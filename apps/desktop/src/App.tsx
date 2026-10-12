@@ -17,6 +17,8 @@ import {
 import { platform } from "./platform";
 import type { KeyDetection, KeyPatch } from "./keyfx";
 import { EffectStack, type EffectRequest } from "./effectstack";
+import { BlendSelect, MaskGroup, effectiveBlendModeOf, type MaskPatch } from "./maskpanel";
+import type { BlendMode } from "@aive/core/compositing";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 
 function fmt(seconds: number): string {
@@ -516,6 +518,10 @@ export function App({ api }: { api: CoreApi }) {
     run("Audio offset (J/L cut)", () => api.rpc("set_audio_offset", { clipId, offsetFrames: Math.round(offset * fps) }));
   const setTransform = (clipId: string, patch: Record<string, number | boolean>) =>
     run("Transform", () => api.rpc("set_clip_transform", { clipId, ...patch }));
+  const setBlendMode = (clipId: string, mode: BlendMode) =>
+    run("Blend mode", () => api.rpc("set_clip_blend_mode", { clipId, mode }));
+  const setMask = (clipId: string, patch: MaskPatch) =>
+    run(patch.shape === null ? "Remove mask" : "Mask", () => api.rpc("set_clip_mask", { clipId, ...patch }));
   // Move/resize a timeline element (text overlay / motion graphic / caption cue)
   // from the timeline element-rail drag → the matching window RPC.
   const setElementWindow = (
@@ -1017,6 +1023,8 @@ export function App({ api }: { api: CoreApi }) {
               onStabilize={stabilize}
               onAudioOffset={setAudioOffset}
               onTransform={setTransform}
+              onBlendMode={setBlendMode}
+              onMask={setMask}
               onAddKeyframe={addKeyframe}
               onClearKeyframes={clearKeyframes}
               onAddText={addText}
@@ -1411,6 +1419,8 @@ type InspectorProps = {
   onStabilize: (clipId: string, opts: StabilizeUiOptions) => void;
   onAudioOffset: (clipId: string, offset: number) => void;
   onTransform: (clipId: string, patch: Record<string, number | boolean>) => void;
+  onBlendMode: (clipId: string, mode: BlendMode) => void;
+  onMask: (clipId: string, patch: MaskPatch) => void;
   onAddKeyframe: (clipId: string, property: KeyframeProperty, value: number) => void;
   onClearKeyframes: (clipId: string, property?: KeyframeProperty) => void;
   onAddText: (clipId: string, text: string, position: string) => void;
@@ -1492,6 +1502,9 @@ function ClipInspector(props: InspectorProps) {
   const [smoothMode, setSmoothMode] = useState<"blend" | "optical-flow">("optical-flow");
   // A still never goes on an audio track: no Freeze for a detached audio clip.
   const onAudioTrack = project?.tracks.some((t) => t.kind === "audio" && t.clips.some((c) => c.id === clip.id)) ?? false;
+  // Blend modes need a picture on a video track; masks also work on adjustment layers.
+  const canMask = !onAudioTrack && (!!clip.adjustment || !!asset?.hasVideo);
+  const canBlend = canMask && !clip.adjustment;
   const bleepTotal = clip.effects?.bleeps?.length ?? 0;
   const bleepVisible = bleepTotal ? expandBleeps(clip, project?.fps ?? 30).length : 0;
   const [stabSmoothing, setStabSmoothing] = useState(30);
@@ -1677,6 +1690,10 @@ function ClipInspector(props: InspectorProps) {
                 onCommit={(v) => props.onTransform(clip.id, { opacity: v })}
                 onKey={() => props.onAddKeyframe(clip.id, "opacity", fx.opacity ?? 1)}
                 onClear={() => props.onClearKeyframes(clip.id, "opacity")} />
+              {canBlend && (
+                <BlendSelect value={effectiveBlendModeOf(project, clip)} disabled={!connected || busy}
+                  onChange={(mode) => props.onBlendMode(clip.id, mode)} />
+              )}
               <div className="flip-row">
                 <button type="button" className={`btn btn-sm ${tf.flipH ? "active" : ""}`}
                   onClick={() => props.onTransform(clip.id, { flipH: !tf.flipH })}>Flip H</button>
@@ -1685,6 +1702,10 @@ function ClipInspector(props: InspectorProps) {
               </div>
               <span className="field-hint">◆ pins a value at the playhead. Key the same control at two different times to animate it (e.g. scale 0.5→1 for a zoom-in).</span>
             </div>
+
+            {canMask && (
+              <MaskGroup clip={clip} disabled={!connected || busy} Range={RangeField} onMask={props.onMask} />
+            )}
 
             <div className="group">
               <div className="group-title"><Waveform size={13} /> Fades</div>

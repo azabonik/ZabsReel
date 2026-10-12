@@ -20,6 +20,7 @@ import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
 import { previewScaleFor } from "@aive/core/effects";
 import { keyPlan, type KeyPlan } from "./keying";
+import { runBlendModes, sanitizeMask, type BlendMode, type ClipMask } from "@aive/core/compositing";
 
 /** A text overlay plus its sampled animation (position/opacity) at the current frame. */
 export type RenderOverlay = TextOverlay & { anim?: { x?: number; y?: number; opacity?: number } };
@@ -92,6 +93,13 @@ export interface ActiveClip {
      * splits them around the first key (`key.preVignette` / `key.postVignette`).
      */
     vignette?: number[];
+    /**
+     * Blend mode the layer composites with (absent = normal). A transition run
+     * uses its FIRST clip's mode, as the export (compositing.ts runBlendModes).
+     */
+    blend?: BlendMode;
+    /** Shape mask in the clip's own picture space (maskdraw.ts draws it). */
+    mask?: ClipMask;
   };
   /** Present when this clip should be HEARD (asset has audio + track not muted). */
   audio?: { volume: number };
@@ -114,7 +122,7 @@ export interface ActiveClip {
    * draws lower layers to an offscreen canvas, then draws that through
    * ctx.filter). Mirrors the FFmpeg bake in graph.ts (split→filter→overlay).
    */
-  adjust?: { colorFilter: string; vignette?: number[] };
+  adjust?: { colorFilter: string; vignette?: number[]; mask?: ClipMask };
 }
 
 /** The full set of layers to render for one frame, drawables in bottom→top order. */
@@ -128,6 +136,27 @@ const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 function vignetteField(filters: Parameters<typeof vignetteAngles>[0]): { vignette?: number[] } {
   const angles = vignetteAngles(filters);
   return angles.length ? { vignette: angles } : {};
+}
+
+/** `{ mask }` for a valid stored mask, else nothing. */
+function maskField(m: unknown): { mask?: ClipMask } {
+  const mask = sanitizeMask(m);
+  return mask ? { mask } : {};
+}
+
+/** `{ blend }` for a non-normal mode, else nothing (normal plans stay as before). */
+function blendField(mode: BlendMode | undefined): { blend?: BlendMode } {
+  return mode && mode !== "normal" ? { blend: mode } : {};
+}
+
+/**
+ * Each picture clip's effective blend mode on one video track: transition-
+ * joined clips share their run's FIRST clip's mode, like the export's runs.
+ */
+function trackBlendModes(sorted: Project["tracks"][number]["clips"], assetById: Map<string, MediaAsset>): Map<string, BlendMode> {
+  const pics = sorted.filter((c) => !c.adjustment && !!(c.assetId && assetById.get(c.assetId)?.hasVideo));
+  const modes = runBlendModes(pics);
+  return new Map(pics.map((c, i) => [c.id, modes[i]]));
 }
 
 /**
@@ -206,6 +235,7 @@ export function activeLayersAt(
     const segments = buildSegments(sorted, assetById, fps);
     const active = segments.filter((s) => t >= s.start && t < s.end);
     if (active.length === 0) continue;
+    const blendOf = track.kind === "video" ? trackBlendModes(sorted, assetById) : undefined;
 
     for (const seg of active) {
       const asset = seg.asset;
@@ -228,6 +258,7 @@ export function activeLayersAt(
           adjust: {
             colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters, pvScale),
             ...vignetteField(seg.clip.effects?.filters),
+            ...maskField(seg.clip.effects?.mask),
           },
         });
         continue;
@@ -292,6 +323,8 @@ export function activeLayersAt(
               transform: tf!,
               key: keyPlan(seg.clip.effects, pvScale),
               ...vignetteField(seg.clip.effects?.filters),
+              ...blendField(blendOf?.get(seg.clip.id)),
+              ...maskField(seg.clip.effects?.mask),
             }
           : undefined,
         audio: audible

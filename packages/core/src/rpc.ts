@@ -5,6 +5,7 @@ import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
 import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
 import { EFFECT_TYPE_IDS, describeEffectsForAI, validateEffect } from "./effects/registry.js";
+import { BLEND_MODES, MASK_SHAPES, describeBlendModesForAI } from "./effects/compositing.js";
 
 /**
  * The RPC surface of the editor. Every editing operation is defined exactly
@@ -633,7 +634,7 @@ export const methods = {
   },
 
   clear_clip_effects: {
-    description: "Remove all effects (speed, volume, fades, color, crop, transform) from a clip. Its bleeps are kept — use remove_bleeps for those.",
+    description: "Remove all effects (speed, volume, fades, color, crop, transform, blend mode, mask) from a clip. Its bleeps are kept — use remove_bleeps for those.",
     schema: z.object({ clipId: z.string() }).strict(),
     handler: (engine, p) => {
       engine.clearClipEffects(p.clipId);
@@ -663,6 +664,37 @@ export const methods = {
         opacity: p.opacity,
       }),
     }),
+  },
+
+  set_clip_blend_mode: {
+    description:
+      `Set how a clip's picture composites onto the video tracks BELOW it (CapCut-style blend modes) — put the clip on a higher video track first. Modes: ${describeBlendModesForAI()}. Typical: light leaks / flares / fire / sparks shot on black → screen or add (the black vanishes); paper, grunge or shadow textures → multiply (the white vanishes); subtle textures → overlay / soft-light. Respects the clip's opacity, fades, keys, cutouts and mask (only the visible part blends). Only the PICTURE blends: the clip's own text overlays, captions and motion graphics draw normally on top (in a transition overlap both clips' text/graphics show at full strength). 'normal' resets it. Clips joined by a transition render as one stream with the run's FIRST clip's mode, so the mode applies to the clip's whole transition run (clipIds lists every clip changed). Not for adjustment layers (mask those instead) or audio. One undo step. Live in the preview; verify exactly with get_frame.`,
+    schema: z.object({ clipId: z.string(), mode: z.enum(BLEND_MODES) }).strict(),
+    handler: (engine, p) => engine.setClipBlendMode(p.clipId, p.mode),
+  },
+
+  set_clip_mask: {
+    description:
+      "Give a clip a SHAPE MASK (CapCut-style): only the part of its picture inside the shape shows (invert:true keeps the outside); the tracks below show elsewhere. The mask lives in the clip's OWN picture (fractions of the picture after crop/fit), so it moves, scales, rotates and flips with set_clip_transform/keyframes. shape: rect | ellipse | linear (a half-plane: the line through x,y at `rotation`; keeps the side ABOVE the line at rotation 0 — rotate 180 or invert for the other side) | mirror (a band of thickness h through x,y at `rotation`); null REMOVES the mask. x,y = centre (0..1 of the picture's width/height, default 0.5,0.5); w,h = size (fractions of the picture's width/height; a new rect/ellipse defaults to a centred square/circle half the short side); rotation = degrees clockwise; feather = soft-edge width 0..1 of the picture's short side (0 = crisp; 0.05–0.2 soft); roundness = rect corner radius 0..1; invert. Only the fields you pass change; out-of-range values are clamped. It multiplies the clip's alpha, so it combines with keys, remove_background cutouts, opacity and blend modes. Uses: split-screen (rect, w:0.5, x:0.25), spotlight/vignette-style reveal (ellipse + feather, or invert for a dark surround with a black lower track), picture-in-picture shapes (circle/rounded-rect face cams with set_clip_transform scale), graduated wipes (linear + feather). On an ADJUSTMENT layer the mask (canvas space) limits where its grade/effects apply — e.g. grade only the sky with a feathered linear mask. One undo step. Live in the preview; verify with get_frame.",
+    schema: z
+      .object({
+        clipId: z.string(),
+        shape: z.enum(MASK_SHAPES).nullable().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        w: z.number().optional(),
+        h: z.number().optional(),
+        rotation: z.number().optional(),
+        feather: z.number().optional(),
+        roundness: z.number().optional(),
+        invert: z.boolean().optional(),
+      })
+      .strict(),
+    handler: (engine, p) => {
+      const { clipId, ...req } = p;
+      const clip = engine.setClipMask(clipId, req);
+      return { clip, mask: clip.effects?.mask ?? null };
+    },
   },
 
   set_keyframes: {

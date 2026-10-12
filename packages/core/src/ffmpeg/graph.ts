@@ -14,6 +14,7 @@ import type {
   VisualEffect,
 } from "../types.js";
 import { effectFilterSteps } from "../effects/registry.js";
+import { blendModeDef, type BlendMode } from "../effects/compositing.js";
 
 export interface RenderProfile {
   /** x264 preset (speed/quality tradeoff). */
@@ -344,13 +345,160 @@ function effectSteps(filters: VisualEffect[], W: number, H: number, tag = "fx"):
 }
 
 /**
+ * Multiply a still grayscale mask (input `maskInput`, a W×H PNG from
+ * ffmpeg/mask.ts) into the stream's alpha, as one comma-chain step with a
+ * `;` sub-graph (like the key steps). Exact 8-bit math, never overwrites the
+ * existing alpha (keys / cutouts / transparent padding stay transparent): the
+ * alpha is pulled out, multiplied gray×gray, and merged back. The single-frame
+ * mask input repeats for every frame (framesync repeatlast). `tag` must be
+ * unique in the filter_complex.
+ */
+function maskMultiplyStep(maskInput: number, tag: string): string {
+  const [a, b, e, m, n] = [`${tag}a`, `${tag}b`, `${tag}e`, `${tag}m`, `${tag}n`];
+  return (
+    `format=rgba,split[${a}][${b}];[${b}]alphaextract[${e}];[${maskInput}:v]format=gray[${m}];` +
+    `[${e}][${m}]blend=all_mode=multiply[${n}];[${a}][${n}]alphamerge,format=rgba`
+  );
+}
+
+/**
+ * Composite `layer` onto `base` with a non-normal blend mode, ending in
+ * `[out]`. W3C "source-over with blending" onto the opaque composite:
+ * out = base + α·(B(base, layer) − base), with B computed in planar RGB (base
+ * as the FIRST input — see effects/compositing.ts for the per-mode filter and
+ * its measured accuracy), the layer's alpha merged onto the blended picture
+ * and overlaid over the base. `add` is Porter-Duff plus like the canvas's
+ * "lighter": the premultiplied layer is added to the base, and the sum is
+ * overlaid wherever the layer has ANY alpha (coverage 255, since the
+ * premultiply already applied α). Every mode keeps the base stream `[m]`
+ * untouched outside the layer's footprint and window (no extra RGB round
+ * trip there). `enable` gates every stage to the layer's window; `tag` must
+ * be unique.
+ */
+function emitBlendComposite(
+  filterParts: string[],
+  base: string,
+  layer: string,
+  mode: BlendMode,
+  enable: string,
+  tag: string,
+  out: string,
+): void {
+  const fx = blendModeDef(mode).ffmpeg;
+  const op =
+    fx.kind === "add"
+      ? "blend=all_mode=addition"
+      : fx.kind === "lut2"
+        ? `lut2=c0='${fx.expr}':c1='${fx.expr}':c2='${fx.expr}'`
+        : `blend=all_mode=${fx.kind === "blend" ? fx.mode : "normal"}`;
+  const layerRgb = fx.kind === "add" ? "format=gbrap,premultiply=inplace=1,format=gbrp" : "format=gbrp";
+  const coverage = fx.kind === "add" ? ",lut=c0='if(gt(val,0),255,0)'" : "";
+  filterParts.push(`${base}split=2[${tag}m][${tag}b]`);
+  filterParts.push(`${layer}format=rgba,split=2[${tag}c][${tag}a]`);
+  filterParts.push(`[${tag}b]format=gbrp[${tag}bg]`);
+  filterParts.push(`[${tag}c]${layerRgb}[${tag}lg]`);
+  filterParts.push(`[${tag}bg][${tag}lg]${op}:shortest=1:${enable}[${tag}x]`);
+  filterParts.push(`[${tag}a]alphaextract${coverage}[${tag}al]`);
+  filterParts.push(`[${tag}x][${tag}al]alphamerge[${tag}l]`);
+  filterParts.push(`[${tag}m][${tag}l]overlay=0:0:eof_action=pass:${enable}[${out}]`);
+}
+
+/** A run's non-normal blend mode (a run is one stream, so its FIRST clip's mode). */
+function runBlendMode(run: Run): BlendMode | undefined {
+  const m = run.clips[0].effects?.blendMode;
+  return m && m !== "normal" ? m : undefined;
+}
+
+/** A blended run member's own text and motion graphics, placed at `startSec` (stack time). */
+interface BlendDecor {
+  clip: ResolvedRenderClip;
+  startSec: number;
+  graphics: { inputIdx: number; g: ResolvedGraphic }[];
+}
+
+/**
+ * Draw the text overlays / captions and motion graphics of a BLENDED run's
+ * clips straight onto the stack, right after the run's blended picture: only
+ * the picture takes the blend mode; text and graphics stay normal source-over,
+ * as the preview draws them (DOM text, paintGraphics). The clip-stream path
+ * cannot be used — its drawtext/overlay output would go through the blend.
+ * Clip-local times shift to stack time; each window is the clip-local one
+ * (inclusive end, like the clip-stream path) clamped to the clip's own frames
+ * and opened half a frame early, since the stack's frame times are exact n/fps.
+ * Drawn on the opaque stack, a translucent caption box keeps its alpha (on a
+ * transparent canvas drawtext would square it). Returns the new stack label.
+ */
+function emitBlendDecorations(
+  filterParts: string[],
+  vcur: string,
+  decor: BlendDecor[],
+  W: number,
+  H: number,
+  fps: number,
+  total: number,
+  tag: string,
+): string {
+  const h = 0.5 / fps;
+  let cur = vcur;
+  decor.forEach((d, k) => {
+    const S = d.startSec;
+    const dur = d.clip.outDuration;
+    if (S + dur <= 0 || S >= total) return; // outside this render window
+    const win = (a: number | undefined, b: number | undefined) => ({
+      start: S + Math.max(0, a ?? 0) - h,
+      end: S + Math.min(b !== undefined ? b + h : Infinity, dur - h),
+    });
+    const texts: string[] = [];
+    for (const ov of d.clip.overlays ?? []) {
+      const w = win(ov.start, ov.end);
+      if (w.end <= w.start) continue;
+      let keyframes: ResolvedOverlay["keyframes"];
+      if (ov.keyframes) {
+        keyframes = {};
+        for (const [p, kfs] of Object.entries(ov.keyframes) as [keyof NonNullable<ResolvedOverlay["keyframes"]>, ResolvedKeyframe[]][]) {
+          if (kfs?.length) keyframes[p] = kfs.map((kf) => ({ ...kf, sec: kf.sec + S }));
+        }
+      }
+      texts.push(drawTextStep({ ...ov, start: w.start, end: w.end, keyframes }));
+    }
+    if (texts.length) {
+      const out = `${tag}t${k}`;
+      filterParts.push(`${cur}${texts.join(",")}[${out}]`);
+      cur = `[${out}]`;
+    }
+    d.graphics.forEach((gi, j) => {
+      const gStart = Math.max(0, gi.g.start ?? 0);
+      const w = win(gStart, gi.g.end);
+      if (w.end <= w.start) return;
+      const off = S + gStart; // the graphic's first frame, stack time
+      const gl = `${tag}g${k}_${j}`;
+      const prep = [`[${gi.inputIdx}:v]format=rgba`, `scale=${W}:${H}`, `fps=${fps}`];
+      if (gi.g.opacity !== undefined && gi.g.opacity < 1) {
+        prep.push(`colorchannelmixer=aa=${Math.max(0, Math.min(1, gi.g.opacity)).toFixed(3)}`);
+      }
+      if (off > 1e-6) prep.push(`tpad=start_duration=${off.toFixed(6)}:color=0x00000000`);
+      else if (off < -1e-6) prep.push(`trim=start=${(-off).toFixed(6)}`);
+      prep.push("setpts=PTS-STARTPTS");
+      filterParts.push(`${prep.join(",")}[${gl}]`);
+      const out = `${tag}o${k}_${j}`;
+      filterParts.push(
+        `${cur}[${gl}]overlay=0:0:eof_action=pass:enable='between(t,${w.start.toFixed(4)},${w.end.toFixed(4)})'[${out}]`,
+      );
+      cur = `[${out}]`;
+    });
+  });
+  return cur;
+}
+
+/**
  * Emit the per-clip video filter graph parts into `filterParts`, ending in
  * `[outLabel]`. The result is an **RGBA** stream scaled to fit the canvas with
  * TRANSPARENT letter/pillar-box padding, so when it is overlaid on a lower
  * track the background shows through the bars (true layering). Fades ramp the
  * alpha for the same reason. A clip with a fast-path transform becomes a small
  * sub-graph (layer steps + positioning overlay onto a transparent canvas);
- * everything else stays one linear chain.
+ * everything else stays one linear chain. `drawText` false leaves the text
+ * overlays out (a blended clip's text goes on the stack instead).
  */
 function emitClipVideoParts(
   filterParts: string[],
@@ -360,6 +508,8 @@ function emitClipVideoParts(
   H: number,
   fps: number,
   outLabel: string,
+  maskInput?: number,
+  drawText = true,
 ): void {
   const fx = clip.effects ?? {};
   const speed = fx.speed ?? 1;
@@ -401,6 +551,11 @@ function emitClipVideoParts(
   steps.push(`setpts=(PTS-STARTPTS)/${speed}`);
   steps.push(`fps=${fps}`);
 
+  // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
+  // space, after color/effects/keys and BEFORE the transform, so it moves,
+  // scales, rotates and flips with the clip.
+  if (maskInput !== undefined) steps.push(maskMultiplyStep(maskInput, `mk${inputIdx}`));
+
   // Alpha fades so the layer dissolves against whatever is beneath it.
   if (fx.fadeIn && fx.fadeIn > 0) steps.push(`fade=t=in:st=0:d=${fx.fadeIn.toFixed(3)}:alpha=1`);
   if (fx.fadeOut && fx.fadeOut > 0) {
@@ -409,7 +564,7 @@ function emitClipVideoParts(
 
   // Per-clip 2D transform + keyframe animation (position/scale/rotation/flip/
   // opacity), baked before text so overlays stay in canvas space (as in preview).
-  const textSteps = (clip.overlays ?? []).map((ov) => drawTextStep(ov));
+  const textSteps = drawText ? (clip.overlays ?? []).map((ov) => drawTextStep(ov)) : [];
   const plan = planTransform(fx, W, H);
 
   if (plan.kind === "fast") {
@@ -759,14 +914,25 @@ export function buildRenderCommand(
   for (const run of videoRuns) run.idxs.forEach((i) => videoIdx.add(i));
   const audioIdx = new Set<number>();
   for (const run of audioRuns) run.idxs.forEach((i) => audioIdx.add(i));
+  // Clips of blended runs: only their picture blends — their text and motion
+  // graphics are drawn on the stack after the blend (emitBlendDecorations).
+  const blendedIdx = new Set<number>();
+  for (const run of videoRuns) if (runBlendMode(run)) run.idxs.forEach((i) => blendedIdx.add(i));
 
   clips.forEach((clip, i) => {
     const inputIdx = inputIdxByClip.get(i);
     if (inputIdx === undefined) return;
     if (clip.showVideo && videoIdx.has(i)) {
-      const graphicsForClip = graphicInputs.filter((x) => x.clipIdx === i);
+      const blended = blendedIdx.has(i);
+      const graphicsForClip = blended ? [] : graphicInputs.filter((x) => x.clipIdx === i);
       const baseLabel = graphicsForClip.length ? `vbase${i}` : `v${i}`;
-      emitClipVideoParts(filterParts, clip, inputIdx, W, H, fps, baseLabel);
+      // A shape mask is one more still input (consumed only by this clip's chain).
+      let maskInput: number | undefined;
+      if (clip.effects?.maskFile) {
+        inputArgs.push("-i", clip.effects.maskFile);
+        maskInput = nextIndex++;
+      }
+      emitClipVideoParts(filterParts, clip, inputIdx, W, H, fps, baseLabel, maskInput, !blended);
 
       if (graphicsForClip.length) {
         let cur = `[${baseLabel}]`;
@@ -796,13 +962,23 @@ export function buildRenderCommand(
   });
 
   // ---- video: assemble each run, then overlay onto a black base in z-order ---
-  const videoSegments: { label: string; startSec: number; dur: number; trackIndex: number }[] = [];
+  const videoSegments: {
+    label: string;
+    startSec: number;
+    dur: number;
+    trackIndex: number;
+    blend?: BlendMode;
+    decor?: BlendDecor[];
+  }[] = [];
   videoRuns.forEach((run, r) => {
     let cur = `[v${run.idxs[0]}]`;
     let curDur = run.clips[0].outDuration;
+    // Where each member starts inside the run stream (for a blended run's decorations).
+    const offsets = [0];
     for (let i = 1; i < run.clips.length; i++) {
       const clip = run.clips[i];
       const d = clampOverlap(clip.transition?.duration ?? 0, curDur, clip.outDuration, fps);
+      offsets.push(curDur - d);
       const out = `vrun${r}_${i}`;
       if (d > 0) {
         filterParts.push(
@@ -818,7 +994,8 @@ export function buildRenderCommand(
     // A run crossing the window's left edge is head-trimmed AFTER its per-clip
     // chains — every clip-local feature (fades, keyframes, drawtext windows)
     // was already applied on the un-shifted local clock, so this stays exact.
-    let startSec = rel(run.startSec);
+    const runStart = rel(run.startSec);
+    let startSec = runStart;
     if (window && startSec < -1e-6) {
       const cut = -startSec;
       const trimmed = `vwin${r}`;
@@ -828,7 +1005,25 @@ export function buildRenderCommand(
       startSec = 0;
     }
     if (curDur > 1e-6) {
-      videoSegments.push({ label: cur, startSec, dur: curDur, trackIndex: run.trackIndex });
+      // A run is ONE stream, so it composites with its first clip's blend mode
+      // (the preview mirrors this — compositing.ts runBlendModes).
+      const blend = runBlendMode(run);
+      const decor: BlendDecor[] = blend
+        ? run.clips
+            .map((clip, k) => ({
+              clip,
+              startSec: runStart + offsets[k],
+              graphics: graphicInputs.filter((x) => x.clipIdx === run.idxs[k]),
+            }))
+            .filter((d) => (d.clip.overlays?.length ?? 0) > 0 || d.graphics.length > 0)
+        : [];
+      videoSegments.push({
+        label: cur,
+        startSec,
+        dur: curDur,
+        trackIndex: run.trackIndex,
+        ...(blend ? { blend, ...(decor.length ? { decor } : {}) } : {}),
+      });
     }
   });
 
@@ -845,6 +1040,8 @@ export function buildRenderCommand(
       start: number;
       end: number;
       steps: string[];
+      /** Still mask input limiting where the adjustment applies (canvas space). */
+      maskInput?: number;
     }
     const adjustOps: AdjustOp[] = [];
     for (const c of clips) {
@@ -864,7 +1061,12 @@ export function buildRenderCommand(
       if (fx.lut) steps.push(`lut3d=${fx.lut}`);
       if (fx.filters?.length) steps.push(...effectSteps(fx.filters, W, H, `a${adjustOps.length}`));
       if (steps.length === 0) continue; // an adjustment with no look yet is a no-op
-      adjustOps.push({ trackIndex: c.trackIndex, start, end, steps });
+      let maskInput: number | undefined;
+      if (fx.maskFile) {
+        inputArgs.push("-i", fx.maskFile);
+        maskInput = nextIndex++;
+      }
+      adjustOps.push({ trackIndex: c.trackIndex, start, end, steps, maskInput });
     }
 
     // Interleave segments + adjustment ops by track level (adjust AFTER its
@@ -897,11 +1099,16 @@ export function buildRenderCommand(
         // Open the window half a frame early: a start rounded UP to 3 decimals (3.96667 -> 3.967) would hide the clip's
         // first frame whenever start/fps is a repeating decimal, leaving a one-frame black flash at the cut.
         const enable = `enable='between(t,${Math.max(0, start - 0.5 / fps).toFixed(4)},${end.toFixed(3)})'`;
-        filterParts.push(`${vcur}${s}overlay=0:0:eof_action=pass:${enable}[${out}]`);
+        if (seg.blend) {
+          emitBlendComposite(filterParts, vcur, s, seg.blend, enable, `bl${i}`, out);
+        } else {
+          filterParts.push(`${vcur}${s}overlay=0:0:eof_action=pass:${enable}[${out}]`);
+        }
         vcur = `[${out}]`;
+        if (seg.decor) vcur = emitBlendDecorations(filterParts, vcur, seg.decor, W, H, fps, total, `dc${i}`);
         return;
       }
-      const { start, end, steps } = item.op;
+      const { start, end, steps, maskInput } = item.op;
       const k = adjIdx++;
       const S = start.toFixed(3);
       const E = end.toFixed(3);
@@ -910,7 +1117,10 @@ export function buildRenderCommand(
       // the branch instead desyncs the overlay's frame pairing — the branches
       // must stay timestamp-aligned for enable to switch cleanly.)
       filterParts.push(`${vcur}split=2[adjb${k}][adjs${k}]`);
-      filterParts.push(`[adjs${k}]${steps.join(",")}[adjf${k}]`);
+      // A mask limits the adjustment: the filtered copy's alpha becomes the
+      // mask, so the overlay below lets the untouched stack show elsewhere.
+      const masked = maskInput !== undefined ? [maskMultiplyStep(maskInput, `amk${k}`)] : [];
+      filterParts.push(`[adjs${k}]${[...steps, ...masked].join(",")}[adjf${k}]`);
       filterParts.push(`[adjb${k}][adjf${k}]overlay=0:0:eof_action=pass:enable='between(t,${S},${E})'[adjo${k}]`);
       vcur = `[adjo${k}]`;
     });

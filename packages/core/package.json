@@ -14,6 +14,10 @@
       "types": "./dist/effects/registry.d.ts",
       "default": "./dist/effects/registry.js"
     },
+    "./compositing": {
+      "types": "./dist/effects/compositing.d.ts",
+      "default": "./dist/effects/compositing.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

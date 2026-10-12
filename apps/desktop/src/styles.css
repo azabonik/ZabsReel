@@ -1302,3 +1302,20 @@ input[type="range"]:disabled { opacity: 0.45; }
 .time-fx .field-row { display: flex; align-items: center; gap: 6px; }
 .time-fx .field-row .btn { flex: 1; min-width: 0; }
 .time-fx .field-row select { flex: 0 0 auto; max-width: 46%; }
+
+/* Blend modes + shape masks (maskpanel.tsx) and the preview's mask handle */
+.mask-shapes { display: flex; width: 100%; }
+.mask-shapes .seg-btn { flex: 1; min-width: 0; display: inline-flex; flex-direction: column; align-items: center; gap: 2px; padding: 5px 2px; font-size: 10.5px; }
+.mask-shape-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.pv-mask-handle {
+  position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+  border-radius: 50%; border: 2px solid #fff; background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.5);
+  cursor: move; touch-action: none; z-index: 3;
+}
+.pv-mask-handle::before, .pv-mask-handle::after {
+  content: ""; position: absolute; background: #fff; left: 50%; top: 50%;
+}
+.pv-mask-handle::before { width: 10px; height: 2px; margin: -1px 0 0 -5px; }
+.pv-mask-handle::after { width: 2px; height: 10px; margin: -5px 0 0 -1px; }
+.pv-mask-handle.dragging { background: var(--accent, #6d5efc); }

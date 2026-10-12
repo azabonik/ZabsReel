@@ -158,6 +158,20 @@ with FFmpeg.
   use CLIP-LOCAL frames (0 = clip start) and an ease per keyframe (linear/hold/
   ease/easeIn/easeOut). This is how you build moving overlays, Ken-Burns pushes,
   fly-ins and animated PiP. clear_keyframes removes a track (or all).
+- **Blend modes & masks** (CapCut-style compositing of an upper-track clip):
+  set_clip_blend_mode — screen or add for light leaks, flares, fire/sparks/smoke
+  shot on black (the black vanishes); multiply for shadows, paper/grunge
+  textures and ink (the white vanishes); overlay/soft-light for subtle
+  textures. Only the picture blends: the clip's own text, captions and motion
+  graphics stay normal on top. set_clip_mask — rect/ellipse/linear/mirror with
+  feather, roundness and invert: split-screen (rect w:0.5 at x:0.25 on one
+  clip, x:0.75 on the other), spotlight reveals (feathered ellipse), circular or
+  rounded-rect picture-in-picture (mask + set_clip_transform scale/position),
+  graduated wipes (feathered linear). Masks live in the clip's own picture, so
+  they FOLLOW its transform and keyframes; they multiply alpha, so they stack
+  with keys, remove_background cutouts, opacity and fades. A mask on an
+  adjustment layer limits where its grade applies. Both preview live; verify
+  with get_frame.
 - **Transitions**: set_transition between adjacent clips (fade/dissolve/wipe/
   slide/…) with an overlap duration.
 - **Text**: add_text overlays and Whisper captions, both fully styleable

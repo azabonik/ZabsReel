@@ -1,6 +1,9 @@
 // Renderer-side mirror of the core project model (kept minimal & decoupled so
 // the renderer bundle never pulls in Node-only core code).
 import type { Keyframes, Transform } from "./keyframes";
+import type { BlendMode, ClipMask } from "@aive/core/compositing";
+
+export type { BlendMode, ClipMask, MaskShape } from "@aive/core/compositing";
 
 export type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes";
 
@@ -161,6 +164,10 @@ export interface ClipEffects {
   crop?: CropRect;
   transform?: Transform;
   opacity?: number;
+  /** How the picture composites onto the tracks below (absent = normal). */
+  blendMode?: BlendMode;
+  /** Shape mask in the clip's own picture space (follows the transform). */
+  mask?: ClipMask;
 }
 
 export type TransitionType =

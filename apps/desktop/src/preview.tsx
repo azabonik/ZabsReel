@@ -28,6 +28,9 @@ import { MediaPool } from "./mediapool";
 import { isKeyBypassed, keyFrame, onKeyBypassChange } from "./glkey";
 import type { KeyPlan } from "./keying";
 import { vignetteFactor } from "@aive/core/effects";
+import { canvasBlendOp, type ClipMask } from "@aive/core/compositing";
+import { canvasToMask, layerXform, maskStageSize, maskToCanvas, stageMasked, type LayerXform } from "./maskdraw";
+import { maskDragFor, maskEditTarget, onMaskEditChange, setMaskDrag } from "./maskedit";
 import { Film, Play, Waveform } from "./icons";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
@@ -228,10 +231,23 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
       filter = "none";
     }
   }
+  // Shape mask (maskdraw.ts): stage the finished layer at its picture size and
+  // multiply its alpha by the mask, BEFORE the transform — so it follows the clip.
+  if (d.mask) {
+    const m = maskStageSize(dw, dh, t.scale, sw, sh);
+    const staged = stageMasked(src, rx, ry, rw, rh, filter, m.w, m.h, d.mask);
+    if (staged) {
+      src = staged;
+      [rx, ry, rw, rh] = [0, 0, m.w, m.h];
+      filter = "none";
+    }
+  }
 
   ctx.save();
   ctx.filter = filter && filter !== "none" ? filter : "none";
   ctx.globalAlpha = clamp01(d.opacity);
+  // Blend mode (W3C source-over with blending; "lighter" for add) — restored by ctx.restore().
+  if (d.blend) ctx.globalCompositeOperation = canvasBlendOp(d.blend) as GlobalCompositeOperation;
   ctx.translate(W / 2 + t.x * W, H / 2 + t.y * H);
   if (t.rotation) ctx.rotate((t.rotation * Math.PI) / 180);
   ctx.scale((t.flipH ? -1 : 1) * t.scale, (t.flipV ? -1 : 1) * t.scale);
@@ -250,6 +266,8 @@ interface FrameInfo {
   audioOnly: boolean;
   graded: boolean;
   drawCount: number;
+  /** The draggable mask-centre handle (percent of the stage), when the Mask group targets a visible layer. */
+  maskHandle?: { clipId: string; x: number; y: number };
 }
 
 const EMPTY_FRAME: FrameInfo = { textClips: [], audioOnly: false, graded: false, drawCount: 0 };
@@ -292,6 +310,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
   // then painted back through ctx.filter (mirrors the FFmpeg split→filter→overlay).
   const adjCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sigRef = useRef("");
+  // The mask-handle target's on-canvas geometry this frame (for pointer → mask mapping).
+  const maskXformRef = useRef<{ clipId: string; xf: LayerXform } | null>(null);
+  const [maskDragging, setMaskDragging] = useState(false);
 
   const [playing, setPlaying] = useState(false);
   const [frame, setFrame] = useState<FrameInfo>(EMPTY_FRAME);
@@ -362,7 +383,36 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     };
     // ADJUSTMENT layer: repaint the composite drawn SO FAR through its color
     // filter (lower layers only — higher tracks draw after, unaffected).
-    const applyAdjust = (filter: string, vignette?: number[]) => {
+    const applyAdjust = (filter: string, vignette?: number[], mask?: ClipMask) => {
+      if (mask) {
+        // A masked adjustment: grade a copy of the composite so far, keep it
+        // only inside the mask, and lay it back over the untouched composite
+        // (the export's split → filter → mask → overlay).
+        let off = adjCanvasRef.current;
+        if (!off) adjCanvasRef.current = off = document.createElement("canvas");
+        if (off.width !== W) off.width = W;
+        if (off.height !== H) off.height = H;
+        const octx = off.getContext("2d");
+        if (!octx) return;
+        octx.clearRect(0, 0, W, H);
+        octx.drawImage(canvas, 0, 0);
+        const staged = stageMasked(off, 0, 0, W, H, filter, W, H, mask, vignette?.length
+          ? (g) => {
+              g.globalCompositeOperation = "source-atop";
+              g.fillStyle = vignetteGradient(g, W / 2, H / 2, Math.hypot(W / 2, H / 2), vignette);
+              g.fillRect(0, 0, W, H);
+              g.globalCompositeOperation = "source-over";
+            }
+          : undefined);
+        if (staged) {
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.filter = "none";
+          ctx.drawImage(staged, 0, 0, W, H, 0, 0, W, H);
+          ctx.restore();
+        }
+        return;
+      }
       if (filter && filter !== "none") {
         let off = adjCanvasRef.current;
         if (!off) adjCanvasRef.current = off = document.createElement("canvas");
@@ -393,9 +443,17 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       }
     };
 
+    // A mask being dragged on the preview draws at the pointer (one RPC on release).
+    for (const c of plan.clips) {
+      const drag = maskDragFor(c.clipId);
+      if (!drag) continue;
+      if (c.draw?.mask) c.draw = { ...c.draw, mask: { ...c.draw.mask, ...drag } };
+      if (c.adjust?.mask) c.adjust = { ...c.adjust, mask: { ...c.adjust.mask, ...drag } };
+    }
+
     for (const c of plan.clips) {
       if (c.adjust) {
-        applyAdjust(c.adjust.colorFilter, c.adjust.vignette);
+        applyAdjust(c.adjust.colorFilter, c.adjust.vignette, c.adjust.mask);
         continue;
       }
       if (!c.path) continue;
@@ -431,6 +489,18 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
 
     // ----- DOM overlay / badge snapshot (only setState when it changes) ------
     const drawClips = plan.clips.filter((c) => c.draw);
+    // Mask handle for the inspector's target clip, if it is on screen now.
+    let maskHandle: FrameInfo["maskHandle"];
+    const target = maskEditTarget();
+    const tc = target ? plan.clips.find((c) => c.clipId === target.clipId && (c.draw?.mask || c.adjust?.mask)) : undefined;
+    const tx = tc ? layerXform(tc, W, H) : null;
+    maskXformRef.current = tc && tx ? { clipId: tc.clipId, xf: tx } : null;
+    if (tc && tx) {
+      const m = (tc.draw?.mask ?? tc.adjust?.mask)!;
+      const [hx, hy] = maskToCanvas(tx, m.x, m.y);
+      const r2 = (n: number) => Math.round(n * 100) / 100;
+      maskHandle = { clipId: tc.clipId, x: r2((hx / W) * 100), y: r2((hy / H) * 100) };
+    }
     const top = drawClips[drawClips.length - 1];
     const audible = plan.clips.find((c) => c.audio);
     const info: FrameInfo = {
@@ -441,6 +511,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       audioOnly: drawClips.length === 0 && !!audible,
       graded: !!top && (top.draw!.colorFilter !== "none" || !!top.draw!.vignette),
       drawCount: drawClips.length,
+      ...(maskHandle ? { maskHandle } : {}),
     };
     const sig = frameSig(info);
     if (sig !== sigRef.current) {
@@ -594,6 +665,17 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, total]);
 
+  // The inspector's Mask group opened/closed (mask handle) — repaint.
+  useEffect(() => onMaskEditChange(() => {
+    drawFnRef.current();
+    scheduleRedraw();
+  }), [scheduleRedraw]);
+
+  // A committed mask drag arrives as a project change: drop the live override.
+  useEffect(() => {
+    setMaskDrag(null);
+  }, [project]);
+
   // The eyedropper toggled a clip's key preview off/on — repaint.
   useEffect(() => onKeyBypassChange(() => {
     drawFnRef.current();
@@ -628,6 +710,50 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
             if (seg) onSelectClip(seg.clip.id);
           }}
         />
+
+        {/* Mask centre handle (Mask group open + the layer on screen): drag to move. */}
+        {frame.maskHandle && (
+          <div
+            className={`pv-mask-handle${maskDragging ? " dragging" : ""}`}
+            style={{ left: `${frame.maskHandle.x}%`, top: `${frame.maskHandle.y}%` }}
+            role="slider"
+            aria-label="Mask centre (drag to move)"
+            aria-valuetext={`${frame.maskHandle.x.toFixed(0)}%, ${frame.maskHandle.y.toFixed(0)}%`}
+            title="Drag to move the mask"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setMaskDragging(true);
+            }}
+            onPointerMove={(e) => {
+              if (!maskDragging) return;
+              const stage = e.currentTarget.parentElement;
+              const g = maskXformRef.current;
+              const canvas = canvasRef.current;
+              if (!stage || !g || !canvas) return;
+              const r = stage.getBoundingClientRect();
+              const X = ((e.clientX - r.left) / r.width) * canvas.width;
+              const Y = ((e.clientY - r.top) / r.height) * canvas.height;
+              const [mx, my] = canvasToMask(g.xf, X, Y);
+              setMaskDrag({ clipId: g.clipId, x: Math.min(1.5, Math.max(-0.5, mx)), y: Math.min(1.5, Math.max(-0.5, my)) });
+              drawFnRef.current();
+            }}
+            onPointerUp={(e) => {
+              if (!maskDragging) return;
+              setMaskDragging(false);
+              e.currentTarget.releasePointerCapture(e.pointerId);
+              const t = maskEditTarget();
+              const d = t ? maskDragFor(t.clipId) : null;
+              if (t && d) t.commit(d.x, d.y);
+            }}
+            onPointerCancel={() => {
+              setMaskDragging(false);
+              setMaskDrag(null);
+              drawFnRef.current();
+            }}
+          />
+        )}
 
         {/* Hidden decoder pool host (off-screen, kept in the DOM so it decodes). */}
         <div ref={hostRef} className="pv-pool" aria-hidden="true" />

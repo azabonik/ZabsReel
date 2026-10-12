@@ -16,8 +16,10 @@
  */
 
 import type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
+import type { BlendMode, ClipMask } from "./effects/compositing.js";
 
 export type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
+export type { BlendMode, ClipMask, MaskShape } from "./effects/compositing.js";
 
 /** Convert a frame count to seconds at the given fps. */
 export function framesToSeconds(frames: number, fps: number): number {
@@ -433,6 +435,18 @@ export interface ClipEffects {
   /** Static opacity 0..1 (multiplies fades + any opacity keyframes). Default 1. */
   opacity?: number;
   /**
+   * How this clip's picture composites onto the tracks below it (CapCut-style
+   * blend modes; effects/compositing.ts). Absent = normal. A transition-joined
+   * run renders as one stream, so it uses its FIRST clip's mode.
+   */
+  blendMode?: BlendMode;
+  /**
+   * Shape mask in the clip's own picture space (follows its transform); it
+   * multiplies the clip's alpha. On an adjustment layer it limits where the
+   * adjustment applies (canvas space). See effects/compositing.ts.
+   */
+  mask?: ClipMask;
+  /**
    * Bleeps censoring this clip's audio (bleep_words / add_bleep). Stored in the
    * clip's SOURCE time, so they follow the clip through moves, trims, splits and
    * speed changes; expanded to timeline sound effects + mutes at render time by
@@ -691,6 +705,17 @@ export interface ResolvedEffects {
   keyframes?: Partial<Record<KeyframeProperty, ResolvedKeyframe[]>>;
   /** Source-time mutes (asset seconds) derived from the clip's bleeps (audio/bleeps.ts). */
   mutes?: Array<{ start: number; end: number }>;
+  /**
+   * Blend mode (absent = normal): the clip's transition run's EFFECTIVE mode
+   * (its first clip's), stamped on every member so segment keys follow it.
+   */
+  blendMode?: BlendMode;
+  /**
+   * Absolute path of the clip's rasterized shape mask (ffmpeg/mask.ts) at the
+   * render canvas — its name hashes every pixel-defining input, so it keys the
+   * segment cache. Multiplied into the clip's alpha.
+   */
+  maskFile?: string;
 }
 
 /**

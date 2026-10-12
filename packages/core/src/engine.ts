@@ -18,6 +18,11 @@ import {
 import { runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
 import { stabilizeFilters, type StabilizeOptions } from "./ffmpeg/stabilize.js";
 import { EFFECTS, effectByType } from "./effects/registry.js";
+import type { BlendMode } from "./effects/compositing.js";
+import {
+  applyRunBlendModes, blendModeTargets, effectiveBlendMode, nextClipMask, stageClipMask, writeBlendMode, writeClipMask,
+  type MaskRequest,
+} from "./blendmask.js";
 import { planSegments, segmentKey, collectMtimes, type PlannedSegment } from "./ffmpeg/segments.js";
 import { transcribe, transcribeFull, type TranscriptCue } from "./whisper/transcribe.js";
 import { parseSrt, parseVtt, formatSrt, formatVtt } from "./captions/srt.js";
@@ -2325,6 +2330,32 @@ export class EditorEngine extends EventEmitter {
   }
 
   /**
+   * Set how a clip's picture composites onto the tracks below (blend mode).
+   * Applies to the clip's whole transition run (one stream in the export).
+   * "normal" removes the field. One undo step.
+   */
+  setClipBlendMode(clipId: string, mode: BlendMode): { clip: Clip; clipIds: string[] } {
+    const targets = blendModeTargets(this.project, clipId); // validates before the undo snapshot
+    return this.mutate(() => {
+      for (const c of targets) writeBlendMode(c, mode);
+      return { clip: this.findClip(clipId).clip, clipIds: targets.map((c) => c.id) };
+    });
+  }
+
+  /**
+   * Set, update (only the fields passed) or remove (shape null) a clip's shape
+   * mask. Values are clamped (compositing.ts normalizeMask). One undo step.
+   */
+  setClipMask(clipId: string, req: MaskRequest): Clip {
+    const mask = nextClipMask(this.project, clipId, req); // validates before the undo snapshot
+    return this.mutate(() => {
+      const { clip } = this.findClip(clipId);
+      writeClipMask(clip, mask);
+      return clip;
+    });
+  }
+
+  /**
    * Set (replace) a clip's keyframe track for one animatable property
    * (x/y/scale/rotation/opacity/volume). Frames are clip-local (0 = clip start).
    * An empty list clears the track. Keyframes are kept sorted by frame.
@@ -2452,7 +2483,7 @@ export class EditorEngine extends EventEmitter {
    * timeline) AND stage any files the filtergraph needs by bare name (LUTs,
    * overlay text files, fonts). Renders run with cwd = that directory.
    */
-  private async stageRender(): Promise<{ clips: ResolvedRenderClip[]; cwd: string }> {
+  private async stageRender(canvas: Canvas): Promise<{ clips: ResolvedRenderClip[]; cwd: string }> {
     const work = join(this.dataDir, "render");
     await mkdir(work, { recursive: true });
     const fps = this.project.fps;
@@ -2478,6 +2509,9 @@ export class EditorEngine extends EventEmitter {
         const e = clip.effects;
         if (e) {
           adjEffects = { color: e.color, grade: e.grade, lut: e.lut, filters: e.filters };
+          // A mask limits where the adjustment applies (canvas space, at the render size).
+          const maskFile = await stageClipMask(this.dataDir, clip, undefined, canvas);
+          if (maskFile) adjEffects.maskFile = maskFile;
           if (adjEffects.lut) {
             let name = lutMap.get(adjEffects.lut);
             if (!name) {
@@ -2536,6 +2570,12 @@ export class EditorEngine extends EventEmitter {
         // Bleep mutes: source-time windows of the clip's bleeps (audio/bleeps.ts).
         const mutes = asset.hasAudio ? bleepMuteSpans(clip, fps) : [];
         if (mutes.length) effects.mutes = mutes;
+        // Blend mode + shape mask (rasterized at THIS render's canvas). Only set
+        // when used, so unmasked/normal clips keep their segment cache keys.
+        const blendMode = effectiveBlendMode(clip);
+        if (blendMode) effects.blendMode = blendMode;
+        const maskFile = await stageClipMask(this.dataDir, clip, asset, canvas);
+        if (maskFile) effects.maskFile = maskFile;
         if (effects.lut) {
           let name = lutMap.get(effects.lut);
           if (!name) {
@@ -2682,6 +2722,9 @@ export class EditorEngine extends EventEmitter {
       }
     }
 
+    // A transition run renders with its first clip's blend mode: stamp it on
+    // every member so each one's segment-cache key follows the lead's mode.
+    applyRunBlendModes(resolved);
     return { clips: resolved, cwd: work };
   }
 
@@ -3118,7 +3161,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<RenderResult> {
     const canvas = previewCanvas(this.canvas);
-    const { clips: staged, cwd } = await this.stageRender();
+    const { clips: staged, cwd } = await this.stageRender(canvas);
     const total = this.fullTimelineSeconds(staged);
     const segments = planSegments(staged, total);
     const mtimes = await collectMtimes(staged);
@@ -3198,7 +3241,7 @@ export class EditorEngine extends EventEmitter {
       }
 
       const canvas = previewCanvas(this.canvas);
-      const { clips: staged, cwd } = await this.stageRender();
+      const { clips: staged, cwd } = await this.stageRender(canvas);
       const hw = await pickHwEncoder("h264");
       const build = (enc: string | null) =>
         buildRenderCommand(staged, canvas, outPath, PREVIEW_PROFILE, this.resolveMusic(), undefined, { hwEncoder: enc });
@@ -3271,7 +3314,7 @@ export class EditorEngine extends EventEmitter {
     if (process.env.AIVE_SEGMENT_CACHE !== "off") {
       try {
         const canvas = previewCanvas(this.canvas);
-        const { clips: staged, cwd } = await this.stageRender();
+        const { clips: staged, cwd } = await this.stageRender(canvas);
         const fullTotal = this.fullTimelineSeconds(staged);
         const segments = planSegments(staged, fullTotal);
         const seg = segments.find((s) => t >= s.start && t < s.end) ?? segments[segments.length - 1];
@@ -3307,7 +3350,7 @@ export class EditorEngine extends EventEmitter {
 
     return this.jobs.start("export", `Export → ${basename(outputPath)}`, async (signal, onProgress) => {
       await mkdir(dirname(outputPath), { recursive: true });
-      const { clips: staged, cwd } = await this.stageRender();
+      const { clips: staged, cwd } = await this.stageRender(this.canvas);
       // Export defaults to SOFTWARE encoding for quality; `hardware: true` opts
       // into NVENC/QSV/AMF/VideoToolbox for speed (with sw retry on failure).
       const hw = settings?.hardware

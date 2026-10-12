@@ -7,7 +7,10 @@
 // same inputs (speed, audio slip, trims, fps) and that the plan plays each
 // bleep's sound effect where the export does. Then the preview side of the
 // effect registry: CSS builders, the vignette pass, bypassed effects, and that
-// the renderer's key helpers ARE the registry's.
+// the renderer's key helpers ARE the registry's. Finally blend modes and shape
+// masks: they flow into draw / adjust plans (a transition run uses its first
+// clip's mode, as the export), the mask staging size buckets, and the
+// mask-handle geometry (maskdraw.ts) round-trips through drawLayer's transform.
 //
 // Imports `@aive/core/effects` through the package exports (core's dist/), so
 // build core first (`npm run build`, or `npx tsc -b packages/core`).
@@ -23,6 +26,7 @@ import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
 import { colorFilter, vignetteAngles } from "../src/playback";
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
+import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/maskdraw";
 import {
   EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, exactOnly, previewScaleFor, vignetteFactor,
 } from "@aive/core/effects";
@@ -449,6 +453,74 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: [vignette, key] → draw.vignette has it, key.preVignette has it, no postVignette",
     kvDraw?.vignette?.length === 1 && kvDraw.key?.preVignette?.length === 1 && kvDraw.key.postVignette === undefined,
     JSON.stringify({ vignette: kvDraw?.vignette, key: kvDraw?.key }));
+}
+
+// ---- blend modes + shape masks flow into the draw plans ----------------------
+{
+  console.log("\nBlend modes + masks in the plan");
+  const mask = { shape: "ellipse", x: 0.3, y: 0.6, w: 0.4, h: 0.5, rotation: 15, feather: 0.1, roundness: 0, invert: true } as const;
+  const bmProject: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [clip("BASE", "vidA", 0, 90)]),
+      // A run: R1 multiply → R2 (transition into it) screen: the run uses R1's mode.
+      // R3 starts later without a transition: its own mode.
+      track("video", 1, [
+        clip("R1", "ovl", 0, 30, { effects: { blendMode: "multiply", mask: { ...mask } } }),
+        clip("R2", "ovl", 20, 30, { transition: { type: "fade", durationFrames: 10 }, effects: { blendMode: "screen" } }),
+        clip("R3", "ovl", 60, 30, { effects: { blendMode: "screen" } }),
+      ]),
+      track("video", 2, [
+        { id: "ADJ2", adjustment: true, startFrame: 0, sourceInFrame: 0, sourceOutFrame: 90,
+          effects: { filters: [{ id: "g", type: "grayscale" }], mask: { ...mask, shape: "linear" } } } as Clip,
+      ]),
+      track("video", 3, [clip("BAD", "ovl", 0, 90, { effects: { blendMode: "normal", mask: { shape: "star" } as never } })]),
+      track("audio", 4, [clip("AUD", "vidA", 0, 90, { effects: { blendMode: "screen", mask: { ...mask } } })]),
+    ],
+    music: undefined,
+  };
+  const bmAssets = new Map(bmProject.assets.map((a) => [a.id, a]));
+  const p25 = activeLayersAt(bmProject, bmAssets, 25 / FPS).clips;
+  const r1 = p25.find((c) => c.clipId === "R1");
+  const r2 = p25.find((c) => c.clipId === "R2");
+  check("plan: blend mode flows into draw.blend", r1?.draw?.blend === "multiply", JSON.stringify(r1?.draw?.blend));
+  check("plan: a transition run uses its FIRST clip's mode (R2 → multiply, like the export)", r2?.draw?.blend === "multiply", JSON.stringify(r2?.draw?.blend));
+  check("plan: mask params flow into draw.mask (normalized)",
+    !!r1?.draw?.mask && r1.draw.mask.shape === "ellipse" && near(r1.draw.mask.x, 0.3, 1e-9) && near(r1.draw.mask.rotation, 15, 1e-9) && r1.draw.mask.invert === true,
+    JSON.stringify(r1?.draw?.mask));
+  check("plan: a clip without a mask has no draw.mask", !!r2?.draw && r2.draw.mask === undefined);
+  const r3 = activeLayersAt(bmProject, bmAssets, 70 / FPS).clips.find((c) => c.clipId === "R3");
+  check("plan: a new run uses its own mode", r3?.draw?.blend === "screen");
+  const base = p25.find((c) => c.clipId === "BASE");
+  check("plan: normal / absent mode → no draw.blend (plain source-over)", !!base?.draw && base.draw.blend === undefined);
+  const adj2 = p25.find((c) => c.clipId === "ADJ2");
+  check("plan: an adjustment layer's mask flows into adjust.mask", adj2?.adjust?.mask?.shape === "linear", JSON.stringify(adj2?.adjust));
+  const bad = p25.find((c) => c.clipId === "BAD");
+  check("plan: an invalid stored mask / explicit normal → neither field", !!bad?.draw && bad.draw.mask === undefined && bad.draw.blend === undefined);
+  const audC = p25.find((c) => c.clipId === "AUD");
+  check("plan: an audio-track clip is never drawn (no blend/mask)", !!audC && audC.draw === undefined);
+
+  // Staging size: power-of-two scale buckets, capped by the source resolution.
+  check("maskStageSize: scale 0.5 → half size", JSON.stringify(maskStageSize(960, 540, 0.5, 1920, 1080)) === JSON.stringify({ w: 480, h: 270 }));
+  check("maskStageSize: scale 0.7 and 0.9 share a bucket (no per-frame mask rebuild)",
+    JSON.stringify(maskStageSize(960, 540, 0.7, 1920, 1080)) === JSON.stringify(maskStageSize(960, 540, 0.9, 1920, 1080)));
+  check("maskStageSize: zoom capped at the source resolution", JSON.stringify(maskStageSize(960, 540, 3, 1920, 1080)) === JSON.stringify({ w: 1920, h: 1080 }));
+
+  // Mask handle geometry: a scaled/rotated/flipped layer maps the centre and back.
+  const layer = {
+    clipId: "X", trackIndex: 1, trackKind: "video", srcTime: 0, rate: 1, gain: 1, overlays: [], graphics: [],
+    draw: { opacity: 1, colorFilter: "none", assetWidth: 1920, assetHeight: 1080,
+      transform: { x: 0.25, y: -0.1, scale: 0.5, rotation: 90, flipH: true, flipV: false, opacity: 1 } },
+  } as unknown as Parameters<typeof layerXform>[0];
+  const xf = layerXform(layer, 1280, 720)!;
+  const [hx, hy] = maskToCanvas(xf, 0.5, 0.5);
+  check("mask handle: the picture centre sits at the transform's translate", near(hx, 1280 * 0.75, 1e-6) && near(hy, 720 * 0.4, 1e-6), `${hx},${hy}`);
+  const [qx, qy] = maskToCanvas(xf, 0.8, 0.3);
+  // rotation 90° (clockwise): the picture's +x axis points down; flipH mirrors it first.
+  // (0.8, 0.3): local (+0.3·1280, −0.2·720) → flipH·0.5 → (−192, −72) → 90° cw → (+72, −192).
+  check("mask handle: rotation/flip/scale map the point like drawLayer", near(qx, 1032, 1e-6) && near(qy, 96, 1e-6), `${qx},${qy}`);
+  const [bx, by] = canvasToMask(xf, qx, qy);
+  check("mask handle: canvas → mask inverts maskToCanvas", near(bx, 0.8, 1e-9) && near(by, 0.3, 1e-9), `${bx},${by}`);
 }
 
 console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);

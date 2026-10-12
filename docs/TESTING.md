@@ -78,7 +78,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys)
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), blend modes + masks in the plan
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -118,6 +118,16 @@ npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto"; self-synthesizes
 npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount; self-synthesizes
+
+# Blend modes + shape masks (lossless exports; self-synthesizes PNG stills and an
+# FFV1 yuva420p cutout): every blend mode vs the W3C formula on the decoded
+# inputs (prints the max deviation per mode), normal byte-identical (framemd5),
+# ellipse/rect/linear/mirror + feather profile + invert, masks following a
+# transform and rotation, on a keyed clip, on an alpha clip, on an adjustment
+# layer, segment-cache invalidation, undo and validation; `add` leaves frames
+# before the layer byte-identical, a blended clip's text stays unblended, and a
+# follower-only segment re-renders when the run lead's mode is cleared. ~30 s.
+npx tsx packages/core/scripts/smoke-masks.ts
 
 # Text overlays + native keyframe-animated text
 npx tsx packages/core/scripts/smoke-text.ts        scratch/a.mp4 scratch/b.mp4
@@ -201,6 +211,8 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Vignette and blur preview live; rows without a live preview show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
 | Stabilize | On a shaky clip set **Smoothing** and **Zoom**, then **Stabilize clip** | Busy label "Stabilizing…", then the clip points at a "(stabilized)" bake; undo restores it |
 | Keys | Put a gray-, green- or black-background clip on a track above another; **Add effect → Color / Chroma / Luma key** | Background turns transparent in the live preview (colour auto-detected); swatch, **Auto**, **Pick** (eyedropper) and the sliders update it in place; export matches |
+| Blend modes | Put a clip on a track above another; in **Transform & animation** set **Blend** to Screen / Multiply / Overlay … | The live preview blends at once; **Render exact** / Export match it (within a few levels) |
+| Masks | In the **Mask** group pick Ellipse / Rectangle / Linear / Mirror; drag Feather, Roundness, Width/Height, Rotation; tick **Invert**; drag the ✛ handle on the preview | Only the masked part shows; the mask moves/scales/rotates with the clip's transform; one undo step per change (one per handle drag) |
 | Transition | Add a crossfade between the two clips | Overlap shown |
 | Text | Add a title / lower-third | Overlay listed on the clip |
 | Library search | Switch the search between **Words** and **Visuals**; search the library | Matching clips/moments returned |
