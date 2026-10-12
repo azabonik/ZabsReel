@@ -209,14 +209,20 @@ export interface VisualEffect {
   /**
    * Effect kind (a documented vocabulary mapped to FFmpeg filters in graph.ts):
    * blur | sharpen | detail | denoise | sepia | grayscale | vignette |
-   * posterize | edges | pixelate | chromakey.
+   * posterize | edges | pixelate | chromakey | colorkey | lumakey.
    */
   type: string;
   /** Primary strength, meaning depends on `type` (e.g. blur sigma, sharpen amount). */
   amount?: number;
-  /** Color argument for effects that need one (e.g. chromakey key color). */
+  /**
+   * Key colour for chromakey / colorkey as "0xRRGGBB". Stored resolved: the
+   * engine turns an `"auto"` request into the sampled hex at apply time.
+   */
   color?: string;
-  /** Extra numeric params for effects that take more than one (e.g. chromakey similarity/blend). */
+  /**
+   * Extra numeric params: chromakey {similarity, blend, despill}, colorkey
+   * {similarity, blend}, lumakey {threshold, tolerance, softness} (all 0..1).
+   */
   params?: Record<string, number>;
 }
 

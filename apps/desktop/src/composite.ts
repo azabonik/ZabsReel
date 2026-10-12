@@ -7,7 +7,8 @@
 // Everything here mirrors the FFmpeg compositor in packages/core ffmpeg/graph.ts
 // "within reason": higher video Track.index composites on top, clips sit at
 // absolute positions (gaps draw nothing, overlaps with a transition cross-fade),
-// fades ramp alpha, crop selects a source region, color is a CSS-filter proxy.
+// fades ramp alpha, crop selects a source region, color is a CSS-filter proxy,
+// keys run as a WebGL pass (keying.ts plans it, glkey.ts draws it).
 
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
 import { clipDurationFrames } from "./types";
@@ -15,6 +16,7 @@ import {
   buildSegments, colorFilter, fadeOpacity, sourceTimeFor, type Segment,
 } from "./playback";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
+import { keyPlan, type KeyPlan } from "./keying";
 
 /** A text overlay plus its sampled animation (position/opacity) at the current frame. */
 export type RenderOverlay = TextOverlay & { anim?: { x?: number; y?: number; opacity?: number } };
@@ -79,6 +81,8 @@ export interface ActiveClip {
     assetHeight: number;
     /** Effective 2D transform at this frame (geometry only; opacity is in `opacity`). */
     transform: EffectiveTransform;
+    /** Live key pass (colorkey/chromakey/lumakey) for the WebGL preview — see glkey.ts. */
+    key?: KeyPlan;
   };
   /** Present when this clip should be HEARD (asset has audio + track not muted). */
   audio?: { volume: number };
@@ -262,6 +266,7 @@ export function activeLayersAt(
               assetWidth: asset!.width,
               assetHeight: asset!.height,
               transform: tf!,
+              key: keyPlan(seg.clip.effects),
             }
           : undefined,
         audio: audible

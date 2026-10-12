@@ -25,6 +25,7 @@ import { DEFAULT_MODEL, type WhisperModel } from "./whisper/setup.js";
 import { buildSignature, buildReferenceSample, signatureSimilarity } from "./media/signature.js";
 import { findAudioOffset, type AudioSyncResult } from "./media/audiosync.js";
 import { rankTranscript, type TranscriptHit } from "./media/search.js";
+import { detectKeyColor, type KeyColorDetection } from "./media/keycolor.js";
 import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
@@ -1129,6 +1130,52 @@ export class EditorEngine extends EventEmitter {
       }
       return clip;
     });
+  }
+
+  /**
+   * Detect a clip's key (background) colour: sample the outer border ring of its
+   * source frame at the clip's in-point and mid-point (after its crop), take the
+   * dominant colour, and report how much of the border matches (confidence).
+   * Sampled BEFORE the clip's color grade — the key runs after it on export.
+   */
+  async detectKeyColor(clipId: string): Promise<KeyColorDetection> {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "key color detection");
+    if (!asset.hasVideo) throw new Error(`Clip "${clipId}" has no picture to detect a key color from`);
+    const fps = this.project.fps;
+    const last = Math.max(0, asset.duration - 0.05);
+    const times = asset.isImage
+      ? [0]
+      : [clip.sourceInFrame, (clip.sourceInFrame + clip.sourceOutFrame) / 2].map((f) => Math.min(last, framesToSeconds(f, fps)));
+    return detectKeyColor(asset.path, times, clip.effects?.crop);
+  }
+
+  /**
+   * applyEffect, resolving `color: "auto"` first: chromakey/colorkey get the
+   * detected border colour as a concrete hex (so export is deterministic and the
+   * UI shows it); lumakey gets its threshold from the border brightness. The
+   * result echoes the resolved colour and the detection confidence.
+   */
+  async applyEffectAuto(
+    clipId: string,
+    effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number> },
+  ): Promise<{ clip: Clip; effectId: string; color?: string; confidence?: number }> {
+    if (effect.color?.trim().toLowerCase() !== "auto") return this.applyEffect(clipId, effect);
+    const keyTypes = ["chromakey", "colorkey", "lumakey"];
+    if (!keyTypes.includes(effect.type)) {
+      throw new Error(`color "auto" only applies to the key effects (${keyTypes.join(", ")}), not "${effect.type}"`);
+    }
+    const det = await this.detectKeyColor(clipId);
+    if (effect.type === "lumakey") {
+      // FFmpeg's lumakey compares limited-range BT.601 luma (black = 16/255).
+      const { r, g, b } = det.rgb;
+      const luma = (16 + (65.481 * r + 128.553 * g + 24.966 * b) / 255) / 255;
+      const params = { ...effect.params, threshold: effect.params?.threshold ?? Math.round(luma * 1000) / 1000 };
+      const res = this.applyEffect(clipId, { ...effect, color: undefined, params });
+      return { ...res, color: det.color, confidence: det.confidence };
+    }
+    const res = this.applyEffect(clipId, { ...effect, color: det.color });
+    return { ...res, color: det.color, confidence: det.confidence };
   }
 
   /**

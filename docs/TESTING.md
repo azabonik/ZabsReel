@@ -108,12 +108,13 @@ npx tsx packages/core/scripts/smoke.ts             scratch/a.mp4 scratch/b.mp4
 npx tsx packages/mcp/scripts/smoke.ts              scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-multitrack.ts                      # self-synthesizes its own media
 
-# Effects, transitions, LUT/stabilize, color grade, per-clip transform + keyframes
+# Effects, keys, transitions, LUT/stabilize, color grade, per-clip transform + keyframes
 npx tsx packages/core/scripts/smoke-effects.ts     scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transitions.ts scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
+npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto"; self-synthesizes
 
 # Text overlays + native keyframe-animated text
 npx tsx packages/core/scripts/smoke-text.ts        scratch/a.mp4 scratch/b.mp4
@@ -184,6 +185,7 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Per-track controls | Mute / hide / lock a track; change its volume | Track header reflects it; preview/audio respond |
 | Per-clip effects | Use the per-clip controls: speed, volume, fades, color grade, crop | Controls reflect on the clip |
 | Transform / keyframes | Move/scale/rotate a clip; add ◆ keyframes to animate position or scale | Motion plays back in the preview |
+| Keys | Put a gray-, green- or black-background clip on a track above another; **Add effect → Color / Chroma / Luma key** | Background turns transparent in the live preview (colour auto-detected); swatch, **Auto**, **Pick** (eyedropper) and the sliders update it in place; export matches |
 | Transition | Add a crossfade between the two clips | Overlap shown |
 | Text | Add a title / lower-third | Overlay listed on the clip |
 | Library search | Switch the search between **Words** and **Visuals**; search the library | Matching clips/moments returned |
@@ -333,7 +335,7 @@ first-run works with no network.
 ## 9. Quick verification checklist
 
 - [ ] `npm run build` succeeds
-- [ ] All §3 smoke tests print `PASSED` (30 scripts; `smoke-bundled` is §7)
+- [ ] All §3 smoke tests print `PASSED` (32 scripts; `smoke-bundled` is §7)
 - [ ] `smoke-bundled.ts` passes (offline bundle)
 - [ ] Desktop app: import → edit → preview → export by hand
 - [ ] Claude Desktop connected; the §5.2 prompt script completes

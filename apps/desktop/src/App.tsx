@@ -15,6 +15,8 @@ import {
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
 import { platform } from "./platform";
+import { EFFECT_LABELS, KeyEffectControls, type KeyDetection, type KeyPatch } from "./keyfx";
+import { isKeyEffect } from "./keying";
 
 function fmt(seconds: number): string {
   return fmtTime(seconds);
@@ -410,6 +412,11 @@ export function App({ api }: { api: CoreApi }) {
     run("Effect", () => api.rpc("apply_effect", { clipId, type, ...(amount !== undefined ? { amount } : {}), ...(effectId ? { effectId } : {}) }));
   const removeEffect = (clipId: string, effectId: string) =>
     run("Remove effect", () => api.rpc("remove_effect", { clipId, effectId }));
+  // Keys: explicit colour/params (keyfx.tsx); color "auto" = engine border detection.
+  const applyKey = (clipId: string, type: string, patch: KeyPatch, effectId?: string) =>
+    run("Key", () => api.rpc("apply_effect", { clipId, type, ...patch, ...(effectId ? { effectId } : {}) }));
+  const detectKey = (clipId: string) =>
+    run("Detecting key color", () => api.rpc<KeyDetection>("detect_key_color", { clipId })) as Promise<KeyDetection | null>;
   const inspectColor = () =>
     run("Inspecting color (scopes)", async () => {
       const at = store.get().playhead;
@@ -511,8 +518,10 @@ export function App({ api }: { api: CoreApi }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedClip, clips, fps, store, undo, redo, splitClipAt, removeClip]);
 
-  const selected = clips.find((c) => c.id === selectedClip) ?? null;
-  const selectedIndex = clips.findIndex((c) => c.id === selectedClip);
+  // Inspect a clip on ANY video track (a keyed overlay lives above the base track).
+  const selectedTrackClips = project?.tracks.find((t) => t.kind === "video" && t.clips.some((c) => c.id === selectedClip))?.clips ?? clips;
+  const selected = selectedTrackClips.find((c) => c.id === selectedClip) ?? null;
+  const selectedIndex = selectedTrackClips.findIndex((c) => c.id === selectedClip);
   const audioAssets = project?.assets.filter((a) => a.hasAudio) ?? [];
   const music = project?.music;
   const musicAsset = music ? assetById.get(music.assetId) : undefined;
@@ -915,6 +924,8 @@ export function App({ api }: { api: CoreApi }) {
               onGrade={setGrade}
               onApplyEffect={applyEffect}
               onRemoveEffect={removeEffect}
+              onApplyKey={applyKey}
+              onDetectKey={detectKey}
               onInspectColor={inspectColor}
               onClearEffects={clearEffects}
               onTransition={setTransition}
@@ -1056,6 +1067,7 @@ const EFFECT_DEFAULT_AMOUNT: Record<string, number | undefined> = {
 const EFFECT_TYPE_NAMES = [
   "blur", "sharpen", "detail", "denoise", "sepia", "grayscale",
   "vignette", "edges", "posterize", "pixelate", "chromakey",
+  "colorkey", "lumakey",
 ];
 
 /** A compact 3-channel (R/G/B) color-wheel control as three mini sliders. */
@@ -1299,6 +1311,8 @@ type InspectorProps = {
   onGrade: (clipId: string, patch: Record<string, unknown>) => void;
   onApplyEffect: (clipId: string, type: string, amount?: number, effectId?: string) => void;
   onRemoveEffect: (clipId: string, effectId: string) => void;
+  onApplyKey: (clipId: string, type: string, patch: KeyPatch, effectId?: string) => void;
+  onDetectKey: (clipId: string) => Promise<KeyDetection | null>;
   onInspectColor: () => void;
   onClearEffects: (clipId: string) => void;
   onTransition: (clipId: string, type: string, duration: number) => void;
@@ -1513,19 +1527,27 @@ function ClipInspector(props: InspectorProps) {
               <div className="dual">
                 <div className="field">
                   <label>Add effect</label>
-                  <select value="" onChange={(e) => { if (e.target.value) props.onApplyEffect(clip.id, e.target.value, EFFECT_DEFAULT_AMOUNT[e.target.value]); }}>
+                  <select value="" onChange={(e) => {
+                    const t = e.target.value;
+                    // Keys start from the detected background colour so the first result already works.
+                    if (t && isKeyEffect(t)) props.onApplyKey(clip.id, t, { color: "auto" });
+                    else if (t) props.onApplyEffect(clip.id, t, EFFECT_DEFAULT_AMOUNT[t]);
+                  }}>
                     <option value="">Choose…</option>
-                    {EFFECT_TYPE_NAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    {EFFECT_TYPE_NAMES.map((t) => <option key={t} value={t}>{EFFECT_LABELS[t] ?? t}</option>)}
                   </select>
                 </div>
               </div>
               {filters.length === 0 ? (
-                <span className="field-hint">Stack blur, sharpen, vignette, chromakey and more — baked in order after color.</span>
+                <span className="field-hint">Stack blur, sharpen, vignette, keys and more — baked in order after color. Keys preview live; put the keyed clip on the track above.</span>
               ) : (
                 filters.map((f: VisualEffect) => (
                   <div className="eff-row" key={f.id}>
                     <div className="eff-body">
-                      {EFFECT_RANGE[f.type] ? (
+                      {isKeyEffect(f.type) ? (
+                        <KeyEffectControls clipId={clip.id} effect={f} disabled={!connected || busy} Range={RangeField}
+                          onApply={props.onApplyKey} onDetect={props.onDetectKey} />
+                      ) : EFFECT_RANGE[f.type] ? (
                         <RangeField label={f.type} min={EFFECT_RANGE[f.type][0]} max={EFFECT_RANGE[f.type][1]} step={EFFECT_RANGE[f.type][2]}
                           def={EFFECT_DEFAULT_AMOUNT[f.type] ?? 0} value={f.amount ?? EFFECT_DEFAULT_AMOUNT[f.type] ?? 0}
                           onCommit={(v) => props.onApplyEffect(clip.id, f.type, v, f.id)} />

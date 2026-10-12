@@ -129,7 +129,9 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n
  * FFmpeg export — it's a live proxy so you can judge a look without rendering.
  * Curves, LUTs, color wheels and most effects are export-only (FFmpeg is the
  * ground truth); we map what CSS can express: brightness/contrast/saturation,
- * hue rotation, warm/cool tint, blur, grayscale, sepia.
+ * hue rotation, warm/cool tint, blur, grayscale, sepia. Keys (chromakey /
+ * colorkey / lumakey) are NOT export-only: they preview through the WebGL key
+ * pass (keying.ts / glkey.ts), which splits this filter around the first key.
  */
 export function colorFilter(color?: ColorAdjust, grade?: ColorGrade, filters?: VisualEffect[]): string {
   const parts: string[] = [];

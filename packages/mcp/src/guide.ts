@@ -54,7 +54,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 ## Order of operations that matter
 - AUTO-REFRAME (16:9 → 9:16 etc.): FIRST set the target aspect with set_project_settings, THEN call auto_reframe on the clip. It face-tracks a moving crop and bakes it. Check the returned hitRate — low means few faces were found (it falls back to a centered crop); consider a different clip or manual crop_clip.
-- REMOVE BACKGROUND (people only): remove_background bakes a transparent cutout of the person (local AI matting, no green screen) and whatever is on the track BELOW shows through — put a color/image/video clip on a lower video track to replace the background. A solid green/blue backdrop → apply_effect chromakey instead (faster, exact); never use it for products, animals or objects. It's slow (~4–5× the clip length at 1080p): pass background:true for clips over ~1 min and poll list_jobs, then get_frame to check the edges.
+- REMOVE BACKGROUND (people only): remove_background bakes a transparent cutout of the person (local AI matting, no green screen) and whatever is on the track BELOW shows through — put a color/image/video clip on a lower video track to replace the background. A solid green/blue backdrop → apply_effect chromakey instead, a gray/white/black or other flat-colour one → colorkey (faster, exact); never use it for products, animals or objects. It's slow (~4–5× the clip length at 1080p): pass background:true for clips over ~1 min and poll list_jobs, then get_frame to check the edges.
 - Anything aspect-dependent (reframe, crop for vertical) needs the canvas set first.
 
 ## Text & captions — you choose everything
@@ -125,9 +125,17 @@ with FFmpeg.
   wheels for shadows/mids/highlights, and tone curves curve/curveR/G/B as 'x/y'
   points), apply_lut (.cube), crop_clip, stabilize_clip, auto_reframe.
 - **Effects**: apply_effect stacks FFmpeg-baked effects (blur, sharpen, detail,
-  denoise, sepia, grayscale, vignette, edges, posterize, pixelate, chromakey —
-  key a color to transparency so a lower track shows through). remove_effect by
-  id; clear_clip_effects wipes color+effects together.
+  denoise, sepia, grayscale, vignette, edges, posterize, pixelate) and KEYS,
+  which make a clip's background transparent so the track BELOW shows through
+  (put the keyed clip on the higher track). Choose the key by background:
+  chromakey for saturated green/blue screens (add params.despill 0..1 to clean
+  green/blue edge spill); colorkey for gray, neutral, white, black or any flat
+  colour screen and for graphics overlays with white/black details (chromakey
+  would erase those neutrals too — they share gray's chroma); lumakey for pure
+  black or white backgrounds (params.threshold 0 = black, 1 = white). Pass
+  color 'auto' to sample the frame border (detect_key_color previews it with a
+  confidence); verify with get_frame. remove_effect by id; clear_clip_effects
+  wipes color+effects together.
 - **See color objectively**: inspect_color returns numeric scopes (luma/contrast,
   saturation, hue, mean RGB) + plain notes (cast/exposure) AND histogram/
   waveform/vectorscope images. Use it to verify a grade instead of eyeballing.

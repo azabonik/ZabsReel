@@ -166,5 +166,41 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("tf @20: scale clamps after last kf", near(drawAt(20)!.transform.scale, 1));
 }
 
+// --- keys surface as a live key plan (WebGL preview), split around colour ----
+{
+  const keyProject: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [clip("PLAIN", "vidA", 0, 30)]),
+      track("video", 1, [
+        clip("KEYED", "ovl", 0, 30, {
+          effects: {
+            color: { brightness: 0.1 },
+            filters: [
+              { id: "g", type: "grayscale" },
+              { id: "k1", type: "colorkey", color: "0x808080" },
+              { id: "b", type: "blur", amount: 10 },
+              { id: "k2", type: "chromakey", color: "#00ff00", params: { despill: 0.5 } },
+            ],
+          },
+        }),
+      ]),
+    ],
+    music: undefined,
+  };
+  const kAssets = new Map(keyProject.assets.map((a) => [a.id, a]));
+  const draws = activeLayersAt(keyProject, kAssets, 0.1).clips.filter((c) => c.draw);
+  const plain = draws.find((c) => c.clipId === "PLAIN")?.draw;
+  const key = draws.find((c) => c.clipId === "KEYED")?.draw?.key;
+  check("key: un-keyed clip has no key plan", !!plain && plain.key === undefined);
+  check("key: keyed clip has a plan with both keys in order", key?.keys.map((k) => k.kind).join(",") === "colorkey,chromakey");
+  check("key: colour + effects before the first key run first", key?.pre === "brightness(1.1) grayscale(1)", key?.pre);
+  check("key: effects after the first key run on the keyed result", key?.post === "blur(2px)", key?.post);
+  check("key: colorkey defaults + parsed colour", !!key && key.keys[0].rgb.join() === "128,128,128" &&
+    near(key.keys[0].similarity, 0.08, 1e-9) && near(key.keys[0].blend, 0.04, 1e-9));
+  check("key: chromakey #00ff00 is a green screen with despill", !!key && key.keys[1].screen === "green" &&
+    near(key.keys[1].despill, 0.5, 1e-9) && near(key.keys[1].similarity, 0.18, 1e-9));
+}
+
 console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

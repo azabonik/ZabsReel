@@ -1099,6 +1099,15 @@ input[type="range"]:disabled { opacity: 0.45; }
 .eff-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 .eff-body { flex: 1; min-width: 0; }
 .eff-name { font-size: 12.5px; color: var(--ink-2); text-transform: capitalize; }
+/* Key effects (keyfx.tsx): colour · Auto · Pick header, then the key's sliders. */
+.eff-row:has(.key-fx) { align-items: flex-start; }
+.key-fx { display: flex; flex-direction: column; gap: 6px; padding: 3px 0; }
+.key-fx-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.key-fx-head .swatch { font: 11.5px var(--mono); }
+.key-fx-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+/* Long option labels (the key names) must not widen a select past its grid cell. */
+.dual > .field { min-width: 0; }
+.dual > .field > select { width: 100%; }
 
 /* Color scopes modal */
 .scopes-modal { width: min(820px, calc(100vw - 48px)); }

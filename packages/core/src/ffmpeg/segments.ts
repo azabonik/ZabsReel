@@ -13,7 +13,7 @@ import type { RenderProfile } from "./graph.js";
  */
 
 /** Bump when the render pipeline changes in a way that invalidates cached pixels. */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

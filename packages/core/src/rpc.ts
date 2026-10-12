@@ -102,6 +102,7 @@ const EASE_KINDS = ["linear", "hold", "ease", "easeIn", "easeOut"] as const;
 const EFFECT_TYPES = [
   "blur", "sharpen", "detail", "denoise", "sepia", "grayscale",
   "vignette", "edges", "posterize", "pixelate", "chromakey",
+  "colorkey", "lumakey",
 ] as const;
 
 function summarizeTimeline(engine: EditorEngine) {
@@ -469,7 +470,7 @@ export const methods = {
 
   apply_effect: {
     description:
-      "Add a creative/utility visual EFFECT to a clip (baked as an FFmpeg filter, in order, after color). Effects stack — call repeatedly. type is one of: blur (gaussian; amount = sigma ~0..100), sharpen (amount ~0..5), detail (contrast-adaptive micro-sharpen; amount 0..1), denoise (amount ~0..30), sepia, grayscale, vignette, edges (edge-detect look), posterize (amount = color levels 2..32), pixelate (amount = block factor 2..100), chromakey (key out a color to transparency so a lower track shows through — pass color e.g. '0x00FF00' and params {similarity,blend}). Pass effectId to UPDATE an existing effect in place. Returns the effectId (use remove_effect to delete it).",
+      "Add a creative/utility visual EFFECT to a clip (baked as an FFmpeg filter, in order, after color). Effects stack — call repeatedly. type is one of: blur (gaussian; amount = sigma ~0..100), sharpen (amount ~0..5), detail (contrast-adaptive micro-sharpen; amount 0..1), denoise (amount ~0..30), sepia, grayscale, vignette, edges (edge-detect look), posterize (amount = color levels 2..32), pixelate (amount = block factor 2..100), or a KEY that makes the background transparent so the track BELOW shows through (put the keyed clip on a higher video track). Pick the key by background: chromakey = saturated GREEN/BLUE screen footage (distance in chroma only; params {similarity 0.18, blend 0.1, despill 0..1 — despill>0 removes green/blue spill from edges}); colorkey = GRAY / neutral / white / black or ANY flat-colour screen, and graphics overlays with white/black/gray details (RGB distance; params {similarity 0.08, blend 0.04}) — chromakey would also erase every white, black and gray area because all neutrals share gray's chroma, so never chromakey a gray screen; lumakey = keep by brightness on a pure black or white background (params {threshold 0 = black … 1 = white, tolerance 0.1, softness 0.05}). color = the key colour as '0x808080', or 'auto' to sample the clip's frame border (resolved to a concrete hex, returned as `color` with a 0..1 `confidence`; for lumakey 'auto' sets the threshold). Keys run after the clip's color grade, so key before grading or re-run 'auto' after. Raise similarity if background speckles remain; lower it if the subject gets holes. Verify with get_frame. Pass effectId to UPDATE an existing effect in place. Returns the effectId (use remove_effect to delete it).",
     schema: z
       .object({
         clipId: z.string(),
@@ -480,13 +481,24 @@ export const methods = {
         effectId: z.string().optional(),
       })
       .strict(),
-    handler: (engine, p) => engine.applyEffect(p.clipId, { id: p.effectId, type: p.type, amount: p.amount, color: p.color, params: p.params }),
+    handler: async (engine, p) =>
+      engine.applyEffectAuto(p.clipId, { id: p.effectId, type: p.type, amount: p.amount, color: p.color, params: p.params }),
   },
 
   remove_effect: {
     description: "Remove one visual effect from a clip by its effectId (from apply_effect). To clear ALL effects/color at once use clear_clip_effects.",
     schema: z.object({ clipId: z.string(), effectId: z.string() }).strict(),
     handler: (engine, p) => ({ clip: engine.removeEffect(p.clipId, p.effectId) }),
+  },
+
+  detect_key_color: {
+    description:
+      "Detect a clip's background/screen colour for keying: samples the outer border of its source frames (in-point and middle) and returns { color: '0xRRGGBB', confidence 0..1 } — confidence is the share of the border matching that colour (near 1 = a flat screen; low = busy edges, so pick the colour another way). Read-only; apply_effect with color 'auto' does this for you.",
+    schema: z.object({ clipId: z.string() }).strict(),
+    handler: async (engine, p) => {
+      const d = await engine.detectKeyColor(p.clipId);
+      return { color: d.color, confidence: d.confidence };
+    },
   },
 
   inspect_color: {
@@ -522,7 +534,7 @@ export const methods = {
 
   remove_background: {
     description:
-      "AI background removal for PEOPLE — a CapCut-style auto cutout, no green screen needed (local Robust Video Matting model). Mattes the clip's used span into a transparent cutout of the person, bakes it, and re-points the clip at it. Transparent areas show the track BELOW: to REPLACE the background, put a color/image/video clip on a LOWER video track under this one; or leave the cutout on top of other footage to composite the person over it. Use ONLY for people / talking-head footage — RVM is a human-matting model and won't cleanly cut out products, cars, animals or objects; for a solid green/blue backdrop use apply_effect chromakey instead (faster and exact). First use downloads a 15 MB model to ~/.aive/models. Slow-ish: on CPU it takes roughly 4–5× the clip's length at 1080p30 (≈2.5× at 720p; a 1-min 1080p clip ≈ 4–5 min). Blocks until done and returns {clipId, assetId, frames, seconds}; for clips longer than ~1 minute pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the original clip. Verify with get_frame.",
+      "AI background removal for PEOPLE — a CapCut-style auto cutout, no green screen needed (local Robust Video Matting model). Mattes the clip's used span into a transparent cutout of the person, bakes it, and re-points the clip at it. Transparent areas show the track BELOW: to REPLACE the background, put a color/image/video clip on a LOWER video track under this one; or leave the cutout on top of other footage to composite the person over it. Use ONLY for people / talking-head footage — RVM is a human-matting model and won't cleanly cut out products, cars, animals or objects; for a solid green/blue backdrop use apply_effect chromakey instead, for a gray/white/black or other flat-colour backdrop colorkey (faster and exact). First use downloads a 15 MB model to ~/.aive/models. Slow-ish: on CPU it takes roughly 4–5× the clip's length at 1080p30 (≈2.5× at 720p; a 1-min 1080p clip ≈ 4–5 min). Blocks until done and returns {clipId, assetId, frames, seconds}; for clips longer than ~1 minute pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the original clip. Verify with get_frame.",
     schema: z.object({ clipId: z.string(), background: z.boolean().optional() }).strict(),
     handler: async (engine, p) => {
       if (p.background) {

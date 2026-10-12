@@ -8,8 +8,9 @@
 // How it works: composite.ts is a PURE (model, playhead) -> draw plan; a
 // MediaPool of hidden <video> decoders supplies the pixels/audio; this component
 // owns the master clock (RAF) and rasterizes the plan with Canvas2D. Text and
-// captions stay DOM overlays on top of the canvas. Motion graphics are
-// export-only in preview (unchanged from before).
+// captions stay DOM overlays on top of the canvas. Keys (colorkey / chromakey /
+// lumakey) preview live through a small WebGL2 pass (glkey.ts), so a keyed
+// overlay shows the track below instead of its background.
 
 import {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
@@ -23,6 +24,8 @@ import {
 } from "./playback";
 import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composite";
 import { MediaPool } from "./mediapool";
+import { isKeyBypassed, keyFrame, onKeyBypassChange } from "./glkey";
+import type { KeyPlan } from "./keying";
 import { Film, Play, Waveform } from "./icons";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
@@ -110,9 +113,11 @@ function bufferSize(project: Project | null, maxLongEdge = 1280): { w: number; h
 /**
  * Draw one video layer: crop → letterbox-contain fit → 2D transform (scale,
  * rotate, flip, translate about the canvas centre) → color filter → alpha. The
- * transform mirrors the FFmpeg geq bake so preview and export agree.
+ * transform mirrors the FFmpeg geq bake so preview and export agree. With a
+ * `key` plan the cropped frame is keyed first (WebGL, at the size it's drawn)
+ * and that result is drawn instead; without WebGL2 it draws unkeyed.
  */
-function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number) {
+function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, key?: KeyPlan) {
   // Intrinsic source dimensions: <video> exposes videoWidth, <img> naturalWidth.
   const iw = (el as HTMLVideoElement).videoWidth || (el as HTMLImageElement).naturalWidth;
   const ih = (el as HTMLVideoElement).videoHeight || (el as HTMLImageElement).naturalHeight;
@@ -126,14 +131,30 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
   const dh = sh * fit;
   const t = d.transform;
 
+  let src: CanvasImageSource = el;
+  let [rx, ry, rw, rh] = [sx, sy, sw, sh];
+  let filter = d.colorFilter;
+  if (key) {
+    // Key at the on-canvas size (never above the source's own resolution).
+    const s = Math.abs(t.scale) || 1;
+    const kw = Math.max(1, Math.min(Math.round(sw), Math.ceil(dw * s)));
+    const kh = Math.max(1, Math.min(Math.round(sh), Math.ceil(dh * s)));
+    const keyed = keyFrame(el, sx, sy, sw, sh, kw, kh, key);
+    if (keyed) {
+      src = keyed.canvas;
+      [rx, ry, rw, rh] = [keyed.x, keyed.y, keyed.w, keyed.h];
+      filter = key.post; // colour + pre-key effects were applied before keying
+    }
+  }
+
   ctx.save();
-  ctx.filter = d.colorFilter && d.colorFilter !== "none" ? d.colorFilter : "none";
+  ctx.filter = filter && filter !== "none" ? filter : "none";
   ctx.globalAlpha = clamp01(d.opacity);
   ctx.translate(W / 2 + t.x * W, H / 2 + t.y * H);
   if (t.rotation) ctx.rotate((t.rotation * Math.PI) / 180);
   ctx.scale((t.flipH ? -1 : 1) * t.scale, (t.flipV ? -1 : 1) * t.scale);
   try {
-    ctx.drawImage(el, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh);
+    ctx.drawImage(src, rx, ry, rw, rh, -dw / 2, -dh / 2, dw, dh);
   } catch {
     /* element not yet decodable this frame — skip, next frame paints it */
   }
@@ -240,6 +261,8 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     ctx.fillRect(0, 0, W, H);
 
     const plan = activeLayersAt(projectRef.current, assetsRef.current, phRef.current);
+    // A clip's key, unless the inspector's eyedropper is picking from it.
+    const liveKey = (c: ActiveClip) => (c.draw?.key && !isKeyBypassed(c.clipId) ? c.draw.key : undefined);
     pool.beginFrame();
     // Draw a clip's active motion graphics full-frame over it (alpha .webm proxy,
     // drawImage preserves transparency) so graphics preview live, in clip z-order.
@@ -287,11 +310,12 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         let img = cache.get(c.path);
         if (!img) {
           img = new Image();
+          img.crossOrigin = "anonymous"; // CORS-clean, so the key pass can upload it
           img.onload = () => { if (!playingRef.current) requestAnimationFrame(() => drawFnRef.current()); };
           img.src = api.fileUrl(c.path);
           cache.set(c.path, img);
         }
-        if (img.complete && img.naturalWidth > 0) drawLayer(ctx, img, c.draw, W, H);
+        if (img.complete && img.naturalWidth > 0) drawLayer(ctx, img, c.draw, W, H, liveKey(c));
         paintGraphics(c.graphics);
         continue;
       }
@@ -303,7 +327,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         volume: c.audio?.volume ?? 0,
         muted: !c.audio,
       });
-      if (c.draw && el.readyState >= 2 && el.videoWidth > 0) drawLayer(ctx, el, c.draw, W, H);
+      if (c.draw && el.readyState >= 2 && el.videoWidth > 0) drawLayer(ctx, el, c.draw, W, H, liveKey(c));
       paintGraphics(c.graphics);
     }
     pool.endFrame();
@@ -472,6 +496,12 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     scheduleRedraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, total]);
+
+  // The eyedropper toggled a clip's key preview off/on — repaint.
+  useEffect(() => onKeyBypassChange(() => {
+    drawFnRef.current();
+    scheduleRedraw();
+  }), [scheduleRedraw]);
 
   // Repaint once when the drawing buffer (project resolution) changes.
   useEffect(() => {
