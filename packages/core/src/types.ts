@@ -103,6 +103,11 @@ export interface MediaAsset {
    * asset re-points it back at the original instead of reversing again.
    */
   reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
+  /**
+   * Set when the user imported a file from SynthCut's own baked/ folder: it is
+   * user media, so the library clean-up never treats it as an engine bake.
+   */
+  userImported?: boolean;
 }
 
 /** A library folder for organizing imported assets (flat; assets carry folderId). */

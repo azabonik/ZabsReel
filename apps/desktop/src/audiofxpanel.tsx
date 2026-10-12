@@ -4,14 +4,17 @@
 // rendered generically from the registry (`@aive/core/audio-effects`) — add,
 // bypass, reorder, remove, every param as a slider (0|1 params as a checkbox).
 // Rows whose effect the live preview can't (fully) play carry a "Render exact"
-// badge. Edits go to the clip that carries the sound (a linked detached-audio
+// badge; ones it plays whole but not sample-for-sample (pitch, robot via the
+// voice AudioWorklet) a quieter "Approx." mark — "Render exact" where the
+// worklet can't load. Edits go to the clip that carries the sound (a linked detached-audio
 // clip when this one is silenced) — the same clip the core picks.
 
-import type { ComponentType, ReactNode } from "react";
+import { useSyncExternalStore, type ComponentType, type ReactNode } from "react";
 import {
-  AUDIO_EFFECTS, AUDIO_EFFECT_CATEGORIES, audioEffectByType, audioExactOnly, audioNeedsRender, audioParamValue,
+  AUDIO_EFFECTS, AUDIO_EFFECT_CATEGORIES, audioEffectByType, audioParamValue, audioPreviewFidelity,
   isAudioEffectEnabled, isSwitchParam, type AudioEffectDef,
 } from "@aive/core/audio-effects";
+import { subscribeVoiceWorklet, voiceWorkletAvailable } from "./workletstatus";
 import type { AudioEffect, Clip, Project } from "./types";
 import type { RangeProps } from "./keyfx";
 import { VOICE_PRESETS, audioCarrier, firstOfType, toggleOn, voiceSlot } from "./audiofx";
@@ -34,13 +37,25 @@ function storedParams(def: AudioEffectDef, f: AudioEffect): Record<string, numbe
 }
 
 function RenderBadge({ type }: { type: string }) {
+  const worklet = useSyncExternalStore(subscribeVoiceWorklet, voiceWorkletAvailable);
   const def = audioEffectByType(type);
-  if (!def || !audioNeedsRender(type)) return null;
-  const partial = def.preview !== "export-only" ? def.preview.partial : undefined;
+  const fidelity = audioPreviewFidelity(type, { worklet });
+  if (!def || fidelity === "live") return null;
+  if (fidelity === "approx" && def.preview !== "export-only") {
+    return (
+      <span className="eff-badge eff-badge-soft" title={`Live preview is approximate — ${def.preview.approx ?? ""}. Render exact plays the export.`}>
+        Approx.
+      </span>
+    );
+  }
+  const partial = fidelity === "partial" && def.preview !== "export-only" ? def.preview.partial : undefined;
+  const noWorklet = !worklet && def.preview !== "export-only" && !partial;
   return (
     <span className="eff-badge" title={partial
       ? `The live preview plays part of it — its ${partial} are heard in Render exact / export`
-      : "No live preview for this effect — use Render exact above the preview (or export) to hear it"}>
+      : noWorklet
+        ? "This browser can't run the live voice effect (no AudioWorklet: open the app from localhost or the desktop app) — use Render exact above the preview (or export) to hear it"
+        : "No live preview for this effect — use Render exact above the preview (or export) to hear it"}>
       Render exact
     </span>
   );
@@ -200,7 +215,7 @@ export function AudioEffectsGroup({ clip, project, disabled, Range, rpc }: {
       {filters.length === 0 ? (
         <span className="field-hint">
           Effects run on the clip&apos;s own sound in order — before speed changes, after bleeps. The preview plays EQ, filters,
-          compressor, echo and telephone-style voices live; noise reduction, normalize, pitch and robot need Render exact.
+          compressor, echo, telephone-style, pitch and robot voices live (pitch and robot approximately); noise reduction and normalize need Render exact.
         </span>
       ) : (
         <div className="eff-list">
@@ -212,7 +227,7 @@ export function AudioEffectsGroup({ clip, project, disabled, Range, rpc }: {
               <div className={`eff-row ${on ? "" : "eff-off"}`} key={f.id}>
                 <div className="eff-head">
                   <span className="eff-name" title={def?.description}>{label}</span>
-                  {def && (audioExactOnly(f.type) || audioNeedsRender(f.type)) && <RenderBadge type={f.type} />}
+                  {def && <RenderBadge type={f.type} />}
                   <span className="eff-actions">
                     <button type="button" className="icon-btn" disabled={disabled || !def}
                       aria-pressed={!on} aria-label={on ? `Bypass ${label}` : `Turn ${label} back on`}

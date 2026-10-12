@@ -29,6 +29,19 @@
  *     remember_projects (the UI's recent projects) keeps their bakes.
  * 12. References as percent-encoded file: URLs (an .otio target_url under a
  *     data dir with a space) and relative paths (a relative AIVE_DATA_DIR).
+ * 13. A trashed file keeps its own mtime (render-cache keys) and gets it back
+ *     on restore; the trash time lives in .trash/.index.json; an entry with no
+ *     record counts as trashed when first seen (never expired at once).
+ * 14. An unreadable known project is logged once per file state, not on every
+ *     run or core start; a changed file is logged again.
+ * 15. Two cores on one data dir: neither trashes a file only the other's undo
+ *     history uses (run files in <dataDir>/run/); a dead core's file (killed
+ *     child process) and a stale one stop counting; dispose removes its file.
+ * 16. Library bakes: a bake no clip uses stays while undo can bring its clip
+ *     back, leaves the library at the next clean-up once no state uses it
+ *     (project stays clean), imported media never; remove_unused_media
+ *     dry run / generated only / includeImported / undo; storage_report
+ *     libraryBakes; a used reversed bake keeps its original.
  *
  * Run: npx tsx packages/core/scripts/smoke-storage.ts
  * (No downloads; synthesizes a tiny clip with ffmpeg; temp dirs only.)
@@ -37,14 +50,14 @@ import {
   chmodSync, closeSync, constants as fsc, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync,
   readFileSync, readdirSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync, lutimesSync, rmSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join, relative } from "node:path";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
-import { StorageJanitor, referencedManagedPaths } from "../src/storage.js";
+import { RUN_REAP_MS, RUN_STALE_MS, StorageJanitor, referencedManagedPaths } from "../src/storage.js";
 
 // Automatic runs off unless a section turns them on (a timer firing between
 // storage_report and clean_up_storage would break the dry-run comparison).
@@ -53,6 +66,24 @@ delete process.env.AIVE_BAKED_TRASH_DAYS;
 
 const DAY = 24 * 60 * 60 * 1000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** `p`, or `timedOut` after `ms` (a ref'd timer: keeps the process alive while the janitor's unref'd timer is pending). */
+function within<T, U>(p: Promise<T>, ms: number, timedOut: U): Promise<T | U> {
+  let t!: NodeJS.Timeout;
+  return Promise.race([p, new Promise<U>((r) => { t = setTimeout(() => r(timedOut), ms); })]).finally(() => clearTimeout(t));
+}
+
+/** Pretend `name` in `areaDir`/.trash was trashed `ms` ago (the trash index holds trash times). */
+function setTrashedAt(areaDir: string, name: string, ms: number) {
+  const idx = join(areaDir, ".trash", ".index.json");
+  let j: { version: 1; trashedAt: Record<string, number> } = { version: 1, trashedAt: {} };
+  try {
+    j = JSON.parse(readFileSync(idx, "utf8"));
+  } catch {
+    /* none yet */
+  }
+  j.trashedAt[name] = Date.now() - ms;
+  writeFileSync(idx, JSON.stringify(j));
+}
 
 let failures = 0;
 function check(ok: boolean, msg: string, detail?: unknown) {
@@ -215,9 +246,10 @@ async function main() {
   check(lstatSync(link).isSymbolicLink() && existsSync(linkTarget), "symlink left in place, target untouched");
   check(existsSync(outsideFile) && statSync(outsideFile).mtimeMs === outsideMtime, "file outside the data dir untouched");
   check(existsSync(siblingFile), "sibling baked2/ dir untouched (no bare-prefix match)");
-  const trashedAt = statSync(join(baked, ".trash", "orphan-old.mkv")).mtimeMs;
-  check(Date.now() - trashedAt < 60_000, "trash time stamped on the moved file");
   const after = await call<Report>("storage_report");
+  const trashedItem = (after as unknown as { trash: { name: string; trashedAt: string }[] }).trash.find((t) => t.name === "orphan-old.mkv");
+  check(!!trashedItem && Date.now() - Date.parse(trashedItem.trashedAt) < 60_000, "trash time recorded for the moved file", trashedItem);
+  check(Math.abs(statSync(join(baked, ".trash", "orphan-old.mkv")).mtimeMs - (Date.now() - 2 * DAY)) < 60_000, "…and the file keeps its own mtime");
   check(after.wouldTrash.length === 0, "nothing left to move");
   check(after.trash.length === 3 && after.trashBytes > 0 && after.usage.trash.bytes > 0, "report lists the trash", after.trash.map(key));
 
@@ -260,6 +292,7 @@ async function main() {
   copyFileSync(projB, copied);
   rmSync(projB); // the original is gone (deleted, or on an unplugged drive); only an unknown copy remains
   backdate(restoreMe, 2 * DAY);
+  const restoreMeMtime = Math.round(statSync(restoreMe).mtimeMs);
   const paused6 = await call<Cleanup>("clean_up_storage");
   check(paused6.moved.length === 0 && existsSync(restoreMe), "a missing known project pauses clean-up: nothing moved", paused6.moved.map(key));
   check(paused6.warnings.some((w) => w.includes("b.aive") && w.includes("paused")), "…and the warning names the file", paused6.warnings);
@@ -274,6 +307,7 @@ async function main() {
   check(!idx6.projects.includes(projB) && !idx6.unavailable, "a project file that no longer exists is dropped from the list", idx6);
   const loaded = await call<{ project: { assets: { path: string }[] }; restoredFromTrash?: string[] }>("load_project", { path: copied });
   check(existsSync(restoreMe) && !existsSync(join(baked, ".trash", "restore-me.mp4")), "load_project moved it back out of the trash");
+  check(Math.round(statSync(restoreMe).mtimeMs) === restoreMeMtime, "…with its original mtime (the segment cache key)", [statSync(restoreMe).mtimeMs, restoreMeMtime]);
   check(loaded.project.assets.every((a) => existsSync(a.path)), "every asset of the loaded project exists on disk");
   check((loaded.restoredFromTrash ?? []).length === 1, "load_project reports restoredFromTrash", loaded.restoredFromTrash);
   const idx6b = JSON.parse(readFileSync(indexPath, "utf8")) as { projects: string[] };
@@ -284,8 +318,8 @@ async function main() {
   check(idx6c.projects.includes(otio), "export_otio recorded the .otio (another NLE may use the bakes)");
 
   console.log("7. trash retention and emptyTrash...");
-  backdate(join(baked, ".trash", "orphan-old.mkv"), 8 * DAY);
-  backdate(join(proxies, ".trash", "asset_gone.mp4"), 1 * DAY);
+  setTrashedAt(baked, "orphan-old.mkv", 8 * DAY);
+  setTrashedAt(proxies, "asset_gone.mp4", 1 * DAY);
   const r7 = await call<Cleanup>("clean_up_storage");
   check(r7.purged.map(key).join() === "baked/orphan-old.mkv" && r7.freedBytes > 0, "trash older than 7 days deleted", r7.purged.map(key));
   check(existsSync(join(proxies, ".trash", "asset_gone.mp4")), "1-day-old trash kept");
@@ -297,7 +331,7 @@ async function main() {
   backdate(orphan4, 2 * DAY);
   const r7c = await call<Cleanup>("clean_up_storage", { emptyTrash: true });
   check(r7c.moved.some((m) => m.name === "orphan-4.mp4"), "emptyTrash first moves the unused files");
-  const leftInTrash = [baked, proxies].flatMap((d) => (existsSync(join(d, ".trash")) ? readdirSync(join(d, ".trash")) : []));
+  const leftInTrash = [baked, proxies].flatMap((d) => (existsSync(join(d, ".trash")) ? readdirSync(join(d, ".trash")).filter((n) => n !== ".index.json") : []));
   check(leftInTrash.length === 0, "emptyTrash leaves the trash empty", leftInTrash);
   check(existsSync(restoreMe) && existsSync(live) && existsSync(savedOnly) && existsSync(young), "referenced and young files still there");
 
@@ -329,16 +363,38 @@ async function main() {
     check(r.moved.length === 0 && existsSync(f) && !existsSync(join(real, ".trash")), "symlinked proxies/ left alone");
   }
   {
-    process.env.AIVE_STORAGE_GC_DELAY_MS = "50";
     const idx = JSON.parse(readFileSync(indexPath, "utf8")) as { since: number };
     idx.since = Date.now() - 10 * DAY;
     writeFileSync(indexPath, JSON.stringify(idx));
+    // Timer-driven: a short delay, and the armed run starts on its own. This is
+    // the engine's first automatic run, so the throttle doesn't apply yet.
+    process.env.AIVE_STORAGE_GC_DELAY_MS = "20";
+    const orphanT = put(baked, "orphan-timer.mp4");
+    backdate(orphanT, 2 * DAY);
+    await call("new_project");
+    const timed = await within(engine.storage.autoRunDone(), 10_000, "timed out" as const);
+    check(timed !== "timed out" && !!timed && timed.moved.some((m) => m.name === "orphan-timer.mp4") && !existsSync(orphanT),
+      "the armed automatic run starts on its own after the delay", timed);
+    // Throttled: a trigger within a minute of the last automatic run waits out
+    // the minute, not the 20 ms delay.
+    await call("new_project");
+    const early = await within(engine.storage.autoRunDone().then(() => "ran" as const), 500, "waiting" as const);
+    check(early === "waiting", "a second trigger within a minute waits (automatic runs at most once a minute)", early);
+    await engine.storage.runScheduledNow();
+
+    // Deterministic: a long delay, then run the armed run at once and await it
+    // (no sleeps). The delay only matters for when it would have started.
+    process.env.AIVE_STORAGE_GC_DELAY_MS = String(60 * 60 * 1000);
     const orphan5 = put(baked, "orphan-5.mp4");
     backdate(orphan5, 2 * DAY);
-    await call("new_project"); // schedules a debounced automatic run
-    await sleep(400);
-    await engine.storage.report(); // waits for the run (same lock)
-    check(!existsSync(orphan5) && existsSync(join(baked, ".trash", "orphan-5.mp4")), "new_project triggered an automatic clean-up");
+    check((await engine.storage.autoRunDone()) === null, "no automatic run armed before the trigger");
+    await call("new_project"); // arms a debounced automatic run
+    const armed = engine.storage.autoRunDone();
+    const ran = await engine.storage.runScheduledNow();
+    check(!!ran && ran.moved.some((m) => m.name === "orphan-5.mp4"), "new_project armed an automatic clean-up", ran);
+    check((await armed) === ran, "autoRunDone() resolves with that run's result");
+    check(!existsSync(orphan5) && existsSync(join(baked, ".trash", "orphan-5.mp4")), "…which moved the orphan to the trash");
+    check((await engine.storage.autoRunDone()) === null && (await engine.storage.runScheduledNow()) === null, "nothing armed afterwards");
     process.env.AIVE_STORAGE_GC_DELAY_MS = "-1";
   }
 
@@ -356,7 +412,7 @@ async function main() {
     const good = JSON.stringify({ tracks: [], assets: [{ id: "a", path: showBake }] });
     writeFileSync(show, good);
     writeIdx(dd, { since: Date.now() - 30 * DAY, projects: [show] });
-    const j = new StorageJanitor(dd, { liveProjects: () => [], runningJobs: () => [], log: () => {}, readTimeoutMs: 500 });
+    const j = new StorageJanitor(dd, { liveProjects: () => [], runningJobs: () => [], log: () => {}, readTimeoutMs: 1500 });
 
     // An unplugged drive (or a moved/renamed file): ENOENT.
     renameSync(vol, `${vol}-unplugged`);
@@ -406,13 +462,13 @@ async function main() {
       backdate(hungOrphan, 2 * DAY);
       const meanwhile = join(vol, "saved-meanwhile.aive");
       writeFileSync(meanwhile, JSON.stringify({ tracks: [], assets: [] }));
-      const pending = j.cleanUp({});
-      await sleep(50);
-      const t1 = Date.now();
+      let cleanupDone = false;
+      const pending = j.cleanUp({}).then((r) => { cleanupDone = true; return r; });
+      await sleep(50); // let the clean-up reach the read (the order check below holds either way)
       await j.remember(meanwhile);
-      const rememberMs = Date.now() - t1;
+      const rememberFirst = !cleanupDone;
       const hung = await pending;
-      check(rememberMs < 250, `remember() (every save) doesn't wait for a clean-up stuck on a hung read (${rememberMs} ms)`);
+      check(rememberFirst, "remember() (every save) finishes while a clean-up is stuck on a hung read");
       check(hung.moved.length === 0 && existsSync(hungOrphan) && hung.warnings.some((w) => w.includes("no answer")), "the hung read times out and pauses clean-up", hung.warnings);
       try {
         closeSync(openSync(fifo, fsc.O_WRONLY | fsc.O_NONBLOCK)); // let the stuck read finish
@@ -455,7 +511,7 @@ async function main() {
     await c10("append_clip", { assetId: a.asset.id });
     // However it got there (a second core, a race): in the trash, trashed 8 days ago.
     renameSync(f, join(bk, ".trash", "rev-x.mp4"));
-    backdate(join(bk, ".trash", "rev-x.mp4"), 8 * DAY);
+    setTrashedAt(bk, "rev-x.mp4", 8 * DAY);
     const rep = await c10<Report>("storage_report");
     const item = rep.trash.find((t) => t.name === "rev-x.mp4");
     check(!!item && item.inUse && !item.expired && rep.inUseTrash.count === 1 && rep.emptyTrash.count === 0, "report: in use, not expired, not for Empty trash", rep.trash);
@@ -512,6 +568,239 @@ async function main() {
     check(restored.length === 1 && existsSync(f), "opening such an .otio moves the bake back out of the trash", restored);
   }
 
+
+  console.log("13. trashed files keep their mtime; the trash time is in the trash index...");
+  {
+    const dd = join(root, "data-mtime");
+    const bk = join(dd, "baked");
+    mkdirSync(bk, { recursive: true });
+    writeIdx(dd, { since: Date.now() - 30 * DAY, projects: [] });
+    const f = put(bk, "cut-x.mkv");
+    backdate(f, 3 * DAY);
+    const before = statSync(f).mtimeMs;
+    const j = new StorageJanitor(dd, { liveProjects: () => [], runningJobs: () => [], log: () => {} });
+    const r = await j.cleanUp({});
+    const inTrash = join(bk, ".trash", "cut-x.mkv");
+    check(r.moved.some((m) => m.name === "cut-x.mkv") && existsSync(inTrash), "moved to the trash");
+    check(statSync(inTrash).mtimeMs === before, "the trash keeps the file's own mtime", [statSync(inTrash).mtimeMs, before]);
+    const tIdx = JSON.parse(readFileSync(join(bk, ".trash", ".index.json"), "utf8")) as { trashedAt: Record<string, number> };
+    check(Date.now() - (tIdx.trashedAt["cut-x.mkv"] ?? 0) < 60_000, "the trash time is recorded in .trash/.index.json", tIdx);
+    const rep13 = await j.report();
+    check(rep13.trash.length === 1 && !rep13.trash[0].expired, "an old file in the trash is not expired (trash time, not mtime)", rep13.trash);
+    const back = await j.restore({ assets: [{ id: "a", path: f }] });
+    check(back.length === 1 && Math.round(statSync(f).mtimeMs) === Math.round(before), "restored with its original mtime (segment-cache key unchanged)");
+    const tIdx2 = JSON.parse(readFileSync(join(bk, ".trash", ".index.json"), "utf8")) as { trashedAt: Record<string, number> };
+    check(tIdx2.trashedAt["cut-x.mkv"] === undefined, "its trash record is dropped on restore", tIdx2);
+    // An entry without a record (trashed by an older version, a lost record): trashed "now".
+    const legacy = join(bk, ".trash", "legacy-old.mp4");
+    copyFileSync(clip, legacy);
+    backdate(legacy, 40 * DAY);
+    const r2 = await j.cleanUp({});
+    check(r2.purged.length === 0 && existsSync(legacy), "an unrecorded old trash entry is not deleted at once", r2.purged);
+    const tIdx3 = JSON.parse(readFileSync(join(bk, ".trash", ".index.json"), "utf8")) as { trashedAt: Record<string, number> };
+    check(Date.now() - (tIdx3.trashedAt["legacy-old.mp4"] ?? 0) < 60_000, "…the clean-up records it as trashed now", tIdx3);
+    setTrashedAt(bk, "legacy-old.mp4", 8 * DAY);
+    const r3 = await j.cleanUp({});
+    check(r3.purged.some((p) => p.name === "legacy-old.mp4") && !existsSync(legacy), "…and deletes it once the retention period has passed");
+    const u = await j.report();
+    const trashed = readdirSync(join(bk, ".trash")).filter((n) => n !== ".index.json");
+    check(u.usage.trash.files === trashed.length && existsSync(join(bk, ".trash", ".index.json")), "the trash index is not counted as a trashed file", [u.usage.trash, trashed]);
+  }
+
+  console.log("14. an unreadable known project is logged once per file state...");
+  {
+    const dd = join(root, "data-log");
+    const bk = join(dd, "baked");
+    mkdirSync(bk, { recursive: true });
+    const bad = join(outside, "corrupt.aive");
+    writeFileSync(bad, "{ half");
+    writeIdx(dd, { since: Date.now() - 30 * DAY, projects: [bad] });
+    const o = put(bk, "orphan-14.mp4");
+    backdate(o, 2 * DAY);
+    const logs: string[] = [];
+    const mk = () => new StorageJanitor(dd, { liveProjects: () => [], runningJobs: () => [], log: (m) => logs.push(m) });
+    const pauses = () => logs.filter((l) => l.startsWith("Clean-up is paused")).length;
+    const j1 = mk();
+    await j1.cleanUp({});
+    await j1.cleanUp({ auto: true });
+    await j1.report();
+    check(pauses() === 1, "logged once by one core over several runs", logs);
+    await mk().cleanUp({ auto: true });
+    await mk().cleanUp({});
+    check(pauses() === 1, "not again after a restart (a fresh core) while the file is unchanged", logs);
+    writeFileSync(bad, "{ still half, but longer");
+    await mk().cleanUp({ auto: true });
+    check(pauses() === 2, "logged again once the file changes", logs);
+    await mk().cleanUp({});
+    rmSync(bad);
+    await mk().cleanUp({});
+    check(pauses() === 3, "…and once it goes missing", logs);
+    await mk().cleanUp({});
+    check(pauses() === 3 && existsSync(o), "still paused, not logged again", logs);
+  }
+
+  console.log("15. two cores on one data dir see each other's undo history...");
+  {
+    const dd = join(root, "data-two");
+    const bk = join(dd, "baked");
+    mkdirSync(bk, { recursive: true });
+    writeIdx(dd, { since: Date.now() - 30 * DAY, projects: [] });
+    const A = new EditorEngine(dd);
+    const B = new EditorEngine(dd);
+    const cA = caller(A);
+    const fa = put(bk, "only-in-a-undo.mp4");
+    const ia = await cA<{ asset: { id: string } }>("import_video", { path: fa });
+    await cA("append_clip", { assetId: ia.asset.id });
+    await cA("remove_asset", { assetId: ia.asset.id }); // now only A's undo history names it
+    backdate(fa, 2 * DAY);
+    await A.storage.publishNow();
+    const runDir = join(dd, "run");
+    const aRun = JSON.parse(readFileSync(A.storage.runFile, "utf8")) as { pid: number; paths: string[] };
+    check(aRun.pid === process.pid && aRun.paths.includes(resolve(fa)), "core A published the paths its undo history names", aRun);
+    const b1 = await B.storage.cleanUp({});
+    check(!b1.moved.some((m) => m.name === "only-in-a-undo.mp4") && existsSync(fa), "core B keeps a file only core A's undo history uses", b1.moved.map(key));
+    const rb = await B.storage.report();
+    check(rb.otherCores === 1, "storage_report counts the other core", rb.otherCores);
+
+    // A second PROCESS that is killed: its run file stays but stops counting.
+    const fc = put(bk, "only-in-child.mp4");
+    backdate(fc, 2 * DAY);
+    const childSrc = join(root, "child-core.mts");
+    writeFileSync(childSrc, [
+      `import { EditorEngine } from ${JSON.stringify(fileURLToPath(new URL("../src/engine.ts", import.meta.url)))};`,
+      `const e = new EditorEngine(${JSON.stringify(dd)});`,
+      `const a = await e.importVideo(${JSON.stringify(fc)});`,
+      `e.appendClip(a.id);`,
+      `await e.storage.publishNow();`,
+      `console.log("ready " + e.storage.runFile);`,
+      `setInterval(() => {}, 1000);`,
+    ].join("\n"));
+    const child = spawn(process.execPath, ["--import", "tsx", childSrc], { cwd: fileURLToPath(new URL("../../..", import.meta.url)), stdio: ["ignore", "pipe", "inherit"] });
+    const childRun = await new Promise<string>((res, rej) => {
+      let buf = "";
+      child.stdout!.on("data", (d) => {
+        buf += String(d);
+        const m = /ready (\S+)/.exec(buf);
+        if (m) res(m[1]);
+      });
+      child.on("exit", (code) => rej(new Error(`child core exited early (${code})`)));
+    });
+    const b2 = await B.storage.cleanUp({});
+    check(existsSync(fc) && !b2.moved.some((m) => m.name === "only-in-child.mp4") && b2.warnings.every((w) => !w.includes("stopped answering")),
+      "a running child core's file is kept", b2.moved.map(key));
+    const exited = new Promise((r) => child.on("exit", r));
+    child.kill("SIGKILL");
+    await exited;
+    check(existsSync(childRun), "a killed core leaves its run file behind");
+    const b3 = await B.storage.cleanUp({});
+    check(b3.moved.some((m) => m.name === "only-in-child.mp4") && !existsSync(childRun), "…which stops counting at once (process gone) and is removed", b3.moved.map(key));
+
+    // A live process whose file was not rewritten for RUN_STALE_MS (hung, or a reused pid).
+    const fs2 = put(bk, "only-in-stale.mp4");
+    backdate(fs2, 2 * DAY);
+    const stale = join(runDir, `core-${process.pid}-stale0.json`);
+    writeFileSync(stale, JSON.stringify({ version: 1, pid: process.pid, startedAt: 0, updatedAt: 0, paths: [resolve(fs2)] }));
+    backdate(stale, RUN_STALE_MS + 60_000);
+    const b4 = await B.storage.cleanUp({});
+    check(b4.moved.some((m) => m.name === "only-in-stale.mp4") && b4.warnings.some((w) => w.includes("stopped answering")), "a stale run file no longer counts (and says so)", b4);
+    check(existsSync(stale), "…but stays in run/ (the core may only be hung)");
+    // Far past stale (a crashed core's pid reused by another process): deleted, no more warning.
+    backdate(stale, RUN_REAP_MS + 60_000);
+    const b4b = await B.storage.cleanUp({});
+    check(!existsSync(stale) && b4b.warnings.every((w) => !w.includes("stopped answering")), "a run file far past stale is removed even though its pid is alive", b4b);
+
+    // A live, fresh run file that can't be read: its references are unknown → pause.
+    const fu = put(bk, "maybe-used.mp4");
+    backdate(fu, 2 * DAY);
+    const garbled = join(runDir, `core-${process.pid}-garbl.json`);
+    writeFileSync(garbled, "{ nope");
+    const b5 = await B.storage.cleanUp({});
+    check(b5.moved.length === 0 && existsSync(fu) && b5.warnings.some((w) => w.includes("can't be read")), "an unreadable live run file pauses clean-up", b5);
+    rmSync(garbled);
+
+    // A dead pid's file is ignored even if fresh.
+    const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    const deadFile = join(runDir, `core-${Number(dead.stdout)}-dead00.json`);
+    writeFileSync(deadFile, JSON.stringify({ version: 1, pid: Number(dead.stdout), startedAt: 0, updatedAt: Date.now(), paths: [resolve(fu)] }));
+    const b6 = await B.storage.cleanUp({});
+    check(b6.moved.some((m) => m.name === "maybe-used.mp4") && !existsSync(deadFile), "a dead core's fresh file is ignored and removed", b6.moved.map(key));
+
+    // A exits cleanly: its file goes, and so does the protection.
+    await A.storage.dispose();
+    check(!existsSync(A.storage.runFile), "dispose() removes the run file");
+    const b7 = await B.storage.cleanUp({});
+    check(b7.moved.some((m) => m.name === "only-in-a-undo.mp4"), "after core A exits, core B trashes what only A used", b7.moved.map(key));
+    await B.storage.dispose();
+  }
+
+  console.log("16. library bakes: unused bakes leave the library, imported media never...");
+  {
+    const dd = join(root, "data-lib");
+    mkdirSync(join(dd, "baked"), { recursive: true });
+    writeIdx(dd, { since: Date.now() - 30 * DAY, projects: [] });
+    const e = new EditorEngine(dd);
+    const c = caller(e);
+    const lib = () => e.getProject().assets.map((a) => a.id);
+    const imp = await c<{ asset: { id: string } }>("import_video", { path: clip });
+    const app = await c<{ clip: { id: string } }>("append_clip", { assetId: imp.asset.id });
+    const rev = await c<{ assetId: string; restored: boolean }>("reverse_clip", { clipId: app.clip.id });
+    const R = e.getProject().assets.find((a) => a.id === rev.assetId)!;
+    check(!rev.restored && R.path.startsWith(join(dd, "baked")), "reverse_clip baked into baked/", R.path);
+    const fwd = await c<{ restored: boolean }>("reverse_clip", { clipId: app.clip.id }); // flips back: R unused now
+    check(fwd.restored, "reversing again re-points at the original");
+    const rep16 = await c<Report & { libraryBakes: { count: number; assets: { assetId: string }[] } }>("storage_report");
+    check(rep16.libraryBakes.count === 1 && rep16.libraryBakes.assets[0].assetId === R.id, "storage_report lists the bake only the library holds", rep16.libraryBakes);
+    const k1 = await c<Cleanup & { removedFromLibrary: { assetId: string }[] }>("clean_up_storage");
+    check(k1.removedFromLibrary.length === 0 && lib().includes(R.id), "kept while an undo step still uses it", k1.removedFromLibrary);
+    // An imported file from baked/ that nothing uses: user media, never auto-removed.
+    const userCopy = put(join(dd, "baked"), "my-copy.mp4");
+    const ui = await c<{ asset: { id: string; userImported?: boolean } }>("import_video", { path: userCopy });
+    check(ui.asset.userImported === true, "a file imported from baked/ is marked as user media");
+    // A bake no clip uses but the music bed does: used (the reference scan is field-agnostic).
+    const revM = await c<{ assetId: string }>("reverse_clip", { clipId: app.clip.id });
+    await c("set_music", { assetId: revM.assetId });
+    await c("reverse_clip", { clipId: app.clip.id }); // the clip flips back: only the music names the bake now
+    const M = e.getProject().assets.find((a) => a.id === revM.assetId)!;
+    check(e.getProject().tracks.every((t) => t.clips.every((cl) => cl.assetId !== M.id)) && e.getProject().music?.assetId === M.id, "a bake only the music bed uses", e.getProject().music);
+    const projL = join(outside, "projects", "lib.aive");
+    await c("save_project", { path: projL });
+    await c("load_project", { path: projL }); // undo history cleared
+    check(!e.isDirty(), "freshly opened project is clean");
+    const k2 = await c<Cleanup & { removedFromLibrary: { assetId: string }[] }>("clean_up_storage");
+    check(k2.removedFromLibrary.map((a) => a.assetId).join() === R.id && !lib().includes(R.id), "once no state uses it, the clean-up removes it from the library", k2.removedFromLibrary);
+    check(lib().includes(ui.asset.id) && lib().includes(imp.asset.id), "imported media stays (the user copy from baked/ too)");
+    check(lib().includes(M.id) && !k2.removedFromLibrary.some((a) => a.assetId === M.id), "a bake only the music bed uses stays in the library", k2.removedFromLibrary);
+    check(!e.isDirty(), "the project stays clean (housekeeping, not an edit)");
+    check(existsSync(R.path), "its file is kept while the saved project still names it");
+    await c("save_project", { path: projL });
+    backdate(R.path, 2 * DAY);
+    const k3 = await c<Cleanup>("clean_up_storage");
+    check(k3.moved.some((m) => R.path.endsWith(m.name)) && !existsSync(R.path), "after saving, the clean-up trashes the bake's file", k3.moved.map(key));
+    check(existsSync(M.path) && lib().includes(M.id), "…but not the file of the bake the music bed uses", k3.moved.map(key));
+
+    // remove_unused_media: dry run, generated only, undo, includeImported; a used reversed bake keeps its original.
+    const rev2 = await c<{ assetId: string }>("reverse_clip", { clipId: app.clip.id });
+    type RU = { dryRun: boolean; removed: { assetId: string; kind: string }[]; keptImported: { assetId: string }[] };
+    const d0 = await c<RU>("remove_unused_media", { dryRun: true, includeImported: true });
+    check(!d0.removed.some((a) => a.assetId === imp.asset.id) && d0.removed.some((a) => a.assetId === ui.asset.id),
+      "the original of a reversed clip in use is used (reverse_clip flips back to it); the unused copy is not", d0.removed);
+    check(!d0.removed.some((a) => a.assetId === M.id), "remove_unused_media does not list the bake the music bed uses", d0.removed);
+    await c("remove_clip", { clipId: app.clip.id });
+    const d1 = await c<RU>("remove_unused_media", { dryRun: true });
+    check(d1.dryRun && d1.removed.map((a) => `${a.kind}:${a.assetId}`).join() === `generated:${rev2.assetId}` &&
+      d1.keptImported.map((a) => a.assetId).join() === ui.asset.id, "dry run: the bake would go, imported media is listed as kept", d1); // the music bed's bake names imp as its original
+    check(lib().includes(rev2.assetId), "…and nothing changed");
+    const r1 = await c<RU>("remove_unused_media");
+    check(r1.removed.length === 1 && !lib().includes(rev2.assetId) && lib().includes(imp.asset.id), "removes the unused bake only", r1);
+    await c("undo");
+    check(lib().includes(rev2.assetId), "one undo step brings it back");
+    await c("remove_music");
+    const r2 = await c<RU>("remove_unused_media", { includeImported: true });
+    check(r2.removed.length === 4 && e.getProject().assets.length === 0, "includeImported removes the unused imported media too", r2);
+    await e.storage.dispose();
+  }
+
+  await engine.storage.dispose();
   rmSync(root, { recursive: true, force: true });
   if (failures) {
     console.error(`\n${failures} check(s) FAILED`);

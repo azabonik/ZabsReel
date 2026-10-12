@@ -106,7 +106,7 @@ async function main(): Promise<void> {
         inputSchema: shape,
         annotations: READ_ONLY.has(name)
           ? { readOnlyHint: true }
-          : { readOnlyHint: false, destructiveHint: name === "remove_clip" || name === "remove_asset" || name === "clean_up_storage" },
+          : { readOnlyHint: false, destructiveHint: name === "remove_clip" || name === "remove_asset" || name === "clean_up_storage" || name === "remove_unused_media" },
       },
       async (args: Record<string, unknown>, extra) => {
         // Forward core progress as MCP progress notifications while this call runs.

@@ -7,6 +7,7 @@ import { newId } from "./ids.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
+import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
   detectSilence,
@@ -482,6 +483,7 @@ export class EditorEngine extends EventEmitter {
     this.storage = new StorageJanitor(dataDir, {
       liveProjects: () => [this.project, ...this.undoStack, ...this.redoStack],
       runningJobs: () => this.jobs.list(true),
+      pruneLibrary: () => this.pruneLibraryBakes(),
     });
     this.jobs.on("job", (job) => this.emit("job", job));
     this.jobs.on("job", (job) => this.storage.onJob(job));
@@ -492,6 +494,8 @@ export class EditorEngine extends EventEmitter {
     const recovery = join(this.dataDir, "autosave", "current.aive.recovery");
     if (existsSync(recovery)) this.recoveryPath = recovery;
     this.on("change", () => this.scheduleRecoverySave());
+    // Other cores on this data dir read what this one uses (storage.ts run files).
+    this.on("change", () => this.storage.notifyChange());
   }
 
   // ---- crash recovery --------------------------------------------------------
@@ -746,6 +750,8 @@ export class EditorEngine extends EventEmitter {
       throw new Error(`Import path must be absolute, got "${path}"`);
     }
     const asset = await probeAsset(path);
+    // A file taken from SynthCut's own baked/ folder is the user's media now.
+    if (isEngineBake(asset, this.dataDir)) asset.userImported = true;
     this.mutate(() => {
       this.project.assets.push(asset);
       // Adopt the first imported video's geometry as the project canvas, unless
@@ -817,6 +823,63 @@ export class EditorEngine extends EventEmitter {
     // The cache entry is deliberately KEPT: it lives outside the undo history,
     // so an undo of this removal restores the asset with its transcript/visual
     // index intact. Entries are dropped wholesale on reset()/load().
+  }
+
+  /**
+   * Library bakes (files the engine baked into baked/) that no clip uses in the
+   * open project nor in any undo/redo state: removed from the library (called
+   * by each storage clean-up run). Not an undo step — an undo that brings such
+   * a clip back restores its asset from its own snapshot. Never touches
+   * imported media. A project with no unsaved edits stays that way.
+   */
+  pruneLibraryBakes(): { assetId: string; name: string; path: string }[] {
+    const drop = prunableLibraryBakes(this.project, [...this.undoStack, ...this.redoStack], this.dataDir);
+    if (!drop.length) return [];
+    const ids = new Set(drop.map((a) => a.id));
+    const wasClean = !this.isDirty();
+    this.project.assets = this.project.assets.filter((a) => !ids.has(a.id));
+    this.project.revision += 1;
+    this.project.updatedAt = Date.now();
+    if (wasClean) this.lastSavedRevision = this.project.revision;
+    this.emit("change", this.project);
+    return drop.map((a) => ({ assetId: a.id, name: a.name, path: a.path }));
+  }
+
+  /**
+   * Remove library assets no clip, overlay, bleep or music bed of the open
+   * project uses. SynthCut-made ones (bakes, built-in bleep sounds) go by
+   * default; imported media only with `includeImported`. One undo step;
+   * `dryRun` only reports. Files are not deleted: the storage clean-up trashes
+   * a bake once nothing references it any more.
+   */
+  async removeUnusedMedia(opts: { dryRun?: boolean; includeImported?: boolean } = {}): Promise<{
+    dryRun: boolean;
+    removed: { assetId: string; name: string; path: string; kind: "generated" | "imported"; bytes: number }[];
+    keptImported: { assetId: string; name: string; path: string; bytes: number }[];
+    removedBytes: number;
+  }> {
+    const { generated, imported } = unusedAssets(this.project, this.dataDir);
+    const describe = async (a: (typeof generated)[number]) => ({ assetId: a.id, name: a.name, path: a.path, bytes: await assetFileBytes(a) });
+    const removed = [
+      ...(await Promise.all(generated.map(async (a) => ({ ...(await describe(a)), kind: "generated" as const })))),
+      ...(opts.includeImported ? await Promise.all(imported.map(async (a) => ({ ...(await describe(a)), kind: "imported" as const }))) : []),
+    ];
+    const keptImported = opts.includeImported ? [] : await Promise.all(imported.map(describe));
+    const dryRun = !!opts.dryRun;
+    if (!dryRun && removed.length) {
+      // Measuring the files awaited: only drop what is STILL unused now.
+      const now = unusedAssets(this.project, this.dataDir);
+      const still = new Set([...now.generated, ...(opts.includeImported ? now.imported : [])].map((a) => a.id));
+      const ids = new Set(removed.map((a) => a.assetId).filter((id) => still.has(id)));
+      removed.splice(0, removed.length, ...removed.filter((a) => ids.has(a.assetId)));
+      if (ids.size) {
+        this.mutate(() => {
+          this.project.assets = this.project.assets.filter((a) => !ids.has(a.id));
+        });
+        this.storage.schedule();
+      }
+    }
+    return { dryRun, removed, keptImported, removedBytes: removed.reduce((n, a) => n + a.bytes, 0) };
   }
 
   /** Set background music (mixed under the whole timeline). volume default 0.3. */

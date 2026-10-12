@@ -1,7 +1,10 @@
-import { lstat, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MASK_GRACE_MS } from "./gc.js";
+import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } from "./library.js";
 
 /**
  * Housekeeping for the files the engine BAKES into the data dir:
@@ -20,20 +23,38 @@ import { MASK_GRACE_MS } from "./gc.js";
  *    history, a file in <dataDir>/autosave/ or a known project file
  *    (<dataDir>/projects.json, appended by save/load) resolves to it. Strings
  *    are scanned without knowing field names, so new bake writers are covered.
+ *  - Other SynthCut cores on the same data dir (an AI client's core next to the
+ *    app's) count too: each running core publishes the managed paths its open
+ *    project and undo/redo history name to <dataDir>/run/core-<pid>-<id>.json
+ *    (atomic rewrite, about 1 s after a change, refreshed every 30 s, removed
+ *    on a clean exit). A run file counts while its process is alive and it was
+ *    rewritten within the last 10 min, so a crashed core's file stops counting.
  *  - An unreferenced top-level entry of baked/ or proxies/ older than the grace
  *    period (1 h: a bake writes its file before it re-points the clip) is
  *    RENAMED into <area>/.trash/ (same directory tree, so the rename is instant).
- *    The rename sets the entry's mtime to the time it was trashed.
+ *    The rename keeps the entry's own mtime (render-cache keys use it, so a
+ *    restored file renders from the cache again); the time it was trashed goes
+ *    into <area>/.trash/.index.json. An entry with no record there (trashed by
+ *    an older version, or a lost record) counts as trashed when first seen.
  *  - Trash entries older than AIVE_BAKED_TRASH_DAYS (default 7) are deleted.
  *  - Loading a project moves any file it names back out of the trash first, and
  *    so does every clean-up for a trashed file that a project names again; a
  *    trashed file a project names is never deleted.
+ *  - Library bakes: an asset the engine baked into baked/ that no clip (or other
+ *    asset reference) uses in the open project or any undo/redo state is
+ *    removed from the library by each clean-up run (library.ts); after that the
+ *    usual rules free its file. Imported media is never removed automatically.
+ *  - Automatic runs start AIVE_STORAGE_GC_DELAY_MS (default 3000) after a save,
+ *    load, new project or finished bake, at most once a minute; a negative value
+ *    turns them off (explicit clean-ups still work).
  *  - While a known project file or an autosave can't be read (missing — an
  *    unplugged drive, a moved file —, no permission, half-written, or no answer
  *    within 10 s), nothing is moved to the trash: its references are unknown.
  *    projects.json records since when (`unavailable`); after the trash retention
  *    period a known project is forgotten and an autosave ignored, or at once
- *    with clean_up_storage {forgetMissing}.
+ *    with clean_up_storage {forgetMissing}. The pause is logged once per file
+ *    state (path + mtime + size, kept in projects.json `logged`), not on every
+ *    run or every core start.
  *  - Nothing runs while a job is running. Symlinks are never followed or moved,
  *    and nothing outside the two managed dirs is touched.
  *  - Files older than the known-projects list itself (`since` in projects.json)
@@ -47,7 +68,24 @@ import { MASK_GRACE_MS } from "./gc.js";
 export const MANAGED_AREAS = ["baked", "proxies"] as const;
 export type ManagedArea = (typeof MANAGED_AREAS)[number];
 export const TRASH_DIR_NAME = ".trash";
+/** In each .trash/: when each entry was trashed ({version, trashedAt: {name: ms}}). */
+export const TRASH_INDEX_FILE = ".index.json";
 export const KNOWN_PROJECTS_FILE = "projects.json";
+/** <dataDir>/run/: one file per running core with the managed paths it uses. */
+export const RUN_DIR_NAME = "run";
+/** A running core rewrites its run file at least this often. */
+const RUN_HEARTBEAT_MS = 30_000;
+/** A run file not rewritten for this long no longer counts (a hung core, or a crashed one whose pid was reused). */
+export const RUN_STALE_MS = 10 * 60_000;
+/**
+ * A run file not rewritten for this long is deleted even though its pid is
+ * alive: that pid now belongs to an unrelated process (a crashed core's pid
+ * reused), or the core is hung and rewrites the file when it wakes up.
+ */
+export const RUN_REAP_MS = 6 * RUN_STALE_MS;
+/** A core publishes its references this long after the last change. */
+const RUN_PUBLISH_DELAY_MS = 1000;
+const RUN_FILE = /^core-(\d+)-[0-9a-z]+\.json$/;
 /** Unreferenced files younger than this stay put (a bake writes before it re-points; cancelled jobs leave partials). */
 export const STORAGE_GRACE_MS = MASK_GRACE_MS;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -77,11 +115,6 @@ function autoDelayMs(): number {
   const raw = process.env.AIVE_STORAGE_GC_DELAY_MS;
   const ms = raw !== undefined && raw.trim() !== "" ? Number(raw) : NaN;
   return Number.isFinite(ms) ? ms : 3000;
-}
-
-function norm(p: string): string {
-  const r = resolve(p);
-  return WIN ? r.toLowerCase() : r;
 }
 
 function fold(s: string): string {
@@ -122,24 +155,6 @@ function fmtDays(ms: number): string {
 }
 
 // ---- reference walker --------------------------------------------------------
-
-/** Every string value (and object key) in a JSON-like value, the way JSON.stringify would see it. */
-export function collectStrings(value: unknown, out: Set<string>, seen: Set<object> = new Set()): void {
-  if (typeof value === "string") {
-    out.add(value);
-    return;
-  }
-  if (!value || typeof value !== "object" || seen.has(value)) return;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const v of value) collectStrings(v, out, seen);
-    return;
-  }
-  for (const [k, v] of Object.entries(value)) {
-    out.add(k);
-    collectStrings(v, out, seen);
-  }
-}
 
 function addRefs(s: string, dirs: string[], out: Set<string>): void {
   if (!AREA_HINT.test(s)) return;
@@ -242,6 +257,12 @@ interface KnownProjects {
    * autosave ignored.
    */
   unavailable?: Record<string, number>;
+  /**
+   * The state (mtime:size, or why it could not be read) each unreadable file
+   * was last logged with: the pause is logged again only when that changes,
+   * not on every run or after a restart.
+   */
+  logged?: Record<string, string>;
 }
 
 type IndexRead =
@@ -267,9 +288,17 @@ async function readIndex(dataDir: string): Promise<IndexRead> {
     if (j.unavailable && typeof j.unavailable === "object" && !Array.isArray(j.unavailable)) {
       for (const [p, t] of Object.entries(j.unavailable)) if (typeof t === "number" && Number.isFinite(t)) unavailable[p] = t;
     }
+    const logged: Record<string, string> = {};
+    if (j.logged && typeof j.logged === "object" && !Array.isArray(j.logged)) {
+      for (const [p, s] of Object.entries(j.logged)) if (typeof s === "string") logged[p] = s;
+    }
     return {
       state: "ok",
-      index: { version: 1, since: j.since, projects: j.projects, ...(Object.keys(unavailable).length ? { unavailable } : {}) },
+      index: {
+        version: 1, since: j.since, projects: j.projects,
+        ...(Object.keys(unavailable).length ? { unavailable } : {}),
+        ...(Object.keys(logged).length ? { logged } : {}),
+      },
     };
   } catch (err) {
     return { state: "corrupt", error: err instanceof Error ? err.message : String(err) };
@@ -329,13 +358,71 @@ interface AreaListing {
   area: ManagedArea;
   dir: string;
   entries: Entry[];
+  /** Trash entries; mtimeMs = when trashed (from the trash index). */
   trash: Entry[];
+  /** Trash entry names the trash index has no time for: counted as trashed at listing time, recorded by the next clean-up. */
+  unrecorded: string[];
   /** Why this area is left alone this run (symlinked dir, unreadable …). */
   problem?: string;
   skippedLinks: number;
 }
 
-async function listEntries(area: ManagedArea, dir: string): Promise<{ entries: Entry[]; skippedLinks: number }> {
+/** The trash index file or one of its temp files (never a trash entry). */
+const isTrashIndexName = (name: string): boolean => name === TRASH_INDEX_FILE || name.startsWith(`${TRASH_INDEX_FILE}.tmp-`);
+
+/** When each entry of `trashDir` was trashed (ms), by entry name. Missing or unreadable index → {}. */
+async function readTrashIndex(trashDir: string): Promise<Record<string, number>> {
+  try {
+    const j = JSON.parse(await readFile(join(trashDir, TRASH_INDEX_FILE), "utf8")) as { trashedAt?: unknown };
+    const out: Record<string, number> = {};
+    if (j && typeof j.trashedAt === "object" && j.trashedAt && !Array.isArray(j.trashedAt)) {
+      for (const [n, t] of Object.entries(j.trashedAt)) if (typeof t === "number" && Number.isFinite(t)) out[n] = t;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Rewrite `trashDir`'s index atomically. Best effort: a missing record only makes an entry count as trashed later. */
+async function writeTrashIndex(trashDir: string, trashedAt: Record<string, number>): Promise<void> {
+  const path = join(trashDir, TRASH_INDEX_FILE);
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(tmp, JSON.stringify({ version: 1, trashedAt }), "utf8");
+    await rename(tmp, path);
+  } catch {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Update the trash index of `trashDir` (read-modify-write; call under the
+ * janitor's lock): set `add`, drop `remove`, and drop records whose entry is
+ * gone. Skipped when the trash dir isn't a plain directory.
+ */
+async function updateTrashIndex(trashDir: string, add: Record<string, number>, remove: Iterable<string> = []): Promise<void> {
+  try {
+    const st = await lstat(trashDir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return;
+  } catch {
+    return;
+  }
+  const current = await readTrashIndex(trashDir);
+  let names: Set<string>;
+  try {
+    names = new Set((await readdir(trashDir)).filter((n) => !isTrashIndexName(n)));
+  } catch {
+    return;
+  }
+  const next: Record<string, number> = {};
+  const drop = new Set(remove);
+  for (const [n, t] of Object.entries({ ...current, ...add })) if (names.has(n) && !drop.has(n)) next[n] = t;
+  if (JSON.stringify(next) === JSON.stringify(current)) return;
+  await writeTrashIndex(trashDir, next);
+}
+
+async function listEntries(area: ManagedArea, dir: string, inTrash = false): Promise<{ entries: Entry[]; skippedLinks: number }> {
   const entries: Entry[] = [];
   let skippedLinks = 0;
   let names: string[] = [];
@@ -345,7 +432,7 @@ async function listEntries(area: ManagedArea, dir: string): Promise<{ entries: E
     return { entries, skippedLinks };
   }
   for (const name of names) {
-    if (name === TRASH_DIR_NAME) continue;
+    if (inTrash ? isTrashIndexName(name) : name === TRASH_DIR_NAME) continue;
     const path = join(dir, name);
     let st;
     try {
@@ -366,9 +453,9 @@ async function listEntries(area: ManagedArea, dir: string): Promise<{ entries: E
   return { entries, skippedLinks };
 }
 
-async function listArea(dataDir: string, area: ManagedArea): Promise<AreaListing> {
+async function listArea(dataDir: string, area: ManagedArea, now = Date.now()): Promise<AreaListing> {
   const dir = join(dataDir, area);
-  const out: AreaListing = { area, dir, entries: [], trash: [], skippedLinks: 0 };
+  const out: AreaListing = { area, dir, entries: [], trash: [], unrecorded: [], skippedLinks: 0 };
   try {
     const st = await lstat(dir);
     if (st.isSymbolicLink()) return { ...out, problem: `${area}/ is a symbolic link — left alone` };
@@ -385,14 +472,15 @@ async function listArea(dataDir: string, area: ManagedArea): Promise<AreaListing
     if (st.isSymbolicLink() || !st.isDirectory()) {
       return { ...out, problem: `${area}/${TRASH_DIR_NAME} is not a plain directory — left alone` };
     }
-    // A trash entry's own mtime is the time it was trashed (set by the rename).
-    const t = await listEntries(area, trashDir);
+    // A trash entry keeps its own mtime; when it was trashed is in the index.
+    // No record (an older version trashed it, or a record was lost): it counts
+    // as trashed now — never its own mtime, which can be old enough to look expired.
+    const t = await listEntries(area, trashDir, true);
+    const index = await readTrashIndex(trashDir);
     for (const e of t.entries) {
-      try {
-        e.mtimeMs = (await lstat(e.path)).mtimeMs;
-      } catch {
-        /* raced */
-      }
+      const at = index[e.name];
+      if (at === undefined) out.unrecorded.push(e.name);
+      e.mtimeMs = at ?? now;
     }
     out.trash = t.entries;
     out.skippedLinks += t.skippedLinks;
@@ -442,6 +530,8 @@ interface UnavailableProject {
   firstMs: number;
   /** Unreadable for longer than the trash retention: no longer pauses clean-up (a known project is forgotten). */
   stale: boolean;
+  /** Its state when read (mtime:size, "missing", "no answer" …): the pause is logged again only when this changes. */
+  sig: string;
 }
 
 type InUseTrash = Entry & { destName: string };
@@ -468,6 +558,8 @@ interface Plan {
   refs: Map<ManagedArea, RefNames>;
   knownProjects: string[];
   unavailable: UnavailableProject[];
+  /** Other running cores on this data dir whose references were counted. */
+  otherCores: number;
   /** Why nothing is moved to the trash this run (an unreadable project file), if so. */
   paused: string | null;
   warnings: string[];
@@ -476,13 +568,32 @@ interface Plan {
 }
 
 export interface StorageDeps {
-  /** In-memory projects: the open project plus its undo/redo history. Read last so they are freshest. */
+  /**
+   * In-memory projects: the open project FIRST, then its undo/redo history.
+   * Read last so they are freshest. History entries are never mutated while
+   * held, so their references are cached per object.
+   */
   liveProjects: () => unknown[];
   /** Jobs still running; any of them pauses clean-up. */
   runningJobs: () => { type: string; label: string }[];
   log?: (msg: string) => void;
   /** Per-file read timeout for known projects and autosaves (default PROJECT_READ_TIMEOUT_MS). */
   readTimeoutMs?: number;
+  /**
+   * Remove library bakes no state uses (see library.ts) before a clean-up run;
+   * returns what it removed. Absent = the library is left alone.
+   */
+  pruneLibrary?: () => { assetId: string; name: string; path: string }[];
+}
+
+/** One running core's references (<dataDir>/run/core-<pid>-<id>.json). */
+interface RunFile {
+  version: 1;
+  pid: number;
+  startedAt: number;
+  updatedAt: number;
+  /** Managed paths (baked/, proxies/) its open project and undo/redo history name. */
+  paths: string[];
 }
 
 export interface StorageCleanupResult {
@@ -499,6 +610,8 @@ export interface StorageCleanupResult {
   keptInTrash: { area: ManagedArea; name: string; bytes: number }[];
   /** Known project files dropped from the list (unreadable past the retention period, or forgetMissing). */
   forgotProjects: string[];
+  /** Library bakes no clip used in the open project or its undo/redo history, removed from the library first. */
+  removedFromLibrary: { assetId: string; name: string; path: string }[];
   failed: { name: string; error: string }[];
   kept: { referenced: number; gracePeriod: number; predatesTracking: number };
   trashBytes: number;
@@ -526,20 +639,188 @@ export class StorageJanitor {
   private indexLock: Promise<unknown> = Promise.resolve();
   /** When remember() last recorded each path (folded): a clean-up never forgets a file saved while it ran. */
   private rememberedAt = new Map<string, number>();
-  /** The unreadable project files the last full run paused for (logged when it changes). */
-  private lastPaused = "";
+  /** The state each unreadable project file was last logged with (folded path → sig), this process. */
+  private loggedSig = new Map<string, string>();
   private timer: NodeJS.Timeout | null = null;
+  /** Settles with the result of the armed automatic run (see autoRunDone). */
+  private pendingAuto: { promise: Promise<StorageCleanupResult>; resolve: (r: StorageCleanupResult) => void } | null = null;
   private lastAutoRun = 0;
   /** An automatic run was skipped because jobs were running; re-arm when they finish. */
   private deferred = false;
+  /** Managed paths each history snapshot names (snapshots are never mutated while held). */
+  private refCache = new WeakMap<object, string[]>();
+  /** This core's run file (<dataDir>/run/core-<pid>-<id>.json). */
+  readonly runFile: string;
+  private publishTimer: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
+  /** Serializes run-file writes (never the clean-up lock: a save must not wait for a walk). */
+  private publishLock: Promise<unknown> = Promise.resolve();
+  private published: RunFile | null = null;
+  private readonly startedAt = Date.now();
+  private disposed = false;
 
   constructor(
     readonly dataDir: string,
     private readonly deps: StorageDeps,
-  ) {}
+  ) {
+    this.runFile = join(dataDir, RUN_DIR_NAME, `core-${process.pid}-${randomBytes(5).toString("hex")}.json`);
+  }
 
   private log(msg: string): void {
     (this.deps.log ?? ((m: string) => console.error(`[aive-core] storage: ${m}`)))(msg);
+  }
+
+  /** The managed paths the in-memory projects name (history snapshots cached by identity). */
+  private liveRefs(): Set<string> {
+    const [open, ...history] = this.deps.liveProjects();
+    const out = referencedManagedPaths(this.dataDir, open === undefined ? [] : [open]);
+    for (const p of history) {
+      if (!p || typeof p !== "object") continue;
+      let refs = this.refCache.get(p);
+      if (!refs) {
+        refs = [...referencedManagedPaths(this.dataDir, [p])];
+        this.refCache.set(p, refs);
+      }
+      for (const r of refs) out.add(r);
+    }
+    return out;
+  }
+
+  // ---- this core's references, for other cores (<dataDir>/run/) -------------------
+
+  /** The open project or its history changed: publish this core's references shortly (debounced). */
+  notifyChange(): void {
+    if (this.disposed || this.publishTimer) return;
+    this.publishTimer = setTimeout(() => {
+      this.publishTimer = null;
+      void this.publishNow().catch(() => {});
+    }, RUN_PUBLISH_DELAY_MS);
+    this.publishTimer.unref?.();
+  }
+
+  /**
+   * Write this core's run file now (other cores' clean-ups read it). Skips the
+   * write when nothing changed and the last one is younger than half the
+   * heartbeat. Never throws.
+   */
+  publishNow(): Promise<void> {
+    if (this.publishTimer) {
+      clearTimeout(this.publishTimer);
+      this.publishTimer = null;
+    }
+    const run = this.publishLock.then(async () => {
+      if (this.disposed) return;
+      const paths = [...this.liveRefs()].sort();
+      const now = Date.now();
+      const same = this.published && this.published.paths.join("\n") === paths.join("\n");
+      if (same && now - this.published!.updatedAt < RUN_HEARTBEAT_MS / 2) return;
+      const file: RunFile = { version: 1, pid: process.pid, startedAt: this.startedAt, updatedAt: now, paths };
+      if (await this.writeRunFile(file)) this.published = file;
+      this.startHeartbeat();
+    });
+    this.publishLock = run.catch(() => {});
+    return run.catch(() => {});
+  }
+
+  private async writeRunFile(file: RunFile): Promise<boolean> {
+    const tmp = `${this.runFile}.tmp-${randomBytes(4).toString("hex")}`;
+    try {
+      await mkdir(dirname(this.runFile), { recursive: true });
+      await writeFile(tmp, JSON.stringify(file), "utf8");
+      if (this.disposed) {
+        await rm(tmp, { force: true });
+        return false;
+      }
+      await rename(tmp, this.runFile);
+      liveRunFiles.add(this.runFile);
+      armRunFileCleanup();
+      return true;
+    } catch (err) {
+      await rm(tmp, { force: true }).catch(() => {});
+      this.log(`could not publish this core's references (${err instanceof Error ? err.message : String(err)})`);
+      return false;
+    }
+  }
+
+  /** Rewrite the run file every RUN_HEARTBEAT_MS so other cores see this one is alive. */
+  private startHeartbeat(): void {
+    if (this.heartbeat || this.disposed) return;
+    this.heartbeat = setInterval(() => {
+      const last = this.published;
+      if (!last) return;
+      this.publishLock = this.publishLock.then(async () => {
+        if (this.disposed || this.published !== last) return;
+        const file = { ...last, updatedAt: Date.now() };
+        if (await this.writeRunFile(file)) this.published = file;
+      }).catch(() => {});
+    }, RUN_HEARTBEAT_MS);
+    this.heartbeat.unref?.();
+  }
+
+  /** Stop publishing and remove this core's run file (engine shutdown). Safe to call twice. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    if (this.publishTimer) clearTimeout(this.publishTimer);
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.timer) clearTimeout(this.timer);
+    this.publishTimer = this.heartbeat = this.timer = null;
+    this.pendingAuto?.resolve({ ...emptyCleanupResult(), skipped: "the core is shutting down" });
+    this.pendingAuto = null;
+    await this.publishLock.catch(() => {});
+    liveRunFiles.delete(this.runFile);
+    await rm(this.runFile, { force: true }).catch(() => {});
+  }
+
+  /**
+   * Other running cores' references: every run file in <dataDir>/run/ but this
+   * one whose process is alive and that was rewritten within RUN_STALE_MS.
+   * A dead process's file is deleted, and so is one not rewritten within
+   * RUN_REAP_MS; a live one that can't be read pauses
+   * clean-up (its references are unknown).
+   */
+  private async otherCoreRefs(now: number): Promise<{ files: RunFile[]; unreadable: string[]; ignored: number }> {
+    const dir = join(this.dataDir, RUN_DIR_NAME);
+    const out = { files: [] as RunFile[], unreadable: [] as string[], ignored: 0 };
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return out;
+    }
+    const own = fold(this.runFile.slice(dir.length + 1));
+    for (const name of names) {
+      const m = RUN_FILE.exec(name);
+      if (!m || fold(name) === own) continue;
+      const path = join(dir, name);
+      const pid = Number(m[1]);
+      if (!pidAlive(pid)) {
+        await rm(path, { force: true }).catch(() => {}); // a crashed core: nothing of it is in memory any more
+        continue;
+      }
+      let st;
+      try {
+        st = await lstat(path);
+      } catch {
+        continue; // removed meanwhile (that core exited)
+      }
+      if (st.isFile() && now - st.mtimeMs >= RUN_REAP_MS) {
+        await rm(path, { force: true }).catch(() => {}); // far past stale: no warning about it on every run
+        continue;
+      }
+      if (!st.isFile() || now - st.mtimeMs >= RUN_STALE_MS) {
+        out.ignored++;
+        continue;
+      }
+      try {
+        const j = JSON.parse(await readFile(path, "utf8")) as Partial<RunFile>;
+        if (!Array.isArray(j.paths) || !j.paths.every((p) => typeof p === "string")) throw new Error("unexpected shape");
+        out.files.push(j as RunFile);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        out.unreadable.push(`${path} (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+    return out;
   }
 
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -664,27 +945,32 @@ export class StorageJanitor {
           try {
             const st = await lstat(trashDir);
             if (st.isSymbolicLink() || !st.isDirectory()) continue;
-            trashNames = await readdir(trashDir);
+            trashNames = (await readdir(trashDir)).filter((n) => !isTrashIndexName(n));
           } catch {
             continue; // no trash
           }
+          const trashedAt = await readTrashIndex(trashDir);
+          const back: string[] = [];
           for (const want of names) {
             const dest = join(dir, want);
             if (await exists(dest)) continue;
-            const pick = await newestTrashCopy(trashDir, trashNames, want);
+            const pick = await newestTrashCopy(trashDir, trashNames, want, trashedAt);
             if (!pick) continue;
             // An exact match keeps its own (on-disk) spelling; a `name~N.ext` copy drops the suffix.
             const destName = fold(pick) === want ? pick : trashOriginalName(pick);
             const target = join(dir, destName);
             if (await exists(target)) continue;
             try {
+              // A rename keeps the file's own mtime, so render-cache keys still match.
               await rename(join(trashDir, pick), target);
               restored.push(target);
+              back.push(pick);
               trashNames = trashNames.filter((n) => n !== pick);
             } catch (err) {
               this.log(`could not restore ${destName} from the trash: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
+          if (back.length) await updateTrashIndex(trashDir, {}, back);
         }
         if (restored.length) this.log(`restored ${restored.length} file(s) from the trash for the project being opened`);
       } catch (err) {
@@ -700,10 +986,12 @@ export class StorageJanitor {
     const now = Date.now();
     const grace = STORAGE_GRACE_MS;
     const retention = trashRetentionMs();
-    const areas = await Promise.all(MANAGED_AREAS.map((a) => listArea(this.dataDir, a)));
+    const areas = await Promise.all(MANAGED_AREAS.map((a) => listArea(this.dataDir, a, now)));
     const warnings: string[] = areas.flatMap((a) => (a.problem ? [a.problem] : []));
     const skippedLinks = areas.reduce((n, a) => n + a.skippedLinks, 0);
     if (skippedLinks) warnings.push(`${skippedLinks} symbolic link(s) in baked/ or proxies/ were left alone`);
+    // Other running cores on this data dir (an AI client's core next to the app's).
+    const others = await this.otherCoreRefs(now);
 
     let index = await readIndex(this.dataDir);
     if (index.state === "missing") {
@@ -729,7 +1017,7 @@ export class StorageJanitor {
       now, mode, areas, index, since,
       candidates: [], young: [], legacyKept: [], referenced: [], trash: [], expired: [], inUseTrash: [], refs: new Map(),
       knownProjects: index.state === "ok" ? index.index.projects : [],
-      unavailable: [], paused: null, warnings, quick: false,
+      unavailable: [], otherCores: others.files.length, paused: null, warnings, quick: false,
     };
 
     const usable = areas.filter((a) => !a.problem);
@@ -743,7 +1031,8 @@ export class StorageJanitor {
         (a) => a.entries.some((e) => now - e.mtimeMs >= grace && e.mtimeMs >= since) || a.trash.some((e) => now - e.mtimeMs >= retention),
       );
       if (!actionable && usable.some((a) => a.trash.length > 0)) {
-        const live = referencedManagedPaths(this.dataDir, this.deps.liveProjects());
+        const live = this.liveRefs();
+        for (const r of referencedManagedPaths(this.dataDir, others.files)) live.add(r);
         actionable = usable.some((a) => inUseTrash(a, referencedNames(a.dir, live)).length > 0);
       }
       if (!actionable) return { ...base, quick: true };
@@ -772,7 +1061,9 @@ export class StorageJanitor {
       if (read.kind === "ok") diskProjects.push(read.value);
       if (read.kind !== "missing" && read.kind !== "unreadable") continue;
       const firstMs = opts.forgetMissing ? 0 : firstSeen.get(fold(resolve(path))) ?? now;
-      base.unavailable.push({ path, autosave, missing: read.kind === "missing", reason: read.error, firstMs, stale: now - firstMs >= retention });
+      base.unavailable.push({
+        path, autosave, missing: read.kind === "missing", reason: read.error, firstMs, stale: now - firstMs >= retention, sig: read.sig,
+      });
     }
     const pausing = base.unavailable.filter((u) => !u.stale);
     const stale = base.unavailable.filter((u) => u.stale);
@@ -785,20 +1076,39 @@ export class StorageJanitor {
         `On an unplugged drive, moved or deleted? Nothing is moved to the trash until ${one ? "it is" : "they are"} back, ` +
         `or until ${one ? "it has" : "they have"} been unreadable for ${fmtDays(retention)}. Forget ${one ? "it" : "them"} to clean up now.`;
       warnings.push(base.paused);
-      // Log once per change, not on every automatic run while it lasts.
-      const key = pausing.map((u) => u.path).join("\n");
-      if (key !== this.lastPaused) this.log(base.paused);
-      this.lastPaused = key;
-    } else {
-      this.lastPaused = "";
+      // Log once per file state (path + mtime + size, or why it can't be read),
+      // not on every run while it lasts nor after a restart: projects.json
+      // keeps what was logged (written by the clean-up, see updateUnavailable).
+      const persisted = new Map(
+        Object.entries(index.state === "ok" ? index.index.logged ?? {} : {}).map(([p, s]) => [fold(resolve(p)), s] as const),
+      );
+      const fresh = pausing.filter((u) => {
+        const k = fold(resolve(u.path));
+        return (this.loggedSig.get(k) ?? persisted.get(k)) !== u.sig;
+      });
+      if (fresh.length) this.log(base.paused);
     }
+    this.loggedSig = new Map(pausing.map((u) => [fold(resolve(u.path)), u.sig] as const));
     if (stale.length) {
       warnings.push(`No longer counted (unreadable for ${fmtDays(retention)} or forgotten): ${list(stale)}`);
     }
 
+    if (others.unreadable.length) {
+      const msg =
+        `Clean-up is paused: another running SynthCut core's list of the files it uses can't be read — ${others.unreadable.slice(0, 3).join("; ")}. ` +
+        `Nothing is moved to the trash until it is readable again or that core exits.`;
+      base.paused = base.paused ? `${base.paused} ${msg}` : msg;
+      warnings.push(msg);
+    }
+    if (others.ignored) {
+      warnings.push(`${plural(others.ignored, "other core")} on this data folder stopped answering for over ${Math.round(RUN_STALE_MS / 60_000)} min — ${others.ignored === 1 ? "its" : "their"} undo history no longer counts`);
+    }
+
     // In-memory references last, so they are the freshest.
-    const refs = referencedManagedPaths(this.dataDir, [...diskProjects, ...this.deps.liveProjects()]);
+    const refs = referencedManagedPaths(this.dataDir, [...diskProjects, ...others.files]);
+    for (const r of this.liveRefs()) refs.add(r);
     const counted = base.knownProjects.length - base.unavailable.filter((u) => !u.autosave).length;
+    const cores = others.files.length ? `, ${plural(others.files.length, "other running SynthCut core")}` : "";
 
     for (const a of usable) {
       const r = referencedNames(a.dir, refs);
@@ -819,7 +1129,7 @@ export class StorageJanitor {
           continue;
         }
         const why =
-          `not used by the open project, its undo history, ${counted} known project file(s) or the autosaves; ` +
+          `not used by the open project, its undo history${cores}, ${counted} known project file(s) or the autosaves; ` +
           `last written ${fmtAge(age)} ago` +
           (predatesTracking ? "; made before SynthCut began tracking project files, so an older project not opened since may still use it (only an explicit clean-up moves it)" : "");
         base.candidates.push({ ...e, predatesTracking, why });
@@ -872,11 +1182,23 @@ export class StorageJanitor {
     /** Known project files and autosaves that can't be read; pausesCleanUp → nothing is moved to the trash. */
     unavailableProjects: { path: string; autosave: boolean; missing: boolean; reason: string; since: string; pausesCleanUp: boolean }[];
     blockedBy: string | null;
+    /** Other running SynthCut cores on this data dir whose open project and undo history were counted. */
+    otherCores: number;
+    /**
+     * Bakes the open project's library holds that no clip of it uses (deleted
+     * clip, undone bake): kept while undo/redo still uses them, then removed
+     * from the library by a clean-up; remove_unused_media removes them now.
+     */
+    libraryBakes: { count: number; bytes: number; size: string; assets: { assetId: string; name: string; path: string; bytes: number }[] };
     settings: { gracePeriodMinutes: number; trashDays: number };
     warnings: string[];
   }> {
     const plan = await this.exclusive(() => this.plan("explicit"));
     const usage = await storageUsage(this.dataDir);
+    const [open] = this.deps.liveProjects();
+    const held = open && typeof open === "object" ? unusedLibraryBakes(open as Parameters<typeof unusedLibraryBakes>[0], this.dataDir) : [];
+    const heldAssets = await Promise.all(held.map(async (a) => ({ assetId: a.id, name: a.name, path: a.path, bytes: await assetFileBytes(a) })));
+    const heldBytes = heldAssets.reduce((n, a) => n + a.bytes, 0);
     const sum = (es: { bytes: number }[]) => es.reduce((n, e) => n + e.bytes, 0);
     const older = plan.candidates.filter((c) => c.predatesTracking);
     const newer = plan.candidates.filter((c) => !c.predatesTracking);
@@ -913,6 +1235,8 @@ export class StorageJanitor {
         since: new Date(u.firstMs).toISOString(), pausesCleanUp: !u.stale,
       })),
       blockedBy: this.blockedBy() ?? null,
+      otherCores: plan.otherCores,
+      libraryBakes: { count: heldAssets.length, bytes: heldBytes, size: fmtBytes(heldBytes), assets: heldAssets.slice(0, REPORT_LIST_MAX) },
       settings: { gracePeriodMinutes: Math.round(STORAGE_GRACE_MS / 60_000), trashDays: trashRetentionMs() / DAY_MS },
       warnings: plan.warnings,
     };
@@ -932,18 +1256,22 @@ export class StorageJanitor {
   }
 
   private async cleanUpLocked(opts: StorageCleanupOptions): Promise<StorageCleanupResult> {
-    const result: StorageCleanupResult = {
-      moved: [], movedBytes: 0, restored: [], purged: [], freedBytes: 0, keptInTrash: [], forgotProjects: [], failed: [],
-      kept: { referenced: 0, gracePeriod: 0, predatesTracking: 0 }, trashBytes: 0, warnings: [],
-    };
+    const result = emptyCleanupResult();
     try {
       const busy = this.blockedBy();
       if (busy) {
         if (opts.auto) this.deferred = true;
         return { ...result, skipped: busy };
       }
+      // Library bakes no state uses leave the library first (library.ts), so
+      // this run already sees their files as unused by the open project.
+      try {
+        result.removedFromLibrary = this.deps.pruneLibrary?.() ?? [];
+      } catch (err) {
+        result.warnings.push(`could not tidy the library: ${err instanceof Error ? err.message : String(err)}`);
+      }
       const plan = await this.plan(opts.auto ? "auto" : "explicit", { forgetMissing: opts.forgetMissing });
-      result.warnings = plan.warnings;
+      result.warnings = [...result.warnings, ...plan.warnings];
       result.kept = { referenced: plan.referenced.length, gracePeriod: plan.young.length, predatesTracking: plan.legacyKept.length };
 
       // A job may have started while project files were read.
@@ -953,7 +1281,8 @@ export class StorageJanitor {
         return { ...result, skipped: late };
       }
 
-      // Trashed files a project names again go back first (a second core, a race).
+      // Trashed files a project names again go back first (a second core, a
+      // race). A rename keeps the file's own mtime, so render-cache keys match.
       for (const t of plan.inUseTrash) {
         const target = join(dirname(dirname(t.path)), t.destName);
         if (await exists(target)) continue;
@@ -969,10 +1298,20 @@ export class StorageJanitor {
 
       // Pre-tracking files Empty trash moves stay in the trash for the retention period.
       const keep = new Set<string>();
+      // When each entry was trashed: this run's moves, and entries an older
+      // version (or a lost record) left without a time count from this run.
+      const trashedNow = new Map<string, Record<string, number>>();
+      for (const a of plan.areas) {
+        if (a.problem) continue;
+        trashedNow.set(join(a.dir, TRASH_DIR_NAME), Object.fromEntries(a.unrecorded.map((n) => [n, plan.now])));
+      }
       if (plan.index.state === "ok") {
         for (const c of plan.candidates) {
           const r = await moveToTrash(c);
           if (r && typeof r === "object") {
+            const rec = trashedNow.get(dirname(r.target)) ?? {};
+            rec[r.target.slice(dirname(r.target).length + 1)] = Date.now();
+            trashedNow.set(dirname(r.target), rec);
             result.moved.push({ area: c.area, name: c.name, bytes: c.bytes });
             result.movedBytes += c.bytes;
             if (opts.emptyTrash && c.predatesTracking) {
@@ -982,6 +1321,8 @@ export class StorageJanitor {
           } else if (r) result.failed.push({ name: `${c.area}/${c.name}`, error: r });
         }
       }
+
+      for (const [trashDir, rec] of trashedNow) await updateTrashIndex(trashDir, rec);
 
       const purge = async (e: Entry) => {
         try {
@@ -1011,6 +1352,10 @@ export class StorageJanitor {
       } else {
         for (const e of plan.expired) await purge(e);
       }
+      // Drop the records of entries restored or deleted for good.
+      if (result.purged.length || result.restored.length) {
+        for (const trashDir of trashedNow.keys()) await updateTrashIndex(trashDir, {});
+      }
 
       // Record which project files can't be read (and since when); forget the
       // ones unreadable for longer than the retention period.
@@ -1026,6 +1371,9 @@ export class StorageJanitor {
             `deleted ${result.purged.length} trashed file(s) (${fmtBytes(result.freedBytes)})` +
             (result.restored.length ? `; moved ${result.restored.length} file(s) a project names back out of the trash` : ""),
         );
+      }
+      if (result.removedFromLibrary.length) {
+        this.log(`removed ${result.removedFromLibrary.length} unused bake(s) from the library: ${result.removedFromLibrary.map((a) => a.name).join(", ")}`);
       }
     } catch (err) {
       result.warnings.push(`clean-up stopped: ${err instanceof Error ? err.message : String(err)}`);
@@ -1046,13 +1394,23 @@ export class StorageJanitor {
       for (const u of plan.unavailable) {
         if (!forget.has(fold(resolve(u.path))) && !touched(u.path)) unavailable[u.path] = u.firstMs;
       }
+      // What each pausing file was logged as (the pause is logged again only when it changes).
+      const logged: Record<string, string> = {};
+      for (const u of plan.unavailable) if (!u.stale && unavailable[u.path] !== undefined) logged[u.path] = u.sig;
       const forgot = index.projects.filter((p) => forget.has(fold(resolve(p))));
       const next: KnownProjects = {
         version: 1, since: index.since,
         projects: index.projects.filter((p) => !forget.has(fold(resolve(p)))),
         ...(Object.keys(unavailable).length ? { unavailable } : {}),
+        ...(Object.keys(logged).length ? { logged } : {}),
       };
-      if (!forgot.length && JSON.stringify(next.unavailable ?? {}) === JSON.stringify(index.unavailable ?? {})) return [];
+      if (
+        !forgot.length &&
+        JSON.stringify(next.unavailable ?? {}) === JSON.stringify(index.unavailable ?? {}) &&
+        JSON.stringify(next.logged ?? {}) === JSON.stringify(index.logged ?? {})
+      ) {
+        return [];
+      }
       try {
         await writeIndex(this.dataDir, next);
       } catch {
@@ -1068,15 +1426,43 @@ export class StorageJanitor {
   /** Debounced, throttled background clean-up (after save / load / new / a bake). Never blocks the caller. */
   schedule(): void {
     const delay = autoDelayMs();
-    if (delay < 0 || this.timer) return;
+    if (delay < 0 || this.timer || this.disposed) return;
     const wait = Math.max(delay, this.lastAutoRun + AUTO_MIN_INTERVAL_MS - Date.now());
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      this.lastAutoRun = Date.now();
-      this.deferred = false;
-      void this.cleanUp({ auto: true }).catch(() => {});
-    }, wait);
+    if (!this.pendingAuto) {
+      let resolve!: (r: StorageCleanupResult) => void;
+      const promise = new Promise<StorageCleanupResult>((r) => { resolve = r; });
+      this.pendingAuto = { promise, resolve };
+    }
+    this.timer = setTimeout(() => void this.fireAutoRun(), wait);
     this.timer.unref?.();
+  }
+
+  /** Run the armed automatic clean-up and settle autoRunDone(). */
+  private async fireAutoRun(): Promise<StorageCleanupResult> {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.lastAutoRun = Date.now();
+    this.deferred = false;
+    const pending = this.pendingAuto;
+    this.pendingAuto = null;
+    const result = await this.cleanUp({ auto: true }).catch((err) => ({
+      ...emptyCleanupResult(), warnings: [`clean-up stopped: ${err instanceof Error ? err.message : String(err)}`],
+    }));
+    pending?.resolve(result);
+    return result;
+  }
+
+  /**
+   * The result of the automatic run schedule() armed (null when none is armed).
+   * Lets a caller (a test, a shutdown) wait for it without guessing timings.
+   */
+  autoRunDone(): Promise<StorageCleanupResult | null> {
+    return this.pendingAuto ? this.pendingAuto.promise : Promise.resolve(null);
+  }
+
+  /** Start the armed automatic run now instead of after its delay (null when none is armed). */
+  runScheduledNow(): Promise<StorageCleanupResult | null> {
+    return this.pendingAuto ? this.fireAutoRun() : Promise.resolve(null);
   }
 
   /** Feed job events: a finished bake (or the last job ending after a deferred run) schedules a clean-up. */
@@ -1088,6 +1474,42 @@ export class StorageJanitor {
 }
 
 // ---- helpers -------------------------------------------------------------------------------
+
+function emptyCleanupResult(): StorageCleanupResult {
+  return {
+    moved: [], movedBytes: 0, restored: [], purged: [], freedBytes: 0, keptInTrash: [], forgotProjects: [],
+    removedFromLibrary: [], failed: [], kept: { referenced: 0, gracePeriod: 0, predatesTracking: 0 }, trashBytes: 0, warnings: [],
+  };
+}
+
+/** Is process `pid` running? (EPERM = it exists, owned by someone else.) */
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Run files of this process's live janitors: removed synchronously on exit. */
+const liveRunFiles = new Set<string>();
+let runCleanupArmed = false;
+function armRunFileCleanup(): void {
+  if (runCleanupArmed) return;
+  runCleanupArmed = true;
+  process.once("exit", () => {
+    for (const f of liveRunFiles) {
+      try {
+        rmSync(f, { force: true });
+      } catch {
+        /* best effort: another core ignores a dead process's file */
+      }
+    }
+  });
+}
+
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -1141,7 +1563,18 @@ function inUseTrash(a: AreaListing, r: RefNames): InUseTrash[] {
 type ProjectRead =
   | { kind: "ok"; value: unknown }
   | { kind: "skip" }
-  | { kind: "missing" | "unreadable"; error: string };
+  /** sig: the file's state for log de-duplication ("missing", "<mtime>:<size>", "no answer", "error:<code>"). */
+  | { kind: "missing" | "unreadable"; error: string; sig: string };
+
+/** "<mtime ms>:<size>" of an unreadable file (or why even stat fails): it is logged again only when this changes. */
+async function fileSig(path: string): Promise<string> {
+  try {
+    const st = await stat(path);
+    return `${Math.round(st.mtimeMs)}:${st.size}`;
+  } catch (err) {
+    return `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
 
 /**
  * Read one project file as JSON, giving up after `timeoutMs` (a hung network
@@ -1155,13 +1588,16 @@ async function readProjectFile(path: string, timeoutMs: number, autosave: boolea
       return { kind: "ok", value: JSON.parse(await readFile(path, "utf8")) };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") return autosave ? { kind: "skip" } : { kind: "missing", error: "not found" };
-      return { kind: "unreadable", error: err instanceof Error ? err.message : String(err) };
+      if (code === "ENOENT" || code === "ENOTDIR") return autosave ? { kind: "skip" } : { kind: "missing", error: "not found", sig: "missing" };
+      return { kind: "unreadable", error: err instanceof Error ? err.message : String(err), sig: await fileSig(path) };
     }
   })();
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<ProjectRead>((res) => {
-    timer = setTimeout(() => res({ kind: "unreadable", error: `no answer after ${Math.max(1, Math.round(timeoutMs / 1000))} s` }), timeoutMs);
+    timer = setTimeout(
+      () => res({ kind: "unreadable", error: `no answer after ${Math.max(1, Math.round(timeoutMs / 1000))} s`, sig: "no answer" }),
+      timeoutMs,
+    );
     timer.unref?.();
   });
   try {
@@ -1171,15 +1607,18 @@ async function readProjectFile(path: string, timeoutMs: number, autosave: boolea
   }
 }
 
-/** The most recently trashed copy of `want` (case-folded on Windows) in `trashNames`. */
-async function newestTrashCopy(trashDir: string, trashNames: string[], want: string): Promise<string | undefined> {
+/** The most recently trashed copy of `want` (case-folded on Windows) in `trashNames` (unrecorded = trashed now). */
+async function newestTrashCopy(
+  trashDir: string, trashNames: string[], want: string, trashedAt: Record<string, number>,
+): Promise<string | undefined> {
   let best: { name: string; t: number } | undefined;
   for (const n of trashNames) {
     if (fold(trashOriginalName(n)) !== want && fold(n) !== want) continue;
     try {
       const st = await lstat(join(trashDir, n));
       if (st.isSymbolicLink()) continue;
-      if (!best || st.mtimeMs > best.t) best = { name: n, t: st.mtimeMs };
+      const t = trashedAt[n] ?? Number.POSITIVE_INFINITY;
+      if (!best || t > best.t) best = { name: n, t };
     } catch {
       /* raced */
     }
@@ -1187,7 +1626,11 @@ async function newestTrashCopy(trashDir: string, trashNames: string[], want: str
   return best?.name;
 }
 
-/** Rename one entry into its area's .trash/ and stamp the trash time. Its trash path, an error string, or null when skipped. */
+/**
+ * Rename one entry into its area's .trash/ (its own mtime is kept; the caller
+ * records the trash time in the trash index). Its trash path, an error string,
+ * or null when skipped.
+ */
 async function moveToTrash(e: Entry): Promise<{ target: string } | string | null> {
   try {
     const st = await lstat(e.path);
@@ -1205,18 +1648,12 @@ async function moveToTrash(e: Entry): Promise<{ target: string } | string | null
     if (tst.isSymbolicLink() || !tst.isDirectory()) return `${TRASH_DIR_NAME} is not a plain directory`;
     const ext = extname(e.name);
     const stem = e.name.slice(0, e.name.length - ext.length);
-    let target = join(trashDir, e.name);
-    for (let i = 1; await exists(target); i++) target = join(trashDir, `${stem}~${i}${ext}`);
+    // Never the trash index's own name (an entry called ".index.json").
+    const taken = async (name: string) => isTrashIndexName(name) || (await exists(join(trashDir, name)));
+    let name = e.name;
+    for (let i = 1; await taken(name); i++) name = `${stem}~${i}${ext}`;
+    const target = join(trashDir, name);
     await rename(e.path, target);
-    const now = new Date();
-    try {
-      const st = await lstat(target);
-      await utimes(target, st.atime, now);
-    } catch (err) {
-      // Without a trash time the next run could delete it at once: put it back.
-      await rename(target, e.path).catch(() => {});
-      return `could not stamp the trash time: ${err instanceof Error ? err.message : String(err)}`;
-    }
     return { target };
   } catch (err) {
     return err instanceof Error ? err.message : String(err); // e.g. file in use on Windows
@@ -1275,7 +1712,21 @@ export async function storageUsage(dataDir: string): Promise<{
       } catch {
         continue;
       }
-      for (const n of inner) await walk(join(p, n), n === TRASH_DIR_NAME ? "trash" : name);
+      for (const n of inner) {
+        if (n !== TRASH_DIR_NAME) {
+          await walk(join(p, n), name);
+          continue;
+        }
+        // The trash, without its own index file.
+        let trashNames: string[] = [];
+        try {
+          const st = await lstat(join(p, n));
+          if (st.isDirectory()) trashNames = await readdir(join(p, n));
+        } catch {
+          continue;
+        }
+        for (const t of trashNames) if (!isTrashIndexName(t)) await walk(join(p, n, t), "trash");
+      }
     } else if (name === "cache" || name === "previews" || name === "frames" || name === "masks") {
       await walk(p, name);
     } else {

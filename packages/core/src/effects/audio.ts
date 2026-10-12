@@ -29,6 +29,8 @@
 
 import { clipFootprintFrames, hasSpeedRamp, type SpeedRamp } from "../speed.js";
 
+export { VOICE_WORKLET_PROCESSOR, VOICE_WORKLET_SOURCE, voiceWorkletLatency, type VoiceWorkletOptions } from "./voiceworklet.js";
+
 /** Every audio effect type, in a stable order (the rpc enum and the AI description follow it). */
 export const AUDIO_EFFECT_TYPE_IDS = [
   "enhance_voice",
@@ -104,7 +106,14 @@ export type AudioNodeSpec =
   /** Multi-tap delay = FFmpeg aecho exactly: y = dry·x + Σ gain_i·x(t − delay_i) (seconds). */
   | { kind: "taps"; dry: number; taps: { delay: number; gain: number }[] }
   /** Sine-modulated delay = FFmpeg vibrato: delay sweeps 0..depth seconds at `rate` Hz. */
-  | { kind: "vibrato"; rate: number; depth: number };
+  | { kind: "vibrato"; rate: number; depth: number }
+  /** AudioWorklet (voiceworklet.ts): phase-vocoder pitch shift by `ratio`, length unchanged. */
+  | { kind: "pitch"; ratio: number }
+  /** AudioWorklet (voiceworklet.ts): the export's afftfilt robotisation, window `win` samples at 48 kHz. */
+  | { kind: "robot"; win: number };
+
+/** Node kinds that run in the voice AudioWorklet (unavailable → those effects are render-only). */
+export const WORKLET_NODE_KINDS: readonly AudioNodeSpec["kind"][] = ["pitch", "robot"];
 
 /** How the live preview plays an effect. */
 export interface AudioPreview {
@@ -116,7 +125,21 @@ export interface AudioPreview {
    * UI still shows the "Render exact" badge.
    */
   partial?: string;
+  /**
+   * Set when the chain plays the whole effect but not sample-for-sample like
+   * the export (a different pitch shifter): says how it differs. The UI shows a
+   * quieter "Approx." mark.
+   */
+  approx?: string;
 }
+
+/** What the live preview can run: `worklet` = the voice AudioWorklet loaded (or loadable). */
+export interface AudioPreviewEnv {
+  worklet: boolean;
+}
+
+/** How faithfully the live preview plays an effect: the inspector's mark. */
+export type AudioPreviewFidelity = "live" | "approx" | "partial" | "render";
 
 export interface AudioEffectDef {
   type: AudioEffectType;
@@ -205,6 +228,14 @@ function pitchSteps(semitones: number, ctx: AudioFfmpegContext): string[] {
   if (!ctx.pitchFallback) return [`rubberband=pitch=${num(r)}:transients=crisp:pitchq=quality`];
   return [`asetrate=${Math.round(AUDIO_FX_RATE * r)}`, `aresample=${AUDIO_FX_RATE}`, `atempo=${num(1 / r)}`];
 }
+/** The live preview of pitchSteps: the worklet's pitch shifter (same ratio, same no-op at 0). */
+function pitchWeb(semitones: number): AudioNodeSpec[] {
+  if (Math.abs(semitones) < 1e-3) return [];
+  return [{ kind: "pitch", ratio: Math.pow(2, clampN(semitones, -12, 12) / 12) }];
+}
+const PITCH_APPROX = "a simpler pitch shifter than the export's rubberband (transients smear a little)";
+/** Robot window sizes (samples at 48 kHz) per tone 0 low · 1 mid · 2 high. */
+const robotWin = (e: AudioEffectInput): number => [2048, 1024, 512][Math.round(audioParamValue(e, "tone"))] ?? 1024;
 
 /**
  * aecho taps (delays ms, decays) with energy-normalised output: in_gain 1,
@@ -582,7 +613,7 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     description: "Shifts the voice pitch in semitones (+12 = an octave up) without changing its speed or length.",
     params: [P("semitones", "Pitch", -12, 12, 0.5, 4, " st")],
     ffmpeg: (e, ctx) => pitchSteps(audioParamValue(e, "semitones"), ctx),
-    preview: "export-only",
+    preview: { webaudio: (e) => pitchWeb(audioParamValue(e, "semitones")), approx: PITCH_APPROX },
   },
   chipmunk: {
     label: "Chipmunk",
@@ -590,7 +621,7 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     description: "High, squeaky cartoon voice (pitch up, formants shifted).",
     params: [P("semitones", "Pitch", 3, 12, 0.5, 8, " st")],
     ffmpeg: (e, ctx) => pitchSteps(audioParamValue(e, "semitones"), ctx),
-    preview: "export-only",
+    preview: { webaudio: (e) => pitchWeb(audioParamValue(e, "semitones")), approx: PITCH_APPROX },
   },
   deep: {
     label: "Deep voice",
@@ -598,7 +629,7 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     description: "Low, heavy monster/villain voice (pitch down, formants shifted).",
     params: [P("semitones", "Pitch", -12, -2, 0.5, -5, " st")],
     ffmpeg: (e, ctx) => pitchSteps(audioParamValue(e, "semitones"), ctx),
-    preview: "export-only",
+    preview: { webaudio: (e) => pitchWeb(audioParamValue(e, "semitones")), approx: PITCH_APPROX },
   },
   robot: {
     label: "Robot",
@@ -608,10 +639,14 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     ffmpeg: (e) => {
       // Zeroing every bin's phase each hop re-synthesises the voice as a buzz at
       // rate/hop (≈ 94 / 188 / 375 Hz) that keeps the words' spectral shape.
-      const win = [2048, 1024, 512][Math.round(audioParamValue(e, "tone"))] ?? 1024;
-      return [`afftfilt=real='hypot(re,im)':imag='0':win_size=${win}:overlap=0.75`];
+      return [`afftfilt=real='hypot(re,im)':imag='0':win_size=${robotWin(e)}:overlap=0.75`];
     },
-    preview: "export-only",
+    // The same afftfilt maths in the worklet: sample-exact against FFmpeg 4.4
+    // (newer FFmpeg also windows afftfilt's output, so its robot is quieter).
+    preview: {
+      webaudio: (e) => [{ kind: "robot", win: robotWin(e) }],
+      approx: "the live robot follows the export's FFmpeg 4 filter; FFmpeg 7 and later render it quieter and softer",
+    },
   },
   echo: {
     label: "Echo",
@@ -741,15 +776,34 @@ export function audioMeasureSteps(filters: readonly AudioEffectInput[], effectId
 /** Types whose `floor` param is the clip's measured noise level (the engine fills it in when omitted). */
 export const NOISE_FLOOR_TYPES: readonly AudioEffectType[] = ["noise_reduction", "enhance_voice"];
 
+/** Does this preview need the voice AudioWorklet? */
+function needsWorklet(d: AudioEffectDef, e: AudioEffectInput): boolean {
+  return d.preview !== "export-only" && d.preview.webaudio(e).some((n) => WORKLET_NODE_KINDS.includes(n.kind));
+}
+
+/**
+ * The inspector's mark for an effect: "live" (the preview plays it like the
+ * export), "approx" (plays all of it, not sample-for-sample), "partial" (plays
+ * part of it) or "render" (only the render plays it — also a worklet effect
+ * where the voice AudioWorklet is unavailable).
+ */
+export function audioPreviewFidelity(type: string, env: AudioPreviewEnv = { worklet: true }): AudioPreviewFidelity {
+  const d = DEF_MAP.get(type);
+  if (!d || d.preview === "export-only") return "render";
+  if (!env.worklet && needsWorklet(d, { type })) return "render";
+  if (d.preview.partial) return "partial";
+  return d.preview.approx ? "approx" : "live";
+}
+
 /** True when the effect has no live preview at all (only the FFmpeg render plays it). */
-export function audioExactOnly(type: string): boolean {
-  return DEF_MAP.get(type)?.preview === "export-only";
+export function audioExactOnly(type: string, env: AudioPreviewEnv = { worklet: true }): boolean {
+  return audioPreviewFidelity(type, env) === "render";
 }
 
 /** True when the render differs from the live preview (no preview, or only part of it previews). */
-export function audioNeedsRender(type: string): boolean {
-  const p = DEF_MAP.get(type)?.preview;
-  return !p || p === "export-only" || !!p.partial;
+export function audioNeedsRender(type: string, env: AudioPreviewEnv = { worklet: true }): boolean {
+  const f = audioPreviewFidelity(type, env);
+  return f === "render" || f === "partial";
 }
 
 /** Bypassed effects (enabled: false) are skipped in export and preview. */
@@ -787,28 +841,40 @@ export interface AudioPreviewPlan {
   sig: string;
   /** Enabled effects the preview can't (fully) play — the render is exact. */
   renderOnly: string[];
+  /** Enabled effects the preview plays whole but not sample-for-sample (pitch shifter). */
+  approx: string[];
+  /** True when `nodes` holds voice-AudioWorklet nodes (pitch / robot). */
+  worklet: boolean;
 }
 
-const EMPTY_PLAN: AudioPreviewPlan = { nodes: [], sig: "", renderOnly: [] };
+const EMPTY_PLAN: AudioPreviewPlan = { nodes: [], sig: "", renderOnly: [], approx: [], worklet: false };
 
-/** Build the preview plan (pure — unit-tested by apps/desktop/scripts/smoke-composite.ts). */
-export function audioPreviewPlan(filters: readonly AudioEffectInput[] | undefined): AudioPreviewPlan {
+/**
+ * Build the preview plan (pure — unit-tested by apps/desktop/scripts/smoke-composite.ts).
+ * Without the voice AudioWorklet (`env.worklet` false) pitch and robot are render-only.
+ */
+export function audioPreviewPlan(filters: readonly AudioEffectInput[] | undefined, env: AudioPreviewEnv = { worklet: true }): AudioPreviewPlan {
   if (!filters?.length) return EMPTY_PLAN;
   const nodes: AudioNodeSpec[] = [];
   const renderOnly: string[] = [];
+  const approx: string[] = [];
   for (const f of filters) {
     if (!isAudioEffectEnabled(f)) continue;
     const d = DEF_MAP.get(f.type);
     if (!d) continue;
-    if (d.preview === "export-only") {
+    if (d.preview === "export-only" || (!env.worklet && needsWorklet(d, f))) {
       renderOnly.push(f.type);
       continue;
     }
     if (d.preview.partial) renderOnly.push(f.type);
+    else if (d.preview.approx) approx.push(f.type);
     nodes.push(...d.preview.webaudio(f));
   }
   if (!nodes.length && !renderOnly.length) return EMPTY_PLAN;
-  return { nodes, sig: nodes.length ? JSON.stringify(nodes) : "", renderOnly };
+  return {
+    nodes, sig: nodes.length ? JSON.stringify(nodes) : "", renderOnly, approx,
+    worklet: nodes.some((n) => WORKLET_NODE_KINDS.includes(n.kind)),
+  };
 }
 
 // ---- linked audio: which clip carries a clip's sound ------------------------------
@@ -910,7 +976,7 @@ export function validateAudioEffect(req: { type: string; params?: Record<string,
 export function describeAudioEffectsForAI(): string {
   return AUDIO_EFFECTS.map((d) => {
     const ctl = d.params.length ? `params {${d.params.map(describeParam).join(", ")}}` : "no controls";
-    const pv = d.preview === "export-only" ? " [render-only]" : "";
+    const pv = d.preview === "export-only" ? " [render-only]" : d.preview.approx ? " [live preview approximate]" : "";
     return `- ${d.type} (${d.category}): ${d.description} ${ctl}.${pv}`;
   }).join("\n");
 }

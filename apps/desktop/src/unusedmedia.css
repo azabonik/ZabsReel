@@ -1,0 +1,15 @@
+/* Library panel → Remove unused media (unusedmedia.tsx). */
+.unused-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+.unused-strip .check-row { display: flex; align-items: center; gap: 6px; }
+.unused-error { color: var(--bad); overflow-wrap: anywhere; }
+.unused-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }

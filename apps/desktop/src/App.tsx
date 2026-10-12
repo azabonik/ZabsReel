@@ -23,6 +23,7 @@ import type { BlendMode } from "@aive/core/compositing";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 import { StorageDialog } from "./storagedialog";
+import { UnusedMediaStrip } from "./unusedmedia";
 
 function fmt(seconds: number): string {
   return fmtTime(seconds);
@@ -106,6 +107,8 @@ export function App({ api }: { api: CoreApi }) {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showStorage, setShowStorage] = useState(false);
   const closeStorage = useCallback(() => setShowStorage(false), []);
+  const [showUnused, setShowUnused] = useState(false);
+  const closeUnused = useCallback(() => setShowUnused(false), []);
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("aive.recent") || "[]"); } catch { return []; }
   });
@@ -732,17 +735,29 @@ export function App({ api }: { api: CoreApi }) {
 
       <div className="workspace">
         {/* Library */}
-        <aside className="panel library">
+        <aside className="panel library" onContextMenu={(e) => {
+          // Right-click in the library (not in a text field): Remove unused media.
+          if (!connected || !project?.assets.length || (e.target as HTMLElement).closest("input, select, textarea")) return;
+          e.preventDefault();
+          setShowUnused(true);
+        }}>
           <div className="panel-head">
             <span className="panel-title">Library</span>
             {project?.assets.length ? (
               <span className="count-badge">{project.assets.length}</span>
             ) : null}
             <span className="spacer" />
+            {project?.assets.length ? (
+              <button className="icon-btn" onClick={() => setShowUnused(true)} disabled={!connected}
+                aria-label="Remove unused media" title="Remove unused media… (bakes and files nothing in the project uses)">
+                <Trash size={14} />
+              </button>
+            ) : null}
             <button className="btn btn-primary btn-sm" onClick={importMedia} disabled={!connected}>
               <Import size={14} /> Import
             </button>
           </div>
+          {showUnused && <UnusedMediaStrip api={api} onClose={closeUnused} />}
           {project?.assets.length ? (
             <div className="lib-search">
               <div className="search-mode" role="group" aria-label="Search type">

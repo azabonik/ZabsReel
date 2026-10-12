@@ -26,6 +26,10 @@ interface StorageReport {
   emptyTrash: { count: number; bytes: number };
   unavailableProjects: { path: string; pausesCleanUp: boolean }[];
   blockedBy: string | null;
+  /** Other running SynthCut cores on this data folder (their undo history counts too). */
+  otherCores: number;
+  /** Bakes the open project's library holds that no clip uses. */
+  libraryBakes: { count: number; bytes: number };
   settings: { gracePeriodMinutes: number; trashDays: number };
   warnings: string[];
 }
@@ -125,6 +129,20 @@ export function StorageDialog({ api, onClose }: { api: CoreApi; onClose: () => v
     }
   };
 
+  const removeLibraryBakes = async () => {
+    setNote(null);
+    setBusy("Removing unused bakes from the library…");
+    try {
+      const r = await api.rpc<{ removed: unknown[] }>("remove_unused_media", {});
+      setNote({ text: `Removed ${plural(r.removed.length, "unused item")} from the library (Undo brings them back). Clean up now moves the files to the trash once nothing uses them.`, warn: false });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const blocked = !!report?.blockedBy;
   const paused = report ? report.unavailableProjects.filter((u) => u.pausesCleanUp).length : 0;
   const older = report?.predatesTracking ?? { count: 0, bytes: 0 };
@@ -169,6 +187,21 @@ export function StorageDialog({ api, onClose }: { api: CoreApi; onClose: () => v
                   <span className="muted"> {plural(report.gracePeriod.count, "newer file")} ({fmtBytes(report.gracePeriod.bytes)}) wait {report.settings.gracePeriodMinutes} min first.</span>
                 )}
               </p>
+              {(report.libraryBakes?.count ?? 0) > 0 && (
+                <p className="storage-line">
+                  <strong>Bakes only the library holds: {report.libraryBakes.count} ({fmtBytes(report.libraryBakes.bytes)})</strong> — no clip in
+                  {" "}this project uses {report.libraryBakes.count === 1 ? "it" : "them"}, so {report.libraryBakes.count === 1 ? "its file stays" : "their files stay"}.
+                  <span className="muted"> {report.libraryBakes.count === 1 ? "It leaves" : "They leave"} the library by
+                  {" "}{report.libraryBakes.count === 1 ? "itself" : "themselves"} once undo can't bring the clip back.</span>
+                  {" "}<button className="btn btn-sm" onClick={removeLibraryBakes} disabled={!!busy}>Remove from library</button>
+                </p>
+              )}
+              {report.otherCores > 0 && (
+                <p className="storage-line muted">
+                  {report.otherCores === 1 ? "Another SynthCut core uses" : `${report.otherCores} other SynthCut cores use`} this data folder
+                  {" "}(an AI client's, for example); files {report.otherCores === 1 ? "its" : "their"} project and undo history use are kept too.
+                </p>
+              )}
               <p className="storage-line">
                 <strong>Trash: {fmtBytes(report.trashBytes)}</strong> (emptied automatically after {report.settings.trashDays} days).
                 <span className="muted"> Opening a project brings back any trashed file it uses.</span>

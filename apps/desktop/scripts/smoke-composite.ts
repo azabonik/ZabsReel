@@ -18,7 +18,10 @@
 // set, bleeps unaffected, the echo/EQ/compressor specs mirror the FFmpeg
 // filters), the linked-audio carrier the inspector edits (also after a split),
 // and that the live route starts on the Play gesture (AudioRouter with stubbed
-// Web Audio).
+// Web Audio); pitch/robot run in the voice AudioWorklet: the chain plays them
+// dry until it loads, then rebuilds with real worklet nodes (stopped on the
+// next rebuild), and a failed load makes them render-only again. The real
+// worklet DSP is measured in packages/core/scripts/smoke-voicefx.ts.
 //
 // Imports `@aive/core/effects` through the package exports (core's dist/), so
 // build core first (`npm run build`, or `npx tsc -b packages/core`).
@@ -45,8 +48,9 @@ import {
 import type { AudioEffect, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 import { audioCarrier, audioFxField } from "../src/audiofx";
 import { AudioRouter } from "../src/audiograph";
+import { setVoiceWorkletState, voiceWorkletState } from "../src/workletstatus";
 import {
-  AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewPlan,
+  AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewFidelity, audioPreviewPlan,
 } from "@aive/core/audio-effects";
 import { cachedPlan, planLayer, passCount, type PlannedStep } from "../src/gl/plan";
 import { drawCount } from "../src/gl/runtime";
@@ -692,9 +696,28 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
     comp[1]?.kind === "gain" && near(20 * Math.log10(comp[1].gain), -9, 1e-6), JSON.stringify(comp));
 
   // Registry: every type has a preview story; the render-only set is what the UI badges.
-  check("registry: render-only = noise_reduction, de_esser, gate, declick, normalize, pitch, chipmunk, deep, robot",
-    AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type)).map((d) => d.type).join() ===
+  check("registry: render-only = noise_reduction, de_esser, gate, declick, normalize",
+    AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type)).map((d) => d.type).join() === "noise_reduction,de_esser,gate,declick,normalize");
+  check("registry: pitch, chipmunk, deep and robot play live, marked approximate",
+    AUDIO_EFFECTS.filter((d) => audioPreviewFidelity(d.type) === "approx").map((d) => d.type).join() === "pitch,chipmunk,deep,robot");
+  check("registry: without the AudioWorklet they are render-only again",
+    AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type, { worklet: false })).map((d) => d.type).join() ===
       "noise_reduction,de_esser,gate,declick,normalize,pitch,chipmunk,deep,robot");
+  const robotPlan = audioPreviewPlan([{ type: "robot", params: { tone: 0 } }, { type: "chipmunk" }]);
+  check("plan: robot = the export's afftfilt window, chipmunk = its rubberband ratio",
+    JSON.stringify(robotPlan.nodes) === JSON.stringify([{ kind: "robot", win: 2048 }, { kind: "pitch", ratio: Math.pow(2, 8 / 12) }]) &&
+      audioEffectFilterSteps([{ type: "robot", params: { tone: 0 } }])[0]!.includes("win_size=2048") && robotPlan.worklet,
+    JSON.stringify(robotPlan.nodes));
+  // The compositor's plan follows the worklet's availability (memoised per state).
+  const voiceStack: AudioEffect[] = [afx("v", "deep")];
+  const prevState = voiceWorkletState();
+  setVoiceWorkletState("ready");
+  const live = audioFxField(voiceStack).fx;
+  setVoiceWorkletState("failed");
+  const dead = audioFxField(voiceStack).fx;
+  setVoiceWorkletState(prevState);
+  check("plan: deep voice plays live while the worklet is available, render-only once it failed",
+    live?.nodes[0]?.kind === "pitch" && live.renderOnly.length === 0 && !!dead && dead.nodes.length === 0 && dead.renderOnly.join() === "deep");
   check("registry: enhance_voice previews partly (EQ/compressor) and still badges", !audioExactOnly("enhance_voice") && audioNeedsRender("enhance_voice"));
 
   // Linked detached audio: the inspector edits the clip that carries the sound.
@@ -791,6 +814,7 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   const viaClick = new AudioRouter();
   for (const f of listeners.pointerdown ?? []) f();
   check("route: any click/key unlocks too", created >= 1 && viaClick.route(el(), tel));
+
   delete g.window;
   delete g.AudioContext;
 }
@@ -989,5 +1013,110 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: a clip without a look has no draw.look (drawn directly, no GL)", activeLayersAt(lp, la, 1.5).clips.find((c) => c.clipId === "L2")?.draw?.look === undefined);
 }
 
-console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);
-process.exit(failures === 0 ? 0 : 1);
+
+// --- the voice AudioWorklet route (async: runs after the synchronous checks) ---
+async function voiceWorkletRouterChecks(): Promise<void> {
+  console.log("\nvoice worklet route (AudioRouter, stubbed Web Audio + AudioWorklet)");
+  const node = (): any => {
+    const store: Record<string, unknown> = {};
+    return new Proxy(store, {
+      get(t, k: string) {
+        if (k === "connect") return (n: unknown) => n;
+        if (k === "disconnect" || k === "start" || k === "stop") return () => {};
+        if (!(k in t)) t[k] = { value: 0, setTargetAtTime() {} };
+        return t[k];
+      },
+      set(t, k: string, v) { t[k] = v; return true; },
+    });
+  };
+  class FakeAudioContext {
+    state = "running";
+    currentTime = 0;
+    destination = node();
+    resume() { this.state = "running"; return Promise.resolve(); }
+    close() { this.state = "closed"; return Promise.resolve(); }
+  }
+  const ctxProto = FakeAudioContext.prototype as unknown as Record<string, () => unknown>;
+  for (const m of ["createMediaElementSource", "createGain", "createBiquadFilter", "createDynamicsCompressor", "createWaveShaper", "createDelay", "createOscillator"]) ctxProto[m] = node;
+  const g = globalThis as unknown as Record<string, unknown>;
+  const el = () => ({ muted: true, volume: 0.5 }) as unknown as HTMLMediaElement;
+  const afx = (id: string, type: string): AudioEffect => ({ id, type });
+
+  // The voice worklet: dry until addModule resolves, then rebuilt with a real
+  // AudioWorkletNode (48 kHz context); a rebuild stops the old processor.
+  let release!: (ok: boolean) => void;
+  const loaded = new Promise<boolean>((r) => { release = r; });
+  let ctxOpts: AudioContextOptions | undefined;
+  const workletNodes: { opts: { processorOptions: unknown }; stopped: boolean }[] = [];
+  class WorkletCtx extends FakeAudioContext {
+    audioWorklet = { addModule: (url: string) => loaded.then((ok) => { if (!ok) throw new Error(`refused ${url.slice(0, 5)}`); }) };
+    constructor(o?: AudioContextOptions) { super(); ctxOpts = o; }
+  }
+  class FakeWorkletNode {
+    port = { postMessage: (m: unknown) => { if (m === "stop") rec.stopped = true; } };
+    rec: { opts: { processorOptions: unknown }; stopped: boolean };
+    constructor(_c: unknown, _name: string, opts: { processorOptions: unknown }) {
+      this.rec = { opts, stopped: false };
+      rec = this.rec;
+      workletNodes.push(this.rec);
+    }
+    connect(n: unknown) { return n; }
+    disconnect() {}
+  }
+  let rec: { opts: { processorOptions: unknown }; stopped: boolean } = { opts: { processorOptions: null }, stopped: false };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  g.AudioContext = WorkletCtx;
+  g.AudioWorkletNode = FakeWorkletNode;
+  const urls = { created: 0, revoked: 0 };
+  const realUrl = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+  URL.createObjectURL = () => { urls.created++; return "blob:fake"; };
+  URL.revokeObjectURL = () => { urls.revoked++; };
+  const wr = new AudioRouter();
+  wr.unlock();
+  check("worklet: the preview context runs at the export's 48 kHz effect rate", ctxOpts?.sampleRate === 48000);
+  check("worklet: loading starts with the context (Blob URL)", voiceWorkletState() === "loading" && urls.created === 1);
+  const pitchPlan = audioPreviewPlan([{ type: "pitch", params: { semitones: 12 } }]);
+  const we = el();
+  check("worklet: a pitch clip is routed before the module is ready (plays dry)", wr.route(we, pitchPlan) && workletNodes.length === 0);
+  release(true);
+  await loaded;
+  await new Promise((r) => setTimeout(r, 0));
+  check("worklet: ready → the waiting chain is rebuilt with a worklet node (ratio 2)",
+    voiceWorkletState() === "ready" && workletNodes.length === 1 && JSON.stringify(workletNodes[0]!.opts.processorOptions) === JSON.stringify({ kind: "pitch", ratio: 2 }) &&
+      urls.revoked === 1, JSON.stringify(workletNodes.map((w) => w.opts.processorOptions)));
+  wr.route(we, pitchPlan);
+  check("worklet: the same plan is not rebuilt per frame", workletNodes.length === 1);
+  wr.route(we, audioPreviewPlan([{ type: "robot" }]));
+  check("worklet: a new plan stops the old processor and builds the robot", workletNodes[0]!.stopped && workletNodes.length === 2 &&
+    JSON.stringify(workletNodes[1]!.opts.processorOptions) === JSON.stringify({ kind: "robot", win: 1024 }));
+  wr.dispose();
+
+  // A refused module (blob: and data: both): render-only, and the plan says so.
+  let refuse!: (ok: boolean) => void;
+  const refused = new Promise<boolean>((r) => { refuse = r; });
+  class RefusingCtx extends FakeAudioContext {
+    audioWorklet = { addModule: () => refused.then(() => { throw new Error("blocked"); }) };
+  }
+  g.AudioContext = RefusingCtx;
+  const fr = new AudioRouter();
+  fr.unlock();
+  refuse(false);
+  await refused;
+  for (let i = 0; i < 5 && voiceWorkletState() !== "failed"; i++) await new Promise((r) => setTimeout(r, 0));
+  check("worklet: a module that can't load → pitch and robot are render-only (badge)",
+    voiceWorkletState() === "failed" && audioFxField([afx("p2", "pitch")]).fx?.renderOnly.join() === "pitch");
+  setVoiceWorkletState("unknown");
+  fr.dispose();
+  URL.createObjectURL = realUrl.create;
+  URL.revokeObjectURL = realUrl.revoke;
+  delete g.AudioWorkletNode;
+  delete g.window;
+  delete g.AudioContext;
+}
+
+void voiceWorkletRouterChecks()
+  .catch((e) => { failures++; console.error("  FAIL voice worklet checks threw:", e); })
+  .then(() => {
+    console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);
+    process.exit(failures === 0 ? 0 : 1);
+  });

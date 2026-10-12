@@ -78,7 +78,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route, the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -106,7 +106,15 @@ npx tsx packages/core/scripts/smoke-jobs.ts
 # unreadable autosave pauses too; save() never waits for a hung read; a trashed
 # file a project names again is moved back, never deleted; emptyTrash keeps the
 # pre-tracking files it moves; remember_projects; percent-encoded file: URLs and
-# relative paths count as references
+# relative paths count as references; the automatic run is awaited, not slept on
+# (autoRunDone / runScheduledNow); a trashed file keeps its mtime and gets it
+# back on restore (trash times in .trash/.index.json, an unrecorded entry counts
+# as trashed when first seen); an unreadable known project is logged once per
+# file state, also across restarts; two cores on one data dir (a second engine,
+# a killed child process, a stale or unreadable run file, a dead pid, dispose)
+# keep each other's undo-history files; library bakes no state uses leave the
+# library (imported media never), remove_unused_media (dry run, generated only,
+# includeImported, undo) and storage_report.libraryBakes
 npx tsx packages/core/scripts/smoke-storage.ts
 
 # Segment render cache: incremental previews (tail edit re-renders only the tail),
@@ -176,6 +184,17 @@ npx tsx packages/core/scripts/smoke-bleep.ts
 # loudness pass, undo, segment-cache key (self-contained).
 # smoke-composite.ts checks the matching Web Audio preview plan.
 npx tsx packages/core/scripts/smoke-voice.ts
+# Live pitch / robot preview (the voice AudioWorklet): the worklet DSP in Node —
+# pitch ±12/+4 st on a 440 Hz tone (dominant 880/220/554 Hz, level, length),
+# robot == FFmpeg 4.x afftfilt sample for sample after the latency (FFmpeg 5+
+# changed afftfilt: reported, not compared), pitch vs rubberband spectra on a
+# voice-like signal — then the REAL audiograph.ts chain in your headless
+# Chromium (OfflineAudioContext at 48 kHz) from a file:// page and an http://
+# page: +12 st → ≈ 880 Hz with the duration unchanged, robot buzz at 187.5 Hz,
+# a strict CSP falls back to dry without errors; and the built renderer
+# carries the worklet source. Needs FFmpeg, core + renderer built, and
+# playwright-core + a Chromium (as parity-gl; SYNTHCUT_SKIP_BROWSER=1 skips).
+npx tsx packages/core/scripts/smoke-voicefx.ts
 
 # Time effects: freeze_frame (ripples the timeline + linked audio), chunked frame-exact
 # reverse_clip (and its un-reverse), smooth_slow_motion (blend + optical flow, no
@@ -332,6 +351,8 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Transition | Add a crossfade between the two clips | Overlap shown |
 | Text | Add a title / lower-third | Overlay listed on the clip |
 | Library search | Switch the search between **Words** and **Visuals**; search the library | Matching clips/moments returned |
+| Voice effects | On a clip with speech set **Voice effect** to Chipmunk, Deep voice, Custom pitch or Robot, then play | The live preview plays it (marked **Approx.**; a little delay on that clip only); **Render exact** plays the export. Opened over plain `http://` from another machine (no AudioWorklet) they show **Render exact** and play dry |
+| Remove unused media | Reverse a clip, then delete it; click the library's trash button (or right-click the library) | The strip lists the unused bake; **Remove … from library** drops it (Undo brings it back); ticking the box also removes unused imported files. **Project → Storage…** shows bakes only the library holds |
 | Captions | Run **Generate Captions** on a clip with speech | Cues appear after transcription |
 | Motion graphic | Use **+ Title card** | A graphic overlay is added after its render |
 | Aspect | Switch to **9:16** preset | Canvas changes |

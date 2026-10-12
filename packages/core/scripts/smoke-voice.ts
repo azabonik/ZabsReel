@@ -359,7 +359,12 @@ async function main() {
   check(audioEffectFilterSteps([{ type: "echo", enabled: false }]).length === 0, "bypassed effects build no filter");
   const pv = audioPreviewPlan([{ type: "highpass" }, { type: "noise_reduction" }, { type: "echo", enabled: false }, { type: "enhance_voice" }]);
   check(pv.nodes.length > 0 && pv.renderOnly.join() === "noise_reduction,enhance_voice", `preview plan: live nodes + render-only list (${pv.renderOnly.join()})`);
-  check(audioPreviewPlan([{ type: "pitch" }]).nodes.length === 0, "pitch has no live chain (render-only)");
+  const pp = audioPreviewPlan([{ type: "pitch", params: { semitones: 12 } }]);
+  const pn = pp.nodes[0];
+  check(pp.nodes.length === 1 && pn?.kind === "pitch" && Math.abs(pn.ratio - 2) < 1e-12 && pp.worklet && pp.approx.join() === "pitch" && pp.renderOnly.length === 0,
+    "pitch previews live through the voice worklet (ratio 2 at +12 st, marked approximate)");
+  const noW = audioPreviewPlan([{ type: "pitch" }, { type: "robot" }], { worklet: false });
+  check(noW.nodes.length === 0 && noW.renderOnly.join() === "pitch,robot", "without the AudioWorklet pitch and robot are render-only");
 
   // ---- media --------------------------------------------------------------------
   console.log("synthesizing test media");

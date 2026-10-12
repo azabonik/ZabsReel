@@ -8,20 +8,25 @@ import {
   AUDIO_EFFECTS, VOICE_CHANGER_TYPES, audioPreviewPlan, isAudioEffectEnabled, linkedSoundPartners, type AudioPreviewPlan,
 } from "@aive/core/audio-effects";
 import type { AudioEffect, Clip, Project } from "./types";
+import { voiceWorkletAvailable } from "./workletstatus";
 
-const plans = new WeakMap<readonly AudioEffect[], AudioPreviewPlan>();
+/** Plans per stack array, one map per worklet availability (it can change once, when loading fails). */
+const plans = { with: new WeakMap<readonly AudioEffect[], AudioPreviewPlan>(), without: new WeakMap<readonly AudioEffect[], AudioPreviewPlan>() };
 
 /**
  * `{ fx }` for a clip's audio effect stack (nothing when it has none), memoised
  * per stack array: a state update replaces the array, so an edit makes a new
  * plan (and a new `sig`) while every other frame reuses the same object.
+ * Without the voice AudioWorklet, pitch and robot are render-only.
  */
 export function audioFxField(filters: readonly AudioEffect[] | undefined): { fx?: AudioPreviewPlan } {
   if (!filters?.length) return {};
-  let plan = plans.get(filters);
+  const worklet = voiceWorkletAvailable();
+  const memo = worklet ? plans.with : plans.without;
+  let plan = memo.get(filters);
   if (!plan) {
-    plan = audioPreviewPlan(filters);
-    plans.set(filters, plan);
+    plan = audioPreviewPlan(filters, { worklet });
+    memo.set(filters, plan);
   }
   return plan.nodes.length || plan.renderOnly.length ? { fx: plan } : {};
 }
