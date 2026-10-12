@@ -3,12 +3,14 @@
 // per stacked effect with its registry params as sliders (plus a colour swatch
 // for effects that take a colour), a bypass toggle, up/down reorder and remove.
 // Keys keep their richer controls (keyfx.tsx: Auto, Pick). Rows whose effect
-// has no live preview carry a "Render exact" badge — only the FFmpeg render
-// shows them.
+// has no live preview here (no WebGL2 path, or WebGL2 unavailable and no CSS
+// proxy) carry a "Render exact" badge — only the FFmpeg render shows them; an
+// approximate live preview carries a softer "≈".
 
 import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
-import { EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, exactOnly, isEnabled, keyColorHex, type EffectDef } from "@aive/core/effects";
+import { EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, isEnabled, keyColorHex, previewFidelity, type EffectDef } from "@aive/core/effects";
+import { glReady } from "./gl/runtime";
 import type { VisualEffect } from "./types";
 import { KeyEffectControls, type KeyDetection, type KeyPatch, type RangeProps } from "./keyfx";
 import { isKeyEffect } from "./keying";
@@ -89,6 +91,11 @@ function ColorSwatch({ value, label, disabled, onCommit }: {
   );
 }
 
+/** How the live preview shows an effect on this machine (WebGL2 or the CSS fallback). */
+function fidelityOf(type: string) {
+  return previewFidelity(type, glReady());
+}
+
 export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemove, onReorder, onApplyKey, onDetectKey }: {
   clipId: string;
   filters: VisualEffect[];
@@ -124,7 +131,7 @@ export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemov
         </select>
       </div>
       {filters.length === 0 ? (
-        <span className="field-hint">Stack exposure, blur, glow, grain, vignette, keys and more — baked in order after color. Keys preview live; put the keyed clip on the track above.</span>
+        <span className="field-hint">Stack exposure, blur, glow, grain, vignette, keys and more — applied in order after color, live in the preview. Put a keyed clip on the track above.</span>
       ) : (
         <div className="eff-list">
           {filters.map((f, i) => {
@@ -135,9 +142,14 @@ export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemov
               <div className={`eff-row ${on ? "" : "eff-off"}`} key={f.id}>
                 <div className="eff-head">
                   <span className="eff-name" title={def?.description}>{label}</span>
-                  {def && exactOnly(f.type) && (
-                    <span className="eff-badge" title="No live preview for this effect — use Render exact above the preview to see it">
+                  {def && fidelityOf(f.type) === "none" && (
+                    <span className="eff-badge" title="No live preview for this effect here — use Render exact above the preview to see it">
                       Render exact
+                    </span>
+                  )}
+                  {def && fidelityOf(f.type) === "approx" && (
+                    <span className="eff-badge eff-badge-soft" title={`Live preview is approximate — ${effectGL(f.type)?.note ?? ""} Render exact shows the export.`}>
+                      ≈
                     </span>
                   )}
                   <span className="eff-actions">

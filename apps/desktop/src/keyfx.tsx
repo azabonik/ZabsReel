@@ -4,7 +4,7 @@
 // sliders. What a key has — colour or not, whether "auto" works, which param
 // "auto" sets, the sliders' labels/ranges/defaults — comes from the effect
 // registry (`@aive/core/effects`). Every change re-applies the effect IN PLACE
-// (apply_effect with its effectId), so the live preview (glkey.ts) and the
+// (apply_effect with its effectId), so the live preview (gl/ pipeline) and the
 // export follow along. The effect's name, bypass, reorder and remove controls
 // are the stack row's (effectstack.tsx).
 

@@ -1,17 +1,16 @@
-// The live-preview KEY plan: a PURE function from a clip's effects to what the
-// WebGL keying pass (glkey.ts) needs — which keys to run, with the effect
-// registry's defaults and clamps (`@aive/core/effects`, shared with the export),
-// and how the CSS colour proxy splits around them. Bypassed effects are left
-// out. No DOM, so composite.ts stays unit-testable in plain Node.
+// The KEY plan: a PURE function from a clip's effects to its keys — which
+// keys, with the effect registry's defaults and clamps (`@aive/core/effects`,
+// shared with the export) — and how the CSS colour proxy splits around them.
+// Bypassed effects are left out. No DOM, so composite.ts stays unit-testable
+// in plain Node. The live preview itself runs keys in the WebGL2 pipeline
+// (gl/plan.ts, at their exact stack position); this split describes the old
+// CSS-proxy ordering and the key helpers keyfx.tsx uses.
 //
 // Export order is colour → effects (in list order) → transform, so the CSS
 // proxy for colour plus every effect BEFORE the first key is drawn first
 // (`pre`); the keys run on that; effects after the first key are drawn on the
-// keyed result (`post`). The vignette canvas pass splits the same way
-// (`preVignette` / `postVignette`): a vignette before the key darkens the frame
-// the key sees, so its dark edge stays opaque, as in the export. Effects
-// sitting between two keys are approximated as "after" — the keys themselves
-// always run in order.
+// keyed result (`post`). The vignette splits the same way (`preVignette` /
+// `postVignette`).
 
 import type { ClipEffects, VisualEffect } from "./types";
 import { colorFilter, vignetteAngles } from "./playback";
@@ -21,7 +20,7 @@ import {
 
 export { hexToRgb, keyColorHex, spillScreen };
 
-/** The key kinds the shader implements (glkey.ts); which effects ARE keys comes from the registry. */
+/** The key kinds (registry GLSL_KEY_* shaders); which effects ARE keys comes from the registry. */
 export type KeyKind = "colorkey" | "chromakey" | "lumakey";
 
 /** The registry's key effects (preview.key), in registry order. */

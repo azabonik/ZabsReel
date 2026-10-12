@@ -39,7 +39,8 @@ import { clipFootprintFrames, clipTimeMap } from "@aive/core/speed";
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/maskdraw";
 import {
-  EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, exactOnly, previewScaleFor, vignetteFactor,
+  EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, exactOnly, gblurParams, posterizeTable, previewFidelity,
+  previewScaleFor, vignetteAngle, vignetteFactor,
 } from "@aive/core/effects";
 import type { AudioEffect, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 import { audioCarrier, audioFxField } from "../src/audiofx";
@@ -47,6 +48,11 @@ import { AudioRouter } from "../src/audiograph";
 import {
   AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewPlan,
 } from "@aive/core/audio-effects";
+import { cachedPlan, planLayer, passCount, type PlannedStep } from "../src/gl/plan";
+import { drawCount } from "../src/gl/runtime";
+import { PlaybackGovernor } from "../src/gl/governor";
+import { balanceParams, curveTable, curvesTables, eqTables, hueParams, parseCube, parseCurvePoints, safeCurve } from "../src/gl/color";
+import { buildRenderCommand, EXPORT_PROFILE } from "../../../packages/core/src/ffmpeg/graph";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -447,7 +453,7 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
     EFFECTS.every((e) => e.preview === "export-only" || !e.preview.css || !!e.preview.note));
   check("css: grayscale + sepia in stack order",
     colorFilter(undefined, undefined, [fx("grayscale"), fx("sepia")]) === "grayscale(1) sepia(0.85)");
-  check("css: export-only effects add nothing (sharpen/pixelate/edges/colorhold/grain/glow/rgbsplit/lens/trails)",
+  check("css: effects without a CSS proxy add nothing (sharpen/pixelate/edges/colorhold/grain/glow/rgbsplit/lens/trails)",
     colorFilter(undefined, undefined, ["sharpen", "pixelate", "edges", "colorhold", "grain", "glow", "rgbsplit", "lens", "trails"].map((t) => fx(t))) === "none");
   check("css: vignette is no longer a contrast/brightness hack", colorFilter(undefined, undefined, [fx("vignette")]) === "none");
   check("css: bypassed effects are skipped",
@@ -462,12 +468,14 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("vignette: falloff = FFmpeg's cos⁴ (centre 1, corner at PI/5 ≈ 0.428)",
     vignetteFactor(0, Math.PI / 5) === 1 && near(vignetteFactor(1, Math.PI / 5), Math.cos(Math.PI / 5) ** 4, 1e-12) && vignetteFactor(1.01, 1) === 0);
 
-  // Every registry entry has a preview story: css, key, a canvas pass, or export-only.
-  const noStory = EFFECTS.filter((e) => e.preview !== "export-only" && !e.preview.css && !e.preview.key && !e.preview.pass).map((e) => e.type);
-  check("registry: every effect has css / key / pass, or is export-only", noStory.length === 0, noStory.join(","));
-  check("registry: Render-exact badge set = the old six + colorhold and the style effects",
-    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(",") === "sharpen,detail,denoise,edges,posterize,pixelate,colorhold,grain,glow,rgbsplit,lens,trails",
-    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(","));
+  // Every registry entry has a preview story: css, key, a canvas pass, gl, or export-only.
+  const noStory = EFFECTS.filter((e) => e.preview !== "export-only" && !e.preview.css && !e.preview.key && !e.preview.pass && !e.preview.gl).map((e) => e.type);
+  check("registry: every effect has css / key / pass / gl, or is export-only", noStory.length === 0, noStory.join(","));
+  check("registry: no effect is Render-exact-only any more (all have a WebGL2 path)", EFFECTS.every((e) => !exactOnly(e.type)));
+  check("registry: without WebGL2 the Render-exact badge set = the GL-only effects + keys",
+    EFFECTS.filter((e) => previewFidelity(e.type, false) === "none").map((e) => e.type).join(",") ===
+      "sharpen,detail,denoise,edges,posterize,pixelate,chromakey,colorkey,lumakey,colorhold,grain,glow,rgbsplit,lens,trails",
+    EFFECTS.filter((e) => previewFidelity(e.type, false) === "none").map((e) => e.type).join(","));
   check("registry: colorhold takes a colour but no 'auto' (generic swatch, not the key controls)",
     effectByType("colorhold")?.color?.default === "0xFF0000" && effectByType("colorhold")?.color?.auto === false && !isKeyEffect("colorhold"));
   check("registry: the Look category exists and lists exposure, vibrance, invert, colorhold",
@@ -785,6 +793,200 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("route: any click/key unlocks too", created >= 1 && viaClick.route(el(), tel));
   delete g.window;
   delete g.AudioContext;
+}
+
+// ---- the WebGL2 preview pipeline: pass plans, uniforms, fidelity, colour maths ----
+{
+  console.log("\nWebGL2 preview pipeline (pure parts)");
+  const f = (type: string, extra: Partial<VisualEffect> = {}): VisualEffect => ({ id: `${type}-${Math.random()}`, type, ...extra });
+  const g1 = { k: 1, w: 1920, h: 1080, cw: 1920, ch: 1080 };
+  const kinds = (steps: PlannedStep[]) => steps.map((s) => s.kind).join(",");
+
+  // Order = the export's: eq → colorbalance → hue → curves → lut3d → effects in stack order.
+  const look = {
+    color: { contrast: 1.2 },
+    grade: { temperature: 0.2, hue: 30, curve: "0/0 0.5/0.6 1/1" },
+    lut: "/luts/teal.cube",
+    filters: [f("blur", { amount: 5 }), f("colorkey", { enabled: false }), f("vignette"), f("chromakey"), f("sharpen"), f("grain", { amount: 0 })],
+  };
+  const steps = planLayer(look, g1);
+  check("plan: colour grade first (eq, colorbalance, hue, curves, lut3d), then the effects in stack order",
+    kinds(steps) === "eq,colorbalance,hue,curves,lut3d,blur,vignette,chromakey,sharpen", kinds(steps));
+  check("plan: a bypassed effect and an inactive one (grain 0, like its empty builder) are left out", !kinds(steps).includes("colorkey") && !kinds(steps).includes("grain"));
+  check("plan: keys stay at their stack position (between effects), marked as keys",
+    steps.findIndex((s) => s.kind === "chromakey") === 7 && steps[7].key === true && steps[6].kind === "vignette");
+  check("plan: the eyedropper bypass drops only the keys", kinds(planLayer(look, g1, { skipKeys: true })) === "eq,colorbalance,hue,curves,lut3d,blur,vignette,sharpen");
+  check("plan: no mask / blend / transform passes (those stay on the Canvas2D side, after the look)",
+    !steps.some((s) => /mask|blend|transform|opacity/.test(s.kind)));
+  check("plan: vignette is a GL pass at its stack position (replaces the canvas pass)", steps[6].passes.length === 1 && steps[6].passes[0].out === "rgb");
+  check("plan: blur = 4 passes (rows causal/anticausal, columns), float between, 8-bit out",
+    steps[5].passes.length === 4 && steps[5].passes.slice(0, 3).every((p) => p.float) && !steps[5].passes[3].float);
+  check("plan: an empty look plans nothing (the layer skips the GL path)", planLayer({}, g1).length === 0 && planLayer(undefined, g1).length === 0);
+  check("plan: an unknown effect type is skipped", planLayer({ filters: [f("nope")] }, g1).length === 0);
+  check("plan: passCount sums every pass (sharpen = 2: separable rows, then columns)", passCount(steps) === 1 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 2, String(passCount(steps)));
+  // Fusion (runtime.ts): per-pixel ops ride in the pass before them, so the
+  // whole grade + the placement is one draw, the vignette rides on the blur's
+  // last pass, and only neighbourhood passes cost a draw of their own.
+  check("fusion: placement + eq/colorbalance/hue/curves/lut3d = 1 draw; blur 4; vignette fused; chromakey 1; sharpen 2 → 8 draws",
+    drawCount(steps) === 8, String(drawCount(steps)));
+  check("fusion: a pure per-pixel look (exposure, vibrance, vignette, colorhold) is a single draw",
+    drawCount(planLayer({ filters: [f("exposure"), f("vibrance"), f("vignette"), f("colorhold")] }, g1)) === 1);
+  check("fusion: the same op twice can't share a draw (its uniforms would collide)",
+    drawCount(planLayer({ filters: [f("invert"), f("invert")] }, g1)) === 2);
+  check("fusion: no look → the placement alone", drawCount([]) === 1);
+  const c1 = cachedPlan(look, g1);
+  check("plan cache: same look object + geometry → the same steps (no per-frame rebuild)", cachedPlan(look, g1) === c1);
+  check("plan cache: a new processing scale re-plans", cachedPlan(look, { ...g1, k: 0.5, w: 960, h: 540 }) !== c1);
+
+  // Uniform builders: FFmpeg's parameter maths, pixel sizes scaled to the preview.
+  const bp = gblurParams(8)!;
+  const lam = Math.fround(64) / 2;
+  const dnu = (1 + 2 * lam - Math.sqrt(1 + 4 * lam)) / (2 * lam);
+  check("blur: gblur's nu / boundary / postscale for sigma 8", bp.nu === Math.fround(dnu) && bp.bscale === Math.fround(1 / (1 - dnu)) &&
+    bp.postscale === Math.fround(Math.fround(dnu / lam) ** 2) && bp.taps > 10 && bp.taps < 200, JSON.stringify(bp));
+  check("blur: sigma 0 → no recursion (gblur passes through) and the step is inactive",
+    gblurParams(0) === null && planLayer({ filters: [f("blur", { amount: 0 })] }, g1).length === 0);
+  const blurAt = (k: number) => planLayer({ filters: [f("blur", { amount: 12 })] }, { ...g1, k }).at(0)!.passes[0].uniforms.u_nu;
+  check("blur: sigma scales with the processing scale (k 2/3 → sigma 8)", blurAt(2 / 3) === gblurParams(8)!.nu && blurAt(1) === gblurParams(12)!.nu);
+  const rs = (k: number) => planLayer({ filters: [f("rgbsplit", { amount: 10, params: { angle: 90 } })] }, { ...g1, k })[0].passes[0].uniforms.u_shift as number[];
+  check("rgbsplit: the builder's integer offset, scaled to the preview", rs(1).join() === "0,10" && rs(0.5).join() === "0,5", `${rs(1)} / ${rs(0.5)}`);
+  const sh = planLayer({ filters: [f("sharpen", { amount: 1.5 })] }, g1)[0].passes[1].uniforms.u_amount;
+  check("sharpen: unsharp's Q16 amount (separable: row sums, then columns + sharpen)", sh === 98304, String(sh));
+  const pz = planLayer({ filters: [f("posterize", { amount: 4 })] }, g1)[0].passes[0].uniforms.u_lut256 as number[];
+  check("posterize: lutrgb's table = (int)(round(v/255·L)/L·255), L = levels − 1",
+    pz.length === 256 && pz[0] === 0 && pz[255] === 255 && pz[128] === 170 && JSON.stringify(pz) === JSON.stringify(posterizeTable({ type: "posterize", amount: 4 })));
+  const px = planLayer({ filters: [f("pixelate", { amount: 16 })] }, g1)[0].passes[0].uniforms;
+  check("pixelate: swscale point-sampling increments for 1920 → 120 blocks → 1920",
+    (px.u_inc1 as number[])[0] === Math.floor((1920 * 65536 + 60) / 120) && (px.u_inc2 as number[])[0] === Math.floor((120 * 65536 + 960) / 1920) &&
+    px.u_cinc1 === Math.floor((960 * 65536 + 60) / 120), JSON.stringify(px));
+  const ck = planLayer({ filters: [f("chromakey", { color: "0x00FF00", params: { despill: 0.5 } })] }, g1)[0].passes[0].uniforms;
+  check("chromakey: the key's U/V from FFmpeg's own macro (green → 44, 21), despill on the green screen",
+    (ck.u_key as number[]).join() === "44,21" && (ck.u_spill as number[])[1] === 1 && (ck.u_spill as number[])[0] === Math.fround(0.5), JSON.stringify(ck));
+  const lk = planLayer({ filters: [f("lumakey", { params: { threshold: 0.5, tolerance: 0.1, softness: 0.05 } })] }, g1)[0].passes[0].uniforms.u_lkey_band as number[];
+  check("lumakey: band = clip8((t∓tol)·255), softness·255 truncated", lk.join() === "102,153,12", lk.join());
+  const vg = planLayer({ filters: [f("vignette", { amount: 2 })] }, g1)[0].passes[0].uniforms.u_vig_angle as number;
+  check("vignette: the builder's lens angle", Math.abs(vg - vignetteAngle({ type: "vignette", amount: 2 })) < 1e-6);
+  check("vignette: amount 0 → no pass (the builder emits nothing)", planLayer({ filters: [f("vignette", { amount: 0 })] }, g1).length === 0);
+  const tr = planLayer({ filters: [f("trails")] }, g1)[0];
+  check("trails: a history step (float lagfun pass, then unpremultiply)", tr.history === true && tr.passes[0].history === true && tr.passes[0].float === true && tr.passes.length === 2);
+
+  // Fidelity flags (scripts/parity-gl.mts measures them against FFmpeg).
+  const fid = (t: string) => effectGL(t)?.fidelity;
+  check("fidelity: every effect declares one, with a note", EFFECTS.every((e) => !!effectGL(e.type)?.fidelity && !!effectGL(e.type)?.note));
+  check("fidelity: denoise approximate; grain, trails and chromakey close; the rest exact",
+    fid("denoise") === "approx" && ["grain", "trails", "chromakey"].every((t) => fid(t) === "close") &&
+      EFFECTS.filter((e) => !["denoise", "grain", "trails", "chromakey"].includes(e.type)).every((e) => fid(e.type) === "exact"));
+  check("badge: the inspector's '≈' set (approx with WebGL2) = denoise only", EFFECTS.filter((e) => previewFidelity(e.type) === "approx").map((e) => e.type).join() === "denoise");
+
+  // Colour maths vs the strings graph.ts builds for the export.
+  const grade = { temperature: 0.4, tint: -0.3, lift: { r: 0.1, b: -0.2 }, gamma: { g: 0.15 }, gain: { r: -0.05, b: 0.9 }, hue: -25.5, curve: "0/0 0.3/0.2 0.7/0.85 1/1", curveG: "0/0.05 1/0.95" };
+  const clipFor = (effects: Record<string, unknown>) => ({
+    path: "/x/p.png", trackIndex: 0, showVideo: true, startSec: 0, sourceIn: 0, sourceSpan: 1, isImage: true, outDuration: 1, hasAudio: false, muted: false, effects,
+  });
+  const fc = (effects: Record<string, unknown>) => {
+    const cmd = buildRenderCommand([clipFor(effects) as never], { width: 320, height: 180, fps: 30 }, "/tmp/x.mp4", EXPORT_PROFILE, undefined, undefined, { videoOnly: true });
+    return cmd.args[cmd.args.indexOf("-filter_complex") + 1];
+  };
+  const g = fc({ color: { contrast: 1.2, saturation: 0.8 }, grade });
+  const cbm = /colorbalance=rs=([-\d.]+):gs=([-\d.]+):bs=([-\d.]+):rm=([-\d.]+):gm=([-\d.]+):bm=([-\d.]+):rh=([-\d.]+):gh=([-\d.]+):bh=([-\d.]+)/.exec(g);
+  const cb = balanceParams(grade)!;
+  check("colorbalance: the preview's wheels = graph.ts's colorbalance (white balance folded, clamped)",
+    !!cbm && [...cb.s, ...cb.m, ...cb.h].every((v, i) => v === Math.fround(Number(cbm[i + 1]))), JSON.stringify({ cb, cbm: cbm?.slice(1) }));
+  const hm = /hue=h=([-\d.]+)/.exec(g);
+  const hp = hueParams(grade)!;
+  const hdeg = Math.fround(Number(hm?.[1])) * Math.PI / 180;
+  check("hue: the preview's rotation = graph.ts's hue=h (Q16 cos/sin of the float option)",
+    !!hm && hp[0] === Math.round(Math.cos(hdeg) * 65536) && hp[1] === Math.round(Math.sin(hdeg) * 65536), `${hm?.[1]} ${hp}`);
+  check("curves: graph.ts emits curves=all then the per-channel curves; the preview folds both",
+    g.includes(`curves=all='${safeCurve(grade.curve)}'`) && g.includes(`curves=g='${safeCurve(grade.curveG)}'`) && !!curvesTables(grade));
+  // The export pins RGBA after an effect stack (and around an adjustment
+  // layer's), so FFmpeg never runs gblur / cas / lenscorrection on the 4:2:0
+  // composite's chroma — the preview's model (parity-gl.mts measures it).
+  check("export: a clip's effect stack is followed by format=rgba (gblur on full-resolution colour)",
+    fc({ filters: [f("blur", { amount: 8 })] }).includes("gblur=sigma=8.000000,format=rgba,setpts="));
+  check("export: no pin without an effect stack", !fc({ color: { contrast: 1.2 } }).includes("gamma=1,format=rgba"));
+  const adjFc = (() => {
+    const base = clipFor({});
+    const adj = { ...base, path: "", adjustment: true, trackIndex: 1, effects: { color: { contrast: 1.1 }, filters: [f("detail")] } };
+    const cmd = buildRenderCommand([base, adj] as never, { width: 320, height: 180, fps: 30 }, "/tmp/x.mp4", EXPORT_PROFILE, undefined, undefined, { videoOnly: true });
+    return cmd.args[cmd.args.indexOf("-filter_complex") + 1];
+  })();
+  check("export: an adjustment layer's look starts from RGBA and its effects end in it (the stack below is yuv420p)",
+    // (color_grade's eq is alphaSafe, which already opens with format=rgba: no second pin.)
+    /\[adjs0\]format=rgba,split\[aeq0a\]\[aeq0b\];\[aeq0a\]eq=[^\[]+\[aeq0v\];.*alphamerge,format=rgba,cas=strength=0\.500000,format=rgba\[adjf0\]/.test(adjFc) &&
+      !adjFc.includes("format=rgba,format=rgba"), adjFc.slice(adjFc.indexOf("[adjs0]"), adjFc.indexOf("[adjf0]") + 7));
+  check("eq: graph.ts emits eq for any `color`, so does the plan (even neutral)", g.includes("eq=brightness=0:contrast=1.2:saturation=0.8:gamma=1") &&
+    planLayer({ color: {} }, g1).map((s) => s.kind).join() === "eq");
+  check("no grade step when the wheels/white balance are neutral and no hue (like colorGradeSteps)",
+    balanceParams({ lift: { r: 0.00001 } }) === null && hueParams({ hue: 0 }) === null && !fc({ grade: { lift: { r: 0.00001 }, hue: 0 } }).includes("colorbalance"));
+
+  const eq = eqTables({ contrast: 1.2, brightness: 0.1, saturation: 0.8 });
+  const C = Math.trunc(1.2 * 4096);
+  const B = Math.trunc((Math.trunc(110) * 511) / 200) - 128 - Math.trunc(C / 32);
+  check("eq: luma table = vf_eq.c process_c ((v·C) >> 12) + B, clipped", eq[100 * 4] === ((100 * C) >> 12) + B && eq[0] === Math.max(0, B) && eq[255 * 4] === 255);
+  const Cs = Math.trunc(0.8 * 4096);
+  check("eq: U/V tables use saturation as their contrast (brightness 0)", eq[200 * 4 + 1] === ((200 * Cs) >> 12) + (Math.trunc(100 * 511 / 200) - 128 - Math.trunc(Cs / 32)));
+  check("eq: parameters are float-rounded first, like vf_eq.c's av_clipf (brightness 0.35 → (int)134.99… = 134 → Y 0 → 86; −0.15 → Y 255 → 213)",
+    eqTables({ brightness: 0.35 })[0] === 86 && eqTables({ brightness: -0.15 })[255 * 4] === 213,
+    `${eqTables({ brightness: 0.35 })[0]} / ${eqTables({ brightness: -0.15 })[255 * 4]}`);
+  const ident = eqTables({});
+  check("eq: neutral eq = identity tables", Array.from({ length: 256 }, (_, i) => ident[i * 4] === i && ident[i * 4 + 1] === i).every(Boolean));
+  const gam = eqTables({ gamma: 2 });
+  check("eq: gamma uses the double-precision LUT (256·v^(1/gamma), truncated)", gam[64 * 4] === Math.trunc(256 * Math.pow(64 / 255, 0.5)));
+
+  const idc = curveTable(parseCurvePoints("0/0 1/1")!);
+  check("curves: identity points → identity, except where FFmpeg's double → int truncation drops a level (as the export does)",
+    idc.every((v, i) => v === i || v === i - 1) && idc[0] === 0 && idc[255] === 255 && idc.filter((v, i) => v !== i).length < 40);
+  const sc = curveTable(parseCurvePoints("0/0 0.25/0.18 0.75/0.85 1/1")!);
+  check("curves: an S-curve passes through its points and stays monotonic", sc[0] === 0 && sc[255] === 255 && Math.abs(sc[63] - 0.18 * 255) <= 2 && sc.every((v, i) => i === 0 || v >= sc[i - 1]));
+  check("curves: points FFmpeg rejects (out of range / not increasing) → no table", parseCurvePoints("0/0 1.5/1") === null && parseCurvePoints("0.5/0 0.5/1") === null);
+  check("curves: missing end points pad flat (no auto-inserted 0/0, 1/1)", curveTable(parseCurvePoints("0.2/0.3 0.8/0.6")!)[0] === Math.trunc(0.3 * 255) && curveTable(parseCurvePoints("0.2/0.3 0.8/0.6")!)[255] === Math.trunc(0.6 * 255));
+
+  const cube = parseCube(['TITLE "t"', "# c", "LUT_3D_SIZE 2", "DOMAIN_MIN 0 0 0", "DOMAIN_MAX 1 1 1",
+    "0 0 0", "1 0 0", "0 1 0", "1 1 0", "0 0 1", "1 0 1", "0 1 1", "1 1 1"].join("\n"));
+  check(".cube: size, red-fastest data, domain scale", !!cube && cube.size === 2 && cube.data[3] === 1 && cube.data[4] === 0 && cube.data[6 * 3 + 1] === 1 && cube.scale.join() === "1,1,1");
+  check(".cube: lines before LUT_3D_SIZE ignored, a 1D or short table rejected (lut3d fails it too)",
+    parseCube("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n") === null && parseCube("LUT_3D_SIZE 2\n0 0 0\n") === null && parseCube("LUT_3D_SIZE 2\n0 0\n") === null);
+  const halfDomain = parseCube(["LUT_3D_SIZE 2", "DOMAIN_MAX 2 2 2", ...Array(8).fill("0.5 0.5 0.5")].join("\n"));
+  check(".cube: DOMAIN_MAX 2 → lut3d's input scale 0.5", !!halfDomain && halfDomain.scale.join() === "0.5,0.5,0.5");
+
+  // Playback resolution of the looks (gl/governor.ts).
+  const gov = (base: number, max = 4) => new PlaybackGovernor(() => base, () => max);
+  const play = (gv: PlaybackGovernor, n: number, dt: number, gl = true) => { for (let i = 0; i < n; i++) gv.frame(dt, gl); return gv.div; };
+  const sw = gov(2);
+  sw.start("p1");
+  check("governor: software playback starts at half resolution and holds it at 30 fps", sw.div === 2 && play(sw, 60, 33) === 2);
+  check("governor: frames slower than the budget (8 fps) drop the looks to a quarter, no further", play(sw, 30, 125) === 4 && play(sw, 60, 125) === 4);
+  sw.start("p1");
+  check("governor: the next play of the same project keeps the quarter; a changed project starts at half again", sw.div === 4 && (sw.start("p2"), sw.div === 2));
+  const hw = gov(1, 1);
+  hw.start("p");
+  check("governor: a GPU (base 1, max 1, as preview.tsx sets it) stays at full resolution, even with slow frames",
+    play(hw, 60, 16) === 1 && play(hw, 30, 100) === 1);
+  const stepper = gov(1);
+  stepper.start("p");
+  check("governor: from full resolution, slow frames step to half, then a quarter", play(stepper, 15, 100) === 2 && play(stepper, 15, 100) === 4);
+  const nogl = gov(2);
+  nogl.start("p");
+  check("governor: slow frames without a WebGL look (decoding) change nothing; a warm-up stall after play is ignored",
+    play(nogl, 60, 200, false) === 2 && (nogl.frame(900, true), nogl.frame(900, true), nogl.frame(900, true), play(nogl, 20, 20) === 2));
+
+  // The draw / adjust plans carry the look (the effects object itself, so the GL plan caches on it).
+  const fxA = { color: { brightness: 0.1 }, filters: [f("glow")] };
+  const fxAdj = { filters: [f("vignette")] };
+  const lp: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [clip("L1", "vidA", 0, 30, { effects: fxA }), clip("L2", "vidB", 30, 30)]),
+      track("video", 1, [{ id: "ADJL", adjustment: true, startFrame: 0, sourceInFrame: 0, sourceOutFrame: 60, effects: fxAdj } as Clip]),
+    ],
+    music: undefined,
+  };
+  const la = new Map(lp.assets.map((a) => [a.id, a]));
+  const at0 = activeLayersAt(lp, la, 0.1).clips;
+  check("plan: draw.look is the clip's effects object", at0.find((c) => c.clipId === "L1")?.draw?.look === fxA);
+  check("plan: adjust.look is the adjustment's effects object", at0.find((c) => c.clipId === "ADJL")?.adjust?.look === fxAdj);
+  check("plan: a clip without a look has no draw.look (drawn directly, no GL)", activeLayersAt(lp, la, 1.5).clips.find((c) => c.clipId === "L2")?.draw?.look === undefined);
 }
 
 console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);

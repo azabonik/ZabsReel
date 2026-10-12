@@ -46,6 +46,7 @@ import { PROJECT_SCHEMA_VERSION } from "../src/types.js";
 import {
   EFFECTS, EFFECT_CATEGORIES, EFFECT_TYPE_IDS, defaultsFor, describeEffectsForAI,
   alphaSafe, effectFilterSteps, exposureBlack, validateEffect, exactOnly, isKeyType, vignetteAngle, vignetteFactor, type EffectInput,
+  effectGL, previewFidelity,
 } from "../src/effects/registry.js";
 
 let failures = 0;
@@ -119,11 +120,14 @@ async function main() {
   const desc = describeEffectsForAI();
   check(EFFECT_TYPE_IDS.every((t) => desc.includes(`- ${t}:`)), "describeEffectsForAI lists every type");
   check(["chromakey", "colorkey", "lumakey"].every(isKeyType) && !isKeyType("blur"), "key flag marks exactly the keys");
-  check(exactOnly("sharpen") && exactOnly("pixelate") && !exactOnly("blur") && !exactOnly("vignette") && !exactOnly("chromakey"),
-    "exactOnly: sharpen/pixelate export-only; blur (css), vignette (pass), keys (WebGL) preview live");
-  check(["exposure", "vibrance", "invert"].every((t) => !exactOnly(t)) &&
-    ["colorhold", "grain", "glow", "rgbsplit", "lens", "trails"].every(exactOnly),
-    "look effects with CSS proxies preview live; colorhold + the style effects are export-only (Render exact)");
+  check(EFFECT_TYPE_IDS.every((t) => !exactOnly(t)), "exactOnly: every effect previews live now (WebGL2; CSS / canvas fallback for some)");
+  check(EFFECT_TYPE_IDS.every((t) => !!effectGL(t) && effectGL(t)!.passes.length > 0 && !!effectGL(t)!.note),
+    "every effect has a WebGL2 preview (passes + a fidelity note)");
+  check(previewFidelity("denoise") === "approx" && previewFidelity("blur") === "exact" && previewFidelity("chromakey") === "close",
+    "previewFidelity follows the GL entry (denoise ≈, blur exact, chromakey close)");
+  check(previewFidelity("sharpen", false) === "none" && previewFidelity("chromakey", false) === "none" &&
+    previewFidelity("blur", false) === "close" && previewFidelity("invert", false) === "exact" && previewFidelity("vignette", false) === "close",
+    "without WebGL2: GL-only effects and keys have no preview; CSS / canvas proxies remain");
   check(["exposure", "vibrance", "invert"].every((t) => { const p = EFFECTS.find((e) => e.type === t)?.preview; return !!p && p !== "export-only" && !!p.note; }),
     "every CSS proxy documents how close it is (preview.note)");
   check(alphaSafe([], "x").length === 0 && alphaSafe(["negate"], "x")[0].includes("alphamerge"), "alphaSafe: empty in → empty out; wraps a chain with alphamerge");

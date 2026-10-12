@@ -20,6 +20,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".wav": "audio/wav",
   ".mp3": "audio/mpeg",
+  ".cube": "text/plain; charset=utf-8",
 };
 
 /**

@@ -556,6 +556,15 @@ export class EditorEngine extends EventEmitter {
         if (candidate && norm(candidate) === target) return true;
       }
     }
+    // A .cube LUT a clip of this project uses (apply_lut): the live preview
+    // fetches it to run the LUT on the GPU. Only that exact file, only .cube.
+    if (target.toLowerCase().endsWith(".cube")) {
+      for (const t of this.project.tracks) {
+        for (const c of t.clips) {
+          if (c.effects?.lut && norm(c.effects.lut) === target) return true;
+        }
+      }
+    }
     return false;
   }
 

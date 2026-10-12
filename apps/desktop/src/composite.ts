@@ -7,8 +7,10 @@
 // Everything here mirrors the FFmpeg compositor in packages/core ffmpeg/graph.ts
 // "within reason": higher video Track.index composites on top, clips sit at
 // absolute positions (gaps draw nothing, overlaps with a transition cross-fade),
-// fades ramp alpha, crop selects a source region, color is a CSS-filter proxy,
-// keys run as a WebGL pass (keying.ts plans it, glkey.ts draws it).
+// fades ramp alpha, crop selects a source region. The look (colour grade, LUT,
+// effects, keys) previews through the WebGL2 pipeline (gl/), which reads
+// `draw.look` / `adjust.look`; colorFilter / vignette / key are the CSS and
+// Canvas2D fallback when WebGL2 is unavailable.
 
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
 import { clipDurationFrames } from "./types";
@@ -20,6 +22,7 @@ import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
 import { previewScaleFor } from "@aive/core/effects";
 import { keyPlan, type KeyPlan } from "./keying";
+import type { LayerLook } from "./gl/plan";
 import { runBlendModes, sanitizeMask, type BlendMode, type ClipMask } from "@aive/core/compositing";
 import { audioFxField } from "./audiofx";
 import type { AudioPreviewPlan } from "@aive/core/audio-effects";
@@ -85,18 +88,26 @@ export interface ActiveClip {
     /** Final alpha = fade/transition gain × animated transform opacity. */
     opacity: number;
     crop?: CropRect;
-    /** CSS filter string (color proxy), or "none". */
+    /**
+     * The clip's look (its effects object: color / grade / lut / filters) for
+     * the WebGL2 pipeline (gl/plan.ts plans it, cached on this object).
+     */
+    look?: LayerLook;
+    /** CSS filter string (color proxy, the no-WebGL2 fallback), or "none". */
     colorFilter: string;
     /** Intrinsic source dimensions, for letterbox-contain fit. */
     assetWidth: number;
     assetHeight: number;
     /** Effective 2D transform at this frame (geometry only; opacity is in `opacity`). */
     transform: EffectiveTransform;
-    /** Live key pass (colorkey/chromakey/lumakey) for the WebGL preview — see glkey.ts. */
+    /**
+     * How the CSS fallback would split around the first key (keying.ts). Keys
+     * themselves only preview through the WebGL2 pipeline (in `look`).
+     */
     key?: KeyPlan;
     /**
-     * Enabled vignettes' lens angles (radians) for the canvas vignette pass;
-     * absent when none. These are ALL of them, for an unkeyed draw; a live key
+     * Enabled vignettes' lens angles (radians) for the fallback's canvas
+     * vignette pass (no WebGL2); absent when none. These are ALL of them, for an unkeyed draw; a live key
      * splits them around the first key (`key.preVignette` / `key.postVignette`).
      */
     vignette?: number[];
@@ -127,12 +138,12 @@ export interface ActiveClip {
    */
   bleep?: { parentClipId: string; bleepId: string; preroll?: boolean };
   /**
-   * Present for an ADJUSTMENT layer active at this instant: its CSS color-proxy
-   * filter, to be applied to the composite of every layer below (the renderer
-   * draws lower layers to an offscreen canvas, then draws that through
-   * ctx.filter). Mirrors the FFmpeg bake in graph.ts (split→filter→overlay).
+   * Present for an ADJUSTMENT layer active at this instant: its look, applied
+   * to the composite of every layer below (WebGL2: the composite runs through
+   * the look's passes; fallback: drawn through the CSS colour-proxy filter).
+   * Mirrors the FFmpeg bake in graph.ts (split→filter→overlay).
    */
-  adjust?: { colorFilter: string; vignette?: number[]; mask?: ClipMask };
+  adjust?: { colorFilter: string; vignette?: number[]; mask?: ClipMask; look?: LayerLook };
 }
 
 /** The full set of layers to render for one frame, drawables in bottom→top order. */
@@ -146,6 +157,11 @@ const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 function vignetteField(filters: Parameters<typeof vignetteAngles>[0]): { vignette?: number[] } {
   const angles = vignetteAngles(filters);
   return angles.length ? { vignette: angles } : {};
+}
+
+/** `{ look }` when the clip has a colour grade, LUT or effects, else nothing (the GL path has nothing to do). */
+function lookField(fx: Project["tracks"][number]["clips"][number]["effects"]): { look?: LayerLook } {
+  return fx && (fx.color || fx.grade || fx.lut || fx.filters?.length) ? { look: fx } : {};
 }
 
 /** `{ mask }` for a valid stored mask, else nothing. */
@@ -266,6 +282,7 @@ export function activeLayersAt(
           overlays: [],
           graphics: [],
           adjust: {
+            ...lookField(seg.clip.effects),
             colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters, pvScale),
             ...vignetteField(seg.clip.effects?.filters),
             ...maskField(seg.clip.effects?.mask),
@@ -331,6 +348,7 @@ export function activeLayersAt(
           ? {
               opacity: gain * (tf?.opacity ?? 1),
               crop: seg.clip.effects?.crop,
+              ...lookField(seg.clip.effects),
               colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters, pvScale),
               assetWidth: asset!.width,
               assetHeight: asset!.height,

@@ -78,7 +78,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route, the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -117,7 +117,7 @@ npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4  
 npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto"; self-synthesizes
-npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount; self-synthesizes
+npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount, every effect has a WebGL2 preview; self-synthesizes
 
 # Blend modes + shape masks (lossless exports; self-synthesizes PNG stills and an
 # FFV1 yuva420p cutout): every blend mode vs the W3C formula on the decoded
@@ -198,6 +198,63 @@ npx tsx packages/core/scripts/smoke-proxy.ts                           # self-sy
 npx tsx packages/core/scripts/smoke-motion.ts
 ```
 
+### Live preview vs export parity (WebGL2, run by hand)
+
+The preview runs each layer's look — colour grade, curves, LUT and every
+effect, keys included, in stack order — through a WebGL2 pipeline
+(`apps/desktop/src/gl/`) whose shaders port FFmpeg 4.4's filters. This script
+measures how close it is: for every registry effect at its default and one
+non-default setting, plus eq / colour wheels / hue / curves / a generated
+17³ `.cube` LUT and a few stacks (YUV chains, keys between effects, fused
+per-pixel ops, a pillarboxed frame with transparent padding), it renders a
+synthetic 320×180 test pattern through the real GL pipeline in a headless
+Chromium and through the export's own per-clip FFmpeg chain (graph.ts,
+with a lossless RGBA tap instead of the final 4:2:0 encode), then prints
+max / mean / p99 of the per-channel difference (alpha, and colour × alpha).
+
+A second table runs the REAL export on 4:2:0 footage: a yuv420p clip through
+the whole graph (clip chain, the yuv420p overlays, `format=yuv420p`), decoded
+back to RGB, against the preview of the same decoded frame sent through the
+same final 4:2:0 steps — so it catches an effect that FFmpeg ran on
+subsampled chroma (FFmpeg picks a filter's pixel format from the filters
+after it; graph.ts pins RGBA after every effect stack so that never
+happens). It covers the effects whose filters take any pixel format (blur,
+detail, lens, grayscale, invert, pixelate …), stacks, adjustment layers and
+the grain's statistics as the export shows them.
+
+```powershell
+npx tsx apps/desktop/scripts/parity-gl.mts                 # both parity tables (~2 min)
+npx tsx apps/desktop/scripts/parity-gl.mts --bench         # + ms/frame: GL (full, half, quarter resolution) vs the old CSS path, 2 layers at 1280×720
+npx tsx apps/desktop/scripts/parity-gl.mts --only blur,glow --dump   # some effects; keep the PNGs (ffmpeg / gl / diff×16)
+npx tsx apps/desktop/scripts/parity-gl.mts --only 420      # just the real-export (4:2:0) table
+```
+
+- Needs FFmpeg on PATH, `npm run build` (the page imports core's dist), and
+  **playwright-core** plus a Chromium. It looks for playwright-core in
+  `node_modules` and the npx cache (`~/.npm/_npx/*/node_modules`), and for a
+  Chromium in Playwright's browser cache (`~/.cache/ms-playwright`, or the
+  Windows / macOS equivalents). Override with `PLAYWRIGHT_CORE=<dir of
+  playwright-core>` and `PLAYWRIGHT_CHROMIUM=<chrome binary>`.
+- Headless Chromium runs WebGL2 on SwiftShader (software), which is exact but
+  slow; `--bench` numbers on a real GPU are far lower.
+- Pass thresholds follow each effect's `fidelity` in the registry: **exact** =
+  max ≤ 3 levels and mean ≤ 1 (≤ 8 and ≤ 1 in the 4:2:0 table, for the
+  rounding at hard colour edges); **close** = p99 ≤ 8; **approx** (denoise)
+  is only reported. Film grain is random, so it compares the noise's mean and
+  standard deviation instead, as the export shows it (its 4:2:0 output
+  averages the grain's colour over 2×2 pixels; the preview models that). It
+  also checks that a lost WebGL context makes the pipeline step aside (the
+  preview uses its CSS fallback) and renders identical bytes after the
+  restore, and that a still larger than the GPU's `MAX_TEXTURE_SIZE` renders
+  like a small one (its crop goes through a scaled 2D canvas). Exits non-zero
+  on a failure.
+- On a software WebGL renderer the preview lowers the looks' processing
+  resolution while playing (`gl/governor.ts`): half, and a quarter when
+  frames with a look still come slower than about 16 fps; paused frames (and
+  a GPU) always use full resolution. `--bench` shows all three.
+- Per-viewer switch: `localStorage["synthcut.preview.gl"] = "off"` in the
+  app's devtools forces the CSS fallback preview (to compare).
+
 What to expect:
 - The **first** captions run downloads whisper.cpp + the `base.en` model (~150 MB);
   the first reframe run downloads the YuNet model; the first `smoke-media` run
@@ -233,7 +290,8 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Per-track controls | Mute / hide / lock a track; change its volume | Track header reflects it; preview/audio respond |
 | Per-clip effects | Use the per-clip controls: speed, volume, fades, color grade, crop | Controls reflect on the clip |
 | Transform / keyframes | Move/scale/rotate a clip; add ◆ keyframes to animate position or scale | Motion plays back in the preview |
-| Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Vignette and blur preview live; rows without a live preview show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
+| Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen, Glow, Pixelate; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Every effect previews live (WebGL2) in stack order and matches **Render exact**; Denoise shows a soft **≈** (approximate preview); without WebGL2 only the CSS-proxy effects preview and the rest show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
+| Grade / LUT | **Color** grade (brightness, contrast, saturation, gamma); ask the AI for colour wheels / temperature / hue / curves (`apply_color`) and a `.cube` LUT (`apply_lut`) | All preview live and match **Render exact** (the LUT loads through the core's `/file` route) |
 | Stabilize | On a shaky clip set **Smoothing** and **Zoom**, then **Stabilize clip** | Busy label "Stabilizing…", then the clip points at a "(stabilized)" bake; undo restores it |
 | Keys | Put a gray-, green- or black-background clip on a track above another; **Add effect → Color / Chroma / Luma key** | Background turns transparent in the live preview (colour auto-detected); swatch, **Auto**, **Pick** (eyedropper) and the sliders update it in place; export matches |
 | Blend modes | Put a clip on a track above another; in **Transform & animation** set **Blend** to Screen / Multiply / Overlay … | The live preview blends at once; **Render exact** / Export match it (within a few levels) |

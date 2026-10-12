@@ -1137,6 +1137,8 @@ input[type="range"]:disabled { opacity: 0.45; }
   flex: none; font-size: 10.5px; line-height: 1; padding: 3px 6px; border-radius: 999px;
   color: var(--warn); border: 1px solid currentColor; opacity: 0.85; white-space: nowrap;
 }
+/* An approximate live preview (WebGL2): a quieter mark than "Render exact". */
+.eff-badge-soft { color: var(--ink-3); opacity: 0.8; }
 .eff-actions { display: inline-flex; gap: 2px; margin-left: auto; flex: none; }
 .eff-actions .icon-btn { width: 26px; height: 26px; }
 .eff-actions .icon-btn[aria-pressed="true"] { color: var(--warn); }

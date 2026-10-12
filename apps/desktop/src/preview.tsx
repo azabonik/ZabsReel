@@ -8,10 +8,12 @@
 // How it works: composite.ts is a PURE (model, playhead) -> draw plan; a
 // MediaPool of hidden <video> decoders supplies the pixels/audio; this component
 // owns the master clock (RAF) and rasterizes the plan with Canvas2D. Text and
-// captions stay DOM overlays on top of the canvas. Keys (colorkey / chromakey /
-// lumakey) preview live through a small WebGL2 pass (glkey.ts), so a keyed
-// overlay shows the track below instead of its background; a vignette through a
-// radial-gradient pass with FFmpeg's own falloff (vignetteFactor).
+// captions stay DOM overlays on top of the canvas. Each layer's LOOK — colour
+// grade, curves, LUT and the effect stack, keys included, in the export's
+// order — runs through the WebGL2 pipeline (gl/: ports of the FFmpeg filters,
+// so the preview matches the export), and the 2D code then applies the mask,
+// blend mode, transform and opacity. Without WebGL2 (or while the context is
+// lost) the look falls back to CSS filter proxies and a canvas vignette pass.
 
 import {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
@@ -26,9 +28,11 @@ import {
 import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composite";
 import { MediaPool } from "./mediapool";
 import { AudioRouter } from "./audiograph";
-import { isKeyBypassed, keyFrame, onKeyBypassChange } from "./glkey";
-import type { KeyPlan } from "./keying";
-import { vignetteFactor } from "@aive/core/effects";
+import { isKeyBypassed, onKeyBypassChange } from "./glkey";
+import { vignetteGradient, vignetteLayer } from "./vignette2d";
+import { glReady, glSoftware, onGLChange, runLayer, setFileUrl } from "./gl/runtime";
+import { cachedPlan, type LayerLook } from "./gl/plan";
+import { PlaybackGovernor } from "./gl/governor";
 import { canvasBlendOp, type ClipMask } from "@aive/core/compositing";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas, stageMasked, type LayerXform } from "./maskdraw";
 import { maskDragFor, maskEditTarget, onMaskEditChange, setMaskDrag } from "./maskedit";
@@ -116,74 +120,87 @@ function bufferSize(project: Project | null, maxLongEdge = 1280): { w: number; h
   return { w: Math.max(2, Math.round(project.width * scale)), h: Math.max(2, Math.round(project.height * scale)) };
 }
 
-/**
- * A radial gradient that darkens like FFmpeg's vignette: black at alpha
- * 1 − Π cos(angle·d)⁴ for the normalised distance d from (cx,cy), d = 1 at
- * `radius` (the canvas-space frame's corner). Stacked vignettes multiply.
- */
-function vignetteGradient(g: CanvasRenderingContext2D, cx: number, cy: number, radius: number, angles: number[]): CanvasGradient {
-  const grad = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(1, radius));
-  const N = 16;
-  for (let i = 0; i <= N; i++) {
-    const d = i / N;
-    let f = 1;
-    for (const a of angles) f *= vignetteFactor(d, a);
-    grad.addColorStop(d, `rgba(0,0,0,${(1 - f).toFixed(4)})`);
-  }
-  return grad;
+/** What the GL path needs besides the layer's draw plan. */
+interface GLDraw {
+  /** Project (export) canvas size. */
+  cw: number;
+  ch: number;
+  /** Timeline frame number (grain, trails). */
+  frame: number;
+  layerId: string;
+  /** Leave the keys out (the eyedropper picks from the unkeyed frame). */
+  skipKeys: boolean;
+  /**
+   * Divisor of the looks' processing resolution: 1 when paused or on a GPU;
+   * while playing on a software renderer, the PlaybackGovernor's (2, or 4
+   * when frames still come too slowly) to keep the frame rate.
+   */
+  div: number;
 }
 
-// Scratch canvas for the vignette pass (grow-only, reused by every layer).
-let vigCanvas: HTMLCanvasElement | null = null;
+/** Processing-size cap of the GL path (its targets are pooled by size). */
+const GL_MAX_EDGE = 4096;
 
 /**
- * Draw a layer's source rect at w×h through `filter`, then darken it with the
- * vignette gradient (`source-atop`, so transparent letterbox bars and keyed
- * areas stay transparent — as the export's alpha-preserving vignette). Returns
- * the scratch canvas (valid until the next call) or null if it can't run.
+ * Run the layer's look through the WebGL2 pipeline. It processes the layer's
+ * whole canvas-space frame (the fitted picture plus transparent padding — what
+ * the export's filters see) at the buffer size × a power-of-two bucket of the
+ * zoom, never above the source's own resolution. Returns what to draw — the
+ * frame (or, masked, the staged picture) and where it goes in the layer's
+ * transformed space — or null to fall back to the CSS path.
  */
-function vignetteLayer(
-  src: CanvasImageSource, sx: number, sy: number, sw: number, sh: number,
-  filter: string, w: number, h: number, radius: number, angles: number[],
-): HTMLCanvasElement | null {
-  if (!vigCanvas) vigCanvas = document.createElement("canvas");
-  const c = vigCanvas;
-  if (c.width < w) c.width = w;
-  if (c.height < h) c.height = h;
-  const g = c.getContext("2d");
-  if (!g) return null;
-  g.save();
-  try {
-    g.globalCompositeOperation = "source-over";
-    g.globalAlpha = 1;
-    g.clearRect(0, 0, w, h);
-    g.filter = filter && filter !== "none" ? filter : "none";
-    g.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
-    g.filter = "none";
-    g.globalCompositeOperation = "source-atop";
-    g.fillStyle = vignetteGradient(g, w / 2, h / 2, radius, angles);
-    g.fillRect(0, 0, w, h);
-    return c;
-  } catch {
-    // A tainted / not-yet-decodable frame: a tainted canvas stays tainted, start fresh.
-    vigCanvas = null;
-    return null;
-  } finally {
-    g.restore();
+function lookThroughGL(
+  el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, g: GLDraw,
+  iw: number, ih: number, sx: number, sy: number, sw: number, sh: number,
+): { src: CanvasImageSource; r: [number, number, number, number]; dst: [number, number, number, number] } | null {
+  if (!d.look || !glReady()) return null;
+  const fitB = Math.min(W / sw, H / sh); // buffer px per source px
+  const s = Math.abs(d.transform.scale) || 1;
+  let q = Math.min(8, 2 ** Math.ceil(Math.log2(Math.max(1 / 8, s))));
+  q = Math.min(q, Math.max(1, 1 / fitB), GL_MAX_EDGE / Math.max(W, H));
+  if (g.div > 1) q = Math.max(1 / 8, q / g.div);
+  const PW = Math.max(1, Math.round(W * q));
+  const PH = Math.max(1, Math.round(H * q));
+  const k = PW / g.cw;
+  const steps = cachedPlan(d.look, { k, w: PW, h: PH, cw: g.cw, ch: g.ch }, { skipKeys: g.skipKeys });
+  if (!steps.length) return null;
+  // The export's fit (scale … force_original_aspect_ratio=decrease, pad centred), in canvas px.
+  const fw = Math.min(g.cw, Math.round((g.ch * sw) / sh));
+  const fh = Math.min(g.ch, Math.round((g.cw * sh) / sw));
+  const pic = { x: Math.trunc((g.cw - fw) / 2) * k, y: Math.trunc((g.ch - fh) / 2) * k, w: fw * k, h: fh * k };
+  const res = runLayer({
+    source: el, srcW: iw, srcH: ih, dynamic: el instanceof HTMLVideoElement,
+    crop: { x: sx, y: sy, w: sw, h: sh }, w: PW, h: PH, pic, steps, k, cw: g.cw, ch: g.ch,
+    frame: g.frame, layerId: g.layerId,
+  });
+  if (!res) return null;
+  if (d.mask) {
+    // The mask lives in the picture: stage just the picture rect and mask it.
+    const dw = pic.w / q;
+    const dh = pic.h / q;
+    const full = maskStageSize(dw, dh, d.transform.scale, sw, sh);
+    // At a playback resolution the picture has no more detail than the GL
+    // result: stage it at that size (the 2D mask work drops with it).
+    const m = g.div > 1
+      ? { w: Math.max(1, Math.min(full.w, Math.round(pic.w))), h: Math.max(1, Math.min(full.h, Math.round(pic.h))) }
+      : full;
+    const staged = stageMasked(res.canvas, res.x + pic.x, res.y + pic.y, pic.w, pic.h, "none", m.w, m.h, d.mask);
+    if (!staged) return null;
+    return { src: staged, r: [0, 0, m.w, m.h], dst: [-W / 2 + pic.x / q, -H / 2 + pic.y / q, dw, dh] };
   }
+  return { src: res.canvas, r: [res.x, res.y, res.w, res.h], dst: [-W / 2, -H / 2, W, H] };
 }
 
 /**
- * Draw one video layer: crop → letterbox-contain fit → 2D transform (scale,
- * rotate, flip, translate about the canvas centre) → color filter → alpha. The
- * transform mirrors the FFmpeg geq bake so preview and export agree. With a
- * `key` plan the cropped frame is keyed first (WebGL, at the size it's drawn)
- * and that result is drawn instead; without WebGL2 it draws unkeyed. Vignettes
- * follow the stack order around the key: one before the first key darkens the
- * frame the key sees (so its dark edge stays opaque, as in the export), one
- * after it darkens the keyed result.
+ * Draw one video layer: crop → letterbox-contain fit → look → mask → 2D
+ * transform (scale, rotate, flip, translate about the canvas centre), blend
+ * mode and alpha. The transform mirrors the FFmpeg geq bake so preview and
+ * export agree. The look runs through the WebGL2 pipeline (lookThroughGL);
+ * without it, through the CSS colour proxy and the canvas vignette pass (keys
+ * and the GL-only effects then show only in the render). Returns true when the
+ * look ran through WebGL2.
  */
-function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, key?: KeyPlan) {
+function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, g: GLDraw): boolean {
   // Intrinsic source dimensions: <video> exposes videoWidth, <img> naturalWidth.
   const iw = (el as HTMLVideoElement).videoWidth || (el as HTMLImageElement).naturalWidth;
   const ih = (el as HTMLVideoElement).videoHeight || (el as HTMLImageElement).naturalHeight;
@@ -191,7 +208,7 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
   const sy = d.crop?.y ?? 0;
   const sw = d.crop?.width ?? iw;
   const sh = d.crop?.height ?? ih;
-  if (sw <= 0 || sh <= 0) return;
+  if (sw <= 0 || sh <= 0) return false;
   const fit = Math.min(W / sw, H / sh);
   const dw = sw * fit;
   const dh = sh * fit;
@@ -199,48 +216,41 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
 
   let src: CanvasImageSource = el;
   let [rx, ry, rw, rh] = [sx, sy, sw, sh];
+  let [px, py, pw, ph] = [-dw / 2, -dh / 2, dw, dh];
   let filter = d.colorFilter;
-  // FFmpeg vignettes the canvas-space frame (after fit + padding), so the
-  // falloff is centred on the layer and reaches d = 1 at the CANVAS corner:
-  // that corner's distance in the pass's pixels, for a pass `w` pixels wide.
-  const vigRadius = (w: number) => Math.hypot(W / 2, H / 2) * (w / dw);
-  let vignette = d.vignette;
-  if (key) {
-    // Key at the on-canvas size (never above the source's own resolution).
-    const s = Math.abs(t.scale) || 1;
-    const kw = Math.max(1, Math.min(Math.round(sw), Math.ceil(dw * s)));
-    const kh = Math.max(1, Math.min(Math.round(sh), Math.ceil(dh * s)));
-    // A vignette before the first key darkens the frame the key sees. Its
-    // scratch canvas is copied into the key's own staging canvas right away.
-    const pv = key.preVignette?.length ? vignetteLayer(el, sx, sy, sw, sh, key.pre, kw, kh, vigRadius(kw), key.preVignette) : null;
-    const keyed = pv ? keyFrame(pv, 0, 0, kw, kh, kw, kh, { ...key, pre: "none" }) : keyFrame(el, sx, sy, sw, sh, kw, kh, key);
-    if (keyed) {
-      src = keyed.canvas;
-      [rx, ry, rw, rh] = [keyed.x, keyed.y, keyed.w, keyed.h];
-      filter = key.post; // colour + pre-key effects were applied before keying
-      vignette = key.postVignette;
+  const gl = lookThroughGL(el, d, W, H, g, iw, ih, sx, sy, sw, sh);
+  if (gl) {
+    src = gl.src;
+    [rx, ry, rw, rh] = gl.r;
+    [px, py, pw, ph] = gl.dst;
+    filter = "none";
+  } else {
+    // CSS fallback. FFmpeg vignettes the canvas-space frame (after fit +
+    // padding), so the falloff is centred on the layer and reaches d = 1 at the
+    // CANVAS corner: that corner's distance in the pass's pixels, for a pass
+    // `w` pixels wide.
+    const vigRadius = (w: number) => Math.hypot(W / 2, H / 2) * (w / dw);
+    if (d.vignette?.length) {
+      const s = Math.abs(t.scale) || 1;
+      const vw = Math.max(1, Math.min(4096, Math.ceil(dw * s)));
+      const vh = Math.max(1, Math.min(4096, Math.ceil(dh * s)));
+      const v = vignetteLayer(src, rx, ry, rw, rh, filter, vw, vh, vigRadius(vw), d.vignette);
+      if (v) {
+        src = v;
+        [rx, ry, rw, rh] = [0, 0, vw, vh];
+        filter = "none";
+      }
     }
-  }
-  if (vignette?.length) {
-    const s = Math.abs(t.scale) || 1;
-    const vw = Math.max(1, Math.min(4096, Math.ceil(dw * s)));
-    const vh = Math.max(1, Math.min(4096, Math.ceil(dh * s)));
-    const v = vignetteLayer(src, rx, ry, rw, rh, filter, vw, vh, vigRadius(vw), vignette);
-    if (v) {
-      src = v;
-      [rx, ry, rw, rh] = [0, 0, vw, vh];
-      filter = "none";
-    }
-  }
-  // Shape mask (maskdraw.ts): stage the finished layer at its picture size and
-  // multiply its alpha by the mask, BEFORE the transform — so it follows the clip.
-  if (d.mask) {
-    const m = maskStageSize(dw, dh, t.scale, sw, sh);
-    const staged = stageMasked(src, rx, ry, rw, rh, filter, m.w, m.h, d.mask);
-    if (staged) {
-      src = staged;
-      [rx, ry, rw, rh] = [0, 0, m.w, m.h];
-      filter = "none";
+    // Shape mask (maskdraw.ts): stage the finished layer at its picture size and
+    // multiply its alpha by the mask, BEFORE the transform — so it follows the clip.
+    if (d.mask) {
+      const m = maskStageSize(dw, dh, t.scale, sw, sh);
+      const staged = stageMasked(src, rx, ry, rw, rh, filter, m.w, m.h, d.mask);
+      if (staged) {
+        src = staged;
+        [rx, ry, rw, rh] = [0, 0, m.w, m.h];
+        filter = "none";
+      }
     }
   }
 
@@ -253,11 +263,12 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
   if (t.rotation) ctx.rotate((t.rotation * Math.PI) / 180);
   ctx.scale((t.flipH ? -1 : 1) * t.scale, (t.flipV ? -1 : 1) * t.scale);
   try {
-    ctx.drawImage(src, rx, ry, rw, rh, -dw / 2, -dh / 2, dw, dh);
+    ctx.drawImage(src, rx, ry, rw, rh, px, py, pw, ph);
   } catch {
     /* element not yet decodable this frame — skip, next frame paints it */
   }
   ctx.restore();
+  return !!gl;
 }
 
 /** DOM-facing snapshot of the current frame (only changes when overlays/badge change). */
@@ -304,6 +315,10 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
   const redrawRef = useRef(0);
   const lastNow = useRef(0);
   const playingRef = useRef(false);
+  // On a software WebGL renderer: the looks' resolution while playing — half,
+  // a quarter when frames still come too slowly (gl/governor.ts). A GPU stays at full.
+  const governorRef = useRef(new PlaybackGovernor(() => (glSoftware() ? 2 : 1), () => (glSoftware() ? 4 : 1)));
+  const glRanRef = useRef(false); // the last frame ran a WebGL look
   const phRef = useRef(0);
   const drawFnRef = useRef<() => void>(() => {});
   // Still images can't go through the <video> pool — cache one <img> per path and
@@ -366,10 +381,16 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, W, H);
 
-    const plan = activeLayersAt(projectRef.current, assetsRef.current, phRef.current);
+    const project = projectRef.current;
+    const plan = activeLayersAt(project, assetsRef.current, phRef.current);
     const router = routerRef.current;
-    // A clip's key, unless the inspector's eyedropper is picking from it.
-    const liveKey = (c: ActiveClip) => (c.draw?.key && !isKeyBypassed(c.clipId) ? c.draw.key : undefined);
+    const cw = project?.width ?? W;
+    const ch = project?.height ?? H;
+    const frameNo = Math.round(phRef.current * (project?.fps ?? 30));
+    // The GL path's per-layer context; keys are left out while the inspector's eyedropper picks from the clip.
+    const div = playingRef.current ? governorRef.current.div : 1;
+    const glFor = (c: ActiveClip): GLDraw => ({ cw, ch, frame: frameNo, layerId: c.clipId, skipKeys: isKeyBypassed(c.clipId), div });
+    glRanRef.current = false;
     pool.beginFrame();
     // Draw a clip's active motion graphics full-frame over it (alpha .webm proxy,
     // drawImage preserves transparency) so graphics preview live, in clip z-order.
@@ -389,7 +410,35 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     };
     // ADJUSTMENT layer: repaint the composite drawn SO FAR through its color
     // filter (lower layers only — higher tracks draw after, unaffected).
-    const applyAdjust = (filter: string, vignette?: number[], mask?: ClipMask) => {
+    const applyAdjust = (filter: string, vignette?: number[], mask?: ClipMask, look?: LayerLook, layerId = "") => {
+      // WebGL2: the adjustment's look runs on the composite so far (the
+      // export's split → filter → [mask] → overlay); its result is drawn over
+      // the composite, so anything it makes transparent shows the original.
+      if (look && glReady()) {
+        // A reduced resolution while playing, if the governor chose one (see GLDraw.div).
+        const PW = Math.max(1, Math.round(W / div));
+        const PH = Math.max(1, Math.round(H / div));
+        const k = PW / cw;
+        const steps = cachedPlan(look, { k, w: PW, h: PH, cw, ch });
+        if (!steps.length) return;
+        const res = runLayer({
+          source: canvas, srcW: W, srcH: H, dynamic: true, crop: { x: 0, y: 0, w: W, h: H }, w: PW, h: PH,
+          pic: { x: 0, y: 0, w: PW, h: PH }, steps, k, cw, ch, frame: frameNo, layerId,
+        });
+        if (res) {
+          const out = mask ? stageMasked(res.canvas, res.x, res.y, res.w, res.h, "none", W, H, mask) : res.canvas;
+          if (out) {
+            ctx.save();
+            ctx.globalAlpha = 1;
+            ctx.filter = "none";
+            if (mask) ctx.drawImage(out, 0, 0, W, H, 0, 0, W, H);
+            else ctx.drawImage(out, res.x, res.y, res.w, res.h, 0, 0, W, H);
+            ctx.restore();
+            glRanRef.current = true;
+            return;
+          }
+        }
+      }
       if (mask) {
         // A masked adjustment: grade a copy of the composite so far, keep it
         // only inside the mask, and lay it back over the untouched composite
@@ -459,7 +508,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
 
     for (const c of plan.clips) {
       if (c.adjust) {
-        applyAdjust(c.adjust.colorFilter, c.adjust.vignette, c.adjust.mask);
+        applyAdjust(c.adjust.colorFilter, c.adjust.vignette, c.adjust.mask, c.adjust.look, c.clipId);
         continue;
       }
       if (!c.path) continue;
@@ -475,7 +524,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
           img.src = api.fileUrl(c.path);
           cache.set(c.path, img);
         }
-        if (img.complete && img.naturalWidth > 0) drawLayer(ctx, img, c.draw, W, H, liveKey(c));
+        if (img.complete && img.naturalWidth > 0 && drawLayer(ctx, img, c.draw, W, H, glFor(c))) glRanRef.current = true;
         paintGraphics(c.graphics);
         continue;
       }
@@ -494,7 +543,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         routed,
       });
       if (routed) router!.setGain(el, c.audio?.volume ?? 0);
-      if (c.draw && el.readyState >= 2 && el.videoWidth > 0) drawLayer(ctx, el, c.draw, W, H, liveKey(c));
+      if (c.draw && el.readyState >= 2 && el.videoWidth > 0 && drawLayer(ctx, el, c.draw, W, H, glFor(c))) glRanRef.current = true;
       paintGraphics(c.graphics);
     }
     pool.endFrame();
@@ -603,14 +652,16 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         poolRef.current?.pauseAll();
         syncMusic(false);
         stopRaf();
+        if (glRanRef.current && governorRef.current.div > 1) scheduleRedraw(); // the end frame in full resolution
         return;
       }
       phRef.current = ph;
       store.set({ playhead: ph });
       drawFnRef.current();
+      governorRef.current.frame(dt * 1000, glRanRef.current);
       rafRef.current = requestAnimationFrame(tick);
     },
-    [store, syncMusic],
+    [store, syncMusic, scheduleRedraw],
   );
 
   const doPlay = useCallback(() => {
@@ -618,6 +669,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     routerRef.current?.unlock(); // a user gesture: let live audio effects start
     if (phRef.current >= totalRef.current - 0.02) writePh(0); // restart if parked at the end
     playingRef.current = true;
+    governorRef.current.start(projectRef.current);
     setPlaying(true);
     store.set({ playing: true });
     lastNow.current = 0;
@@ -633,7 +685,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     poolRef.current?.pauseAll();
     syncMusic(false);
     stopRaf();
-  }, [store, syncMusic]);
+    // The last frame may have run its looks at a playback resolution: redraw it in full.
+    if (glRanRef.current && governorRef.current.div > 1) scheduleRedraw();
+  }, [store, syncMusic, scheduleRedraw]);
 
   const doSeek = useCallback(
     (time: number) => {
@@ -693,6 +747,17 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
   useEffect(() => {
     setMaskDrag(null);
   }, [project]);
+
+  // The GL pipeline fetches LUTs through the core's /file route; repaint when
+  // one arrives or the context is lost / restored.
+  useEffect(() => {
+    const off = onGLChange(() => {
+      drawFnRef.current();
+      scheduleRedraw();
+    });
+    setFileUrl((p) => api.fileUrl(p)); // repaints through the listener above
+    return off;
+  }, [api, scheduleRedraw]);
 
   // The eyedropper toggled a clip's key preview off/on — repaint.
   useEffect(() => onKeyBypassChange(() => {

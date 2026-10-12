@@ -352,6 +352,17 @@ function effectSteps(filters: VisualEffect[], W: number, H: number, tag = "fx"):
 }
 
 /**
+ * Follows (and, on an adjustment layer, precedes) an effect stack. FFmpeg
+ * picks a filter's pixel format from the filters AFTER it, and the composite's
+ * overlays run in yuv420p: without the pin, a filter that takes any format
+ * (gblur, cas, lenscorrection, hue, negate) ran on 4:2:0 chroma — a blur
+ * spread colour twice as wide as its sigma — or not, depending on the next
+ * filter. Pinned, every effect sees full-resolution colour, as the live
+ * preview (apps/desktop/src/gl/) computes it.
+ */
+const EFFECTS_RGBA_PIN = "format=rgba";
+
+/**
  * Multiply a still grayscale mask (input `maskInput`, a W×H PNG from
  * ffmpeg/mask.ts) into the stream's alpha, as one comma-chain step with a
  * `;` sub-graph (like the key steps). Exact 8-bit math, never overwrites the
@@ -551,7 +562,8 @@ function emitClipVideoParts(
   }
 
   // Creative/utility effects (blur/sharpen/key/…) after color, before transform.
-  if (fx.filters?.length) steps.push(...effectSteps(fx.filters, W, H, `c${inputIdx}`));
+  const fxSteps = fx.filters?.length ? effectSteps(fx.filters, W, H, `c${inputIdx}`) : [];
+  if (fxSteps.length) steps.push(...fxSteps, EFFECTS_RGBA_PIN);
 
   // Reset timestamps and apply speed in one go. A speed RAMP retimes with its
   // closed-form curve (speed.ts rampSetptsExpr: τ(source seconds) / TB); the
@@ -1177,7 +1189,13 @@ export function buildRenderCommand(
       }
       if (fx.grade) steps.push(...colorGradeSteps(fx.grade));
       if (fx.lut) steps.push(`lut3d=${fx.lut}`);
-      if (fx.filters?.length) steps.push(...effectSteps(fx.filters, W, H, `a${adjustOps.length}`));
+      const fxSteps = fx.filters?.length ? effectSteps(fx.filters, W, H, `a${adjustOps.length}`) : [];
+      if (fxSteps.length) {
+        // The stack below is yuv420p: start from RGBA too, as a clip's chain does (EFFECTS_RGBA_PIN).
+        // An alphaSafe colour step already opens with it.
+        if (!steps[0]?.startsWith(`${EFFECTS_RGBA_PIN},`)) steps.unshift(EFFECTS_RGBA_PIN);
+        steps.push(...fxSteps, EFFECTS_RGBA_PIN);
+      }
       if (steps.length === 0) continue; // an adjustment with no look yet is a no-op
       let maskInput: number | undefined;
       if (fx.maskFile) {

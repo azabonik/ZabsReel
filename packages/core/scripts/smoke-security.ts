@@ -9,7 +9,7 @@
  * Run: npx tsx packages/core/scripts/smoke-security.ts
  * (No media arguments needed — synthesizes its own clip with ffmpeg lavfi.)
  */
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
@@ -98,6 +98,24 @@ async function main() {
   check(fileOk.status === 200, `/file for an IMPORTED asset → 200 (got ${fileOk.status})`);
   const fileNoToken = await fetch(`${base}/file?path=${encodeURIComponent(clipPath)}`);
   check(fileNoToken.status === 401, `/file without token → 401 (got ${fileNoToken.status})`);
+
+  // A .cube LUT a clip uses becomes servable (the live preview runs it on the
+  // GPU); a .cube no clip uses, and a non-.cube path set as a LUT, do not.
+  const cubePath = join(dataDir, "..", `aive-sec-lut-${Date.now()}.cube`);
+  const otherCube = join(dataDir, "..", `aive-sec-other-${Date.now()}.cube`);
+  writeFileSync(cubePath, "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n");
+  writeFileSync(otherCube, "LUT_3D_SIZE 2\n");
+  const cubeBefore = await fetch(`${base}/file?path=${encodeURIComponent(cubePath)}&token=${token}`);
+  check(cubeBefore.status === 403, `/file for a .cube no clip uses → 403 (got ${cubeBefore.status})`);
+  const lutClip = engine.appendClip(engine.getProject().assets[0].id);
+  engine.setClipEffects(lutClip.id, { lut: cubePath });
+  const cubeOk = await fetch(`${base}/file?path=${encodeURIComponent(cubePath)}&token=${token}`);
+  check(cubeOk.status === 200 && (await cubeOk.text()).startsWith("LUT_3D_SIZE"), `/file for the clip's .cube LUT → 200 (got ${cubeOk.status})`);
+  const cubeOther = await fetch(`${base}/file?path=${encodeURIComponent(otherCube)}&token=${token}`);
+  check(cubeOther.status === 403, `/file for another .cube → 403 (got ${cubeOther.status})`);
+  engine.setClipEffects(lutClip.id, { lut: sysPath });
+  const notCube = await fetch(`${base}/file?path=${encodeURIComponent(sysPath)}&token=${token}`);
+  check(notCube.status === 403, `/file for a non-.cube path set as a LUT → 403 (got ${notCube.status})`);
 
   console.log("5. WebSocket upgrade auth...");
   const wsDenied = await new Promise<boolean>((resolve) => {

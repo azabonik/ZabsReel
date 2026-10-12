@@ -143,16 +143,14 @@ export function rateAt(seg: Segment, srcTime: number): number {
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 /**
- * Approximate the engine's color pipeline (eq + secondary grade + simple
- * effects) with CSS filters for instant preview. Not pixel-identical to the
- * FFmpeg export — it's a live proxy so you can judge a look without rendering.
- * Curves, LUTs, color wheels and the "export-only" effects need Render exact
- * (FFmpeg is the ground truth); we map what CSS can express: brightness/
- * contrast/saturation, hue rotation, warm/cool tint, and each effect's CSS
- * builder from the effect registry (`@aive/core/effects`). Keys (chromakey /
- * colorkey / lumakey) preview through the WebGL key pass (keying.ts /
- * glkey.ts), which splits this filter around the first key; the vignette
- * through a canvas pass (see vignetteAngles). Bypassed effects are skipped.
+ * The CSS-filter FALLBACK for a look, used when WebGL2 is unavailable (the
+ * live preview normally runs the look through the WebGL2 pipeline in gl/,
+ * which matches the export). Not pixel-identical to the FFmpeg export: we map
+ * what CSS can express — brightness / contrast / saturation, hue rotation,
+ * warm/cool tint, and each effect's CSS builder from the effect registry
+ * (`@aive/core/effects`). Curves, LUTs, colour wheels, keys and the GL-only
+ * effects don't show here; the vignette uses a canvas pass (vignetteAngles).
+ * Bypassed effects are skipped.
  */
 export function colorFilter(
   color?: ColorAdjust,
@@ -183,9 +181,9 @@ export function colorFilter(
 }
 
 /**
- * Lens angles (radians) of the clip's enabled vignettes, for the preview's
- * canvas vignette pass — the same cos⁴ falloff FFmpeg's vignette applies over
- * the canvas-space frame. Empty when there are none.
+ * Lens angles (radians) of the clip's enabled vignettes, for the no-WebGL2
+ * fallback's canvas vignette pass (vignette2d.ts) — the same cos⁴ falloff
+ * FFmpeg's vignette applies over the canvas-space frame. Empty when there are none.
  */
 export function vignetteAngles(filters?: VisualEffect[]): number[] {
   const out: number[] = [];
