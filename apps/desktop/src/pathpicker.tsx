@@ -26,8 +26,9 @@ function SessionNotice() {
       <div className="session-notice" role="alertdialog" aria-labelledby="session-notice-title">
         <h3 id="session-notice-title"><Alert size={16} /> This tab is not connected to the editor</h3>
         <p>
-          The link that opens SynthCut carries the session key for the current run. This tab has no key,
-          or a key from an earlier run.
+          The link that opens SynthCut carries the session key for the current run. Only the tab that
+          opened the link keeps the key, so a new tab has none. This tab has no key, or a key from an
+          earlier run.
         </p>
         <p>Open the link printed in the terminal where you ran <code>npm run web</code>.</p>
       </div>

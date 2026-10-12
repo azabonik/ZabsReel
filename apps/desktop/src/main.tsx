@@ -13,20 +13,26 @@ const params = new URLSearchParams(window.location.search);
 let port = Number(params.get("port")) || 0;
 let token = params.get("token");
 
-// Served over http (web shell / Vite): keep the session for reloads and new
-// tabs, then take the token out of the address bar so it isn't left in view,
+// Served over http (web shell / Vite): keep the session so a reload still
+// works, then take the token out of the address bar so it isn't left in view,
 // bookmarks or screenshots. Electron loads from file:// and is left as-is.
+// sessionStorage, not localStorage: it belongs to this tab and is cleared when
+// the tab closes. localStorage would keep a live token on disk, readable by
+// any page served later on the same origin (e.g. another Vite project on
+// localhost:5173), which could then drive the core. A new tab needs the link.
 if (location.protocol === "http:" || location.protocol === "https:") {
   try {
-    if (token) localStorage.setItem("aive.session", JSON.stringify({ port, token }));
+    if (token) sessionStorage.setItem("aive.session", JSON.stringify({ port, token }));
     else {
-      const saved = JSON.parse(localStorage.getItem("aive.session") || "null") as { port?: number; token?: string } | null;
+      const saved = JSON.parse(sessionStorage.getItem("aive.session") || "null") as { port?: number; token?: string } | null;
       if (saved?.token) {
         token = saved.token;
         port ||= Number(saved.port) || 0;
       }
     }
   } catch { /* storage blocked — the URL token still works for this load */ }
+  // Earlier builds kept the session in localStorage; remove any copy left there.
+  try { localStorage.removeItem("aive.session"); } catch { /* ignore */ }
   if (params.has("token")) history.replaceState(null, "", location.pathname + location.hash);
 }
 port ||= 4789;
