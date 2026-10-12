@@ -5,7 +5,7 @@
   "mcpServers": {
     "synthcut": {
       "command": "node",
-      "args": ["C:\\Users\\Dhruv\\Desktop\\AI_native_editor\\packages\\mcp\\dist\\index.js"]
+      "args": ["C:\\Users\\<user>\\src\\SynthCut\\packages\\mcp\\dist\\index.js"]
     }
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Core data model for the AI-Native Video Editor.
+ * Core data model for SynthCut.
  *
  * Editing is fully **non-destructive**: source files are never modified. A
  * project is an Edit Decision List (EDL) — clips that *reference* regions of

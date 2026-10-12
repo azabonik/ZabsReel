@@ -83,7 +83,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer(
     {
-      name: "ai-native-video-editor",
+      name: "synthcut",
       version: "0.1.0",
     },
     {
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
             content: {
               type: "text" as const,
               text:
-                `You are operating the AI-Native Video Editor via its MCP tools. ` +
+                `You are operating the SynthCut video editor via its MCP tools. ` +
                 `First read the resource aive://guide/editing for editing craft. ` +
                 `Then accomplish this brief:\n\n${goal}${presetLine}\n\n` +
                 `Import the user's footage, analyze it, build and refine the timeline, render a preview for review, then export when approved.`,

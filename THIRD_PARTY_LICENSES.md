@@ -1,6 +1,6 @@
 # Third-Party Licenses & Notices
 
-The AI-Native Video Editor is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
+SynthCut is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
 It ships with, or downloads on first use, a number of third-party components.
 This file lists them, their licenses, and any obligations they place on
 redistribution. Packaged installers include a copy of this file.

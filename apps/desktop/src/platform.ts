@@ -27,7 +27,7 @@ const MEDIA_FILTERS: FileFilter[] = [
   { name: "All Files", extensions: ["*"] },
 ];
 const PROJECT_FILTERS: FileFilter[] = [
-  { name: "AI-Native Project", extensions: ["aive"] },
+  { name: "SynthCut Project", extensions: ["aive"] },
   { name: "All Files", extensions: ["*"] },
 ];
 const EXPORT_FILTERS: FileFilter[] = [{ name: "MP4 Video", extensions: ["mp4"] }];

@@ -1,5 +1,5 @@
 {
-  "name": "ai-native-video-editor",
+  "name": "synthcut",
   "version": "1.0.5",
   "private": true,
   "description": "An open-source video editor built to be operated by AI, not humans. Exposes itself as an MCP server so any MCP-compatible AI client can drive real, local FFmpeg-based edits.",

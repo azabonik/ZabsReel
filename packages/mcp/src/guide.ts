@@ -100,7 +100,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 Full craft reference: aive://guide/editing.`;
 
-export const EDITING_GUIDE = `# AI-Native Video Editor — Editing Guide
+export const EDITING_GUIDE = `# SynthCut — Editing Guide
 
 You operate a non-destructive video editor through MCP tools. Source files are
 never modified; you build an Edit Decision List (a timeline of clips that

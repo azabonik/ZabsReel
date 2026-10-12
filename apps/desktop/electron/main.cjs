@@ -202,7 +202,7 @@ ipcMain.handle("dialog:openProject", async () => {
     title: "Open project",
     properties: ["openFile"],
     filters: [
-      { name: "AI-Native Project", extensions: ["aive"] },
+      { name: "SynthCut Project", extensions: ["aive"] },
       { name: "All Files", extensions: ["*"] },
     ],
   });
@@ -214,7 +214,7 @@ ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
   const result = await dialog.showSaveDialog({
     title: "Save project as",
     defaultPath: `${base.replace(/\.aive$/i, "")}.aive`,
-    filters: [{ name: "AI-Native Project", extensions: ["aive"] }],
+    filters: [{ name: "SynthCut Project", extensions: ["aive"] }],
   });
   return result.canceled ? null : result.filePath;
 });

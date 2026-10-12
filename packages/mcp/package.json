@@ -1,7 +1,7 @@
 {
   "name": "@aive/mcp",
   "version": "1.0.5",
-  "description": "MCP server for the AI-Native Video Editor. Exposes the editor's tools to any MCP-compatible AI client (e.g. Claude Desktop) and forwards them to the running editor core.",
+  "description": "MCP server for SynthCut. Exposes the editor's tools to any MCP-compatible AI client (e.g. Claude Desktop) and forwards them to the running editor core.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",

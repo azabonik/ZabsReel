@@ -1,10 +1,10 @@
 {
   "name": "synthcut-desktop",
   "version": "1.0.5",
-  "description": "Electron + React desktop UI for the AI-Native Video Editor. Shows the timeline, clip library and preview; reflects AI edits live.",
+  "description": "Electron + React desktop UI for SynthCut. Shows the timeline, clip library and preview; reflects AI edits live.",
   "license": "GPL-3.0-or-later",
   "private": true,
-  "author": "AI-Native Video Editor contributors",
+  "author": "SynthCut contributors",
   "main": "electron/main.cjs",
   "scripts": {
     "build:renderer": "vite build",
