@@ -78,7 +78,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), blend modes + masks in the plan
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -149,6 +149,16 @@ npx tsx packages/core/scripts/smoke-matte.ts
 # audio (self-contained: synthesizes its own media, injects a fake transcript).
 # smoke-composite.ts checks the renderer's bleep expansion against the core's.
 npx tsx packages/core/scripts/smoke-bleep.ts
+# Per-clip audio effects + one-click voice tools: synthesizes speech-like audio
+# (formant voice, loud/quiet phrases, pink-noise floor, 40 Hz rumble, s-bursts)
+# and measures exports: every effect keeps sync + length, noise reduction /
+# rumble cut / presence EQ / de-esser / compressor / limiter / normalize (±1 LU)
+# / pitch (rubberband + fallback) / enhance_voice, speed 2, bypass, bleeps with
+# effects, linked audio (also after a split), mono/stereo/quad/5.1 soft clip,
+# exports at speed 0.5–3 that must finish, video-only staging without the
+# loudness pass, undo, segment-cache key (self-contained).
+# smoke-composite.ts checks the matching Web Audio preview plan.
+npx tsx packages/core/scripts/smoke-voice.ts
 
 # Time effects: freeze_frame (ripples the timeline + linked audio), chunked frame-exact
 # reverse_clip (and its un-reverse), smooth_slow_motion (blend + optical flow, no

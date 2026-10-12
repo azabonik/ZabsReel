@@ -19,6 +19,7 @@ import type { KeyDetection, KeyPatch } from "./keyfx";
 import { EffectStack, type EffectRequest } from "./effectstack";
 import { BlendSelect, MaskGroup, effectiveBlendModeOf, type MaskPatch } from "./maskpanel";
 import type { BlendMode } from "@aive/core/compositing";
+import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 
 function fmt(seconds: number): string {
@@ -440,6 +441,8 @@ export function App({ api }: { api: CoreApi }) {
     run("Remove effect", () => api.rpc("remove_effect", { clipId, effectId }));
   const reorderEffect = (clipId: string, effectId: string, toIndex: number) =>
     run("Reorder effect", () => api.rpc("reorder_effect", { clipId, effectId, toIndex }));
+  // Audio effects (audiofxpanel.tsx): the core validates against the audio effect registry.
+  const audioRpc: AudioRpc = (label, method, params) => void run(label, () => api.rpc(method, params));
   // Keys: explicit colour/params (keyfx.tsx); color "auto" = engine border detection.
   const applyKey = (clipId: string, type: string, patch: KeyPatch, effectId?: string) =>
     run("Key", () => api.rpc("apply_effect", { clipId, type, ...patch, ...(effectId ? { effectId } : {}) }));
@@ -1003,6 +1006,7 @@ export function App({ api }: { api: CoreApi }) {
               onApplyEffect={applyEffect}
               onRemoveEffect={removeEffect}
               onReorderEffect={reorderEffect}
+              onAudioRpc={audioRpc}
               onApplyKey={applyKey}
               onDetectKey={detectKey}
               onInspectColor={inspectColor}
@@ -1398,6 +1402,7 @@ type InspectorProps = {
   onApplyEffect: (clipId: string, req: EffectRequest, effectId?: string) => void;
   onRemoveEffect: (clipId: string, effectId: string) => void;
   onReorderEffect: (clipId: string, effectId: string, toIndex: number) => void;
+  onAudioRpc: AudioRpc;
   onApplyKey: (clipId: string, type: string, patch: KeyPatch, effectId?: string) => void;
   onDetectKey: (clipId: string) => Promise<KeyDetection | null>;
   onInspectColor: () => void;
@@ -1522,7 +1527,7 @@ function ClipInspector(props: InspectorProps) {
   const capStyle = clip.captions?.style ?? {};
   const hasEffects =
     fx.speed !== undefined || fx.volume !== undefined || fx.fadeInFrames || fx.fadeOutFrames ||
-    fx.color || fx.grade || (fx.filters?.length ?? 0) > 0 || fx.lut;
+    fx.color || fx.grade || (fx.filters?.length ?? 0) > 0 || fx.lut || (fx.audioFilters?.length ?? 0) > 0;
 
   const tabs: { id: Tab; label: string; icon: JSX.Element; count?: number }[] = [
     { id: "adjust", label: "Adjust", icon: <Sliders size={14} /> },
@@ -1814,6 +1819,9 @@ function ClipInspector(props: InspectorProps) {
               </button>
               <span className="field-hint">AI cutout for people (no green screen). The track below shows through — put a colour, image or video on a lower track to replace the background.</span>
             </div>
+            {asset?.hasAudio && (
+              <AudioEffectsGroup clip={clip} project={project} disabled={!connected || busy} Range={RangeField} rpc={props.onAudioRpc} />
+            )}
             {asset?.hasAudio && (
               <div className="group">
                 <div className="group-title"><Waveform size={13} /> Bleep swear words</div>

@@ -43,6 +43,10 @@ import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
 import {
+  describeAudioStack, measureNoiseFloor, removeAudioEffectFrom, reorderAudioEffectIn, resolveAudioFx, upsertAudioEffect,
+} from "./audio/fx.js";
+import { NOISE_FLOOR_TYPES, audioDefaultsFor, linkedSoundPartners } from "./effects/audio.js";
+import {
   sortKeyframes,
   type Keyframe,
   type KeyframeProperty,
@@ -2166,6 +2170,136 @@ export class EditorEngine extends EventEmitter {
     });
   }
 
+  // ---- per-clip audio effects (effects/audio.ts, audio/fx.ts) -----------------
+
+  /**
+   * The clip that carries `clip`'s sound: itself when it's audible, else the
+   * audible linked clip of the same asset that plays the same stretch of the
+   * source (a video clip silenced to volume 0 with its detached audio on an
+   * audio track; after a split, the matching HALF — effects/audio.ts
+   * linkedSoundPartners), else itself.
+   */
+  private soundCarrier(clip: Clip, track: Track): Clip {
+    const audible = (c: Clip, t: Track) => !t.muted && c.effects?.volume !== 0;
+    if (audible(clip, track)) return clip;
+    return linkedSoundPartners(clip, this.linkedClips(clip)).find((m) => audible(m, this.findClip(m.id).track)) ?? clip;
+  }
+
+  /** {@link soundCarrier} for a clip id, refusing clips without sound. `note` says when it's a different clip. */
+  private audioCarrier(clipId: string): { clip: Clip; note?: string } {
+    const { clip, track } = this.findClip(clipId);
+    if (clip.adjustment || !clip.assetId) {
+      throw new Error(`Clip "${clipId}" is an adjustment layer — it has no audio. Audio effects go on clips with sound (adjustment layers only grade/affect video).`);
+    }
+    if (!this.clipAsset(clip)?.hasAudio) throw new Error(`Clip "${clipId}" has no audio to process.`);
+    const m = this.soundCarrier(clip, track);
+    if (m === clip) return { clip };
+    const mt = this.findClip(m.id).track;
+    return { clip: m, note: `Applied to linked clip "${m.id}" (track ${mt.index}) — it carries this clip's sound; "${clipId}" itself is silenced.` };
+  }
+
+  /**
+   * The clip that holds an audio effect: the clip itself, else the clip that
+   * carries its sound, else another linked clip playing the same source
+   * stretch — not just the first group member with that id (split halves
+   * share effect ids).
+   */
+  private audioEffectOwner(clipId: string, effectId: string): Clip {
+    const { clip, track } = this.findClip(clipId);
+    const partners = linkedSoundPartners(clip, this.linkedClips(clip));
+    const owner = [clip, this.soundCarrier(clip, track), ...partners].find((c) => c.effects?.audioFilters?.some((f) => f.id === effectId));
+    if (owner) return owner;
+    const stacks = [clip, ...partners].map((c) => describeAudioStack(c) && `${c.id}: ${describeAudioStack(c)}`).filter(Boolean);
+    throw new Error(`Audio effect "${effectId}" not found on clip "${clipId}"${stacks.length ? ` — audio effects: ${stacks.join("; ")}` : " — it has no audio effects"}.`);
+  }
+
+  /**
+   * Add (or update by id) an audio effect on the clip that carries `clipId`'s
+   * sound — one undo step. Same update rules as applyEffect (params REPLACED;
+   * a bare `enabled` toggles the bypass). New effects slot in at signal-chain
+   * position (audio/fx.ts upsertAudioEffect).
+   */
+  async applyAudioEffect(
+    clipId: string,
+    effect: { id?: string; type: string; params?: Record<string, number>; enabled?: boolean },
+  ): Promise<{ clip: Clip; clipId: string; effectId: string; noiseFloor?: number; note?: string }> {
+    // An update edits the effect where it lives; a new one goes on the sound's carrier.
+    const carrier: { clip: Clip; note?: string } = effect.id ? { clip: this.audioEffectOwner(clipId, effect.id) } : this.audioCarrier(clipId);
+    const prev = effect.id ? carrier.clip.effects?.audioFilters?.find((f) => f.id === effect.id) : undefined;
+    const toggleOnly = !!prev && prev.type === effect.type && effect.params === undefined && effect.enabled !== undefined;
+    const params = toggleOnly ? undefined : await this.withMeasuredFloor(carrier.clip, effect.type, effect.params);
+    return this.mutate(() => {
+      const live = this.findClip(carrier.clip.id).clip;
+      const effectId = upsertAudioEffect(live, toggleOnly ? effect : { ...effect, params });
+      const floor = params?.floor !== undefined && effect.params?.floor === undefined ? params.floor : undefined;
+      return {
+        clip: live, clipId: live.id, effectId,
+        ...(floor !== undefined ? { noiseFloor: floor } : {}),
+        ...(carrier.note ? { note: carrier.note } : {}),
+      };
+    });
+  }
+
+  /**
+   * Fill in the noise-floor param a denoiser needs but wasn't given: measured
+   * from the clip's own audio (audio/fx.ts measureNoiseFloor), so the render is
+   * deterministic and the value shows in the inspector.
+   */
+  private async withMeasuredFloor(clip: Clip, type: string, params: Record<string, number> | undefined): Promise<Record<string, number> | undefined> {
+    if (!(NOISE_FLOOR_TYPES as readonly string[]).includes(type) || params?.floor !== undefined) return params;
+    const asset = this.clipAsset(clip);
+    if (!asset?.hasAudio) return params;
+    const fps = this.project.fps;
+    const floor = await measureNoiseFloor(asset.path, clip.sourceInFrame / fps, (clip.sourceOutFrame - clip.sourceInFrame) / fps);
+    return floor === null ? params : { ...params, floor: clamp(floor, -90, -20) };
+  }
+
+  /** Remove one audio effect by id (found on the clip or its linked audio) — one undo step. */
+  removeAudioEffect(clipId: string, effectId: string): { clip: Clip; clipId: string } {
+    const owner = this.audioEffectOwner(clipId, effectId);
+    return this.mutate(() => {
+      const live = this.findClip(owner.id).clip;
+      removeAudioEffectFrom(live, effectId);
+      return { clip: live, clipId: live.id };
+    });
+  }
+
+  /** Move one audio effect to `toIndex` (clamped) in its stack — one undo step. */
+  reorderAudioEffect(clipId: string, effectId: string, toIndex: number): { clip: Clip; clipId: string } {
+    const owner = this.audioEffectOwner(clipId, effectId);
+    return this.mutate(() => {
+      const live = this.findClip(owner.id).clip;
+      reorderAudioEffectIn(live, effectId, toIndex);
+      return { clip: live, clipId: live.id };
+    });
+  }
+
+  /**
+   * One-click "Enhance voice": add or update the enhance_voice macro on the
+   * clip that carries the sound (turning it back on if bypassed). Omitted
+   * options keep the macro's current values (defaults for a new one).
+   */
+  async enhanceVoice(
+    clipId: string,
+    opts: { strength?: number; noiseReduction?: boolean; normalize?: boolean } = {},
+  ): Promise<{ clip: Clip; clipId: string; effectId: string; params: Record<string, number>; note?: string }> {
+    const carrier = this.audioCarrier(clipId);
+    const existing = carrier.clip.effects?.audioFilters?.find((f) => f.type === "enhance_voice");
+    const cur = { ...audioDefaultsFor("enhance_voice"), ...existing?.params };
+    const kept: Record<string, number> = {
+      strength: clamp(opts.strength ?? cur.strength, 0, 1),
+      denoise: opts.noiseReduction === undefined ? cur.denoise : opts.noiseReduction ? 1 : 0,
+      normalize: opts.normalize === undefined ? cur.normalize : opts.normalize ? 1 : 0,
+    };
+    if (existing?.params?.floor !== undefined) kept.floor = existing.params.floor;
+    const params = (await this.withMeasuredFloor(carrier.clip, "enhance_voice", kept))!;
+    return this.mutate(() => {
+      const live = this.findClip(carrier.clip.id).clip;
+      const effectId = upsertAudioEffect(live, { id: existing?.id, type: "enhance_voice", params, enabled: true });
+      return { clip: live, clipId: live.id, effectId, params, ...(carrier.note ? { note: carrier.note } : {}) };
+    });
+  }
+
   /**
    * Build (and cache) an asset's perceptual visual fingerprint. If a CLIP image
    * model is installed (AIVE_CLIP_VISION) each sample also gets a semantic
@@ -2506,8 +2640,11 @@ export class EditorEngine extends EventEmitter {
    * Resolve the timeline into render-ready clips (in seconds, absolute on the
    * timeline) AND stage any files the filtergraph needs by bare name (LUTs,
    * overlay text files, fonts). Renders run with cwd = that directory.
+   * `audio: false` = a video-only render (get_frame, segments): skips the
+   * render-time audio measurements (audio/fx.ts resolveAudioFx). `signal`
+   * cancels them.
    */
-  private async stageRender(canvas: Canvas): Promise<{ clips: ResolvedRenderClip[]; cwd: string }> {
+  private async stageRender(canvas: Canvas, opts: { audio?: boolean; signal?: AbortSignal } = {}): Promise<{ clips: ResolvedRenderClip[]; cwd: string }> {
     const work = join(this.dataDir, "render");
     await mkdir(work, { recursive: true });
     const fps = this.project.fps;
@@ -2600,6 +2737,11 @@ export class EditorEngine extends EventEmitter {
         if (blendMode) effects.blendMode = blendMode;
         const maskFile = await stageClipMask(this.dataDir, clip, asset, canvas);
         if (maskFile) effects.maskFile = maskFile;
+        // Audio effects (effects/audio.ts) + the pitch fallback when FFmpeg lacks rubberband.
+        if (asset.hasAudio && e.audioFilters?.length) {
+          const src = { path: asset.path, sourceIn: f2s(clip.sourceInFrame), sourceSpan: f2s(clip.sourceOutFrame - clip.sourceInFrame), mutes };
+          Object.assign(effects, await resolveAudioFx(e.audioFilters, opts.audio === false ? undefined : src, opts.signal));
+        }
         if (effects.lut) {
           let name = lutMap.get(effects.lut);
           if (!name) {
@@ -3195,7 +3337,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<RenderResult> {
     const canvas = previewCanvas(this.canvas);
-    const { clips: staged, cwd } = await this.stageRender(canvas);
+    const { clips: staged, cwd } = await this.stageRender(canvas, { signal });
     const total = this.fullTimelineSeconds(staged);
     const segments = planSegments(staged, total);
     const mtimes = await collectMtimes(staged);
@@ -3275,7 +3417,7 @@ export class EditorEngine extends EventEmitter {
       }
 
       const canvas = previewCanvas(this.canvas);
-      const { clips: staged, cwd } = await this.stageRender(canvas);
+      const { clips: staged, cwd } = await this.stageRender(canvas, { signal });
       const hw = await pickHwEncoder("h264");
       const build = (enc: string | null) =>
         buildRenderCommand(staged, canvas, outPath, PREVIEW_PROFILE, this.resolveMusic(), undefined, { hwEncoder: enc });
@@ -3348,7 +3490,7 @@ export class EditorEngine extends EventEmitter {
     if (process.env.AIVE_SEGMENT_CACHE !== "off") {
       try {
         const canvas = previewCanvas(this.canvas);
-        const { clips: staged, cwd } = await this.stageRender(canvas);
+        const { clips: staged, cwd } = await this.stageRender(canvas, { audio: false });
         const fullTotal = this.fullTimelineSeconds(staged);
         const segments = planSegments(staged, fullTotal);
         const seg = segments.find((s) => t >= s.start && t < s.end) ?? segments[segments.length - 1];
@@ -3384,7 +3526,7 @@ export class EditorEngine extends EventEmitter {
 
     return this.jobs.start("export", `Export → ${basename(outputPath)}`, async (signal, onProgress) => {
       await mkdir(dirname(outputPath), { recursive: true });
-      const { clips: staged, cwd } = await this.stageRender(this.canvas);
+      const { clips: staged, cwd } = await this.stageRender(this.canvas, { signal });
       // Export defaults to SOFTWARE encoding for quality; `hardware: true` opts
       // into NVENC/QSV/AMF/VideoToolbox for speed (with sw retry on failure).
       const hw = settings?.hardware

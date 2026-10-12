@@ -242,6 +242,24 @@ export interface VisualEffect {
   enabled?: boolean;
 }
 
+/**
+ * A per-clip AUDIO effect (noise reduction, EQ, compressor, voice changer, …),
+ * baked into the clip's audio chain. The vocabulary, each type's params (ranges
+ * + defaults), its FFmpeg filter and its live Web Audio preview live in ONE
+ * place: the audio effect registry (effects/audio.ts, importable as
+ * `@aive/core/audio-effects`).
+ */
+export interface AudioEffect {
+  /** Stable id so the UI/AI can update, bypass, reorder or remove a single effect. */
+  id: string;
+  /** One of the registry's AUDIO_EFFECT_TYPE_IDS (unknown types are skipped). */
+  type: string;
+  /** The type's registry params. Absent = default. */
+  params?: Record<string, number>;
+  /** false = BYPASSED: kept in the stack but skipped in export and preview. Absent = on. */
+  enabled?: boolean;
+}
+
 export type OverlayPosition =
   | "top"
   | "center"
@@ -453,6 +471,12 @@ export interface ClipEffects {
    * audio/bleeps.ts. Never atempo'd — the SFX keeps its pitch at any speed.
    */
   bleeps?: Bleep[];
+  /**
+   * Audio effects (effects/audio.ts), applied in order to the clip's own audio
+   * in SOURCE time — after the bleep mutes, before speed — so speed never
+   * changes them. Never applied to bleep sound effects.
+   */
+  audioFilters?: AudioEffect[];
 }
 
 /** Built-in bleep sound effects (synthesized, see audio/sfx.ts). */
@@ -716,6 +740,12 @@ export interface ResolvedEffects {
    * segment cache. Multiplied into the clip's alpha.
    */
   maskFile?: string;
+  /** Audio effects (effects/audio.ts), baked between the mutes and atempo. */
+  audioFilters?: AudioEffect[];
+  /** FFmpeg lacks rubberband: pitch effects use the asetrate+atempo fallback. */
+  pitchFallback?: boolean;
+  /** Measured loudness (LUFS) entering each audio effect's loudness stage, by effect id (audio/fx.ts). */
+  loudness?: Record<string, number>;
 }
 
 /**

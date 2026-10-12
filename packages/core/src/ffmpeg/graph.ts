@@ -15,6 +15,7 @@ import type {
 } from "../types.js";
 import { alphaSafe, effectFilterSteps } from "../effects/registry.js";
 import { blendModeDef, type BlendMode } from "../effects/compositing.js";
+import { AUDIO_FX_RATE, audioEffectFilterSteps } from "../effects/audio.js";
 
 export interface RenderProfile {
   /** x264 preset (speed/quality tradeoff). */
@@ -679,6 +680,15 @@ function audioFilterChain(clip: ResolvedRenderClip): string {
   if (fx.mutes?.length) {
     steps.push(`aeval='val(ch)*${muteGainExpr(fx.mutes, clip.sourceIn)}':c=same`);
   }
+  // Audio effects (effects/audio.ts) in SOURCE time: after the mutes, before
+  // atempo, so speed never changes an EQ, an echo or a voice pitch. They run at
+  // a known rate; apad+atrim pins the stream to the clip's source span (echo
+  // tails would lengthen it, FFT/pitch filters can flush short), keeping the
+  // timing of transition runs and concat exact.
+  const fxSteps = audioEffectFilterSteps(fx.audioFilters, { pitchFallback: fx.pitchFallback, loudness: fx.loudness });
+  if (fxSteps.length) {
+    steps.push(`aresample=${AUDIO_FX_RATE}`, ...fxSteps, "apad", `atrim=0:${clip.sourceSpan.toFixed(6)}`, "asetpts=PTS-STARTPTS");
+  }
   if (Math.abs(speed - 1) > 1e-6) {
     for (const f of atempoFactors(speed)) steps.push(`atempo=${f}`);
   }
@@ -1163,7 +1173,11 @@ export function buildRenderCommand(
         filterParts.push(`${cur}adelay=${startMs}:all=1[${out}]`);
         cur = `[${out}]`;
       }
-      audioLabels.push(cur);
+      // Re-chunk to the base's 1024-sample frames: FFmpeg 4.4's amix can stall
+      // for good (the export never ends) on an input whose frame sizes wander —
+      // atempo after an audio effect chain, a speed-3 clip, a bleep at speed.
+      filterParts.push(`${cur}asetnsamples=n=1024:p=0[amixin${r}]`);
+      audioLabels.push(`[amixin${r}]`);
     });
 
     filterParts.push(

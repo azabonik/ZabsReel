@@ -102,6 +102,15 @@ export interface VisualEffect {
   enabled?: boolean;
 }
 
+/** Mirrors core's AudioEffect; the vocabulary + params live in `@aive/core/audio-effects`. */
+export interface AudioEffect {
+  id: string;
+  type: string;
+  params?: Record<string, number>;
+  /** false = bypassed (skipped in export and preview). Absent = on. */
+  enabled?: boolean;
+}
+
 /** A spoken-word search hit from search_transcript. */
 export interface TranscriptHit {
   assetId: string;
@@ -153,6 +162,8 @@ export interface Bleep {
 export interface ClipEffects {
   /** Bleeps censoring this clip (source seconds; follow the clip through every edit). */
   bleeps?: Bleep[];
+  /** Audio effects (source time, after bleep mutes, before speed; never on bleep sounds). */
+  audioFilters?: AudioEffect[];
   speed?: number;
   volume?: number;
   fadeInFrames?: number;

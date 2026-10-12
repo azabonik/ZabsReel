@@ -17,6 +17,11 @@ export interface SyncOpts {
   /** Linear volume 0..1 (already includes fades); 0 + muted when inaudible. */
   volume: number;
   muted: boolean;
+  /**
+   * The element plays through Web Audio (audiograph.ts): it stays unmuted at
+   * full volume and its loudness is the route's GainNode, not el.volume.
+   */
+  routed?: boolean;
 }
 
 export class MediaPool {
@@ -64,8 +69,13 @@ export class MediaPool {
   /** Drive an element toward `srcTime`, correcting drift sparingly while playing. */
   sync(el: HTMLVideoElement, o: SyncOpts): void {
     el.playbackRate = o.rate > 0 ? o.rate : 1;
-    el.muted = o.muted || o.volume <= 0;
-    el.volume = clamp01(o.volume);
+    if (o.routed) {
+      if (el.muted) el.muted = false;
+      if (el.volume !== 1) el.volume = 1;
+    } else {
+      el.muted = o.muted || o.volume <= 0;
+      el.volume = clamp01(o.volume);
+    }
     if (!Number.isFinite(o.srcTime)) return;
 
     if (o.playing) {

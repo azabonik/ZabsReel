@@ -11,6 +11,11 @@
 // masks: they flow into draw / adjust plans (a transition run uses its first
 // clip's mode, as the export), the mask staging size buckets, and the
 // mask-handle geometry (maskdraw.ts) round-trips through drawLayer's transform.
+// Last, per-clip audio effects: the Web Audio plan (chain, render-only badge
+// set, bleeps unaffected, the echo/EQ/compressor specs mirror the FFmpeg
+// filters), the linked-audio carrier the inspector edits (also after a split),
+// and that the live route starts on the Play gesture (AudioRouter with stubbed
+// Web Audio).
 //
 // Imports `@aive/core/effects` through the package exports (core's dist/), so
 // build core first (`npm run build`, or `npx tsc -b packages/core`).
@@ -30,7 +35,12 @@ import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/ma
 import {
   EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, exactOnly, previewScaleFor, vignetteFactor,
 } from "@aive/core/effects";
-import type { Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
+import type { AudioEffect, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
+import { audioCarrier, audioFxField } from "../src/audiofx";
+import { AudioRouter } from "../src/audiograph";
+import {
+  AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewPlan,
+} from "@aive/core/audio-effects";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -521,6 +531,186 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("mask handle: rotation/flip/scale map the point like drawLayer", near(qx, 1032, 1e-6) && near(qy, 96, 1e-6), `${qx},${qy}`);
   const [bx, by] = canvasToMask(xf, qx, qy);
   check("mask handle: canvas → mask inverts maskToCanvas", near(bx, 0.8, 1e-9) && near(by, 0.3, 1e-9), `${bx},${by}`);
+}
+
+// --- audio effects: the per-clip Web Audio plan (audiograph.ts plays it) ------
+{
+  console.log("\naudio effects (Web Audio plan)");
+  const afx = (id: string, type: string, extra: Partial<AudioEffect> = {}): AudioEffect => ({ id, type, ...extra });
+  const STACK: AudioEffect[] = [
+    afx("hp", "highpass", { params: { frequency: 100 } }),
+    afx("nr", "noise_reduction"),
+    afx("eq", "eq_presence", { params: { gain: 6 } }),
+    afx("ec", "echo", { enabled: false }),
+    afx("tel", "telephone"),
+  ];
+  const sfxWav: MediaAsset = asset("sfxbeep", { path: "C:/data/sfx/beep-v1.wav", hasVideo: false, duration: 3, builtinSfx: "beep" });
+  const aProject: Project = {
+    ...project,
+    assets: [vidA, aud, sfxWav],
+    tracks: [
+      track("video", 0, [clip("FX", "vidA", 0, 180, {
+        effects: { audioFilters: STACK, bleeps: [{ id: "b1", start: 1.0, end: 1.5, sound: "beep" }], speed: 2 },
+      })]),
+      track("audio", 0, [clip("DRY", "aud", 0, 180)]),
+      track("audio", 1, [clip("ONLYNR", "aud", 0, 180, { effects: { audioFilters: [afx("n2", "noise_reduction")] } })]),
+    ],
+    music: undefined,
+  };
+  const aAssets = new Map(aProject.assets.map((a) => [a.id, a]));
+  const planAt = (t: number) => activeLayersAt(aProject, aAssets, t).clips;
+  const fxClip = planAt(0.2).find((c) => c.clipId === "FX");
+  const fxPlan = fxClip?.audio?.fx;
+  check("plan: an audible clip with audio effects carries its Web Audio plan", !!fxPlan && fxPlan.nodes.length > 0);
+  check("plan: chain = highpass ×2, presence peak, telephone (bypassed echo + render-only NR skipped)",
+    fxPlan?.nodes.map((n) => (n.kind === "biquad" ? n.type : n.kind)).join() ===
+      "highpass,highpass,peaking,highpass,highpass,lowpass,lowpass,peaking,shaper,gain",
+    fxPlan?.nodes.map((n) => (n.kind === "biquad" ? n.type : n.kind)).join());
+  check("plan: render-only effects listed for the badge (noise_reduction)", fxPlan?.renderOnly.join() === "noise_reduction");
+  check("plan: highpass cutoff = the stored param", fxPlan?.nodes[0]?.kind === "biquad" && fxPlan.nodes[0].frequency === 100);
+  check("plan: the plan object is reused frame to frame (no per-frame rebuild)", planAt(0.4).find((c) => c.clipId === "FX")?.audio?.fx === fxPlan);
+  check("plan: a clip without audio effects has no fx", !planAt(0.2).find((c) => c.clipId === "DRY")?.audio?.fx);
+  const onlyNr = planAt(0.2).find((c) => c.clipId === "ONLYNR")?.audio?.fx;
+  check("plan: render-only stack → no live nodes, empty sig (never routed), badge kept",
+    !!onlyNr && onlyNr.nodes.length === 0 && onlyNr.sig === "" && onlyNr.renderOnly.join() === "noise_reduction");
+
+  // Bleeps keep working with audio effects present: the mute is in the gain,
+  // and the bleep SFX layer is never processed. (Clip at speed 2: source
+  // 1.0–1.5 s → timeline 0.5–0.75 s.)
+  const inBleep = planAt(0.62);
+  check("bleep: the clip's gain is muted inside the bleep with effects present", inBleep.find((c) => c.clipId === "FX")?.audio?.volume === 0);
+  const sfx = inBleep.find((c) => c.bleep);
+  check("bleep: the SFX layer plays, with no audio effects", !!sfx?.audio && sfx.audio.volume > 0 && !sfx.audio.fx);
+  check("bleep: outside the bleep the clip is audible", (planAt(0.3).find((c) => c.clipId === "FX")?.audio?.volume ?? 0) > 0.99);
+
+  // An edit makes a new stack array → a new plan with a new signature.
+  const edited = audioFxField([...STACK.slice(0, 2), afx("eq", "eq_presence", { params: { gain: 3 } }), ...STACK.slice(3)]).fx;
+  check("plan: editing a param changes the signature (chain rebuilt once)", !!edited && edited.sig !== fxPlan?.sig);
+  check("plan: same values → same signature", audioFxField([...STACK]).fx?.sig === fxPlan?.sig);
+
+  // The preview runs the export's maths: echo taps = the aecho delays/decays.
+  const echo: AudioEffect[] = [afx("e", "echo", { params: { delay: 300, decay: 0.5 } })];
+  const taps = audioPreviewPlan(echo).nodes[0];
+  const aecho = audioEffectFilterSteps(echo)[0] ?? "";
+  const m = /out_gain=([\d.]+):delays=([\d.|]+):decays=([\d.|]+)/.exec(aecho);
+  const outGain = Number(m?.[1]);
+  const delays = (m?.[2] ?? "").split("|").map(Number);
+  const decays = (m?.[3] ?? "").split("|").map(Number);
+  check("echo: preview taps == FFmpeg aecho (delays, decay × out_gain, dry = out_gain)",
+    taps?.kind === "taps" && taps.taps.length === delays.length && near(taps.dry, outGain, 1e-6) &&
+      taps.taps.every((t, i) => near(t.delay, delays[i]! / 1000, 1e-9) && near(t.gain, outGain * decays[i]!, 1e-6)),
+    `${aecho} vs ${JSON.stringify(taps)}`);
+  const eqStep = audioEffectFilterSteps([afx("p", "eq_presence", { params: { gain: 5, frequency: 3500 } })])[0];
+  const eqNode = audioPreviewPlan([afx("p", "eq_presence", { params: { gain: 5, frequency: 3500 } })]).nodes[0];
+  check("eq: preview peaking filter == FFmpeg equalizer (f, Q, gain)",
+    eqNode?.kind === "biquad" && eqNode.type === "peaking" && eqStep === `equalizer=f=${(3500).toFixed(6)}:t=q:w=${(1).toFixed(6)}:g=${(5).toFixed(6)}` &&
+      eqNode.frequency === 3500 && eqNode.Q === 1 && eqNode.gain === 5, `${eqStep} vs ${JSON.stringify(eqNode)}`);
+  const comp = audioPreviewPlan([afx("c", "compressor", { params: { threshold: -20, ratio: 4 } })]).nodes;
+  check("compressor: Web Audio's auto makeup is undone ((1/g)^0.6 with g = −15 dB → −9 dB)",
+    comp[1]?.kind === "gain" && near(20 * Math.log10(comp[1].gain), -9, 1e-6), JSON.stringify(comp));
+
+  // Registry: every type has a preview story; the render-only set is what the UI badges.
+  check("registry: render-only = noise_reduction, de_esser, gate, declick, normalize, pitch, chipmunk, deep, robot",
+    AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type)).map((d) => d.type).join() ===
+      "noise_reduction,de_esser,gate,declick,normalize,pitch,chipmunk,deep,robot");
+  check("registry: enhance_voice previews partly (EQ/compressor) and still badges", !audioExactOnly("enhance_voice") && audioNeedsRender("enhance_voice"));
+
+  // Linked detached audio: the inspector edits the clip that carries the sound.
+  const linked: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [clip("V", "vidA", 0, 60, { linkGroupId: "g", effects: { volume: 0 } })]),
+      track("audio", 0, [clip("A", "vidA", 0, 60, { linkGroupId: "g" })]),
+    ],
+  };
+  const v = linked.tracks[0]!.clips[0]!;
+  check("carrier: a silenced video clip's sound is its linked audio clip", audioCarrier(linked, v).id === "A");
+  check("carrier: an audible clip carries its own sound", audioCarrier(linked, linked.tracks[1]!.clips[0]!).id === "A");
+  const unmuted: Project = { ...linked, tracks: [track("video", 0, [clip("V", "vidA", 0, 60, { linkGroupId: "g" })]), linked.tracks[1]!] };
+  check("carrier: when the video clip is audible itself, it stays the target", audioCarrier(unmuted, unmuted.tracks[0]!.clips[0]!).id === "V");
+
+  // A split linked pair keeps all four halves in one link group: each video
+  // half's sound is the audio half playing the same source, not the first
+  // audio clip in the group. (clip() takes source in = 0, so set the right
+  // halves' source range explicitly.)
+  const half = (id: string, start: number, srcIn: number, extra: Partial<Clip> = {}) =>
+    clip(id, "vidA", start, 60, { linkGroupId: "g", sourceInFrame: srcIn, sourceOutFrame: srcIn + 60, ...extra });
+  const split: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [half("VL", 0, 0, { effects: { volume: 0 } }), half("VR", 60, 60, { effects: { volume: 0 } })]),
+      track("audio", 0, [half("AL", 0, 0), half("AR", 60, 60)]),
+    ],
+  };
+  const [vl, vr] = split.tracks[0]!.clips;
+  check("carrier: after a split the RIGHT video half's sound is the right audio half", audioCarrier(split, vr!).id === "AR", audioCarrier(split, vr!).id);
+  check("carrier: after a split the left video half's sound is the left audio half", audioCarrier(split, vl!).id === "AL", audioCarrier(split, vl!).id);
+  // Audio halves slid 40 frames later: the right video overlaps the LEFT audio
+  // half more on the timeline, but the right audio half plays its source.
+  const slid: Project = {
+    ...split,
+    tracks: [split.tracks[0]!, track("audio", 0, [half("AL", 40, 0), half("AR", 100, 60)])],
+  };
+  check("carrier: source overlap beats timeline overlap (slid audio halves)", audioCarrier(slid, slid.tracks[0]!.clips[1]!).id === "AR");
+  const rightSilenced: Project = {
+    ...split,
+    tracks: [split.tracks[0]!, track("audio", 0, [half("AL", 0, 0), half("AR", 60, 60, { effects: { volume: 0 } })])],
+  };
+  check("carrier: never the other half — a silenced right audio half leaves the right video as its own target",
+    audioCarrier(rightSilenced, rightSilenced.tracks[0]!.clips[1]!).id === "VR");
+}
+
+// --- the live audio route starts on the Play gesture (audiograph.ts) ---------
+{
+  console.log("\naudio route (AudioRouter, stubbed Web Audio)");
+  // Minimal stand-ins: any node accepts params/connect; the context counts creations.
+  const node = (): any => {
+    const store: Record<string, unknown> = {};
+    return new Proxy(store, {
+      get(t, k: string) {
+        if (k === "connect") return (n: unknown) => n;
+        if (k === "disconnect" || k === "start" || k === "stop") return () => {};
+        if (!(k in t)) t[k] = { value: 0, setTargetAtTime() {} };
+        return t[k];
+      },
+      set(t, k: string, v) { t[k] = v; return true; },
+    });
+  };
+  let created = 0;
+  class FakeAudioContext {
+    state = "running";
+    currentTime = 0;
+    destination = node();
+    constructor() { created++; }
+    resume() { this.state = "running"; return Promise.resolve(); }
+    close() { this.state = "closed"; return Promise.resolve(); }
+  }
+  const ctxProto = FakeAudioContext.prototype as unknown as Record<string, () => unknown>;
+  for (const m of ["createMediaElementSource", "createGain", "createBiquadFilter", "createDynamicsCompressor", "createWaveShaper", "createDelay", "createOscillator"]) ctxProto[m] = node;
+  const g = globalThis as unknown as Record<string, unknown>;
+  const listeners: Record<string, Array<() => void>> = {};
+  g.window = { addEventListener: (t: string, f: () => void) => (listeners[t] ??= []).push(f), removeEventListener() {} };
+  g.AudioContext = FakeAudioContext;
+  const tel = audioPreviewPlan([{ type: "telephone" }]);
+  const el = () => ({ muted: true, volume: 0.5 }) as unknown as HTMLMediaElement;
+
+  const before = new AudioRouter();
+  check("route: no gesture yet → the element is never routed (a suspended context would silence it)", !before.route(el(), tel) && created === 0);
+
+  // Play pressed on a plain clip (nothing wants a chain yet), then the playhead
+  // runs into a telephone clip: the context made in the gesture must be there.
+  created = 0;
+  const router = new AudioRouter();
+  router.unlock(); // doPlay's gesture, before any clip asked for a chain
+  check("route: the Play gesture creates the context even before an effect clip is reached", created === 1);
+  const e1 = el();
+  check("route: an effect clip reached during playback is routed (not played dry)", router.route(e1, tel) && router.isRouted(e1));
+  created = 0;
+  const viaClick = new AudioRouter();
+  for (const f of listeners.pointerdown ?? []) f();
+  check("route: any click/key unlocks too", created >= 1 && viaClick.route(el(), tel));
+  delete g.window;
+  delete g.AudioContext;
 }
 
 console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);

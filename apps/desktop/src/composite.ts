@@ -21,6 +21,8 @@ import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransfor
 import { previewScaleFor } from "@aive/core/effects";
 import { keyPlan, type KeyPlan } from "./keying";
 import { runBlendModes, sanitizeMask, type BlendMode, type ClipMask } from "@aive/core/compositing";
+import { audioFxField } from "./audiofx";
+import type { AudioPreviewPlan } from "@aive/core/audio-effects";
 
 /** A text overlay plus its sampled animation (position/opacity) at the current frame. */
 export type RenderOverlay = TextOverlay & { anim?: { x?: number; y?: number; opacity?: number } };
@@ -101,8 +103,11 @@ export interface ActiveClip {
     /** Shape mask in the clip's own picture space (maskdraw.ts draws it). */
     mask?: ClipMask;
   };
-  /** Present when this clip should be HEARD (asset has audio + track not muted). */
-  audio?: { volume: number };
+  /**
+   * Present when this clip should be HEARD (asset has audio + track not muted).
+   * `fx` = its audio effects' Web Audio plan (audiograph.ts plays it).
+   */
+  audio?: { volume: number; fx?: AudioPreviewPlan };
   /** Text overlays active at this instant (drawable clips only), with sampled animation. */
   overlays: RenderOverlay[];
   /** Motion graphics active at this instant (drawable clips only) — drawn over the clip. */
@@ -328,7 +333,7 @@ export function activeLayersAt(
             }
           : undefined,
         audio: audible
-          ? { volume: clamp01(vol) * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime) }
+          ? { volume: clamp01(vol) * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime), ...audioFxField(seg.clip.effects?.audioFilters) }
           : undefined,
         overlays: drawable ? activeOverlays(seg.clip.overlays, localFrames) : [],
         graphics,

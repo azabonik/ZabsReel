@@ -11,9 +11,15 @@
  */
 
 import { EFFECTS, isKeyType } from "@aive/core/effects";
+import { AUDIO_EFFECTS, AUDIO_EFFECT_CATEGORIES } from "@aive/core/audio-effects";
 
 /** The effect vocabulary, generated from the core effect registry so the guide never drifts. */
 const LOOK_EFFECTS = EFFECTS.filter((e) => !isKeyType(e.type)).map((e) => e.type).join(", ");
+
+/** Audio effect types per category, from the audio effect registry. */
+const AUDIO_FX = Object.fromEntries(
+  AUDIO_EFFECT_CATEGORIES.map((c) => [c, AUDIO_EFFECTS.filter((d) => d.category === c).map((d) => d.type).join(", ")]),
+) as Record<(typeof AUDIO_EFFECT_CATEGORIES)[number], string>;
 
 /**
  * Always-on operating manual. Keep it tight but complete: it is injected into
@@ -87,6 +93,12 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 - edit_by_transcript = "here's my script, assemble the cut": pass the kept text verbatim (quote the transcript's real wording) and it appends one clip per kept span to the base track.
 - bleep_words = auto-censor: every swear word (built-in list; words adds custom terms, includeMild adds damn/hell) becomes a bleep ON the clip — the original is muted under it and a sound (beep/quack/squeak/boing/honk) plays there. Bleeps follow their clip automatically through moves, trims, splits, speed changes and deletes, so bleep whenever you like (no need to bleep last). Run with dryRun:true first; re-running replaces a clip's bleeps. Nudge one with set_bleep (start/end in source seconds), add a missed word with add_bleep, drop one with remove_bleep; remove_bleeps restores the original audio. timeline_summary lists each clip's bleeps with their timeline frames.
 - Everything is one undo step — if the result sounds clipped, undo, then retry with a larger padFrames.
+
+## Voice & audio effects
+- enhance_voice = the one-click fix for ANY talking clip (vlog, interview, voice-over): rumble cut, noise reduction (relative to the clip's measured noise floor), de-ess, warmth/presence EQ, phrase levelling + compression, −16 LUFS. strength 0.3 subtle … 1 heavy; noiseReduction:false for clean studio audio; normalize:false keeps the clip's own level. Use it first; add individual apply_audio_effect types only for a specific problem (noise_reduction for hiss alone, highpass for rumble, eq_presence for a muffled mic, de_esser for harsh s's, compressor/limiter/normalize for level) — don't stack them on top of enhance_voice.
+- Voice changer presets (apply_audio_effect): chipmunk (pitch up), deep (pitch down), pitch (custom ±12 semitones), robot, echo, reverb, telephone, megaphone, underwater. Pitch keeps the clip's length.
+- Audio effects run in SOURCE time before speed: set_clip_speed never changes an EQ, echo or voice pitch (a chipmunk stays a chipmunk at 2×). Bleep mutes come first (censored words stay silent) and bleep sounds are never processed. A clip silenced to volume 0 with linked detached audio: the effect lands on the audio clip (see the result's note).
+- Noise reduction, normalize, pitch/robot, de-esser and gate are render-only: listen with render_preview (the live preview plays the EQ/compressor/echo/telephone-style ones). Bypass with enabled:false to A/B; remove_audio_effect / reorder_audio_effect manage the stack.
 
 ## Long-running work: jobs
 - Slow operations (export, preview, transcribe, reframe, stabilize, reverse, smooth slow motion, proxy, motion graphics) run as JOBS you can observe and cancel: list_jobs shows {id, type, label, status, fraction 0..1}; cancel_job stops one mid-flight (a canceled export deletes its partial file). Long tool calls also stream MCP progress notifications when your client requests them.
@@ -182,6 +194,11 @@ with FFmpeg.
 - **Motion graphics**: add_graphic renders an AI-authored Remotion component to
   an alpha overlay (animated titles, lower-thirds, callouts).
 - **Audio bed**: set_music (one timeline-wide track, optional ducking).
+- **Voice & audio effects**: enhance_voice (one-click voice polish), and
+  apply_audio_effect for cleanup (${AUDIO_FX.Cleanup}), tone (${AUDIO_FX.Tone}),
+  dynamics (${AUDIO_FX.Dynamics}) and voice changers (${AUDIO_FX["Voice changer"]}).
+  They run per clip before speed changes, after bleep mutes; remove_audio_effect /
+  reorder_audio_effect manage the stack, enabled:false bypasses one.
 - **Media intelligence**: organize the library with create_folder/move_asset_to_folder.
   index_transcript transcribes a whole asset so search_transcript can find a
   quote/topic across all footage (ranked hits with seconds); locate_in_timeline

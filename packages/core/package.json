@@ -18,6 +18,10 @@
       "types": "./dist/effects/compositing.d.ts",
       "default": "./dist/effects/compositing.js"
     },
+    "./audio-effects": {
+      "types": "./dist/effects/audio.d.ts",
+      "default": "./dist/effects/audio.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

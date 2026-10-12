@@ -6,6 +6,7 @@ import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js
 import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
 import { EFFECT_TYPE_IDS, describeEffectsForAI, validateEffect } from "./effects/registry.js";
 import { BLEND_MODES, MASK_SHAPES, describeBlendModesForAI } from "./effects/compositing.js";
+import { AUDIO_EFFECT_TYPE_IDS, describeAudioEffectsForAI, validateAudioEffect } from "./effects/audio.js";
 
 /**
  * The RPC surface of the editor. Every editing operation is defined exactly
@@ -634,7 +635,7 @@ export const methods = {
   },
 
   clear_clip_effects: {
-    description: "Remove all effects (speed, volume, fades, color, crop, transform, blend mode, mask) from a clip. Its bleeps are kept — use remove_bleeps for those.",
+    description: "Remove all effects (speed, volume, fades, color, crop, transform, blend mode, mask, visual and audio effects) from a clip. Its bleeps are kept — use remove_bleeps for those.",
     schema: z.object({ clipId: z.string() }).strict(),
     handler: (engine, p) => {
       engine.clearClipEffects(p.clipId);
@@ -1334,6 +1335,67 @@ export const methods = {
       "Remove EVERY bleep from the given clips (all clips if clipIds is omitted), restoring the original audio. One undo step. Returns {clearedClips, removedBleeps}.",
     schema: z.object({ clipIds: z.array(z.string()).optional() }).strict(),
     handler: (engine, p) => engine.removeBleeps(p),
+  },
+
+  // ---- per-clip audio effects (effects/audio.ts) ----------------------------
+  apply_audio_effect: {
+    description:
+      "Add an AUDIO effect to a clip's sound (baked into the clip's audio, in stack order). Effects stack — call repeatedly. " +
+      "For a quick 'make the voice sound good' use enhance_voice instead (one tuned chain); use individual effects for a specific fix or a creative voice. " +
+      "Every type with its params (ranges, defaults):\n" +
+      describeAudioEffectsForAI() +
+      "\nValues outside a range are clamped (reported in `adjusted`); an unknown param is rejected with the valid list. " +
+      "Audio effects run in the clip's SOURCE time, after bleep mutes and BEFORE speed: set_clip_speed never changes an EQ, echo time or voice pitch (a pitched voice stays pitched at 2×), and bleep sounds are never processed. " +
+      "If the clip's sound is carried by a linked detached-audio clip (this clip silenced at volume 0), the effect goes on that clip — the result's clipId/note say so. " +
+      "A NEW effect slots in at signal-chain position (enhance → cleanup → tone → dynamics → voice changer); reorder_audio_effect moves one. " +
+      "Pass effectId to UPDATE one in place (type + params REPLACED — send the full set); enabled:false BYPASSES it (kept, skipped in export and preview), {effectId, type, enabled} alone toggles it. " +
+      "Live preview plays filters/EQ/compressor/echo/telephone-style effects; [render-only] ones (noise reduction, normalize, pitch/robot, de-esser, gate) are heard in render_preview/export. " +
+      "Returns {clipId, effectId} (remove_audio_effect deletes it).",
+    schema: z
+      .object({
+        clipId: z.string(),
+        type: z.enum(AUDIO_EFFECT_TYPE_IDS),
+        params: z.record(z.number()).optional(),
+        enabled: z.boolean().optional(),
+        effectId: z.string().optional(),
+      })
+      .strict(),
+    handler: async (engine, p) => {
+      const v = validateAudioEffect({ type: p.type, params: p.params });
+      const r = await engine.applyAudioEffect(p.clipId, { id: p.effectId, type: p.type, params: v.params, enabled: p.enabled });
+      return v.adjusted.length ? { ...r, adjusted: v.adjusted } : r;
+    },
+  },
+
+  remove_audio_effect: {
+    description:
+      "Remove one audio effect by its effectId (from apply_audio_effect / enhance_voice; found on the clip or its linked detached audio). To keep it but switch it off use apply_audio_effect with enabled:false. One undo step.",
+    schema: z.object({ clipId: z.string(), effectId: z.string() }).strict(),
+    handler: (engine, p) => engine.removeAudioEffect(p.clipId, p.effectId),
+  },
+
+  reorder_audio_effect: {
+    description:
+      "Move one audio effect within its clip's audio stack (they run in order: e.g. noise reduction before a voice changer, normalize after EQ). toIndex = new 0-based position (clamped). One undo step.",
+    schema: z.object({ clipId: z.string(), effectId: z.string(), toIndex: z.number().int().min(0) }).strict(),
+    handler: (engine, p) => engine.reorderAudioEffect(p.clipId, p.effectId, p.toIndex),
+  },
+
+  enhance_voice: {
+    description:
+      "ONE-CLICK VOICE ENHANCE (CapCut-style) for dialogue, vlogs, voice-overs and interviews: adds — or updates — one tuned chain on the clip's audio: rumble cut (75 Hz) → noise reduction → de-esser → warmth + presence EQ → gentle compressor → speech levelling + loudness normalisation to −16 LUFS (true peak −1.5 dBTP). " +
+      "strength 0..1 (default 0.7 for a new one; 0.3 = subtle, 1 = heavy cleanup); noiseReduction:false skips the denoiser (clean studio audio), normalize:false keeps the clip's own level (a limiter still prevents clipping). Omitted options keep the current values. " +
+      "Use this first for any talking clip; reach for apply_audio_effect only for a specific problem (e.g. eq_presence for a muffled mic) or a creative voice. Runs before speed (unchanged by set_clip_speed). " +
+      "Applies to the linked detached-audio clip when that carries the sound (see clipId/note). The live preview plays its EQ/compressor part — render_preview to hear the denoise/normalize. One undo step. Returns {clipId, effectId, params}.",
+    schema: z
+      .object({
+        clipId: z.string(),
+        strength: z.number().min(0).max(1).optional(),
+        noiseReduction: z.boolean().optional(),
+        normalize: z.boolean().optional(),
+      })
+      .strict(),
+    handler: (engine, p) => engine.enhanceVoice(p.clipId, { strength: p.strength, noiseReduction: p.noiseReduction, normalize: p.normalize }),
   },
 
   locate_in_timeline: {

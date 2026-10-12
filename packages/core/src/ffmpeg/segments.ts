@@ -113,6 +113,12 @@ export function segmentKey(
 ): string {
   const deps = clipsIntersecting(clips, seg).map((c) => ({
     ...c,
+    // Segments are VIDEO-only: audio effects can't change a pixel, so they stay
+    // out of the key (an audio-effect edit re-renders only the audio pass).
+    // Clips without them hash exactly as before — no CACHE_VERSION bump.
+    effects: c.effects && (c.effects.audioFilters || c.effects.pitchFallback || c.effects.loudness)
+      ? { ...c.effects, audioFilters: undefined, pitchFallback: undefined, loudness: undefined }
+      : c.effects,
     startSec: Number((c.startSec - seg.start).toFixed(6)),
     mtime: mtimes[c.path] ?? -1,
     graphicMtimes: (c.graphics ?? []).map((g) => mtimes[g.path] ?? -1),

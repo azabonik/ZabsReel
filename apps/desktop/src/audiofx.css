@@ -1,0 +1,10 @@
+/* The inspector's Audio group (audiofxpanel.tsx): one-click voice toggles —
+   checkbox + label (+ "Render exact" badge), their slider under them when on —
+   then the "Voice effect" slot and the generic audio effect stack (eff-* rows
+   from styles.css). Kept in its own file, imported by the component. */
+.afx-toggle { display: flex; flex-direction: column; gap: 6px; }
+.afx-toggle-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.afx-toggle-head .check-row { font-weight: 500; }
+.afx-toggle > .rfield { padding-left: 22px; }
+.afx-voice > label { display: flex; align-items: center; gap: 8px; }
+.afx-voice > select { width: 100%; }

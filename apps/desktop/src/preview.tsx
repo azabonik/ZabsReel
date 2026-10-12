@@ -25,6 +25,7 @@ import {
 } from "./playback";
 import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composite";
 import { MediaPool } from "./mediapool";
+import { AudioRouter } from "./audiograph";
 import { isKeyBypassed, keyFrame, onKeyBypassChange } from "./glkey";
 import type { KeyPlan } from "./keying";
 import { vignetteFactor } from "@aive/core/effects";
@@ -296,6 +297,8 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
   const hostRef = useRef<HTMLDivElement>(null);
   const musicRef = useRef<HTMLAudioElement>(null);
   const poolRef = useRef<MediaPool | null>(null);
+  // Web Audio route for clips with live audio effects (audiograph.ts).
+  const routerRef = useRef<AudioRouter | null>(null);
 
   const rafRef = useRef(0);
   const redrawRef = useRef(0);
@@ -364,6 +367,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     ctx.fillRect(0, 0, W, H);
 
     const plan = activeLayersAt(projectRef.current, assetsRef.current, phRef.current);
+    const router = routerRef.current;
     // A clip's key, unless the inspector's eyedropper is picking from it.
     const liveKey = (c: ActiveClip) => (c.draw?.key && !isKeyBypassed(c.clipId) ? c.draw.key : undefined);
     pool.beginFrame();
@@ -372,7 +376,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     const paintGraphics = (gs: ActiveClip["graphics"]) => {
       for (const g of gs) {
         const gel = pool.acquire(`gfx:${g.key}`, g.path);
-        pool.sync(gel, { srcTime: g.srcTime, playing: playingRef.current, rate: 1, volume: 0, muted: true });
+        const groute = !!router?.route(gel, undefined); // a reused decoder may be routed: keep it silent
+        pool.sync(gel, { srcTime: g.srcTime, playing: playingRef.current, rate: 1, volume: 0, muted: true, routed: groute });
+        if (groute) router!.setGain(gel, 0);
         if (gel.readyState >= 2 && gel.videoWidth > 0) {
           ctx.save();
           ctx.globalAlpha = clamp01(g.opacity);
@@ -474,6 +480,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         continue;
       }
       const el = pool.acquire(c.clipId, c.path);
+      // Live audio effects play through Web Audio; the route's gain then
+      // carries the volume (fades, keyframes, bleep mutes, inaudible = 0).
+      const routed = !!router?.route(el, c.audio?.fx);
       pool.sync(el, {
         srcTime: c.srcTime,
         // A bleep about to sound is bound + parked at 0 but kept paused.
@@ -481,7 +490,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         rate: c.rate,
         volume: c.audio?.volume ?? 0,
         muted: !c.audio,
+        routed,
       });
+      if (routed) router!.setGain(el, c.audio?.volume ?? 0);
       if (c.draw && el.readyState >= 2 && el.videoWidth > 0) drawLayer(ctx, el, c.draw, W, H, liveKey(c));
       paintGraphics(c.graphics);
     }
@@ -536,9 +547,14 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     if (!hostRef.current) return;
     const pool = new MediaPool(hostRef.current, (p) => api.fileUrl(p), () => scheduleRedraw());
     poolRef.current = pool;
+    // Same lifetime as the pool: a routed element only ever sounds through its router.
+    const router = new AudioRouter();
+    routerRef.current = router;
     return () => {
       pool.destroy();
       poolRef.current = null;
+      router.dispose();
+      routerRef.current = null;
     };
   }, [api, scheduleRedraw]);
 
@@ -598,6 +614,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
 
   const doPlay = useCallback(() => {
     if (!hasClips) return;
+    routerRef.current?.unlock(); // a user gesture: let live audio effects start
     if (phRef.current >= totalRef.current - 0.02) writePh(0); // restart if parked at the end
     playingRef.current = true;
     setPlaying(true);
