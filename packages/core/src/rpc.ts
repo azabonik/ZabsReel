@@ -7,7 +7,7 @@ import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
 import { EFFECT_TYPE_IDS, describeEffectsForAI, validateEffect } from "./effects/registry.js";
 import { BLEND_MODES, MASK_SHAPES, describeBlendModesForAI } from "./effects/compositing.js";
 import { AUDIO_EFFECT_TYPE_IDS, describeAudioEffectsForAI, validateAudioEffect } from "./effects/audio.js";
-import { RAMP_AUDIO_MODES, RAMP_MAX_POINTS, RAMP_MAX_SPEED, RAMP_MIN_SPEED, RAMP_PRESETS, RAMP_PRESET_DEFS } from "./speed.js";
+import { RAMP_AUDIO_MODES, RAMP_MAX_POINTS, RAMP_MAX_SPEED, RAMP_MIN_SPEED, RAMP_PRESETS, RAMP_PRESET_DEFS, SPEED_RIPPLE_MODES } from "./speed.js";
 
 /**
  * The RPC surface of the editor. Every editing operation is defined exactly
@@ -104,6 +104,17 @@ const KEYFRAME_PROPERTIES = ["x", "y", "scale", "rotation", "opacity", "volume"]
 /** Built-in bleep sounds (synthesized, see audio/sfx.ts). */
 const BLEEP_SOUNDS = ["beep", "quack", "squeak", "boing", "honk"] as const;
 const EASE_KINDS = ["linear", "hold", "ease", "easeIn", "easeOut"] as const;
+
+/** How set_clip_speed / set_speed_ramp / clear_speed_ramp move the timeline (engine.changeSpeed). */
+const SPEED_RIPPLE_DOC =
+  "every clip AFTER it on its track moves by the change in length (sped up: later clips pull in, no black gap; slowed down: they move out, no overlap; gaps and transition overlaps after it are kept). " +
+  "LINKED clips that play the same moment on other tracks (its detached audio; a separate mic recording linked to it; a same-footage copy showing the same frame) get the SAME speed / curve (moved by their sync offset on another recording) and the clips after them move by the same amount, so picture and sound stay in sync. Called on the detached audio, the linked picture keeps its start and sets the distance. A J-cut head / L-cut tail on the audio changes length with the speed: one that would run into the next clip (or before frame 0) is trimmed to fit, and one that gets shorter leaves a short silence — both listed in splitEdits. Other halves of a split pair, a freeze-frame still and a linked B-roll or cutaway clip on another video track (even from the same footage) keep their speed (a track that holds such a linked clip ripples from the clip's OLD end, see below). A later clip's own linked clips (its detached audio or mic on another track) move with it, with the clips after them. To change only one of a linked pair, unlink_clip first. " +
+  "ripple: 'track' (default) = only those tracks — UNLINKED tracks (titles, overlays, music) and markers do NOT move, so re-check them; " +
+  "'all' = every other track ripples from the clip's OLD end too and the markers at/after it move (keeps titles, captions, overlays and music cues on the same footage). On a track that ripples from the old end, the clips starting at/after it move, except (listed in notMoved with a reason) one that straddles it and any clip that would break the edit there by moving: entering through a transition from, butted to, or running into a clip that stays, or linked to a clip that stays; " +
+  "'none' = the length changes in place and nothing moves (the linked clips still change speed) — for when you place clips yourself. " +
+  "Refused (nothing changes): a speed-up that leaves the clip no longer than its transitions (shorten/remove the transition first), and a ripple that would start a clip before frame 0, run a clip into another, break a transition or split a linked pair — the error names the clip and the fix.";
+const SPEED_RESULT_DOC =
+  "Returns {clip, durationFrames, previousDurationFrames (the clip's length now / before), deltaFrames (how far later clips moved = the picture's change in length; with ripple 'none' nothing moves), shiftedClips (how many moved), shiftedMarkers, linked:[{clipId, trackIndex, startFrame, durationFrames, previousDurationFrames}], notMoved:[{clipId, trackIndex, startFrame, endFrame, reason: straddles|transition|butted|blocked|linked}], splitEdits:[{clipId, trackIndex, side: head|tail, wasFrames, nowFrames (frames it starts before / ends after the picture; negative = inside it), trimmedFrames}]}.";
 
 function summarizeTimeline(engine: EditorEngine) {
   const project = engine.getProject();
@@ -397,16 +408,22 @@ export const methods = {
   // ---- per-clip effects -----------------------------------------------------
   set_clip_speed: {
     description:
-      "Change a clip's CONSTANT playback speed (0.25..4; 1 = normal, 2 = 2x faster, 0.5 = slow motion). Adjusts video, audio, and the clip's timeline footprint in place (later clips are NOT rippled — move them if the clip got longer/shorter). Clears any speed ramp on the clip (use set_speed_ramp for curve speed).",
-    schema: z.object({ clipId: z.string(), speed: z.number().min(0.25).max(4) }).strict(),
-    handler: (engine, p) => ({ clip: engine.setClipEffects(p.clipId, { speed: p.speed }) }),
+      "Change a clip's CONSTANT playback speed (0.25..4; 1 = normal, 2 = 2x faster, 0.5 = slow motion). Adjusts video, audio and the clip's timeline length, and the timeline RIPPLES like CapCut: " +
+      SPEED_RIPPLE_DOC +
+      " Clears any speed ramp on the clip (use set_speed_ramp for curve speed). One undo step (speed + ripple). " +
+      SPEED_RESULT_DOC,
+    schema: z.object({ clipId: z.string(), speed: z.number().min(0.25).max(4), ripple: z.enum(SPEED_RIPPLE_MODES).optional() }).strict(),
+    handler: (engine, p) => engine.setClipSpeed(p.clipId, p.speed, { ripple: p.ripple }),
   },
 
   set_speed_ramp: {
     description:
       `CURVE SPEED (speed ramp, CapCut-style): speed changes smoothly over the clip instead of one constant speed. Either a PRESET generated across the clip's CURRENT used source range — ${RAMP_PRESETS.map((p) => `${p} (${RAMP_PRESET_DEFS[p].description})`).join("; ")} — or custom POINTS [{src, speed}] (speed 0.1..10; src = ASSET seconds, or 0..1 of the clip's used range with normalized:true; speed is linear between points and constant beyond the first/last). ` +
-      "The points are anchored in SOURCE time (like bleeps), so the curve FOLLOWS the clip: a trim windows it, a split gives each half its part of the same curve, a reverse mirrors it. The clip's timeline footprint becomes the integral of 1/speed over its used range and changes IN PLACE (like set_clip_speed, later clips are NOT rippled — check timeline_summary and move/close up neighbours). " +
-      "audio: 'stretch' (default) time-stretches the clip's own sound with pitch preserved, following the curve; 'mute' silences it (and its bleeps). Replaces any constant speed (set_clip_speed later clears the ramp). Omit preset and points to change only audio on an existing ramp. Not for still images or adjustment layers; smooth_slow_motion refuses a ramped clip. A detached LINKED audio clip is not ramped with it — ramp it too (same preset, same source range) or mute it. One undo step. Returns {clip, durationFrames, previousDurationFrames}. Verify with get_frame / render_preview.",
+      "The points are anchored in SOURCE time (like bleeps), so the curve FOLLOWS the clip: a trim windows it, a split gives each half its part of the same curve, a reverse mirrors it. The clip's timeline length becomes the integral of 1/speed over its used range, and the timeline RIPPLES like set_clip_speed: " +
+      SPEED_RIPPLE_DOC +
+      " audio: 'stretch' (default) time-stretches the clip's own sound with pitch preserved, following the curve; 'mute' silences it (and its bleeps; the linked detached audio gets the same mode). Replaces any constant speed (set_clip_speed later clears the ramp). Omit preset and points to change only audio on an existing ramp (the length does not change, nothing moves). Not for still images or adjustment layers; smooth_slow_motion refuses a ramped clip. One undo step (curve + ripple). " +
+      SPEED_RESULT_DOC +
+      " Verify with get_frame / render_preview.",
     schema: z
       .object({
         clipId: z.string(),
@@ -418,6 +435,7 @@ export const methods = {
           .optional(),
         normalized: z.boolean().optional(),
         audio: z.enum(RAMP_AUDIO_MODES).optional(),
+        ripple: z.enum(SPEED_RIPPLE_MODES).optional(),
       })
       // "preset XOR points" and the src range are checked in the handler / engine: a top-level
       // .refine() would make this a ZodEffects with no `.shape` (MCP registration needs it).
@@ -426,15 +444,16 @@ export const methods = {
       if (p.points?.some((pt: { src: number }) => pt.src < 0 || (p.normalized && pt.src > 1))) {
         throw new Error("Point src must be >= 0 asset seconds (or within 0..1 with normalized:true).");
       }
-      return engine.setSpeedRamp(p.clipId, { preset: p.preset, points: p.points, normalized: p.normalized, audio: p.audio });
+      return engine.setSpeedRamp(p.clipId, { preset: p.preset, points: p.points, normalized: p.normalized, audio: p.audio, ripple: p.ripple });
     },
   },
 
   clear_speed_ramp: {
     description:
-      "Remove a clip's speed ramp (curve speed): it plays at normal speed (1x) again and its footprint changes in place (later clips are NOT rippled). One undo step. Returns {clip, durationFrames}.",
-    schema: z.object({ clipId: z.string() }).strict(),
-    handler: (engine, p) => engine.clearSpeedRamp(p.clipId),
+      "Remove a clip's speed ramp (curve speed): it plays at normal speed (1x) again — its linked detached audio too — and the timeline RIPPLES by the change in length like set_clip_speed (ripple 'track' default / 'all' / 'none', same meaning). One undo step. " +
+      SPEED_RESULT_DOC,
+    schema: z.object({ clipId: z.string(), ripple: z.enum(SPEED_RIPPLE_MODES).optional() }).strict(),
+    handler: (engine, p) => engine.clearSpeedRamp(p.clipId, { ripple: p.ripple }),
   },
 
   set_clip_volume: {
@@ -633,7 +652,7 @@ export const methods = {
 
   freeze_frame: {
     description:
-      "FREEZE FRAME (CapCut-style): hold one exact frame of a clip for durationSeconds (default 3). atSeconds = TIMELINE seconds inside the clip (0 = its first frame; speed, speed ramps and trim are respected, so it is the frame shown at that moment; on a slowed or ramped clip the cut snaps to a source-frame boundary, which in a slow section can be several timeline frames from atSeconds — e.g. up to 10 at 0.1x; read startFrame from the result). Grabs that frame as a lossless PNG (baked into the data dir), imports it as an image asset, splits the clip there and INSERTS a still clip between the halves. THE TIMELINE RIPPLES: the clip's track shifts right by durationSeconds, and LINKED clips (e.g. a detached audio clip of the same footage) are split at the same point and shifted too, so picture and sound stay aligned (the audio is silent under the freeze); clips on UNLINKED tracks (music, overlays) are not moved. The still keeps the clip's color/filters/crop/transform/opacity and has no audio. atSeconds at/before the start puts the still BEFORE the clip; at/after the end holds the last frame (no empty halves). The held frame is also the first frame of the right half, as in any NLE. If you pass the DETACHED AUDIO clip of a linked pair, the linked picture clip is frozen (a still never goes on an audio track). A freeze point inside the next clip's incoming transition overlap is refused (freeze earlier or remove_transition). One undo step. Returns {stillClipId, assetId, startFrame, durationFrames, shiftedClips}. Verify with get_frame.",
+      "FREEZE FRAME (CapCut-style): hold one exact frame of a clip for durationSeconds (default 3). atSeconds = TIMELINE seconds inside the clip (0 = its first frame; speed, speed ramps and trim are respected, so it is the frame shown at that moment; on a slowed or ramped clip the cut snaps to a source-frame boundary, which in a slow section can be several timeline frames from atSeconds — e.g. up to 10 at 0.1x; read startFrame from the result). Grabs that frame as a lossless PNG (baked into the data dir), imports it as an image asset, splits the clip there and INSERTS a still clip between the halves. THE TIMELINE RIPPLES: the clip's track shifts right by durationSeconds, and LINKED clips (e.g. a detached audio clip of the same footage) are split at the same point and shifted too, so picture and sound stay aligned (the audio is silent under the freeze); a later clip's own linked clips on other tracks (its detached audio or mic) move with it, together with the clips after them; other clips on UNLINKED tracks (music, overlays) are not moved. The still keeps the clip's color/filters/crop/transform/opacity and has no audio. atSeconds at/before the start puts the still BEFORE the clip; at/after the end holds the last frame (no empty halves). The held frame is also the first frame of the right half, as in any NLE. If you pass the DETACHED AUDIO clip of a linked pair, the linked picture clip is frozen (a still never goes on an audio track). A freeze point inside the next clip's incoming transition overlap is refused (freeze earlier or remove_transition). One undo step. Returns {stillClipId, assetId, startFrame, durationFrames, shiftedClips}. Verify with get_frame.",
     schema: z
       .object({ clipId: z.string(), atSeconds: z.number().min(0), durationSeconds: z.number().positive().max(600).optional() })
       .strict(),
@@ -669,11 +688,12 @@ export const methods = {
   },
 
   clear_clip_effects: {
-    description: "Remove all effects (speed, speed ramp, volume, fades, color, crop, transform, blend mode, mask, visual and audio effects) from a clip. Its bleeps are kept — use remove_bleeps for those.",
-    schema: z.object({ clipId: z.string() }).strict(),
+    description:
+      "Remove all effects (speed, speed ramp, volume, fades, color, crop, transform, blend mode, mask, visual and audio effects) from a clip. Its bleeps are kept — use remove_bleeps for those. Dropping a speed or speed ramp changes the clip's length: its linked detached audio goes back to 1x too and the timeline ripples like set_clip_speed (ripple 'track' default / 'all' / 'none'). Returns {ok, deltaFrames, shiftedClips, shiftedMarkers, linked, notMoved, splitEdits} (same meaning as set_clip_speed).",
+    schema: z.object({ clipId: z.string(), ripple: z.enum(SPEED_RIPPLE_MODES).optional() }).strict(),
     handler: (engine, p) => {
-      engine.clearClipEffects(p.clipId);
-      return { ok: true };
+      const r = engine.clearClipEffects(p.clipId, { ripple: p.ripple });
+      return { ok: true, deltaFrames: r.deltaFrames, shiftedClips: r.shiftedClips, shiftedMarkers: r.shiftedMarkers, linked: r.linked, notMoved: r.notMoved, splitEdits: r.splitEdits };
     },
   },
 

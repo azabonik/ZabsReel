@@ -61,6 +61,7 @@ import {
   type RampPreset,
   type SpeedRamp,
   type SpeedRampPoint,
+  type SpeedRipple,
 } from "./speed.js";
 import {
   sortKeyframes,
@@ -250,6 +251,55 @@ interface RippleCut {
   rampStart?: { trackIndex: number; source: number };
   /** A speed-ramped clip cut at `end`: its track and the source frame its remainder starts on. */
   rampEnd?: { trackIndex: number; source: number };
+}
+
+/** What a speed change did to the timeline (EditorEngine.changeSpeed). */
+export interface SpeedChangeReport {
+  /** The changed clip's footprint now and before, in frames. */
+  durationFrames: number;
+  previousDurationFrames: number;
+  /**
+   * How far the clips after it moved: the change in length of the PICTURE (the
+   * clip itself, or its linked picture when the change came from its detached
+   * audio). With ripple "none" nothing moved (shiftedClips is 0).
+   */
+  deltaFrames: number;
+  /** Clips moved by deltaFrames (the clip itself and its linked partners not counted). */
+  shiftedClips: number;
+  /** Markers moved by deltaFrames (ripple "all" only). */
+  shiftedMarkers: number;
+  /** Linked clips that got the same speed (e.g. its detached audio), as they are now. */
+  linked: { clipId: string; trackIndex: number; startFrame: number; durationFrames: number; previousDurationFrames: number }[];
+  /**
+   * Clips on tracks that ripple from the clip's OLD end that were left where
+   * they were: "straddles" = it straddles the old end; "transition" =
+   * it enters through a transition from a clip that stays; "butted" = it is
+   * butted to a clip that stays; "blocked" = moving it would run it into a clip
+   * that stays; "linked" = a clip linked to it stays.
+   */
+  notMoved: { clipId: string; trackIndex: number; startFrame: number; endFrame: number; reason: SpeedNotMovedReason }[];
+  /**
+   * Linked clips whose J-cut head (frames it starts BEFORE the picture;
+   * negative = after it) or L-cut tail (frames it ends AFTER the picture;
+   * negative = before it) changed with the speed: wasFrames / nowFrames on the
+   * timeline; trimmedFrames = cut off so it does not run into the clip next to
+   * it (or before frame 0). nowFrames < wasFrames with no trim leaves that much
+   * more silence next to it.
+   */
+  splitEdits: { clipId: string; trackIndex: number; side: "head" | "tail"; wasFrames: number; nowFrames: number; trimmedFrames: number }[];
+}
+
+/** Why a speed ripple left a clip in place (SpeedChangeReport.notMoved). */
+export type SpeedNotMovedReason = "straddles" | "transition" | "butted" | "blocked" | "linked";
+
+/** Length of the overlap of [a0, a1) and [b0, b1) (0 when they don't overlap). */
+function spanOverlap(a0: number, a1: number, b0: number, b1: number): number {
+  return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+}
+
+/** A clip's speed state (constant speed or ramp) as a comparable key; absent = 1x. */
+function speedKey(fx: ClipEffects | undefined): string {
+  return JSON.stringify([fx?.speed ?? 1, fx?.speedRamp?.points?.length ? fx.speedRamp : null]);
 }
 
 const MAX_HISTORY = 100;
@@ -1332,6 +1382,9 @@ export class EditorEngine extends EventEmitter {
   /**
    * Merge effects into a clip (speed, volume, fades, color grade, LUT, crop).
    * `color` is deep-merged so you can tweak one channel at a time.
+   * Engine-level: a `speed` / `speedRamp` in the patch changes the footprint IN
+   * PLACE (nothing moves, linked clips keep their speed). set_clip_speed goes
+   * through setClipSpeed, which ripples and keeps linked clips in sync.
    */
   setClipEffects(clipId: string, patch: ClipEffects): Clip {
     return this.mutate(() => {
@@ -1354,17 +1407,30 @@ export class EditorEngine extends EventEmitter {
   }
 
   /**
+   * CONSTANT SPEED (set_clip_speed): 0.25..4, clears any speed ramp. The clip's
+   * footprint changes and the timeline ripples (see changeSpeed); one undo step.
+   */
+  setClipSpeed(clipId: string, speed: number, opts: { ripple?: SpeedRipple } = {}): { clip: Clip } & SpeedChangeReport {
+    const s = clamp(speed, 0.25, 4);
+    return this.changeSpeed(clipId, (fx) => {
+      const next: ClipEffects = { ...(fx ?? {}), speed: s };
+      delete next.speedRamp;
+      return next;
+    }, opts.ripple);
+  }
+
+  /**
    * CURVE SPEED: give a clip a speed ramp (one undo step). `preset` generates
    * the points across the clip's CURRENT used source range; `points` are
    * explicit ({src, speed}, src in ASSET seconds — or 0..1 of the used range
    * with `normalized`); neither = keep the current curve (e.g. only change
    * `audio`). Replaces any constant `speed`. Like set_clip_speed the clip's
-   * footprint changes in place — later clips are NOT rippled.
+   * footprint changes and the timeline ripples (see changeSpeed).
    */
   setSpeedRamp(
     clipId: string,
-    opts: { preset?: RampPreset; points?: SpeedRampPoint[]; normalized?: boolean; audio?: RampAudio },
-  ): { clip: Clip; durationFrames: number; previousDurationFrames: number } {
+    opts: { preset?: RampPreset; points?: SpeedRampPoint[]; normalized?: boolean; audio?: RampAudio; ripple?: SpeedRipple },
+  ): { clip: Clip } & SpeedChangeReport {
     const fps = this.project.fps;
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "a speed ramp");
@@ -1381,10 +1447,8 @@ export class EditorEngine extends EventEmitter {
     if (!points && !current) {
       throw new Error(`Clip "${clipId}" has no speed ramp yet — pass a preset (${RAMP_PRESETS.join(", ")}) or points.`);
     }
-    const previousDurationFrames = clipDurationFrames(clip, fps);
-    const updated = this.mutate(() => {
-      const { clip: target } = this.findClip(clipId);
-      const effects = target.effects ?? (target.effects = {});
+    return this.changeSpeed(clipId, (fx) => {
+      const effects: ClipEffects = fx ?? {};
       const ramp: SpeedRamp = points
         ? { points, ...(opts.preset ? { preset: opts.preset } : {}) }
         : { ...current! };
@@ -1393,30 +1457,440 @@ export class EditorEngine extends EventEmitter {
       else delete ramp.audio;
       effects.speedRamp = ramp;
       delete effects.speed;
-      return target;
-    });
-    return { clip: updated, durationFrames: clipDurationFrames(updated, fps), previousDurationFrames };
+      return effects;
+    }, opts.ripple);
   }
 
-  /** Remove a clip's speed ramp (it plays at normal speed again; one undo step). */
-  clearSpeedRamp(clipId: string): { clip: Clip; durationFrames: number } {
+  /** Remove a clip's speed ramp (it plays at normal speed again and the timeline ripples; one undo step). */
+  clearSpeedRamp(clipId: string, opts: { ripple?: SpeedRipple } = {}): { clip: Clip } & SpeedChangeReport {
     const { clip } = this.findClip(clipId);
     if (!clip.effects?.speedRamp) throw new Error(`Clip "${clipId}" has no speed ramp to clear.`);
-    const updated = this.mutate(() => {
-      const { clip: target } = this.findClip(clipId);
-      if (target.effects) delete target.effects.speedRamp;
-      return target;
-    });
-    return { clip: updated, durationFrames: clipDurationFrames(updated, this.project.fps) };
+    return this.changeSpeed(clipId, (fx) => {
+      if (fx) delete fx.speedRamp;
+      return fx;
+    }, opts.ripple);
   }
 
-  /** Remove all effects from a clip (its bleeps are kept — see removeBleeps). */
-  clearClipEffects(clipId: string): void {
-    this.mutate(() => {
-      const { clip } = this.findClip(clipId);
-      const bleeps = clip.effects?.bleeps;
-      delete clip.effects;
-      if (bleeps?.length) clip.effects = { bleeps };
+  /**
+   * Remove all effects from a clip (its bleeps are kept — see removeBleeps).
+   * Dropping a speed or speed ramp changes its footprint: that ripples like
+   * set_clip_speed and its linked partners go back to 1x too (changeSpeed).
+   */
+  clearClipEffects(clipId: string, opts: { ripple?: SpeedRipple } = {}): { clip: Clip } & SpeedChangeReport {
+    const { clip } = this.findClip(clipId);
+    const hadSpeed = speedKey(clip.effects) !== speedKey(undefined);
+    return this.changeSpeed(clipId, (fx) => (fx?.bleeps?.length ? { bleeps: fx.bleeps } : undefined), opts.ripple, hadSpeed);
+  }
+
+  /**
+   * The linked clips that play the same moment as `clip` on OTHER tracks — its
+   * detached audio — at most one per track (the best overlap): same link
+   * group, moving media (no still or adjustment layer), and either the same
+   * asset with an overlapping SOURCE range, or another asset on a track of the
+   * other kind (picture ↔ sound, e.g. a separate mic recording) overlapping it
+   * on the timeline. On a track of the SAME kind only a copy of the same
+   * footage showing the same frame at the same moment counts (e.g. a blurred
+   * background duplicate). Not the other half of a split pair (same track, or
+   * a different source range), not a freeze_frame still, not a linked B-roll
+   * or cutaway clip on another video track (even from the same footage).
+   */
+  private speedPartners(clip: Clip, track: Track): { clip: Clip; track: Track }[] {
+    if (!clip.linkGroupId) return [];
+    const fps = this.project.fps;
+    const end = clipEndFrame(clip, fps);
+    const xClip = clipTimeMap(clip, fps);
+    const out: { clip: Clip; track: Track }[] = [];
+    for (const t of this.project.tracks) {
+      if (t === track) continue;
+      const sameKind = t.kind === track.kind;
+      let best: { clip: Clip; src: number; tl: number } | undefined;
+      for (const m of t.clips) {
+        if (m.linkGroupId !== clip.linkGroupId || m.adjustment || !m.assetId) continue;
+        const asset = this.project.assets.find((a) => a.id === m.assetId);
+        if (!asset || asset.isImage) continue;
+        const same = m.assetId === clip.assetId;
+        if (!same && sameKind) continue;
+        const src = same ? spanOverlap(clip.sourceInFrame, clip.sourceOutFrame, m.sourceInFrame, m.sourceOutFrame) : 0;
+        const tl = spanOverlap(clip.startFrame, end, m.startFrame, clipEndFrame(m, fps));
+        if (same ? src <= 0 : tl <= 0) continue;
+        if (sameKind) {
+          if (tl <= 0) continue;
+          const at = Math.max(clip.startFrame, m.startFrame);
+          const off = clipTimeMap(m, fps).sourceAt((at - m.startFrame) / fps) - xClip.sourceAt((at - clip.startFrame) / fps);
+          if (Math.abs(off) * fps >= 0.5) continue;
+        }
+        if (!best || src > best.src || (src === best.src && tl > best.tl)) best = { clip: m, src, tl };
+      }
+      if (best) out.push({ clip: best.clip, track: t });
+    }
+    return out;
+  }
+
+  /**
+   * Ripple LINKED pairs along: every clip in `moving` (all moving by the same
+   * distance) pulls in the clips linked to it — other link groups than
+   * `ownGroup` — and every clip after those on their tracks, so a later clip
+   * and its detached audio / mic recording / cutaway move as a whole. Grows
+   * `moving` in place. A clip in `fixed` never moves: the ones that would have
+   * to are returned (the caller refuses, or leaves them).
+   */
+  private rippleLinked(moving: Set<Clip>, ownGroup: string | undefined, fixed: Set<Clip>): Clip[] {
+    const order = new Map<Clip, Clip[]>();
+    for (const t of this.project.tracks) {
+      const sorted = [...t.clips].sort((a, b) => a.startFrame - b.startFrame);
+      for (const c of t.clips) order.set(c, sorted);
+    }
+    const conflicts = new Set<Clip>();
+    const queue = [...moving];
+    const add = (c: Clip): boolean => {
+      if (moving.has(c)) return true;
+      if (fixed.has(c)) {
+        conflicts.add(c);
+        return false;
+      }
+      moving.add(c);
+      queue.push(c);
+      return true;
+    };
+    while (queue.length) {
+      const c = queue.pop()!;
+      if (!c.linkGroupId || c.linkGroupId === ownGroup) continue;
+      for (const l of this.linkedClips(c)) {
+        if (moving.has(l) || !add(l)) continue;
+        const sorted = order.get(l)!;
+        for (const x of sorted.slice(sorted.indexOf(l) + 1)) add(x);
+      }
+    }
+    return [...conflicts];
+  }
+
+  /**
+   * Change a clip's SPEED (constant or ramp) as ONE undo step: `next` maps its
+   * effects to the new ones. Planned and checked first, so a refusal changes
+   * nothing.
+   *
+   * LINKED partners (speedPartners — its detached audio) get the same speed /
+   * the same curve (`syncPartners`). Ramp points are in asset seconds, so a
+   * partner on the same footage gets the very same points; one on another
+   * recording gets them moved by the sync offset between the two (its source
+   * minus the clip's at a shared timeline frame), so the same moments change
+   * speed. Positions are anchored to the PICTURE (the clip, or its linked
+   * picture when the change comes from its detached audio): it keeps its
+   * start, and with a ripple every partner is re-anchored so its sound still
+   * lines up with it. A partner's J-cut head / L-cut tail scales with the
+   * speed; one that would run into the clip next to it (or before frame 0) is
+   * trimmed to fit (splitEdits).
+   *
+   * delta = new footprint − old footprint of the PICTURE. ripple:
+   *  - "track" (default): on the picture's track and each partner's track
+   *    every clip AFTER it in track order moves by delta (gaps and transition
+   *    overlaps after it are kept). Other tracks holding a linked clip (no
+   *    partner) ripple from the picture's OLD end. Unlinked tracks and
+   *    markers stay put (like freeze_frame).
+   *  - "all": every other track ripples from the OLD end too, and the
+   *    markers at/after it move.
+   *  - "none": in place, nothing moves (the partners still change speed).
+   * A track that ripples from the old end moves its clips that start at/after
+   * it, except (notMoved) a clip that straddles it and the clips that cannot
+   * move without breaking the edit there: entering through a transition from,
+   * butted to, or running into a clip that stays, or linked to a clip that
+   * stays. A clip that moves takes its own linked clips (another pair) and
+   * the clips after those along (rippleLinked).
+   *
+   * Refused: a clip (or partner) that gets no longer than its transitions; a
+   * plan that would start a clip before frame 0, run one into another, break
+   * a transition, or split a linked pair (one must move, the other cannot).
+   */
+  private changeSpeed(
+    clipId: string,
+    next: (fx: ClipEffects | undefined) => ClipEffects | undefined,
+    ripple: SpeedRipple = "track",
+    syncPartners = true,
+  ): { clip: Clip } & SpeedChangeReport {
+    const fps = this.project.fps;
+    const { track, clip } = this.findClip(clipId);
+    const moves = ripple !== "none";
+    const newFx = next(structuredClone(clip.effects));
+
+    // The clip and its linked partners; `ref` = the picture everything is anchored to.
+    let ref = { clip, track };
+    let group = syncPartners ? [ref, ...this.speedPartners(clip, track)] : [ref];
+    if (syncPartners && track.kind === "audio") {
+      const pic = group.find((g) => g.track.kind === "video");
+      if (pic) {
+        ref = pic;
+        group = [pic, ...this.speedPartners(pic.clip, pic.track).filter((g) => g.track !== track), { clip, track }];
+      }
+    }
+    const groupId = clip.linkGroupId;
+
+    // Sync offset of m against `base` in asset seconds (m's source minus base's at a shared frame).
+    const offsetTo = (m: Clip, base: Clip) => {
+      const at = Math.max(base.startFrame, m.startFrame);
+      const d = clipTimeMap(m, fps).sourceAt((at - m.startFrame) / fps) - clipTimeMap(base, fps).sourceAt((at - base.startFrame) / fps);
+      return Math.round(d * 1e6) / 1e6;
+    };
+    // A partner's effects: its own, with the clip's new speed / curve (moved by the sync offset).
+    const partnerFx = (m: Clip): ClipEffects | undefined => {
+      const fx: ClipEffects = { ...(m.effects ?? {}) };
+      delete fx.speed;
+      delete fx.speedRamp;
+      if (newFx?.speed !== undefined) fx.speed = newFx.speed;
+      if (newFx?.speedRamp) {
+        const offset = offsetTo(m, clip);
+        fx.speedRamp = offset ? mapRampPoints(newFx.speedRamp, (s) => s + offset) : structuredClone(newFx.speedRamp);
+      }
+      return Object.keys(fx).length || m.effects ? fx : undefined;
+    };
+
+    const refFx = ref.clip === clip ? newFx : partnerFx(ref.clip);
+    const refWas = clipDurationFrames(ref.clip, fps);
+    const refDur = clipDurationFrames({ ...ref.clip, effects: refFx }, fps);
+    const delta = refDur - refWas;
+    const oldEnd = ref.clip.startFrame + refWas;
+    const newRefEnd = ref.clip.startFrame + refDur;
+    const xRef = clipTimeMap({ ...ref.clip, effects: refFx }, fps);
+    const sortedClips = (t: Track) => [...t.clips].sort((a, b) => a.startFrame - b.startFrame);
+
+    // Refuse a clip that would be no longer than its transitions.
+    const checkTransitions = (t: Track, c: Clip, dur: number, was: number) => {
+      if (!moves || dur >= was) return;
+      const ordered = sortedClips(t);
+      const i = ordered.indexOf(c);
+      const inF = i > 0 && c.transition ? c.transition.durationFrames : 0;
+      const outF = ordered[i + 1]?.transition?.durationFrames ?? 0;
+      if (dur <= inF + outF) {
+        throw new Error(
+          `At the new speed clip "${c.id}" would be ${dur} frames long — not longer than its transitions (${inF} frames in + ${outF} out). Shorten or remove the transition first (set_transition / remove_transition), or pick a slower speed.`,
+        );
+      }
+    };
+
+    // Plan every member: new effects, (re-anchored) start, trims of a J-cut head / L-cut tail.
+    const splitEdits: SpeedChangeReport["splitEdits"] = [];
+    const plans = group.map(({ clip: m, track: t }) => {
+      const effects = m === clip ? newFx : m === ref.clip ? refFx : partnerFx(m);
+      const was = clipDurationFrames(m, fps);
+      const plan = { clip: m, track: t, effects, startFrame: m.startFrame, sourceInFrame: m.sourceInFrame, sourceOutFrame: m.sourceOutFrame, was, dur: 0 };
+      const footprint = (srcIn: number, srcOut: number) => clipDurationFrames({ ...m, effects, sourceInFrame: srcIn, sourceOutFrame: srcOut }, fps);
+      if (m !== ref.clip && moves) {
+        const off = offsetTo(m, ref.clip);
+        const startAt = (srcIn: number) => ref.clip.startFrame + Math.round(xRef.timelineAt(srcIn / fps - off) * fps);
+        const ordered = sortedClips(t);
+        const i = ordered.indexOf(m);
+        const prev = ordered[i - 1];
+        const after = ordered[i + 1];
+        const oldHead = ref.clip.startFrame - m.startFrame;
+        const oldTail = clipEndFrame(m, fps) - oldEnd;
+        // J-cut head: re-anchored; never before frame 0 or into the clip before it (which stays).
+        plan.startFrame = startAt(m.sourceInFrame);
+        const lo = prev ? Math.min(m.startFrame, clipEndFrame(prev, fps) - (m.transition?.durationFrames ?? 0)) : 0;
+        let trimmedHead = 0;
+        if (plan.startFrame < lo) {
+          const from = plan.startFrame;
+          let s = m.sourceInFrame;
+          while (s < m.sourceOutFrame - MIN_CLIP_FRAMES && startAt(s) < lo) s++;
+          plan.sourceInFrame = s;
+          plan.startFrame = startAt(s);
+          trimmedHead = plan.startFrame - from;
+        }
+        if (prev && m.transition && plan.startFrame !== m.startFrame) {
+          throw new Error(
+            `Linked clip "${m.id}" (track ${t.index}) starts before the picture (a J-cut) and enters through a ${m.transition.durationFrames}-frame transition: at the new speed it would start at frame ${plan.startFrame} instead of ${m.startFrame}, breaking that transition. Remove the transition first (remove_transition), trim the head (trim_clip), or unlink_clip it.`,
+          );
+        }
+        // L-cut tail: never into the clip after it (that clip moves by delta); a transition into it stays exact.
+        const tr = after?.transition?.durationFrames ?? 0;
+        let trimmedTail = 0;
+        if (after) {
+          const hi = after.startFrame + delta + tr + Math.max(0, clipEndFrame(m, fps) - (after.startFrame + tr));
+          if (plan.startFrame + footprint(plan.sourceInFrame, plan.sourceOutFrame) > hi) {
+            const from = plan.startFrame + footprint(plan.sourceInFrame, plan.sourceOutFrame);
+            let s = plan.sourceOutFrame;
+            while (s > plan.sourceInFrame + MIN_CLIP_FRAMES && plan.startFrame + footprint(plan.sourceInFrame, s) > hi) s--;
+            plan.sourceOutFrame = s;
+            trimmedTail = from - (plan.startFrame + footprint(plan.sourceInFrame, s));
+          }
+          const endNow = plan.startFrame + footprint(plan.sourceInFrame, plan.sourceOutFrame);
+          if (tr && Math.abs(endNow - hi) > 1) {
+            throw new Error(
+              `Linked clip "${m.id}" (track ${t.index}) runs past the picture (an L-cut) into a ${tr}-frame transition to clip "${after.id}": at the new speed it would end at frame ${endNow} instead of ${hi}, breaking that transition. Remove the transition first (remove_transition), trim the tail (trim_clip), or unlink_clip it.`,
+            );
+          }
+        }
+        const newHead = ref.clip.startFrame - plan.startFrame;
+        const newTail = plan.startFrame + footprint(plan.sourceInFrame, plan.sourceOutFrame) - newRefEnd;
+        if (oldHead !== newHead || trimmedHead > 0) splitEdits.push({ clipId: m.id, trackIndex: t.index, side: "head", wasFrames: oldHead, nowFrames: newHead, trimmedFrames: trimmedHead });
+        if (oldTail !== newTail || trimmedTail > 0) splitEdits.push({ clipId: m.id, trackIndex: t.index, side: "tail", wasFrames: oldTail, nowFrames: newTail, trimmedFrames: trimmedTail });
+      }
+      plan.dur = footprint(plan.sourceInFrame, plan.sourceOutFrame);
+      checkTransitions(t, m, plan.dur, was);
+      return plan;
+    });
+    const planOf = new Map(plans.map((p) => [p.clip, p]));
+
+    // Who moves by delta (on the timeline as it is now).
+    const moving = new Set<Clip>();
+    const notMoved: SpeedChangeReport["notMoved"] = [];
+    if (moves && delta !== 0) {
+      const anchorTracks = new Set(plans.map((p) => p.track));
+      const fixed = new Set<Clip>(plans.map((p) => p.clip));
+      for (const p of plans) {
+        const ordered = sortedClips(p.track);
+        const i = ordered.indexOf(p.clip);
+        ordered.slice(0, i).forEach((c) => fixed.add(c));
+        ordered.slice(i + 1).forEach((c) => moving.add(c));
+      }
+      const refuseSplit = (stuck: Clip[]) => {
+        if (!stuck.length) return;
+        const c = stuck[0];
+        throw new Error(
+          `Clip "${c.id}" (track ${this.findClip(c.id).track.index}) is linked to a clip that moves with this ripple, but it sits before the speed-changed clip on its track and cannot move with it — they would fall out of sync. unlink_clip it, or pass ripple:'none' and place the clips yourself.`,
+        );
+      };
+      refuseSplit(this.rippleLinked(moving, groupId, fixed));
+      const forced = new Set(moving);
+
+      // Tracks that ripple from the OLD end: walk them in order (moving / staying clips).
+      const linkedTracks = new Set(this.project.tracks.filter((t) => groupId && t.clips.some((c) => c.linkGroupId === groupId)));
+      const fromEnd = this.project.tracks.filter((t) => !anchorTracks.has(t) && (ripple === "all" || linkedTracks.has(t)));
+      const heldByLink = new Set<Clip>();
+      for (let round = 0; round <= 64; round++) {
+        moving.clear();
+        forced.forEach((c) => moving.add(c));
+        notMoved.length = 0;
+        for (const t of fromEnd) {
+          let heldEnd = -Infinity;
+          let prev: Clip | undefined;
+          let prevHeld = false;
+          let chain = false; // the previous clip stays and reaches past the old end
+          for (const c of sortedClips(t)) {
+            const e = clipEndFrame(c, fps);
+            let reason: SpeedNotMovedReason | undefined;
+            let goes = false;
+            if (forced.has(c)) goes = true;
+            else if (c.startFrame < oldEnd) {
+              if (e > oldEnd) reason = "straddles";
+            } else if (heldByLink.has(c)) reason = "linked";
+            else if (c.transition && prevHeld) reason = "transition";
+            else if (chain && prev && c.startFrame <= clipEndFrame(prev, fps)) reason = "butted";
+            else if (delta < 0 && c.startFrame + delta < heldEnd) reason = "blocked";
+            else goes = true;
+            if (goes) {
+              moving.add(c);
+              prevHeld = false;
+              chain = false;
+            } else {
+              heldEnd = Math.max(heldEnd, e);
+              prevHeld = true;
+              chain = c.startFrame < oldEnd ? e > oldEnd : true;
+              if (reason) notMoved.push({ clipId: c.id, trackIndex: t.index, startFrame: c.startFrame, endFrame: e, reason });
+            }
+            prev = c;
+          }
+        }
+        // A linked pair moves as a whole or not at all.
+        let changed = false;
+        for (const c of moving) {
+          if (forced.has(c) || !c.linkGroupId || c.linkGroupId === groupId || heldByLink.has(c)) continue;
+          if (this.linkedClips(c).some((l) => !moving.has(l))) {
+            heldByLink.add(c);
+            changed = true;
+          }
+        }
+        if (!changed) break;
+      }
+    }
+
+    // Check the result on every track before changing anything.
+    if (moves) {
+      const changed = (c: Clip) => planOf.has(c) || moving.has(c);
+      for (const t of this.project.tracks) {
+        if (!t.clips.some(changed)) continue;
+        const span = new Map(
+          t.clips.map((c) => {
+            const was0 = c.startFrame;
+            const was1 = clipEndFrame(c, fps);
+            const now0 = planOf.get(c)?.startFrame ?? (moving.has(c) ? was0 + delta : was0);
+            return [c, { was0, was1, now0, now1: now0 + (planOf.get(c)?.dur ?? was1 - was0) }];
+          }),
+        );
+        const startOf = (c: Clip) => span.get(c)!.now0;
+        const endOf = (c: Clip) => span.get(c)!.now1;
+        const was = sortedClips(t);
+        const now = [...t.clips].sort((a, b) => startOf(a) - startOf(b));
+        // A clip entering through a transition keeps the same clip before it, overlapped by the same frames.
+        const nowIdx = new Map(now.map((c, i) => [c, i]));
+        const joins = (a: Clip, b: Clip) => !!b.transition && now[nowIdx.get(b)! - 1] === a;
+        now.forEach((n, i) => {
+          if (changed(n) && startOf(n) < 0) {
+            throw new Error(`At the new speed clip "${n.id}" (track ${t.index}) would start before frame 0 (at ${startOf(n)}). Move it later first, unlink_clip it, or pass ripple:'none'.`);
+          }
+          const p = now[i - 1];
+          if (!n.transition || !p || !(changed(n) || changed(p))) return;
+          const ovNow = endOf(p) - startOf(n);
+          const ovWas = span.get(p)!.was1 - n.startFrame;
+          if (was[was.indexOf(n) - 1] !== p || Math.abs(ovNow - ovWas) > 1) {
+            throw new Error(
+              `At the new speed the ${n.transition.durationFrames}-frame transition into clip "${n.id}" (track ${t.index}) would no longer line up with the clip before it. Remove the transition first (remove_transition), or pass ripple:'none' and place the clips yourself.`,
+            );
+          }
+        });
+        // No clip runs further into another than it already did.
+        for (const n of t.clips) {
+          if (!changed(n)) continue;
+          for (const p of t.clips) {
+            if (p === n || joins(p, n) || joins(n, p)) continue;
+            const sp = span.get(p)!;
+            const sn = span.get(n)!;
+            const ovNow = spanOverlap(sp.now0, sp.now1, sn.now0, sn.now1);
+            if (ovNow > spanOverlap(sp.was0, sp.was1, sn.was0, sn.was1)) {
+              throw new Error(
+                `At the new speed clip "${n.id}" and clip "${p.id}" (track ${t.index}) would overlap by ${ovNow} frames. Make room first (move_clip / trim_clip), unlink_clip the clip that is in the way, or pass ripple:'none' and place the clips yourself.`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    return this.mutate(() => {
+      const setEffects = (c: Clip, fx: ClipEffects | undefined) => {
+        if (fx) c.effects = fx;
+        else delete c.effects;
+      };
+      for (const p of plans) {
+        setEffects(p.clip, p.effects);
+        p.clip.startFrame = p.startFrame;
+        p.clip.sourceInFrame = p.sourceInFrame;
+        p.clip.sourceOutFrame = p.sourceOutFrame;
+      }
+      for (const c of moving) c.startFrame += delta;
+      let shiftedMarkers = 0;
+      if (ripple === "all" && delta !== 0) {
+        for (const m of this.project.markers ?? []) {
+          if (m.frame >= oldEnd) {
+            m.frame = Math.max(0, m.frame + delta);
+            shiftedMarkers++;
+          }
+        }
+        this.project.markers?.sort((a, b) => a.frame - b.frame);
+      }
+      for (const t of this.project.tracks) EditorEngine.sortTrack(t);
+      const named = planOf.get(clip)!;
+      return {
+        clip,
+        durationFrames: named.dur,
+        previousDurationFrames: named.was,
+        deltaFrames: delta,
+        shiftedClips: moving.size,
+        shiftedMarkers,
+        linked: plans
+          .filter((p) => p.clip !== clip)
+          .map((p) => ({ clipId: p.clip.id, trackIndex: p.track.index, startFrame: p.clip.startFrame, durationFrames: p.dur, previousDurationFrames: p.was })),
+        notMoved,
+        splitEdits,
+      };
     });
   }
 
@@ -4342,15 +4816,15 @@ export class EditorEngine extends EventEmitter {
         const r = m.id === target.id ? this.splitOne(m.id, c, false, srcFrame) : this.splitOne(m.id, splitAbs - m.startFrame, false);
         if (r) rightHalves.add(r.right);
       }
-      let shifted = 0;
+      const moving = new Set<Clip>();
+      const staying = new Set<Clip>();
       for (const t of tracks) {
-        for (const x of t.clips) {
-          if (x.startFrame >= splitAbs || later.has(x.id) || rightHalves.has(x.id)) {
-            x.startFrame += stillFrames;
-            shifted++;
-          }
-        }
+        for (const x of t.clips) (x.startFrame >= splitAbs || later.has(x.id) || rightHalves.has(x.id) ? moving : staying).add(x);
       }
+      // A later clip's own linked clips (another pair) on other tracks move with it.
+      this.rippleLinked(moving, target.linkGroupId, staying);
+      for (const x of moving) x.startFrame += stillFrames;
+      const shifted = moving.size;
       const effects = structuredClone(target.effects) ?? {};
       for (const k of ["speed", "speedRamp", "volume", "fadeInFrames", "fadeOutFrames", "bleeps"] as const) delete effects[k];
       const stillClip: Clip = {

@@ -180,6 +180,22 @@ npx tsx packages/core/scripts/smoke-time.ts
 npx tsx packages/core/scripts/smoke-ramps.ts
 RAMPS_BASELINE_REF=dd38598 npx tsx packages/core/scripts/smoke-ramps.ts
 
+# Speed changes ripple (CapCut-style): set_clip_speed 2x / 0.5x, every ramp preset,
+# clear_speed_ramp, clear_clip_effects and an audio-only ramp change move the
+# clips after the clip by exactly the change in length (butted stays butted, gaps
+# and a cross-dissolve overlap are kept), the detached linked audio gets the same
+# speed / curve and its later clips move too; ripple "track" leaves unlinked
+# tracks and markers alone, "all" moves the title and late markers (a straddling
+# music bed stays, listed in notMoved), "none" moves nothing; one undo restores
+# everything; a speed-up shorter than its transition is refused; freeze halves,
+# a linked mic recording (curve moved by its sync offset), a J-cut head, smooth
+# slow motion and reverse; a later clip's own linked mic moves with it (freeze too);
+# L-cut tails / J-cut heads changed from either side stay in sync (trimmed to fit,
+# reported in splitEdits); a straddler holds the clips joined to it; split pairs
+# and collisions are refused; exports have no black gap after montage and no
+# overlap after bullet (self-contained, frame-index-coded media).
+npx tsx packages/core/scripts/smoke-ripple.ts
+
 # Text-based editing: word-level transcripts, delete_transcript_ranges,
 # tighten_talk, edit_by_transcript (self-contained — uses the checked-in fixture)
 npx tsx packages/core/scripts/smoke-textedit.ts

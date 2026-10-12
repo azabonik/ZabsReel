@@ -26,9 +26,10 @@ async function main() {
   // Expectations derive from the PROBED durations so any test media works.
   console.log(`baseline timeline: ${engine.timelineDuration().toFixed(2)}s (expect ~${(a.duration + b.duration).toFixed(1)})`);
 
-  // Speed up clip A by 2x -> its OWN footprint halves. In the absolute
-  // (multi-track) model this does NOT ripple clip B — B keeps its position, so a
-  // gap opens. Verify A's footprint shrank rather than the whole-timeline length.
+  // Speed up clip A by 2x -> its OWN footprint halves. engine.setClipEffects is
+  // the in-place primitive: it does NOT ripple clip B — B keeps its position, so a
+  // gap opens (set_clip_speed / engine.setClipSpeed ripple; see smoke-ripple.ts).
+  // Verify A's footprint shrank rather than the whole-timeline length.
   engine.setClipEffects(c1.id, { speed: 2 });
   const aDur = engine.clipDuration(c1);
   const wantA = a.duration / 2;

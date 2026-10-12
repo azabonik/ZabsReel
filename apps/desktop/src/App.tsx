@@ -1681,7 +1681,7 @@ function ClipInspector(props: InspectorProps) {
                       </select>
                     </div>
                   )}
-                  <span className="field-hint">Freeze ripples the timeline. Reverse / smooth bake new media; Undo restores.</span>
+                  <span className="field-hint">Speed changes and Freeze ripple the timeline (later clips move, linked audio follows). Reverse / smooth bake new media; Undo restores.</span>
                 </div>
               )}
             </div>

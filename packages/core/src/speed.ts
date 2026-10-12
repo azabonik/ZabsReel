@@ -41,6 +41,16 @@ export type RampPreset = (typeof RAMP_PRESETS)[number];
 export const RAMP_AUDIO_MODES = ["stretch", "mute"] as const;
 export type RampAudio = (typeof RAMP_AUDIO_MODES)[number];
 
+/**
+ * How a speed change (set_clip_speed, set_speed_ramp, clear_speed_ramp,
+ * clear_clip_effects) moves the rest of the timeline (engine.changeSpeed):
+ * "track" (default) = the clips after it on its own track and on its linked
+ * partners' tracks; "all" = also every other track and the markers, from the
+ * clip's old end; "none" = in place, nothing moves.
+ */
+export const SPEED_RIPPLE_MODES = ["track", "all", "none"] as const;
+export type SpeedRipple = (typeof SPEED_RIPPLE_MODES)[number];
+
 /** One control point of a speed curve. */
 export interface SpeedRampPoint {
   /** ASSET seconds (source time, like bleeps). */
