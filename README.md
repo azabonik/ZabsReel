@@ -116,7 +116,7 @@ A full multi-track, frame-based editing workstation. Every capability is exposed
 - **Performance** — segment render cache (small edits re-render only the touched seconds; `get_frame` verify-loops are near-instant), fast affine transform baking, and automatic GPU encoding for previews (opt-in for exports).
 - **Output** — real-time Canvas2D compositor preview, proxy media for fast preview, platform export presets with loudness normalization (-14/-16 LUFS), and sidecar SRT/VTT caption export/import.
 
-**94 MCP tools** in total, all processing local and offline via FFmpeg.
+**100+ MCP tools** in total, all processing local and offline via FFmpeg.
 
 ## Interchange (OpenTimelineIO)
 

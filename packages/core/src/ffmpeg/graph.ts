@@ -13,7 +13,7 @@ import type {
   RGBWheel,
   VisualEffect,
 } from "../types.js";
-import { effectFilterSteps } from "../effects/registry.js";
+import { alphaSafe, effectFilterSteps } from "../effects/registry.js";
 import { blendModeDef, type BlendMode } from "../effects/compositing.js";
 
 export interface RenderProfile {
@@ -289,6 +289,11 @@ function safeCurve(pts: string): string {
   return clean;
 }
 
+/** FFmpeg `eq` for the basic colour grade. Wrap with alphaSafe(): eq drops alpha (probed on FFmpeg 4.4; colorbalance/hue/curves/lut3d/colortemperature keep it). */
+function eqStep(c: { brightness?: number; contrast?: number; saturation?: number; gamma?: number }): string {
+  return `eq=brightness=${c.brightness ?? 0}:contrast=${c.contrast ?? 1}:saturation=${c.saturation ?? 1}:gamma=${c.gamma ?? 1}`;
+}
+
 /**
  * Bake the richer secondary grade (white balance, lift/gamma/gain color wheels,
  * hue, tone curves) into FFmpeg filter steps. Applied AFTER the basic `eq` and
@@ -529,9 +534,8 @@ function emitClipVideoParts(
 
   if (fx.color) {
     const c = fx.color;
-    steps.push(
-      `eq=brightness=${c.brightness ?? 0}:contrast=${c.contrast ?? 1}:saturation=${c.saturation ?? 1}:gamma=${c.gamma ?? 1}`,
-    );
+    // eq has no alpha-capable pixel format (it would turn transparent letterbox bars opaque).
+    steps.push(...alphaSafe([eqStep(c)], `ceq${inputIdx}`));
   }
 
   // Richer secondary grade (wheels / white balance / hue / curves) after the
@@ -1053,9 +1057,7 @@ export function buildRenderCommand(
       const steps: string[] = [];
       if (fx.color) {
         const cc = fx.color;
-        steps.push(
-          `eq=brightness=${cc.brightness ?? 0}:contrast=${cc.contrast ?? 1}:saturation=${cc.saturation ?? 1}:gamma=${cc.gamma ?? 1}`,
-        );
+        steps.push(...alphaSafe([eqStep(cc)], `aeq${adjustOps.length}`));
       }
       if (fx.grade) steps.push(...colorGradeSteps(fx.grade));
       if (fx.lut) steps.push(`lut3d=${fx.lut}`);

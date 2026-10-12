@@ -20,8 +20,9 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 4: vignette honours its amount (the effect registry) and keeps alpha.
  * 5: overlay windows open half a frame early (no black first frame at cuts).
  * 6: sharpen / denoise / edges keep alpha (alphaSafe), plus the look and style effects.
+ * 7: color_grade's eq keeps alpha (alphaSafe): graded letterboxed / keyed / masked clips stay transparent.
  */
-const CACHE_VERSION = 6;
+const CACHE_VERSION = 7;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

@@ -1,5 +1,5 @@
 import { readdir, stat, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 /**
  * Disk garbage collection for the engine's data dir. Render artifacts
@@ -14,6 +14,12 @@ import { join } from "node:path";
  *                   source right after transcription; this catches strays)
  *   cache/segments/ LRU-pruned so the whole prunable set fits `maxBytes`
  *
+ * masks/         shape-mask PNGs are content-addressed and re-rendered on
+ *                   demand, so any mask-*.png NOT named in `keepMasks` (the
+ *                   set the project, its undo/redo history and the preview
+ *                   canvas can ask for) and older than MASK_GRACE_MS is
+ *                   deleted. Without `keepMasks` masks/ is left alone.
+ *
  * proxies/ and baked/ are EXEMPT — projects reference those files.
  * Total budget: AIVE_CACHE_MAX_MB (default 2048).
  */
@@ -21,6 +27,8 @@ import { join } from "node:path";
 export interface GcOptions {
   /** Total byte budget across prunable dirs (default 2 GiB / AIVE_CACHE_MAX_MB). */
   maxBytes?: number;
+  /** Mask PNG file names still referenced (see blendmask.referencedMaskNames). Omit to skip mask pruning. */
+  keepMasks?: Set<string>;
 }
 
 export interface GcReport {
@@ -29,6 +37,8 @@ export interface GcReport {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** A fresh mask may belong to a render that is still staging; never prune younger ones. */
+export const MASK_GRACE_MS = 60 * 60 * 1000;
 
 export function cacheBudgetBytes(): number {
   const mb = Number(process.env.AIVE_CACHE_MAX_MB);
@@ -96,6 +106,19 @@ export async function pruneDataDir(dataDir: string, opts: GcOptions = {}): Promi
       for (const f of await listFiles(join(dataDir, dir))) {
         if (f.path.toLowerCase().endsWith(".wav") && f.mtimeMs < cutoff) await drop(f, report);
         else kept.push(f);
+      }
+    }
+
+    // Orphan shape-mask PNGs (and stale temp files from a crashed write).
+    if (opts.keepMasks) {
+      const maskCutoff = Date.now() - MASK_GRACE_MS;
+      for (const f of await listFiles(join(dataDir, "masks"))) {
+        const name = basename(f.path);
+        const isMask = /^mask-[0-9a-f]+\.png$/.test(name);
+        const isTmp = /^mask-[0-9a-f]+\.png\.tmp-/.test(name);
+        if ((isMask && !opts.keepMasks.has(name)) || isTmp) {
+          if (f.mtimeMs < maskCutoff) await drop(f, report);
+        }
       }
     }
 

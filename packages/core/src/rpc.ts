@@ -645,23 +645,25 @@ export const methods = {
   // ---- per-clip transform + keyframe animation ------------------------------
   set_clip_transform: {
     description:
-      "Position/scale/rotate a clip's picture within the output canvas (after it's fit to the canvas). x,y = offset as a FRACTION of canvas width/height (0 = centered, +x right, +y down; e.g. x:0.25 nudges a quarter-width right). scale = multiplier (1 = fit, 0.5 = half-size picture-in-picture, 2 = zoom in). rotation = degrees clockwise. flipH/flipV = mirror. opacity = 0..1. Only the fields you pass change; pass {} fields to leave others. Combine with set_keyframes to ANIMATE any of x/y/scale/rotation/opacity over time.",
+      "Position/scale/rotate a clip's picture within the output canvas (after it's fit to the canvas). x,y = offset as a FRACTION of canvas width/height (0 = centered, +x right, +y down; e.g. x:0.25 nudges a quarter-width right). scale = multiplier (1 = fit, 0.5 = half-size picture-in-picture, 2 = zoom in). rotation = degrees clockwise. flipH/flipV = mirror. opacity = 0..1. Only the fields you pass change; omitted fields keep their stored value. Pass null for a field to RESET it to default, or reset:true to reset the whole transform and opacity. Combine with set_keyframes to ANIMATE any of x/y/scale/rotation/opacity over time.",
     schema: z
       .object({
         clipId: z.string(),
-        x: z.number().optional(),
-        y: z.number().optional(),
-        scale: z.number().min(0.01).max(16).optional(),
-        rotation: z.number().optional(),
-        flipH: z.boolean().optional(),
-        flipV: z.boolean().optional(),
-        opacity: z.number().min(0).max(1).optional(),
+        x: z.number().nullable().optional(),
+        y: z.number().nullable().optional(),
+        scale: z.number().min(0.01).max(16).nullable().optional(),
+        rotation: z.number().nullable().optional(),
+        flipH: z.boolean().nullable().optional(),
+        flipV: z.boolean().nullable().optional(),
+        opacity: z.number().min(0).max(1).nullable().optional(),
+        reset: z.boolean().optional(),
       })
       .strict(),
     handler: (engine, p) => ({
       clip: engine.setClipTransform(p.clipId, {
         transform: { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation, flipH: p.flipH, flipV: p.flipV },
         opacity: p.opacity,
+        reset: p.reset,
       }),
     }),
   },

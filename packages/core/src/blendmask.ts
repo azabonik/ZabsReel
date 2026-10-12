@@ -9,7 +9,8 @@ import {
   type ClipMask,
   type PictureRect,
 } from "./effects/compositing.js";
-import { ensureMaskFile } from "./ffmpeg/mask.js";
+import { previewCanvas } from "./ffmpeg/graph.js";
+import { ensureMaskFile, maskFileName, type MaskRenderSpec } from "./ffmpeg/mask.js";
 import type { Canvas, Clip, MediaAsset, Project, ResolvedRenderClip, Track } from "./types.js";
 
 /**
@@ -40,6 +41,16 @@ export function clipPictureRect(clip: Clip, asset: MediaAsset | undefined, W: nu
   return src ? fitPictureRect(src.w, src.h, W, H) : null;
 }
 
+/** The raster spec of a clip's mask at `canvas`, or undefined without a (valid) mask or picture. */
+export function clipMaskSpec(clip: Clip, asset: MediaAsset | undefined, canvas: Canvas): MaskRenderSpec | undefined {
+  const mask = sanitizeMask(clip.effects?.mask);
+  if (!mask) return undefined;
+  const { W, H } = renderDims(canvas);
+  const rect = clipPictureRect(clip, asset, W, H);
+  if (!rect || rect.w <= 0 || rect.h <= 0) return undefined;
+  return { mask, W, H, rect };
+}
+
 /**
  * Rasterize (or reuse) a clip's mask at the render canvas and return the PNG
  * path, or undefined when the clip has no (valid) mask or no picture.
@@ -50,12 +61,32 @@ export async function stageClipMask(
   asset: MediaAsset | undefined,
   canvas: Canvas,
 ): Promise<string | undefined> {
-  const mask = sanitizeMask(clip.effects?.mask);
-  if (!mask) return undefined;
-  const { W, H } = renderDims(canvas);
-  const rect = clipPictureRect(clip, asset, W, H);
-  if (!rect || rect.w <= 0 || rect.h <= 0) return undefined;
-  return ensureMaskFile(join(dataDir, "masks"), { mask, W, H, rect });
+  const spec = clipMaskSpec(clip, asset, canvas);
+  return spec ? ensureMaskFile(join(dataDir, "masks"), spec) : undefined;
+}
+
+/**
+ * File names of every mask PNG the given project states (live project plus
+ * undo/redo snapshots) can ask for at their export or preview canvas.
+ * Used by gc.ts to prune masks nothing references any more.
+ */
+export function referencedMaskNames(projects: Project[]): Set<string> {
+  const names = new Set<string>();
+  for (const project of projects) {
+    // Each snapshot's OWN canvas (it may differ across undo steps): export size + preview size.
+    const full: Canvas = { width: project.width, height: project.height, fps: project.fps };
+    const canvases = [full, previewCanvas(full)];
+    for (const track of project.tracks) {
+      for (const clip of track.clips) {
+        if (!clip.effects?.mask) continue;
+        for (const canvas of canvases) {
+          const spec = clipMaskSpec(clip, assetOf(project, clip), canvas);
+          if (spec) names.add(maskFileName(spec));
+        }
+      }
+    }
+  }
+  return names;
 }
 
 /** A clip's stored blend mode if it is a real, non-normal mode. */

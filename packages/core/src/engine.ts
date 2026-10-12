@@ -22,6 +22,7 @@ import type { BlendMode } from "./effects/compositing.js";
 import {
   applyRunBlendModes, blendModeTargets, effectiveBlendMode, nextClipMask, stageClipMask, writeBlendMode, writeClipMask,
   type MaskRequest,
+  referencedMaskNames,
 } from "./blendmask.js";
 import { planSegments, segmentKey, collectMtimes, type PlannedSegment } from "./ffmpeg/segments.js";
 import { transcribe, transcribeFull, type TranscriptCue } from "./whisper/transcribe.js";
@@ -346,6 +347,13 @@ function defaultProject(): Project {
  * integer count of project frames (`project.fps`). Frames are only converted to
  * seconds at the FFmpeg boundary (see {@link stageRender}).
  */
+/** Copy of `o` without undefined-valued keys, so spreading it never erases stored fields. */
+function definedOnly<T extends object>(o: T): T {
+  const out = {} as T;
+  for (const k of Object.keys(o) as (keyof T)[]) if (o[k] !== undefined) out[k] = o[k];
+  return out;
+}
+
 export class EditorEngine extends EventEmitter {
   private project: Project = defaultProject();
   private undoStack: Project[] = [];
@@ -1153,9 +1161,10 @@ export class EditorEngine extends EventEmitter {
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const current = clip.effects ?? {};
-      const next: ClipEffects = { ...current, ...patch };
-      if (patch.color) next.color = { ...(current.color ?? {}), ...patch.color };
-      if (patch.grade) next.grade = { ...(current.grade ?? {}), ...patch.grade };
+      const clean = definedOnly(patch);
+      const next: ClipEffects = { ...current, ...clean };
+      if (clean.color) next.color = { ...(current.color ?? {}), ...definedOnly(clean.color) };
+      if (clean.grade) next.grade = { ...(current.grade ?? {}), ...definedOnly(clean.grade) };
       if (next.speed !== undefined) next.speed = clamp(next.speed, 0.25, 4);
       if (next.volume !== undefined) next.volume = Math.max(0, next.volume);
       if (next.fadeInFrames !== undefined) next.fadeInFrames = Math.max(0, Math.round(next.fadeInFrames));
@@ -1185,10 +1194,11 @@ export class EditorEngine extends EventEmitter {
       const { clip } = this.findClip(clipId);
       const effects = clip.effects ?? (clip.effects = {});
       const current = effects.grade ?? {};
-      const next: ColorGrade = { ...current, ...patch };
+      const clean = definedOnly(patch);
+      const next: ColorGrade = { ...current, ...clean };
       // Merge the three wheels field-by-field so a single-channel nudge sticks.
       for (const w of ["lift", "gamma", "gain"] as const) {
-        if (patch[w]) next[w] = { ...(current[w] ?? {}), ...patch[w] };
+        if (clean[w]) next[w] = { ...(current[w] ?? {}), ...definedOnly(clean[w]) };
       }
       effects.grade = next;
       return clip;
@@ -2314,17 +2324,31 @@ export class EditorEngine extends EventEmitter {
    * x/y are fractions of the canvas; scale is a multiplier (1 = fit); rotation is
    * degrees clockwise; opacity is 0..1.
    */
-  setClipTransform(clipId: string, patch: { transform?: Transform; opacity?: number }): Clip {
+  setClipTransform(
+    clipId: string,
+    patch: { transform?: { [K in keyof Transform]?: Transform[K] | null }; opacity?: number | null; reset?: boolean },
+  ): Clip {
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const effects = clip.effects ?? (clip.effects = {});
-      if (patch.transform) {
-        const cur = effects.transform ?? {};
-        const next: Transform = { ...cur, ...patch.transform };
-        if (next.scale !== undefined) next.scale = clamp(next.scale, 0.01, 16);
-        effects.transform = next;
+      if (patch.reset) {
+        delete effects.transform;
+        delete effects.opacity;
       }
-      if (patch.opacity !== undefined) effects.opacity = clamp(patch.opacity, 0, 1);
+      if (patch.transform) {
+        const next: Transform = { ...(effects.transform ?? {}) };
+        // undefined = "not provided" (kept); null = reset that field to its default.
+        for (const [k, v] of Object.entries(patch.transform) as [keyof Transform, unknown][]) {
+          if (v === undefined) continue;
+          if (v === null) delete next[k];
+          else (next as Record<string, unknown>)[k] = v;
+        }
+        if (next.scale !== undefined) next.scale = clamp(next.scale, 0.01, 16);
+        if (Object.keys(next).length) effects.transform = next;
+        else delete effects.transform;
+      }
+      if (patch.opacity === null) delete effects.opacity;
+      else if (patch.opacity !== undefined) effects.opacity = clamp(patch.opacity, 0, 1);
       return clip;
     });
   }
@@ -2794,6 +2818,16 @@ export class EditorEngine extends EventEmitter {
     );
   }
 
+  /** Best-effort GC of the data dir, keeping masks the project / undo / redo states can still use. */
+  private async pruneData(): Promise<void> {
+    try {
+      const keepMasks = referencedMaskNames([this.project, ...this.undoStack, ...this.redoStack]);
+      await pruneDataDir(this.dataDir, { keepMasks });
+    } catch {
+      /* GC is best-effort */
+    }
+  }
+
   get canvas(): Canvas {
     return { width: this.project.width, height: this.project.height, fps: this.project.fps };
   }
@@ -2895,7 +2929,7 @@ export class EditorEngine extends EventEmitter {
       const targets = overlayId ? clip.overlays.filter((o) => o.id === overlayId) : clip.overlays;
       if (overlayId && targets.length === 0) throw new Error(`No text overlay ${overlayId} on this clip.`);
       for (const o of targets) {
-        Object.assign(o, style);
+        Object.assign(o, definedOnly(style));
         // A keyword `position` and explicit x/y are mutually exclusive intents:
         // the renderer prefers x/y when present, so a stale x/y would silently
         // override a freshly-picked keyword. Clear them so the keyword takes.
@@ -3077,7 +3111,7 @@ export class EditorEngine extends EventEmitter {
       const { clip } = this.findClip(clipId);
       const caps = clip.captions;
       if (!caps) throw new Error("This clip has no captions to style — generate captions first.");
-      caps.style = { ...(caps.style ?? {}), ...style } as typeof caps.style;
+      caps.style = { ...(caps.style ?? {}), ...definedOnly(style) } as typeof caps.style;
       // A keyword `position` overrides any prior free x/y placement (the renderer
       // prefers x/y when present), so clear them when a keyword position is set.
       if (typeof style.position === "string" && style.position && caps.style) {
@@ -3230,7 +3264,7 @@ export class EditorEngine extends EventEmitter {
         try {
           const result = await this.renderPreviewSegmented(outPath, signal, onProgress);
           this.previewCache = { projectId: this.project.id, revision: this.project.revision, path: outPath };
-          void pruneDataDir(this.dataDir).catch(() => {});
+          void this.pruneData();
           return result;
         } catch (err) {
           if (signal.aborted) throw err;
@@ -3266,7 +3300,7 @@ export class EditorEngine extends EventEmitter {
       this.renderStats.singlePassRenders += 1;
 
       this.previewCache = { projectId: this.project.id, revision: this.project.revision, path: outPath };
-      void pruneDataDir(this.dataDir).catch(() => {});
+      void this.pruneData();
       return { path: outPath, duration: totalDuration } satisfies RenderResult;
     });
     this.previewJobId = job.id;
@@ -3404,7 +3438,7 @@ export class EditorEngine extends EventEmitter {
       }
 
       this.emit("progress", { job: "export", fraction: 1 });
-      void pruneDataDir(this.dataDir).catch(() => {});
+      void this.pruneData();
       return { path: outputPath, duration: totalDuration } satisfies RenderResult;
     });
   }
