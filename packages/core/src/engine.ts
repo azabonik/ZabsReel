@@ -16,6 +16,8 @@ import {
   type ColorInspection,
 } from "./ffmpeg/analysis.js";
 import { runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
+import { stabilizeFilters, type StabilizeOptions } from "./ffmpeg/stabilize.js";
+import { EFFECTS, effectByType } from "./effects/registry.js";
 import { planSegments, segmentKey, collectMtimes, type PlannedSegment } from "./ffmpeg/segments.js";
 import { transcribe, transcribeFull, type TranscriptCue } from "./whisper/transcribe.js";
 import { parseSrt, parseVtt, formatSrt, formatVtt } from "./captions/srt.js";
@@ -68,6 +70,7 @@ import {
   type Marker,
   type MediaFolder,
   type VisualSignature,
+  type VisualEffect,
   type MediaAsset,
   type Project,
   type ResolvedEffects,
@@ -1185,11 +1188,14 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Append (or update by id) a creative/utility visual effect on a clip. Effects
-   * bake in order after color. Returns the clip and the effect's id.
+   * bake in order after color. An update REPLACES amount/color/params with what
+   * is passed — except a bare bypass toggle (only `enabled`, same type), which
+   * keeps the values. `enabled` is kept when omitted (false = bypassed, stored
+   * only then). Returns the clip and the effect's id.
    */
   applyEffect(
     clipId: string,
-    effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number> },
+    effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number>; enabled?: boolean },
   ): { clip: Clip; effectId: string } {
     let effectId = "";
     const clip = this.mutate(() => {
@@ -1197,16 +1203,26 @@ export class EditorEngine extends EventEmitter {
       const effects = clip.effects ?? (clip.effects = {});
       const list = effects.filters ?? (effects.filters = []);
       const existing = effect.id ? list.find((f) => f.id === effect.id) : undefined;
-      if (existing) {
+      let target: VisualEffect;
+      const toggleOnly =
+        effect.enabled !== undefined && effect.amount === undefined && effect.color === undefined && effect.params === undefined;
+      if (existing && toggleOnly && existing.type === effect.type) {
+        target = existing;
+      } else if (existing) {
         existing.type = effect.type;
         existing.amount = effect.amount;
         existing.color = effect.color;
         existing.params = effect.params;
-        effectId = existing.id;
+        target = existing;
       } else {
-        effectId = effect.id ?? newId("fx");
-        list.push({ id: effectId, type: effect.type, amount: effect.amount, color: effect.color, params: effect.params });
+        target = { id: effect.id ?? newId("fx"), type: effect.type, amount: effect.amount, color: effect.color, params: effect.params };
+        list.push(target);
       }
+      // Only a bypass is stored: an effect without `enabled` is on, so turning it
+      // back on leaves the same JSON (and segment-cache key) as before.
+      if (effect.enabled === false) target.enabled = false;
+      else if (effect.enabled === true) delete target.enabled;
+      effectId = target.id;
       return clip;
     });
     return { clip, effectId };
@@ -1220,6 +1236,25 @@ export class EditorEngine extends EventEmitter {
         clip.effects.filters = clip.effects.filters.filter((f) => f.id !== effectId);
         if (clip.effects.filters.length === 0) delete clip.effects.filters;
       }
+      return clip;
+    });
+  }
+
+  /** Move one visual effect to `toIndex` (clamped) in its clip's stack — one undo step. */
+  reorderEffect(clipId: string, effectId: string, toIndex: number): Clip {
+    const { clip: pre } = this.findClip(clipId);
+    const list = pre.effects?.filters ?? [];
+    if (!list.some((f) => f.id === effectId)) {
+      const ids = list.map((f) => `${f.id} (${f.type})`).join(", ");
+      throw new Error(`Effect "${effectId}" not found on clip "${clipId}"${ids ? ` — its effects: ${ids}` : " — it has no effects"}`);
+    }
+    return this.mutate(() => {
+      const { clip } = this.findClip(clipId);
+      const filters = clip.effects!.filters!;
+      const from = filters.findIndex((f) => f.id === effectId);
+      const to = Math.max(0, Math.min(filters.length - 1, Math.round(toIndex)));
+      const [moved] = filters.splice(from, 1);
+      filters.splice(to, 0, moved);
       return clip;
     });
   }
@@ -1250,19 +1285,22 @@ export class EditorEngine extends EventEmitter {
    */
   async applyEffectAuto(
     clipId: string,
-    effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number> },
+    effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number>; enabled?: boolean },
   ): Promise<{ clip: Clip; effectId: string; color?: string; confidence?: number }> {
     if (effect.color?.trim().toLowerCase() !== "auto") return this.applyEffect(clipId, effect);
-    const keyTypes = ["chromakey", "colorkey", "lumakey"];
-    if (!keyTypes.includes(effect.type)) {
-      throw new Error(`color "auto" only applies to the key effects (${keyTypes.join(", ")}), not "${effect.type}"`);
+    const spec = effectByType(effect.type)?.color;
+    if (!spec?.auto) {
+      const autoTypes = EFFECTS.filter((d) => d.color?.auto).map((d) => d.type);
+      throw new Error(`color "auto" only applies to the key effects (${autoTypes.join(", ")}), not "${effect.type}"`);
     }
     const det = await this.detectKeyColor(clipId);
-    if (effect.type === "lumakey") {
+    if (spec.default === null && spec.autoParam) {
+      // lumakey: no stored colour — set the threshold from the border brightness.
       // FFmpeg's lumakey compares limited-range BT.601 luma (black = 16/255).
       const { r, g, b } = det.rgb;
       const luma = (16 + (65.481 * r + 128.553 * g + 24.966 * b) / 255) / 255;
-      const params = { ...effect.params, threshold: effect.params?.threshold ?? Math.round(luma * 1000) / 1000 };
+      const key = spec.autoParam;
+      const params = { ...effect.params, [key]: effect.params?.[key] ?? Math.round(luma * 1000) / 1000 };
       const res = this.applyEffect(clipId, { ...effect, color: undefined, params });
       return { ...res, color: det.color, confidence: det.confidence };
     }
@@ -3331,17 +3369,18 @@ export class EditorEngine extends EventEmitter {
    * Stabilize a clip's footage (two-pass vidstab), bake it, and re-point the
    * clip at the result. Other effects and any transition are preserved.
    */
-  async stabilizeClip(clipId: string): Promise<Clip> {
+  async stabilizeClip(clipId: string, opts: StabilizeOptions = {}): Promise<Clip> {
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "stabilization");
     const { promise } = this.jobs.start("stabilize", `Stabilize ${asset.name}`, (signal, onProgress) =>
-      this.stabilizeClipRun(clipId, signal, onProgress),
+      this.stabilizeClipRun(clipId, opts, signal, onProgress),
     );
     return promise;
   }
 
   private async stabilizeClipRun(
     clipId: string,
+    opts: StabilizeOptions,
     signal: AbortSignal,
     onProgress: (fraction: number) => void,
   ): Promise<Clip> {
@@ -3350,11 +3389,15 @@ export class EditorEngine extends EventEmitter {
     const fps = this.project.fps;
     const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
     const spanSec = framesToSeconds(clip.sourceOutFrame - clip.sourceInFrame, fps);
+    const { detect, transform } = stabilizeFilters(opts);
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
-    const trfName = `${clipId}.trf`;
-    const outName = `${clipId}-stab.mp4`;
+    // Unique per run: re-stabilizing reads the previous bake (and the undo
+    // history may still reference it), so never write over it.
+    const stem = `${clipId}-stab-${Date.now().toString(36)}`;
+    const trfName = `${stem}.trf`;
+    const outName = `${stem}.mp4`;
     const outPath = join(dir, outName);
 
     await runFfmpeg(
@@ -3367,7 +3410,7 @@ export class EditorEngine extends EventEmitter {
         "-i",
         asset.path,
         "-vf",
-        `vidstabdetect=shakiness=6:accuracy=15:result=${trfName}`,
+        `${detect}:result=${trfName}`,
         "-f",
         "null",
         "-",
@@ -3385,7 +3428,7 @@ export class EditorEngine extends EventEmitter {
       "-i",
       asset.path,
       "-vf",
-      `vidstabtransform=input=${trfName}:smoothing=30:zoom=0,unsharp=5:5:0.8:3:3:0.4`,
+      `vidstabtransform=input=${trfName}:${transform},unsharp=5:5:0.8:3:3:0.4`,
       "-c:v",
       "libx264",
       "-preset",
@@ -3398,7 +3441,11 @@ export class EditorEngine extends EventEmitter {
     if (asset.hasAudio) pass2.push("-c:a", "aac", "-b:a", "192k");
     else pass2.push("-an");
     pass2.push("-movflags", "+faststart", "-y", outName);
-    await runFfmpeg(pass2, { cwd: dir, signal, totalDuration: spanSec, onProgress: (f) => onProgress(0.5 + f * 0.5) });
+    try {
+      await runFfmpeg(pass2, { cwd: dir, signal, totalDuration: spanSec, onProgress: (f) => onProgress(0.5 + f * 0.5) });
+    } finally {
+      await rm(join(dir, trfName), { force: true }).catch(() => {});
+    }
 
     const baked = await probeAsset(outPath);
     baked.name = `${asset.name} (stabilized)`;
@@ -4053,13 +4100,13 @@ export class EditorEngine extends EventEmitter {
 }
 
 /**
- * Bring a loaded project up to the current schema. v1 projects (single video
- * track, clip timing in SECONDS, sequential clips, no track index) are migrated
- * to v2 (multi-track, frame-based, absolute positions) — laying the old
- * sequential clips out end-to-end with transition overlaps preserved.
+ * Bring a loaded project up to the current schema, one step at a time:
+ * v1 → v2 timing (migrateV1Timing), bare marker numbers → Marker objects (v3),
+ * and pre-v4 vignette amounts dropped (dropLegacyVignetteAmounts).
  */
 function migrateProject(loaded: Project): Project {
   if (loaded.schemaVersion === PROJECT_SCHEMA_VERSION) return loaded;
+  const from = loaded.schemaVersion ?? 1;
 
   // v2 (or v1) → v3: bare marker frame numbers become Marker objects. Additive
   // and order-preserving; runs for every pre-v3 project.
@@ -4069,12 +4116,39 @@ function migrateProject(loaded: Project): Project {
     );
   }
 
-  if ((loaded.schemaVersion ?? 1) >= 2) {
-    // Already multi-track/frame-based — only the marker upgrade was needed.
-    loaded.schemaVersion = PROJECT_SCHEMA_VERSION;
-    return loaded;
-  }
+  if (from < 2) migrateV1Timing(loaded);
+  if (from < 4) dropLegacyVignetteAmounts(loaded);
 
+  loaded.schemaVersion = PROJECT_SCHEMA_VERSION;
+  return loaded;
+}
+
+/**
+ * v3 → v4: before the effect registry the export ignored a vignette's `amount`
+ * and always drew FFmpeg's default lens angle (PI/5), while the old inspector
+ * slider stored a value anyway (0 when merely touched). The registry reads
+ * `amount` as the strength (0 = no vignette), so a stored legacy value would
+ * change the look of an old project or make its vignette vanish. Drop it: an
+ * absent amount is the registry default 1 = PI/5, which is what every old
+ * vignette rendered. Adjustment layers are clips, so they are covered too.
+ */
+function dropLegacyVignetteAmounts(loaded: Project): void {
+  for (const track of loaded.tracks ?? []) {
+    for (const clip of track.clips ?? []) {
+      for (const f of clip.effects?.filters ?? []) {
+        if (f.type === "vignette") delete f.amount;
+      }
+    }
+  }
+}
+
+/**
+ * v1 → v2: v1 projects (single video track, clip timing in SECONDS, sequential
+ * clips, no track index) become multi-track, frame-based, absolute positions —
+ * laying the old sequential clips out end-to-end with transition overlaps
+ * preserved.
+ */
+function migrateV1Timing(loaded: Project): void {
   const fps = loaded.fps || 30;
   const s2f = (sec: number | undefined): number | undefined =>
     sec === undefined ? undefined : Math.round(sec * fps);
@@ -4169,7 +4243,4 @@ function migrateProject(loaded: Project): Project {
       delete m.fadeOut;
     }
   }
-
-  loaded.schemaVersion = PROJECT_SCHEMA_VERSION;
-  return loaded;
 }

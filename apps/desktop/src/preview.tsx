@@ -10,7 +10,8 @@
 // owns the master clock (RAF) and rasterizes the plan with Canvas2D. Text and
 // captions stay DOM overlays on top of the canvas. Keys (colorkey / chromakey /
 // lumakey) preview live through a small WebGL2 pass (glkey.ts), so a keyed
-// overlay shows the track below instead of its background.
+// overlay shows the track below instead of its background; a vignette through a
+// radial-gradient pass with FFmpeg's own falloff (vignetteFactor).
 
 import {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
@@ -26,6 +27,7 @@ import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composit
 import { MediaPool } from "./mediapool";
 import { isKeyBypassed, keyFrame, onKeyBypassChange } from "./glkey";
 import type { KeyPlan } from "./keying";
+import { vignetteFactor } from "@aive/core/effects";
 import { Film, Play, Waveform } from "./icons";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
@@ -111,11 +113,71 @@ function bufferSize(project: Project | null, maxLongEdge = 1280): { w: number; h
 }
 
 /**
+ * A radial gradient that darkens like FFmpeg's vignette: black at alpha
+ * 1 − Π cos(angle·d)⁴ for the normalised distance d from (cx,cy), d = 1 at
+ * `radius` (the canvas-space frame's corner). Stacked vignettes multiply.
+ */
+function vignetteGradient(g: CanvasRenderingContext2D, cx: number, cy: number, radius: number, angles: number[]): CanvasGradient {
+  const grad = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(1, radius));
+  const N = 16;
+  for (let i = 0; i <= N; i++) {
+    const d = i / N;
+    let f = 1;
+    for (const a of angles) f *= vignetteFactor(d, a);
+    grad.addColorStop(d, `rgba(0,0,0,${(1 - f).toFixed(4)})`);
+  }
+  return grad;
+}
+
+// Scratch canvas for the vignette pass (grow-only, reused by every layer).
+let vigCanvas: HTMLCanvasElement | null = null;
+
+/**
+ * Draw a layer's source rect at w×h through `filter`, then darken it with the
+ * vignette gradient (`source-atop`, so transparent letterbox bars and keyed
+ * areas stay transparent — as the export's alpha-preserving vignette). Returns
+ * the scratch canvas (valid until the next call) or null if it can't run.
+ */
+function vignetteLayer(
+  src: CanvasImageSource, sx: number, sy: number, sw: number, sh: number,
+  filter: string, w: number, h: number, radius: number, angles: number[],
+): HTMLCanvasElement | null {
+  if (!vigCanvas) vigCanvas = document.createElement("canvas");
+  const c = vigCanvas;
+  if (c.width < w) c.width = w;
+  if (c.height < h) c.height = h;
+  const g = c.getContext("2d");
+  if (!g) return null;
+  g.save();
+  try {
+    g.globalCompositeOperation = "source-over";
+    g.globalAlpha = 1;
+    g.clearRect(0, 0, w, h);
+    g.filter = filter && filter !== "none" ? filter : "none";
+    g.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
+    g.filter = "none";
+    g.globalCompositeOperation = "source-atop";
+    g.fillStyle = vignetteGradient(g, w / 2, h / 2, radius, angles);
+    g.fillRect(0, 0, w, h);
+    return c;
+  } catch {
+    // A tainted / not-yet-decodable frame: a tainted canvas stays tainted, start fresh.
+    vigCanvas = null;
+    return null;
+  } finally {
+    g.restore();
+  }
+}
+
+/**
  * Draw one video layer: crop → letterbox-contain fit → 2D transform (scale,
  * rotate, flip, translate about the canvas centre) → color filter → alpha. The
  * transform mirrors the FFmpeg geq bake so preview and export agree. With a
  * `key` plan the cropped frame is keyed first (WebGL, at the size it's drawn)
- * and that result is drawn instead; without WebGL2 it draws unkeyed.
+ * and that result is drawn instead; without WebGL2 it draws unkeyed. Vignettes
+ * follow the stack order around the key: one before the first key darkens the
+ * frame the key sees (so its dark edge stays opaque, as in the export), one
+ * after it darkens the keyed result.
  */
 function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, key?: KeyPlan) {
   // Intrinsic source dimensions: <video> exposes videoWidth, <img> naturalWidth.
@@ -134,16 +196,36 @@ function drawLayer(ctx: CanvasRenderingContext2D, el: HTMLVideoElement | HTMLIma
   let src: CanvasImageSource = el;
   let [rx, ry, rw, rh] = [sx, sy, sw, sh];
   let filter = d.colorFilter;
+  // FFmpeg vignettes the canvas-space frame (after fit + padding), so the
+  // falloff is centred on the layer and reaches d = 1 at the CANVAS corner:
+  // that corner's distance in the pass's pixels, for a pass `w` pixels wide.
+  const vigRadius = (w: number) => Math.hypot(W / 2, H / 2) * (w / dw);
+  let vignette = d.vignette;
   if (key) {
     // Key at the on-canvas size (never above the source's own resolution).
     const s = Math.abs(t.scale) || 1;
     const kw = Math.max(1, Math.min(Math.round(sw), Math.ceil(dw * s)));
     const kh = Math.max(1, Math.min(Math.round(sh), Math.ceil(dh * s)));
-    const keyed = keyFrame(el, sx, sy, sw, sh, kw, kh, key);
+    // A vignette before the first key darkens the frame the key sees. Its
+    // scratch canvas is copied into the key's own staging canvas right away.
+    const pv = key.preVignette?.length ? vignetteLayer(el, sx, sy, sw, sh, key.pre, kw, kh, vigRadius(kw), key.preVignette) : null;
+    const keyed = pv ? keyFrame(pv, 0, 0, kw, kh, kw, kh, { ...key, pre: "none" }) : keyFrame(el, sx, sy, sw, sh, kw, kh, key);
     if (keyed) {
       src = keyed.canvas;
       [rx, ry, rw, rh] = [keyed.x, keyed.y, keyed.w, keyed.h];
       filter = key.post; // colour + pre-key effects were applied before keying
+      vignette = key.postVignette;
+    }
+  }
+  if (vignette?.length) {
+    const s = Math.abs(t.scale) || 1;
+    const vw = Math.max(1, Math.min(4096, Math.ceil(dw * s)));
+    const vh = Math.max(1, Math.min(4096, Math.ceil(dh * s)));
+    const v = vignetteLayer(src, rx, ry, rw, rh, filter, vw, vh, vigRadius(vw), vignette);
+    if (v) {
+      src = v;
+      [rx, ry, rw, rh] = [0, 0, vw, vh];
+      filter = "none";
     }
   }
 
@@ -280,26 +362,40 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     };
     // ADJUSTMENT layer: repaint the composite drawn SO FAR through its color
     // filter (lower layers only — higher tracks draw after, unaffected).
-    const applyAdjust = (filter: string) => {
-      if (!filter || filter === "none") return;
-      let off = adjCanvasRef.current;
-      if (!off) adjCanvasRef.current = off = document.createElement("canvas");
-      if (off.width !== W) off.width = W;
-      if (off.height !== H) off.height = H;
-      const octx = off.getContext("2d");
-      if (!octx) return;
-      octx.clearRect(0, 0, W, H);
-      octx.drawImage(canvas, 0, 0);
-      ctx.save();
-      ctx.globalAlpha = 1;
-      ctx.filter = filter;
-      ctx.clearRect(0, 0, W, H);
-      ctx.drawImage(off, 0, 0);
-      ctx.restore();
+    const applyAdjust = (filter: string, vignette?: number[]) => {
+      if (filter && filter !== "none") {
+        let off = adjCanvasRef.current;
+        if (!off) adjCanvasRef.current = off = document.createElement("canvas");
+        if (off.width !== W) off.width = W;
+        if (off.height !== H) off.height = H;
+        const octx = off.getContext("2d");
+        if (octx) {
+          octx.clearRect(0, 0, W, H);
+          octx.drawImage(canvas, 0, 0);
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.filter = filter;
+          ctx.clearRect(0, 0, W, H);
+          ctx.drawImage(off, 0, 0);
+          ctx.restore();
+        }
+      }
+      if (vignette?.length) {
+        // The composite is opaque, so a plain black gradient darkens it like
+        // FFmpeg's vignette over the whole canvas (after the colour proxy, as
+        // the export runs colour → effects).
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.filter = "none";
+        ctx.fillStyle = vignetteGradient(ctx, W / 2, H / 2, Math.hypot(W / 2, H / 2), vignette);
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+      }
     };
+
     for (const c of plan.clips) {
       if (c.adjust) {
-        applyAdjust(c.adjust.colorFilter);
+        applyAdjust(c.adjust.colorFilter, c.adjust.vignette);
         continue;
       }
       if (!c.path) continue;
@@ -343,7 +439,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         .map((c) => ({ clipId: c.clipId, overlays: c.overlays, caption: c.caption })),
       topName: top?.assetName ?? audible?.assetName,
       audioOnly: drawClips.length === 0 && !!audible,
-      graded: !!top && top.draw!.colorFilter !== "none",
+      graded: !!top && (top.draw!.colorFilter !== "none" || !!top.draw!.vignette),
       drawCount: drawClips.length,
     };
     const sig = frameSig(info);

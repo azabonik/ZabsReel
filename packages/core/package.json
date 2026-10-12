@@ -10,6 +10,10 @@
     ".": "./dist/index.js",
     "./rpc": "./dist/rpc.js",
     "./types": "./dist/types.js",
+    "./effects": {
+      "types": "./dist/effects/registry.d.ts",
+      "default": "./dist/effects/registry.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

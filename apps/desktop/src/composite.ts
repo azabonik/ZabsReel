@@ -13,7 +13,7 @@
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
 import { clipDurationFrames } from "./types";
 import {
-  buildSegments, colorFilter, fadeOpacity, sourceTimeFor, type Segment,
+  buildSegments, colorFilter, fadeOpacity, sourceTimeFor, vignetteAngles, type Segment,
 } from "./playback";
 import { muteGainAt } from "./mutes";
 import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
@@ -85,6 +85,12 @@ export interface ActiveClip {
     transform: EffectiveTransform;
     /** Live key pass (colorkey/chromakey/lumakey) for the WebGL preview — see glkey.ts. */
     key?: KeyPlan;
+    /**
+     * Enabled vignettes' lens angles (radians) for the canvas vignette pass;
+     * absent when none. These are ALL of them, for an unkeyed draw; a live key
+     * splits them around the first key (`key.preVignette` / `key.postVignette`).
+     */
+    vignette?: number[];
   };
   /** Present when this clip should be HEARD (asset has audio + track not muted). */
   audio?: { volume: number };
@@ -107,7 +113,7 @@ export interface ActiveClip {
    * draws lower layers to an offscreen canvas, then draws that through
    * ctx.filter). Mirrors the FFmpeg bake in graph.ts (split→filter→overlay).
    */
-  adjust?: { colorFilter: string };
+  adjust?: { colorFilter: string; vignette?: number[] };
 }
 
 /** The full set of layers to render for one frame, drawables in bottom→top order. */
@@ -116,6 +122,12 @@ export interface FramePlan {
 }
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+/** `{ vignette: angles }` when the clip has an enabled vignette, else nothing (keeps plans lean). */
+function vignetteField(filters: Parameters<typeof vignetteAngles>[0]): { vignette?: number[] } {
+  const angles = vignetteAngles(filters);
+  return angles.length ? { vignette: angles } : {};
+}
 
 /**
  * Per-track gain for an active segment at time `t`: its own fade ramp, optionally
@@ -213,6 +225,7 @@ export function activeLayersAt(
           graphics: [],
           adjust: {
             colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters),
+            ...vignetteField(seg.clip.effects?.filters),
           },
         });
         continue;
@@ -276,6 +289,7 @@ export function activeLayersAt(
               assetHeight: asset!.height,
               transform: tf!,
               key: keyPlan(seg.clip.effects),
+              ...vignetteField(seg.clip.effects?.filters),
             }
           : undefined,
         audio: audible

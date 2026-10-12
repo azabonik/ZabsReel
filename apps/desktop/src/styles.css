@@ -1124,11 +1124,26 @@ input[type="range"]:disabled { opacity: 0.45; }
 .wheel-g input { accent-color: #4fbf67; }
 .wheel-b input { accent-color: #5b86ff; }
 
-.eff-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
-.eff-body { flex: 1; min-width: 0; }
-.eff-name { font-size: 12.5px; color: var(--ink-2); text-transform: capitalize; }
+/* Effect stack (effectstack.tsx): one row per effect — name, badges and the
+   bypass / up / down / remove buttons, then the effect's registry sliders. */
+.eff-add > select { width: 100%; }
+.eff-list { display: flex; flex-direction: column; gap: 4px; }
+.eff-row { display: flex; flex-direction: column; gap: 2px; padding: 4px 0 2px; border-top: 1px solid var(--line-2); }
+.eff-row:first-child { border-top: none; }
+.eff-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.eff-body { min-width: 0; }
+.eff-name { font-size: 12.5px; color: var(--ink-2); font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eff-badge {
+  flex: none; font-size: 10.5px; line-height: 1; padding: 3px 6px; border-radius: 999px;
+  color: var(--warn); border: 1px solid currentColor; opacity: 0.85; white-space: nowrap;
+}
+.eff-actions { display: inline-flex; gap: 2px; margin-left: auto; flex: none; }
+.eff-actions .icon-btn { width: 26px; height: 26px; }
+.eff-actions .icon-btn[aria-pressed="true"] { color: var(--warn); }
+/* Bypassed: the settings stay editable but read as switched off. */
+.eff-off .eff-name { color: var(--ink-4); text-decoration: line-through; }
+.eff-off .eff-body { opacity: 0.5; }
 /* Key effects (keyfx.tsx): colour · Auto · Pick header, then the key's sliders. */
-.eff-row:has(.key-fx) { align-items: flex-start; }
 .key-fx { display: flex; flex-direction: column; gap: 6px; padding: 3px 0; }
 .key-fx-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
 .key-fx-head .swatch { font: 11.5px var(--mono); }

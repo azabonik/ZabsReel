@@ -12,8 +12,11 @@ import type { RenderProfile } from "./graph.js";
  * assembled by lossless concat + ONE cheap full-timeline audio pass.
  */
 
-/** Bump when the render pipeline changes in a way that invalidates cached pixels. */
-const CACHE_VERSION = 3;
+/**
+ * Bump when the render pipeline changes in a way that invalidates cached pixels.
+ * 4: vignette honours its amount (the effect registry) and keeps alpha.
+ */
+const CACHE_VERSION = 4;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

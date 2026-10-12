@@ -1,38 +1,19 @@
 // Inspector controls for the KEY effects (colorkey / chromakey / lumakey): a key
 // colour swatch, "Auto" (detect the background from the frame border), an
 // eyedropper (any on-screen pixel; Chromium/Electron only), and each key's
-// sliders. Every change re-applies the effect IN PLACE (apply_effect with its
-// effectId), so the live preview (glkey.ts) and the export follow along.
+// sliders. What a key has — colour or not, whether "auto" works, which param
+// "auto" sets, the sliders' labels/ranges/defaults — comes from the effect
+// registry (`@aive/core/effects`). Every change re-applies the effect IN PLACE
+// (apply_effect with its effectId), so the live preview (glkey.ts) and the
+// export follow along. The effect's name, bypass, reorder and remove controls
+// are the stack row's (effectstack.tsx).
 
 import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
+import { effectByType } from "@aive/core/effects";
 import type { VisualEffect } from "./types";
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, hexToRgb, isKeyEffect, keyColorHex, type KeyKind } from "./keying";
 import { setKeyBypass } from "./glkey";
-
-/** Friendly names for the Add-effect menu (other effects show their type). */
-export const EFFECT_LABELS: Record<string, string> = {
-  colorkey: "Color key (any color — gray/white/black screens)",
-  chromakey: "Chroma key (green/blue screen)",
-  lumakey: "Luma key (black/white background)",
-};
-
-const SHORT_NAMES: Record<KeyKind, string> = { colorkey: "Color key", chromakey: "Chroma key", lumakey: "Luma key" };
-
-/** [param, label, min, max, step] per key, in display order. */
-const SLIDERS: Record<KeyKind, [string, string, number, number, number][]> = {
-  colorkey: [["similarity", "Similarity", 0.01, 1, 0.01], ["blend", "Blend (soft edge)", 0, 1, 0.01]],
-  chromakey: [
-    ["similarity", "Similarity", 0.01, 1, 0.01],
-    ["blend", "Blend (soft edge)", 0, 1, 0.01],
-    ["despill", "Despill", 0, 1, 0.05],
-  ],
-  lumakey: [
-    ["threshold", "Threshold (0 black · 1 white)", 0, 1, 0.01],
-    ["tolerance", "Tolerance", 0, 1, 0.01],
-    ["softness", "Softness", 0, 1, 0.01],
-  ],
-};
 
 export interface KeyPatch {
   color?: string;
@@ -77,9 +58,16 @@ export function KeyEffectControls({ clipId, effect, disabled, Range, onApply, on
   onDetect: (clipId: string) => Promise<KeyDetection | null>;
 }) {
   const kind: KeyKind = isKeyEffect(effect.type) ? effect.type : "colorkey";
-  const hasColor = kind !== "lumakey";
+  const def = effectByType(kind);
+  const spec = def?.color;
+  const hasColor = !!spec?.default;
+  // The param "auto" / the eyedropper set when the key stores no colour (lumakey: threshold).
+  const autoParam = spec?.autoParam ?? "threshold";
   const color = keyColorHex(effect.color, KEY_DEFAULT_COLOR[kind] || "0x000000");
-  const params = { ...KEY_DEFAULTS[kind], ...effect.params };
+  // Only the params the registry declares: a stray key stored by an older build
+  // would otherwise be re-sent and rejected by apply_effect's validation.
+  const params: Record<string, number> = { ...KEY_DEFAULTS[kind] };
+  for (const k of Object.keys(params)) if (typeof effect.params?.[k] === "number") params[k] = effect.params[k];
   const [swatch, setSwatch] = useState(`#${color.slice(2).toLowerCase()}`);
   const [hint, setHint] = useState<string | null>(null);
   useEffect(() => setSwatch(`#${color.slice(2).toLowerCase()}`), [color]);
@@ -110,7 +98,7 @@ export function KeyEffectControls({ clipId, effect, disabled, Range, onApply, on
         : `Detected ${d.color} on ${pct}% of the frame border.`,
     );
     if (hasColor) commit({ color: d.color });
-    else commit({ params: { ...params, threshold: lumaOf(d.color) } });
+    else commit({ params: { ...params, [autoParam]: lumaOf(d.color) } });
   };
 
   const ED = eyeDropper();
@@ -125,7 +113,7 @@ export function KeyEffectControls({ clipId, effect, disabled, Range, onApply, on
       const hex = keyColorHex(sRGBHex, color);
       setHint(null);
       if (hasColor) commit({ color: hex });
-      else commit({ params: { ...params, threshold: lumaOf(hex) } });
+      else commit({ params: { ...params, [autoParam]: lumaOf(hex) } });
     } catch {
       /* picker cancelled (Esc) */
     } finally {
@@ -133,22 +121,24 @@ export function KeyEffectControls({ clipId, effect, disabled, Range, onApply, on
     }
   };
 
+  const name = def?.label ?? kind;
   return (
     <div className="key-fx">
       <div className="key-fx-head">
-        <span className="eff-name">{SHORT_NAMES[kind]}</span>
         {hasColor && (
           <label className="swatch" title="Key colour">
             <input ref={swatchRef} type="color" value={swatch} disabled={disabled}
-              onChange={(e) => setSwatch(e.target.value)} aria-label={`${SHORT_NAMES[kind]} colour`} />
+              onChange={(e) => setSwatch(e.target.value)} aria-label={`${name} colour`} />
             {color}
           </label>
         )}
         <span className="key-fx-actions">
-          <button type="button" className="btn btn-sm" disabled={disabled} onClick={() => void auto()}
-            title={hasColor ? "Detect the background colour from the frame border" : "Set the threshold from the frame border's brightness"}>
-            Auto
-          </button>
+          {spec?.auto && (
+            <button type="button" className="btn btn-sm" disabled={disabled} onClick={() => void auto()}
+              title={hasColor ? "Detect the background colour from the frame border" : `Set the ${autoParam} from the frame border's brightness`}>
+              Auto
+            </button>
+          )}
           {ED && (
             <button type="button" className="btn btn-sm" disabled={disabled} onClick={() => void pick()}
               title={hasColor ? "Pick the key colour from anywhere on screen" : "Pick the brightness to key from anywhere on screen"}>
@@ -158,10 +148,10 @@ export function KeyEffectControls({ clipId, effect, disabled, Range, onApply, on
         </span>
       </div>
       {hint && <span className="field-hint">{hint}</span>}
-      {SLIDERS[kind].map(([k, label, min, max, step]) => (
-        <Range key={k} label={label} min={min} max={max} step={step} def={KEY_DEFAULTS[kind][k] ?? 0}
-          value={params[k] ?? KEY_DEFAULTS[kind][k] ?? 0}
-          onCommit={(v) => commit({ params: { ...params, [k]: v } })} />
+      {(def?.params ?? []).map((p) => (
+        <Range key={p.key} label={p.label} min={p.min} max={p.max} step={p.step} def={p.default} unit={p.unit}
+          value={params[p.key] ?? p.default}
+          onCommit={(v) => commit({ params: { ...params, [p.key]: v } })} />
       ))}
     </div>
   );

@@ -312,3 +312,10 @@ export const ArrowUp = (p: IconProps) => (
     <path d="m6 11 6-6 6 6" />
   </Svg>
 );
+
+export const ArrowDown = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 5v14" />
+    <path d="m6 13 6 6 6-6" />
+  </Svg>
+);

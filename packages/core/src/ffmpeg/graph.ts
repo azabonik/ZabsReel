@@ -13,6 +13,7 @@ import type {
   RGBWheel,
   VisualEffect,
 } from "../types.js";
+import { effectFilterSteps } from "../effects/registry.js";
 
 export interface RenderProfile {
   /** x264 preset (speed/quality tradeoff). */
@@ -330,139 +331,16 @@ function colorGradeSteps(grade: ColorGrade): string[] {
   return steps;
 }
 
-/** A few colour names the AI tends to use for key colours; everything else must be hex. */
-const KEY_COLOR_NAMES: Record<string, string> = {
-  green: "00FF00", blue: "0000FF", black: "000000", white: "FFFFFF", gray: "808080", grey: "808080", red: "FF0000",
-};
-
 /**
- * Normalise a key colour (0xRRGGBB / #RRGGBB / RRGGBB, optional alpha byte, or
- * a basic name) to FFmpeg's `0xRRGGBB`. Anything else — including a stray
- * "auto" the engine didn't resolve — falls back, so the graph never breaks.
- */
-function keyColorHex(c: string | undefined, fallback: string): string {
-  const s = (c ?? "").trim().toLowerCase();
-  const m = /^(?:0x|#)?([0-9a-f]{6})(?:[0-9a-f]{2})?$/.exec(s);
-  if (m) return `0x${m[1].toUpperCase()}`;
-  return `0x${KEY_COLOR_NAMES[s] ?? fallback}`;
-}
-
-/** Which despill screen (if any) a key colour is: clearly green- or blue-dominant. */
-function spillScreen(hex: string): "green" | "blue" | null {
-  const v = parseInt(hex.slice(2), 16);
-  const r = (v >> 16) & 0xff;
-  const g = (v >> 8) & 0xff;
-  const b = v & 0xff;
-  if (g >= 80 && g - Math.max(r, b) >= 40) return "green";
-  if (b >= 80 && b - Math.max(r, g) >= 40) return "blue";
-  return null;
-}
-
-/**
- * One key (colorkey / chromakey / lumakey) as a self-contained sub-graph step.
- * FFmpeg's keyers REWRITE alpha — colorkey/chromakey set it on every pixel,
- * lumakey inside its band — which would turn the transparent letterbox padding
- * (or a source's own alpha) opaque again. So the key runs on a split copy and
- * its alpha is MULTIPLIED into the original's (blend's c3 = the alpha plane).
- * The colour comes from the untouched original, or from the keyed copy when it
- * was despilled. `label` must be unique in the whole filter_complex.
- */
-function keyStep(f: VisualEffect, label: string): string {
-  const p = f.params ?? {};
-  let key: string;
-  let keyedColour = false;
-  if (f.type === "lumakey") {
-    const thr = num(clampN(p.threshold ?? 0, 0, 1));
-    const tol = num(clampN(p.tolerance ?? 0.1, 0, 1));
-    const soft = num(clampN(p.softness ?? 0.05, 0, 1));
-    // Reset alpha first: lumakey leaves out-of-band alpha alone, and multiplying
-    // the original alpha in twice would darken semi-transparent sources.
-    key = `lutrgb=a=maxval,lumakey=threshold=${thr}:tolerance=${tol}:softness=${soft}`;
-  } else if (f.type === "colorkey") {
-    const sim = num(clampN(p.similarity ?? 0.08, 0.01, 1));
-    const blend = num(clampN(p.blend ?? 0.04, 0, 1));
-    key = `colorkey=${keyColorHex(f.color, "808080")}:${sim}:${blend}`;
-  } else {
-    const color = keyColorHex(f.color, "00FF00");
-    const sim = num(clampN(p.similarity ?? 0.18, 0.01, 1));
-    const blend = num(clampN(p.blend ?? 0.1, 0, 1));
-    key = `chromakey=${color}:${sim}:${blend}`;
-    const despill = clampN(p.despill ?? 0, 0, 1);
-    const screen = despill > 0 ? spillScreen(color) : null;
-    if (screen) {
-      // Pull the screen colour out of edges/reflections: the spill channel is
-      // limited toward the average of the other two, scaled by `despill`.
-      const d = num(-despill);
-      const scales = screen === "green" ? `red=0:green=${d}:blue=0` : `red=0:green=0:blue=${d}`;
-      key += `,despill=type=${screen}:mix=0.5:expand=0:${scales}:brightness=0`;
-      keyedColour = true;
-    }
-  }
-  const [a, b, k] = [`${label}a`, `${label}b`, `${label}k`];
-  const top = keyedColour ? `[${k}][${b}]` : `[${b}][${k}]`;
-  // RGBA into the split: a grade before the key (eq) outputs alpha-less YUV, and
-  // blend would then settle on a format with no alpha plane to multiply.
-  return `format=rgba,split[${a}][${b}];[${a}]${key},format=rgba[${k}];${top}blend=c3_mode=multiply,format=rgba`;
-}
-
-/**
- * Map a documented visual-effect vocabulary to FFmpeg filter strings. Unknown
- * types are skipped (the rpc layer validates/teaches the vocabulary). Operates
- * on the canvas-space RGBA stream, so effects stack after color and before the
- * 2D transform. `W`/`H` are the output canvas size (for pixelate's rescale);
- * `tag` makes the keys' sub-graph labels unique per clip / adjustment layer.
+ * The clip's creative/utility effect stack as FFmpeg steps. Delegates to the
+ * effect registry (effects/registry.ts), which owns every effect's filter
+ * builder; bypassed (enabled: false) and unknown types are skipped. Operates on
+ * the canvas-space RGBA stream, so effects stack after color and before the 2D
+ * transform. `W`/`H` are the output canvas size (for pixelate's rescale); `tag`
+ * makes the sub-graph labels (keys, vignette) unique per clip / adjustment layer.
  */
 function effectSteps(filters: VisualEffect[], W: number, H: number, tag = "fx"): string[] {
-  const out: string[] = [];
-  for (const [i, f] of filters.entries()) {
-    const a = f.amount;
-    switch (f.type) {
-      case "blur":
-        out.push(`gblur=sigma=${num(clampN(a ?? 8, 0, 100))}`);
-        break;
-      case "sharpen":
-        out.push(`unsharp=5:5:${num(clampN(a ?? 1, 0, 5))}:5:5:0`);
-        break;
-      case "detail": // contrast-adaptive sharpening (subtle local detail)
-        out.push(`cas=strength=${num(clampN(a ?? 0.5, 0, 1))}`);
-        break;
-      case "denoise":
-        out.push(`hqdn3d=${num(clampN(a ?? 4, 0, 30))}`);
-        break;
-      case "sepia":
-        out.push("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131");
-        break;
-      case "grayscale":
-        out.push("hue=s=0");
-        break;
-      case "vignette":
-        out.push("vignette");
-        break;
-      case "edges":
-        out.push("edgedetect=mode=colormix");
-        break;
-      case "posterize": {
-        const L = Math.max(1, Math.round(clampN(a ?? 6, 2, 32)) - 1);
-        const e = `round(val/255*${L})/${L}*255`;
-        out.push(`lutrgb=r='${e}':g='${e}':b='${e}'`);
-        break;
-      }
-      case "pixelate": {
-        const b = clampN(a ?? 16, 2, 100);
-        out.push(`scale=max(2\\,iw/${num(b)}):max(2\\,ih/${num(b)}):flags=neighbor`);
-        out.push(`scale=${W}:${H}:flags=neighbor`);
-        break;
-      }
-      case "chromakey": // UV-distance key: saturated green/blue screens (+ despill)
-      case "colorkey": // RGB-distance key: gray/white/black/any flat colour
-      case "lumakey": // brightness key: black or white backgrounds
-        out.push(keyStep(f, `key${tag}_${i}`));
-        break;
-      default:
-        break; // unknown type: skip (validated upstream)
-    }
-  }
-  return out;
+  return effectFilterSteps(filters, W, H, tag);
 }
 
 /**

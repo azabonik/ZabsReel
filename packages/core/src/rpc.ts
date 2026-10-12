@@ -4,6 +4,7 @@ import { clipDurationFrames, clipEndFrame } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
 import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
+import { EFFECT_TYPE_IDS, describeEffectsForAI, validateEffect } from "./effects/registry.js";
 
 /**
  * The RPC surface of the editor. Every editing operation is defined exactly
@@ -100,12 +101,6 @@ const KEYFRAME_PROPERTIES = ["x", "y", "scale", "rotation", "opacity", "volume"]
 /** Built-in bleep sounds (synthesized, see audio/sfx.ts). */
 const BLEEP_SOUNDS = ["beep", "quack", "squeak", "boing", "honk"] as const;
 const EASE_KINDS = ["linear", "hold", "ease", "easeIn", "easeOut"] as const;
-/** The documented visual-effect vocabulary (each maps to an FFmpeg filter in graph.ts). */
-const EFFECT_TYPES = [
-  "blur", "sharpen", "detail", "denoise", "sepia", "grayscale",
-  "vignette", "edges", "posterize", "pixelate", "chromakey",
-  "colorkey", "lumakey",
-] as const;
 
 function summarizeTimeline(engine: EditorEngine) {
   const project = engine.getProject();
@@ -482,25 +477,46 @@ export const methods = {
 
   apply_effect: {
     description:
-      "Add a creative/utility visual EFFECT to a clip (baked as an FFmpeg filter, in order, after color). Effects stack — call repeatedly. type is one of: blur (gaussian; amount = sigma ~0..100), sharpen (amount ~0..5), detail (contrast-adaptive micro-sharpen; amount 0..1), denoise (amount ~0..30), sepia, grayscale, vignette, edges (edge-detect look), posterize (amount = color levels 2..32), pixelate (amount = block factor 2..100), or a KEY that makes the background transparent so the track BELOW shows through (put the keyed clip on a higher video track). Pick the key by background: chromakey = saturated GREEN/BLUE screen footage (distance in chroma only; params {similarity 0.18, blend 0.1, despill 0..1 — despill>0 removes green/blue spill from edges}); colorkey = GRAY / neutral / white / black or ANY flat-colour screen, and graphics overlays with white/black/gray details (RGB distance; params {similarity 0.08, blend 0.04}) — chromakey would also erase every white, black and gray area because all neutrals share gray's chroma, so never chromakey a gray screen; lumakey = keep by brightness on a pure black or white background (params {threshold 0 = black … 1 = white, tolerance 0.1, softness 0.05}). color = the key colour as '0x808080', or 'auto' to sample the clip's frame border (resolved to a concrete hex, returned as `color` with a 0..1 `confidence`; for lumakey 'auto' sets the threshold). Keys run after the clip's color grade, so key before grading or re-run 'auto' after. Raise similarity if background speckles remain; lower it if the subject gets holes. Verify with get_frame. Pass effectId to UPDATE an existing effect in place. Returns the effectId (use remove_effect to delete it).",
+      "Add a creative/utility visual EFFECT to a clip (baked as an FFmpeg filter, in stack order, after color). Effects stack — call repeatedly. " +
+      "Every type with its controls (ranges, defaults):\n" +
+      describeEffectsForAI() +
+      "\nValues outside a range are clamped (reported in `adjusted`); an unknown param, or an amount/color the type doesn't take, is rejected with the valid list. " +
+      "KEYS make the background transparent so the track BELOW shows through (put the keyed clip on a higher video track); pick the key by background as described above. " +
+      "color = the key colour as '0x808080', or 'auto' to sample the clip's frame border (resolved to a concrete hex, returned as `color` with a 0..1 `confidence`; for lumakey 'auto' sets the threshold). " +
+      "Keys run after the clip's color grade, so key before grading or re-run 'auto' after. Raise similarity if background speckles remain; lower it if the subject gets holes. Verify with get_frame. " +
+      "Pass effectId to UPDATE an existing effect in place (amount/color/params are REPLACED by what you pass — send the full set). enabled:false BYPASSES an effect (kept, but skipped in export and preview), enabled:true turns it back on; {effectId, type, enabled} alone toggles it without touching its values. " +
+      "Returns the effectId (remove_effect deletes it; reorder_effect moves it in the stack).",
     schema: z
       .object({
         clipId: z.string(),
-        type: z.enum(EFFECT_TYPES),
+        type: z.enum(EFFECT_TYPE_IDS),
         amount: z.number().optional(),
         color: z.string().optional(),
         params: z.record(z.number()).optional(),
+        enabled: z.boolean().optional(),
         effectId: z.string().optional(),
       })
       .strict(),
-    handler: async (engine, p) =>
-      engine.applyEffectAuto(p.clipId, { id: p.effectId, type: p.type, amount: p.amount, color: p.color, params: p.params }),
+    handler: async (engine, p) => {
+      const v = validateEffect({ type: p.type, amount: p.amount, color: p.color, params: p.params });
+      const r = await engine.applyEffectAuto(p.clipId, {
+        id: p.effectId, type: p.type, amount: v.amount, color: v.color, params: v.params, enabled: p.enabled,
+      });
+      return v.adjusted.length ? { ...r, adjusted: v.adjusted } : r;
+    },
   },
 
   remove_effect: {
-    description: "Remove one visual effect from a clip by its effectId (from apply_effect). To clear ALL effects/color at once use clear_clip_effects.",
+    description: "Remove one visual effect from a clip by its effectId (from apply_effect). To clear ALL effects/color at once use clear_clip_effects. To keep it but switch it off, use apply_effect with enabled:false.",
     schema: z.object({ clipId: z.string(), effectId: z.string() }).strict(),
     handler: (engine, p) => ({ clip: engine.removeEffect(p.clipId, p.effectId) }),
+  },
+
+  reorder_effect: {
+    description:
+      "Move one visual effect within a clip's effect stack (effects bake in stack order, e.g. blur→key differs from key→blur). toIndex is the effect's new 0-based position (clamped to the stack). One undo step.",
+    schema: z.object({ clipId: z.string(), effectId: z.string(), toIndex: z.number().int().min(0) }).strict(),
+    handler: (engine, p) => ({ clip: engine.reorderEffect(p.clipId, p.effectId, p.toIndex) }),
   },
 
   detect_key_color: {
@@ -522,9 +538,24 @@ export const methods = {
 
   stabilize_clip: {
     description:
-      "Stabilize shaky footage in a clip using two-pass analysis. Bakes a stabilized copy and re-points the clip at it (other effects preserved). May take a while for long clips.",
-    schema: z.object({ clipId: z.string() }).strict(),
-    handler: async (engine, p) => ({ clip: await engine.stabilizeClip(p.clipId) }),
+      "Stabilize shaky footage in a clip using two-pass analysis (vidstab). Bakes a stabilized copy and re-points the clip at it (other effects preserved; undo restores the original). May take a while for long clips. " +
+      "Options: shakiness 1..10 (default 6; how shaky/fast the camera is), accuracy 1..15 (default 15), smoothing 1..100 frames (default 30; higher = steadier, slower camera moves), " +
+      "zoom 'auto' (default; zoom in just enough to hide the moving borders) | 'none' (no zoom, so the moving borders show) | a fixed percent (e.g. 8), " +
+      "crop 'keep' (default; fill the borders from nearby frames) | 'black'.",
+    schema: z
+      .object({
+        clipId: z.string(),
+        shakiness: z.number().int().min(1).max(10).optional(),
+        accuracy: z.number().int().min(1).max(15).optional(),
+        smoothing: z.number().int().min(1).max(100).optional(),
+        zoom: z.union([z.enum(["none", "auto"]), z.number().min(-100).max(100)]).optional(),
+        crop: z.enum(["keep", "black"]).optional(),
+      })
+      .strict(),
+    handler: async (engine, p) => {
+      const { clipId, ...opts } = p;
+      return { clip: await engine.stabilizeClip(clipId, opts) };
+    },
   },
 
   auto_reframe: {

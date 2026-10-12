@@ -8,6 +8,7 @@
 // flow back to it through an imperative ref (see PlayerHandle).
 
 import { useSyncExternalStore } from "react";
+import { effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
 import type { Clip, MediaAsset, ColorAdjust, ColorGrade, VisualEffect } from "./types";
 
 export interface PlaybackState {
@@ -127,11 +128,13 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n
  * Approximate the engine's color pipeline (eq + secondary grade + simple
  * effects) with CSS filters for instant preview. Not pixel-identical to the
  * FFmpeg export — it's a live proxy so you can judge a look without rendering.
- * Curves, LUTs, color wheels and most effects are export-only (FFmpeg is the
- * ground truth); we map what CSS can express: brightness/contrast/saturation,
- * hue rotation, warm/cool tint, blur, grayscale, sepia. Keys (chromakey /
- * colorkey / lumakey) are NOT export-only: they preview through the WebGL key
- * pass (keying.ts / glkey.ts), which splits this filter around the first key.
+ * Curves, LUTs, color wheels and the "export-only" effects need Render exact
+ * (FFmpeg is the ground truth); we map what CSS can express: brightness/
+ * contrast/saturation, hue rotation, warm/cool tint, and each effect's CSS
+ * builder from the effect registry (`@aive/core/effects`). Keys (chromakey /
+ * colorkey / lumakey) preview through the WebGL key pass (keying.ts /
+ * glkey.ts), which splits this filter around the first key; the vignette
+ * through a canvas pass (see vignetteAngles). Bypassed effects are skipped.
  */
 export function colorFilter(color?: ColorAdjust, grade?: ColorGrade, filters?: VisualEffect[]): string {
   const parts: string[] = [];
@@ -147,12 +150,30 @@ export function colorFilter(color?: ColorAdjust, grade?: ColorGrade, filters?: V
     else if (grade.temperature && grade.temperature < 0) parts.push(`hue-rotate(${grade.temperature * 20}deg)`);
   }
   for (const f of filters ?? []) {
-    if (f.type === "blur") parts.push(`blur(${clamp(f.amount ?? 8, 0, 50) / 5}px)`);
-    else if (f.type === "grayscale") parts.push("grayscale(1)");
-    else if (f.type === "sepia") parts.push("sepia(0.85)");
-    else if (f.type === "vignette") parts.push("contrast(1.1) brightness(0.95)");
+    if (!isEnabled(f)) continue;
+    const preview = effectByType(f.type)?.preview;
+    const css = preview && preview !== "export-only" ? preview.css?.(f) : undefined;
+    if (css) parts.push(css);
   }
   return parts.length ? parts.join(" ") : "none";
+}
+
+/**
+ * Lens angles (radians) of the clip's enabled vignettes, for the preview's
+ * canvas vignette pass — the same cos⁴ falloff FFmpeg's vignette applies over
+ * the canvas-space frame. Empty when there are none.
+ */
+export function vignetteAngles(filters?: VisualEffect[]): number[] {
+  const out: number[] = [];
+  for (const f of filters ?? []) {
+    if (!isEnabled(f)) continue;
+    const preview = effectByType(f.type)?.preview;
+    if (preview && preview !== "export-only" && preview.pass === "vignette") {
+      const a = vignetteAngle(f);
+      if (a > 0) out.push(a);
+    }
+  }
+  return out;
 }
 
 /** Opacity from fade-in / fade-out within a segment at the given timeline time. */

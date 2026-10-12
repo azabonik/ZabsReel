@@ -1,37 +1,45 @@
 // The live-preview KEY plan: a PURE function from a clip's effects to what the
-// WebGL keying pass (glkey.ts) needs — which keys to run, with graph.ts's
-// defaults and clamps, and how the CSS colour proxy splits around them. No DOM,
-// so composite.ts stays unit-testable in plain Node.
+// WebGL keying pass (glkey.ts) needs — which keys to run, with the effect
+// registry's defaults and clamps (`@aive/core/effects`, shared with the export),
+// and how the CSS colour proxy splits around them. Bypassed effects are left
+// out. No DOM, so composite.ts stays unit-testable in plain Node.
 //
 // Export order is colour → effects (in list order) → transform, so the CSS
 // proxy for colour plus every effect BEFORE the first key is drawn first
 // (`pre`); the keys run on that; effects after the first key are drawn on the
-// keyed result (`post`). Effects sitting between two keys are approximated as
-// "after" — the keys themselves always run in order.
+// keyed result (`post`). The vignette canvas pass splits the same way
+// (`preVignette` / `postVignette`): a vignette before the key darkens the frame
+// the key sees, so its dark edge stays opaque, as in the export. Effects
+// sitting between two keys are approximated as "after" — the keys themselves
+// always run in order.
 
 import type { ClipEffects, VisualEffect } from "./types";
-import { colorFilter } from "./playback";
+import { colorFilter, vignetteAngles } from "./playback";
+import {
+  EFFECTS, defaultsFor, effectByType, hexToRgb, isEnabled, isKeyType, keyColorHex, paramValue, spillScreen,
+} from "@aive/core/effects";
 
-export const KEY_EFFECT_TYPES = ["colorkey", "chromakey", "lumakey"] as const;
-export type KeyKind = (typeof KEY_EFFECT_TYPES)[number];
+export { hexToRgb, keyColorHex, spillScreen };
+
+/** The key kinds the shader implements (glkey.ts); which effects ARE keys comes from the registry. */
+export type KeyKind = "colorkey" | "chromakey" | "lumakey";
+
+/** The registry's key effects (preview.key), in registry order. */
+export const KEY_EFFECT_TYPES = EFFECTS.filter((e) => isKeyType(e.type)).map((e) => e.type) as KeyKind[];
 
 export function isKeyEffect(type: string): type is KeyKind {
-  return (KEY_EFFECT_TYPES as readonly string[]).includes(type);
+  return isKeyType(type);
 }
 
-/** Per-key parameter defaults — keep in sync with graph.ts keyStep(). */
-export const KEY_DEFAULTS: Record<KeyKind, Record<string, number>> = {
-  colorkey: { similarity: 0.08, blend: 0.04 },
-  chromakey: { similarity: 0.18, blend: 0.1, despill: 0 },
-  lumakey: { threshold: 0, tolerance: 0.1, softness: 0.05 },
-};
+/** Per-key parameter defaults, from the effect registry (the export uses the same). */
+export const KEY_DEFAULTS = Object.fromEntries(
+  KEY_EFFECT_TYPES.map((t) => [t, defaultsFor(t).params ?? {}]),
+) as Record<KeyKind, Record<string, number>>;
 
-/** Default key colour when none is stored (graph.ts falls back the same way). */
-export const KEY_DEFAULT_COLOR: Record<KeyKind, string> = {
-  colorkey: "0x808080",
-  chromakey: "0x00FF00",
-  lumakey: "",
-};
+/** Default key colour when none is stored ("" = the key takes no colour), from the registry. */
+export const KEY_DEFAULT_COLOR = Object.fromEntries(
+  KEY_EFFECT_TYPES.map((t) => [t, effectByType(t)?.color?.default ?? ""]),
+) as Record<KeyKind, string>;
 
 /** The keys the preview shader runs per clip (extra keys are export-only). */
 export const MAX_KEYS = 4;
@@ -53,68 +61,47 @@ export interface KeySpec {
 export interface KeyPlan {
   /** CSS filter for colour + effects before the first key ("none" when empty). */
   pre: string;
+  /** Lens angles of the vignettes before the first key — drawn before keying; absent when none. */
+  preVignette?: number[];
   keys: KeySpec[];
   /** CSS filter for the effects after the first key ("none" when empty). */
   post: string;
-}
-
-const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-
-const KEY_COLOR_NAMES: Record<string, string> = {
-  green: "00FF00", blue: "0000FF", black: "000000", white: "FFFFFF", gray: "808080", grey: "808080", red: "FF0000",
-};
-
-/**
- * Normalise a key colour (0xRRGGBB / #RRGGBB / RRGGBB, optional alpha byte, or
- * a basic name) to "0xRRGGBB" — the same rule as graph.ts, so preview and
- * export agree on what an odd value means. Unparseable → `fallback`.
- */
-export function keyColorHex(c: string | undefined, fallback: string): string {
-  const s = (c ?? "").trim().toLowerCase();
-  const m = /^(?:0x|#)?([0-9a-f]{6})(?:[0-9a-f]{2})?$/.exec(s);
-  if (m) return `0x${m[1].toUpperCase()}`;
-  const named = KEY_COLOR_NAMES[s];
-  return named ? `0x${named}` : fallback;
-}
-
-export function hexToRgb(hex: string): [number, number, number] {
-  const v = parseInt(hex.replace(/^0x|^#/i, ""), 16) || 0;
-  return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
-}
-
-/** Which despill screen a key colour is: clearly green- or blue-dominant (as graph.ts). */
-export function spillScreen([r, g, b]: [number, number, number]): "green" | "blue" | null {
-  if (g >= 80 && g - Math.max(r, b) >= 40) return "green";
-  if (b >= 80 && b - Math.max(r, g) >= 40) return "blue";
-  return null;
+  /** Lens angles of the vignettes after the first key — drawn on the keyed result; absent when none. */
+  postVignette?: number[];
 }
 
 function keySpec(f: VisualEffect & { type: KeyKind }): KeySpec {
-  const p = { ...KEY_DEFAULTS[f.type], ...f.params };
   const rgb = hexToRgb(keyColorHex(f.color, KEY_DEFAULT_COLOR[f.type] || "0x000000"));
+  // paramValue applies the registry default + range clamp, exactly as the
+  // export's filter builder does; a param the key doesn't have gets the fallback.
+  const v = (k: string, fallback: number) => paramValue(f, k, fallback);
   return {
     kind: f.type,
     rgb,
-    similarity: clamp(p.similarity ?? 0.1, 0.01, 1),
-    blend: clamp(p.blend ?? 0, 0, 1),
-    despill: f.type === "chromakey" ? clamp(p.despill ?? 0, 0, 1) : 0,
+    similarity: v("similarity", 0.1),
+    blend: v("blend", 0),
+    despill: f.type === "chromakey" ? v("despill", 0) : 0,
     screen: f.type === "chromakey" ? spillScreen(rgb) : null,
-    threshold: clamp(p.threshold ?? 0, 0, 1),
-    tolerance: clamp(p.tolerance ?? 0.1, 0, 1),
-    softness: clamp(p.softness ?? 0.05, 0, 1),
+    threshold: v("threshold", 0),
+    tolerance: v("tolerance", 0.1),
+    softness: v("softness", 0.05),
   };
 }
 
-/** The key plan for a clip, or undefined when it has no key effect. */
+/** The key plan for a clip, or undefined when it has no (enabled) key effect. Bypassed effects are left out. */
 export function keyPlan(fx: ClipEffects | undefined): KeyPlan | undefined {
-  const filters = fx?.filters ?? [];
+  const filters = (fx?.filters ?? []).filter(isEnabled);
   const first = filters.findIndex((f) => isKeyEffect(f.type));
   if (first < 0) return undefined;
   const after = filters.slice(first);
   const keys = after.filter((f): f is VisualEffect & { type: KeyKind } => isKeyEffect(f.type)).slice(0, MAX_KEYS).map(keySpec);
+  const preVignette = vignetteAngles(filters.slice(0, first));
+  const postVignette = vignetteAngles(after);
   return {
     pre: colorFilter(fx?.color, fx?.grade, filters.slice(0, first)),
+    ...(preVignette.length ? { preVignette } : {}),
     keys,
     post: colorFilter(undefined, undefined, after.filter((f) => !isKeyEffect(f.type))),
+    ...(postVignette.length ? { postVignette } : {}),
   };
 }

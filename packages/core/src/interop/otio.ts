@@ -247,6 +247,7 @@ export async function otioToProject(
   const missing: string[] = [];
 
   const sc = (t.metadata?.synthcut ?? {}) as Partial<{
+    schemaVersion: number;
     width: number;
     height: number;
     fps: number;
@@ -435,7 +436,14 @@ export async function otioToProject(
     music: sc.music,
     markers: sc.markers,
     revision: 0,
-    schemaVersion: PROJECT_SCHEMA_VERSION,
+    // The schema the SynthCut clips in the metadata were written with, so the
+    // engine's migrateProject upgrades them (e.g. pre-v4 vignette amounts). An
+    // OTIO timeline is always frame-based, so never below v2; foreign OTIO
+    // carries no SynthCut clips and is current.
+    schemaVersion:
+      typeof sc.schemaVersion === "number" && Number.isFinite(sc.schemaVersion)
+        ? Math.max(2, Math.min(PROJECT_SCHEMA_VERSION, Math.floor(sc.schemaVersion)))
+        : PROJECT_SCHEMA_VERSION,
     createdAt: now,
     updatedAt: now,
   };

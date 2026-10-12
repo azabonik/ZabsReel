@@ -207,17 +207,18 @@ export interface ColorGrade {
   curveB?: string;
 }
 
-/** A creative/utility visual effect baked as an FFmpeg filter (blur/sharpen/etc.). */
+/**
+ * A creative/utility visual effect baked as an FFmpeg filter (blur/sharpen/key/…).
+ * The vocabulary, each type's params (ranges + defaults), its FFmpeg filter and
+ * its live preview all live in ONE place: the effect registry
+ * (effects/registry.ts, importable as `@aive/core/effects`).
+ */
 export interface VisualEffect {
-  /** Stable id so the UI/AI can remove or update a single effect. */
+  /** Stable id so the UI/AI can remove, update or reorder a single effect. */
   id: string;
-  /**
-   * Effect kind (a documented vocabulary mapped to FFmpeg filters in graph.ts):
-   * blur | sharpen | detail | denoise | sepia | grayscale | vignette |
-   * posterize | edges | pixelate | chromakey | colorkey | lumakey.
-   */
+  /** Effect kind — one of the registry's EFFECT_TYPE_IDS (unknown types are skipped). */
   type: string;
-  /** Primary strength, meaning depends on `type` (e.g. blur sigma, sharpen amount). */
+  /** Primary strength (the registry param "amount"), meaning depends on `type` (e.g. blur sigma). Absent = default. */
   amount?: number;
   /**
    * Key colour for chromakey / colorkey as "0xRRGGBB". Stored resolved: the
@@ -225,10 +226,12 @@ export interface VisualEffect {
    */
   color?: string;
   /**
-   * Extra numeric params: chromakey {similarity, blend, despill}, colorkey
-   * {similarity, blend}, lumakey {threshold, tolerance, softness} (all 0..1).
+   * The type's other registry params, e.g. chromakey {similarity, blend, despill},
+   * colorkey {similarity, blend}, lumakey {threshold, tolerance, softness}. Absent = default.
    */
   params?: Record<string, number>;
+  /** false = BYPASSED: kept in the stack but skipped in export and preview. Absent = on. */
+  enabled?: boolean;
 }
 
 export type OverlayPosition =
@@ -591,9 +594,11 @@ export interface Marker {
 
 /**
  * Current project schema version. v1 = single-track seconds; v2 = multi-track
- * frames; v3 = named markers ({frame,name?,color?,note?} instead of number[]).
+ * frames; v3 = named markers ({frame,name?,color?,note?} instead of number[]);
+ * v4 = a vignette's `amount` is its strength (the effect registry). Before v4
+ * the export ignored it, so loading a pre-v4 project drops it (→ the default).
  */
-export const PROJECT_SCHEMA_VERSION = 3;
+export const PROJECT_SCHEMA_VERSION = 4;
 
 /** Timeline footprint of a clip in project frames (accounts for speed). */
 export function clipDurationFrames(clip: Clip): number {

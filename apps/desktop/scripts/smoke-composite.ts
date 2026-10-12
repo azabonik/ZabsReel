@@ -5,7 +5,12 @@
 // (but still play audio), and that muted tracks are silent. Also checks the
 // renderer's bleep expansion (src/bleeps.ts) against the core original on the
 // same inputs (speed, audio slip, trims, fps) and that the plan plays each
-// bleep's sound effect where the export does.
+// bleep's sound effect where the export does. Then the preview side of the
+// effect registry: CSS builders, the vignette pass, bypassed effects, and that
+// the renderer's key helpers ARE the registry's.
+//
+// Imports `@aive/core/effects` through the package exports (core's dist/), so
+// build core first (`npm run build`, or `npx tsc -b packages/core`).
 //
 // Run:  npx tsx apps/desktop/scripts/smoke-composite.ts
 
@@ -16,6 +21,12 @@ import type { Bleep, Clip, MediaAsset, Project, Track } from "../src/types";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
 import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../../../packages/core/src/audio/bleeps";
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
+import { colorFilter, vignetteAngles } from "../src/playback";
+import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, keyPlan } from "../src/keying";
+import {
+  EFFECTS, defaultsFor, effectByType, exactOnly, vignetteFactor,
+} from "@aive/core/effects";
+import type { Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -304,6 +315,102 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: no SFX after the beep ends", !activeLayersAt(pj, pAssets, 1 + 1.5).clips.some((c) => c.bleep?.bleepId === "b1"));
   check("plan: muted track plays no bleeps", !activeLayersAt(mk({ muted: true }), pAssets, 2.2).clips.some((c) => c.bleep));
   check("plan: clip volume 0 silences its bleeps", !activeLayersAt(mk({}, { volume: 0 }), pAssets, 2.2).clips.some((c) => c.bleep));
+}
+
+// --- effect registry: preview side ------------------------------------------
+{
+  const fx = (type: string, extra: Partial<VisualEffect> = {}): VisualEffect => ({ id: `${type}-${Math.random()}`, type, ...extra });
+  // CSS builders (byte-identical to the pre-registry colorFilter for blur/grayscale/sepia).
+  check("css: blur 10 → blur(2px)", colorFilter(undefined, undefined, [fx("blur", { amount: 10 })]) === "blur(2px)");
+  check("css: blur default (8) → blur(1.6px)", colorFilter(undefined, undefined, [fx("blur")]) === "blur(1.6px)");
+  check("css: blur clamps at 50 → blur(10px)", colorFilter(undefined, undefined, [fx("blur", { amount: 90 })]) === "blur(10px)");
+  check("css: grayscale + sepia in stack order",
+    colorFilter(undefined, undefined, [fx("grayscale"), fx("sepia")]) === "grayscale(1) sepia(0.85)");
+  check("css: export-only effects add nothing (sharpen/pixelate/edges)",
+    colorFilter(undefined, undefined, [fx("sharpen"), fx("pixelate"), fx("edges")]) === "none");
+  check("css: vignette is no longer a contrast/brightness hack", colorFilter(undefined, undefined, [fx("vignette")]) === "none");
+  check("css: bypassed effects are skipped",
+    colorFilter({ brightness: 0.1 }, undefined, [fx("blur", { amount: 10, enabled: false }), fx("grayscale")]) === "brightness(1.1) grayscale(1)",
+    colorFilter({ brightness: 0.1 }, undefined, [fx("blur", { amount: 10, enabled: false }), fx("grayscale")]));
+  check("css: enabled:true counts as on", colorFilter(undefined, undefined, [fx("sepia", { enabled: true })]) === "sepia(0.85)");
+
+  // Vignette pass: angles from the registry (amount 1 = PI/5), bypass + amount 0 drop it.
+  const angles = vignetteAngles([fx("vignette"), fx("vignette", { amount: 2 }), fx("vignette", { amount: 0 }), fx("vignette", { amount: 1.5, enabled: false })]);
+  check("vignette: default and amount 2 → [PI/5, 2·PI/5]; amount 0 and bypassed dropped",
+    angles.length === 2 && near(angles[0], Math.PI / 5, 1e-9) && near(angles[1], (2 * Math.PI) / 5, 1e-9), JSON.stringify(angles));
+  check("vignette: falloff = FFmpeg's cos⁴ (centre 1, corner at PI/5 ≈ 0.428)",
+    vignetteFactor(0, Math.PI / 5) === 1 && near(vignetteFactor(1, Math.PI / 5), Math.cos(Math.PI / 5) ** 4, 1e-12) && vignetteFactor(1.01, 1) === 0);
+
+  // Every registry entry has a preview story: css, key, a canvas pass, or export-only.
+  const noStory = EFFECTS.filter((e) => e.preview !== "export-only" && !e.preview.css && !e.preview.key && !e.preview.pass).map((e) => e.type);
+  check("registry: every effect has css / key / pass, or is export-only", noStory.length === 0, noStory.join(","));
+  check("registry: Render-exact badge set = sharpen, detail, denoise, edges, posterize, pixelate",
+    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(",") === "sharpen,detail,denoise,edges,posterize,pixelate");
+
+  // The renderer's key helpers are derived from the registry, not a copy.
+  check("keying: KEY_EFFECT_TYPES from the registry's key flag", KEY_EFFECT_TYPES.join(",") === "chromakey,colorkey,lumakey");
+  check("keying: KEY_DEFAULTS = registry defaults",
+    KEY_EFFECT_TYPES.every((t) => JSON.stringify(KEY_DEFAULTS[t]) === JSON.stringify(defaultsFor(t).params)));
+  check("keying: KEY_DEFAULT_COLOR = registry colour defaults",
+    KEY_DEFAULT_COLOR.chromakey === "0x00FF00" && KEY_DEFAULT_COLOR.colorkey === effectByType("colorkey")?.color?.default && KEY_DEFAULT_COLOR.lumakey === "");
+
+  // Bypassed keys: no plan when the only key is off; a bypassed first key moves the split.
+  check("key: a bypassed key gives no key plan",
+    keyPlan({ filters: [fx("chromakey", { color: "0x00FF00", enabled: false })] }) === undefined);
+  const kp = keyPlan({ filters: [fx("colorkey", { enabled: false }), fx("grayscale"), fx("lumakey", { params: { threshold: 1 } }), fx("blur", { amount: 5 })] });
+  check("key: bypassed key skipped — the plan starts at the next enabled key",
+    !!kp && kp.keys.map((k) => k.kind).join() === "lumakey" && kp.pre === "grayscale(1)" && kp.post === "blur(1px)",
+    JSON.stringify(kp));
+  check("key: params clamped by the registry ranges (similarity 5 → 1)",
+    keyPlan({ filters: [fx("chromakey", { params: { similarity: 5 } })] })?.keys[0].similarity === 1);
+
+  // Vignettes split around the first key like the CSS proxy: one before the key
+  // darkens the frame the key sees (the export keys the darkened frame, so the
+  // dark edge stays opaque); one after it darkens the keyed result.
+  const vk = keyPlan({ filters: [fx("vignette"), fx("colorkey"), fx("vignette", { amount: 2 })] });
+  check("key: a vignette before the first key → preVignette, one after → postVignette",
+    !!vk && vk.preVignette?.length === 1 && near(vk.preVignette[0], Math.PI / 5, 1e-9) &&
+      vk.postVignette?.length === 1 && near(vk.postVignette[0], (2 * Math.PI) / 5, 1e-9),
+    JSON.stringify(vk));
+  const kv = keyPlan({ filters: [fx("colorkey"), fx("vignette")] });
+  check("key: [key, vignette] → only postVignette", !!kv && kv.preVignette === undefined && kv.postVignette?.length === 1, JSON.stringify(kv));
+  const vOff = keyPlan({ filters: [fx("vignette", { enabled: false }), fx("vignette", { amount: 0 }), fx("colorkey")] });
+  check("key: bypassed / amount-0 vignettes before a key → neither field", !!vOff && vOff.preVignette === undefined && vOff.postVignette === undefined,
+    JSON.stringify(vOff));
+  const noVig = keyPlan({ filters: [fx("grayscale"), fx("chromakey")] });
+  check("key: no vignette → no vignette fields in the plan", !!noVig && !("preVignette" in noVig) && !("postVignette" in noVig));
+
+  // The draw plan carries the vignette for clips AND adjustment layers.
+  const vProject: Project = {
+    ...project,
+    tracks: [
+      track("video", 0, [clip("VIG", "vidA", 0, 30, { effects: { filters: [fx("vignette", { amount: 1.5 })] } })]),
+      track("video", 1, [{ id: "ADJ", adjustment: true, startFrame: 0, sourceInFrame: 0, sourceOutFrame: 30,
+        effects: { filters: [fx("vignette"), fx("grayscale")] } } as Clip]),
+      track("video", 2, [clip("OFF", "ovl", 0, 30, { effects: { filters: [fx("vignette", { enabled: false })] } })]),
+    ],
+    music: undefined,
+  };
+  const vAssets = new Map(vProject.assets.map((a) => [a.id, a]));
+  const vPlan = activeLayersAt(vProject, vAssets, 0.1).clips;
+  const vig = vPlan.find((c) => c.clipId === "VIG");
+  const adj = vPlan.find((c) => c.clipId === "ADJ");
+  const offC = vPlan.find((c) => c.clipId === "OFF");
+  check("plan: clip vignette angle (1.5 → 0.3·PI)", !!vig?.draw?.vignette && near(vig.draw.vignette[0], 0.3 * Math.PI, 1e-9));
+  check("plan: adjustment layer carries vignette + css", !!adj?.adjust?.vignette && adj.adjust.colorFilter === "grayscale(1)");
+  check("plan: bypassed vignette → no vignette field", !!offC?.draw && offC.draw.vignette === undefined);
+
+  // A keyed clip: draw.vignette keeps every vignette (the unkeyed fallback);
+  // the key plan carries the split the keyed draw uses.
+  const kvProject: Project = {
+    ...project,
+    tracks: [track("video", 0, [clip("KV", "vidA", 0, 30, { effects: { filters: [fx("vignette"), fx("colorkey", { color: "0x808080" })] } })])],
+    music: undefined,
+  };
+  const kvDraw = activeLayersAt(kvProject, new Map(kvProject.assets.map((a) => [a.id, a])), 0.1).clips.find((c) => c.clipId === "KV")?.draw;
+  check("plan: [vignette, key] → draw.vignette has it, key.preVignette has it, no postVignette",
+    kvDraw?.vignette?.length === 1 && kvDraw.key?.preVignette?.length === 1 && kvDraw.key.postVignette === undefined,
+    JSON.stringify({ vignette: kvDraw?.vignette, key: kvDraw?.key }));
 }
 
 console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);

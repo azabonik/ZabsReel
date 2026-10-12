@@ -86,12 +86,15 @@ export interface ColorGrade {
   curveB?: string;
 }
 
+/** Mirrors core's VisualEffect; the vocabulary + params live in `@aive/core/effects`. */
 export interface VisualEffect {
   id: string;
   type: string;
   amount?: number;
   color?: string;
   params?: Record<string, number>;
+  /** false = bypassed (skipped in export and preview). Absent = on. */
+  enabled?: boolean;
 }
 
 /** A spoken-word search hit from search_transcript. */

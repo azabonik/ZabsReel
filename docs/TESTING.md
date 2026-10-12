@@ -77,7 +77,8 @@ from `scratch/`.
 
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide
+# smoke-composite imports @aive/core/effects from core's dist/, so build first.
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys)
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -111,10 +112,11 @@ npx tsx packages/core/scripts/smoke-multitrack.ts                      # self-sy
 # Effects, keys, transitions, LUT/stabilize, color grade, per-clip transform + keyframes
 npx tsx packages/core/scripts/smoke-effects.ts     scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transitions.ts scratch/a.mp4 scratch/b.mp4
-npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4
+npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4   # + stabilize options on a synthesized shaky clip
 npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto"; self-synthesizes
+npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount; self-synthesizes
 
 # Text overlays + native keyframe-animated text
 npx tsx packages/core/scripts/smoke-text.ts        scratch/a.mp4 scratch/b.mp4
@@ -190,6 +192,8 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Per-track controls | Mute / hide / lock a track; change its volume | Track header reflects it; preview/audio respond |
 | Per-clip effects | Use the per-clip controls: speed, volume, fades, color grade, crop | Controls reflect on the clip |
 | Transform / keyframes | Move/scale/rotate a clip; add ◆ keyframes to animate position or scale | Motion plays back in the preview |
+| Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Vignette and blur preview live; rows without a live preview show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
+| Stabilize | On a shaky clip set **Smoothing** and **Zoom**, then **Stabilize clip** | Busy label "Stabilizing…", then the clip points at a "(stabilized)" bake; undo restores it |
 | Keys | Put a gray-, green- or black-background clip on a track above another; **Add effect → Color / Chroma / Luma key** | Background turns transparent in the live preview (colour auto-detected); swatch, **Auto**, **Pick** (eyedropper) and the sliders update it in place; export matches |
 | Transition | Add a crossfade between the two clips | Overlap shown |
 | Text | Add a title / lower-third | Overlay listed on the clip |

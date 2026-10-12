@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
-import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualEffect, VisualHit } from "./types";
+import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualHit } from "./types";
 import { clipDurationFrames } from "./types";
 import {
   buildSegments, createPlaybackStore, fmtTime, usePlaybackValue,
@@ -15,8 +15,8 @@ import {
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
 import { platform } from "./platform";
-import { EFFECT_LABELS, KeyEffectControls, type KeyDetection, type KeyPatch } from "./keyfx";
-import { isKeyEffect } from "./keying";
+import type { KeyDetection, KeyPatch } from "./keyfx";
+import { EffectStack, type EffectRequest } from "./effectstack";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 
 function fmt(seconds: number): string {
@@ -424,10 +424,13 @@ export function App({ api }: { api: CoreApi }) {
   // Richer secondary grade: white balance / hue / wheels / curves.
   const setGrade = (clipId: string, patch: Record<string, unknown>) =>
     run("Grade", () => api.rpc("apply_color", { clipId, ...patch }));
-  const applyEffect = (clipId: string, type: string, amount?: number, effectId?: string) =>
-    run("Effect", () => api.rpc("apply_effect", { clipId, type, ...(amount !== undefined ? { amount } : {}), ...(effectId ? { effectId } : {}) }));
+  // Generic effects (effectstack.tsx): the core validates/clamps against the effect registry.
+  const applyEffect = (clipId: string, req: EffectRequest, effectId?: string) =>
+    run("Effect", () => api.rpc("apply_effect", { clipId, ...req, ...(effectId ? { effectId } : {}) }));
   const removeEffect = (clipId: string, effectId: string) =>
     run("Remove effect", () => api.rpc("remove_effect", { clipId, effectId }));
+  const reorderEffect = (clipId: string, effectId: string, toIndex: number) =>
+    run("Reorder effect", () => api.rpc("reorder_effect", { clipId, effectId, toIndex }));
   // Keys: explicit colour/params (keyfx.tsx); color "auto" = engine border detection.
   const applyKey = (clipId: string, type: string, patch: KeyPatch, effectId?: string) =>
     run("Key", () => api.rpc("apply_effect", { clipId, type, ...patch, ...(effectId ? { effectId } : {}) }));
@@ -485,6 +488,8 @@ export function App({ api }: { api: CoreApi }) {
     setSelectedClip(clipId);
     setSelectedBleep({ clipId, bleepId });
   }, []);
+  const stabilize = (clipId: string, opts: StabilizeUiOptions) =>
+    run("Stabilizing", () => api.rpc("stabilize_clip", { clipId, ...opts }));
   const setAudioOffset = (clipId: string, offset: number) =>
     run("Audio offset (J/L cut)", () => api.rpc("set_audio_offset", { clipId, offsetFrames: Math.round(offset * fps) }));
   const setTransform = (clipId: string, patch: Record<string, number | boolean>) =>
@@ -969,6 +974,7 @@ export function App({ api }: { api: CoreApi }) {
               onGrade={setGrade}
               onApplyEffect={applyEffect}
               onRemoveEffect={removeEffect}
+              onReorderEffect={reorderEffect}
               onApplyKey={applyKey}
               onDetectKey={detectKey}
               onInspectColor={inspectColor}
@@ -983,6 +989,7 @@ export function App({ api }: { api: CoreApi }) {
               onSetBleep={setBleep}
               onRemoveBleep={removeBleep}
               onDeselectBleep={() => setSelectedBleep(null)}
+              onStabilize={stabilize}
               onAudioOffset={setAudioOffset}
               onTransform={setTransform}
               onAddKeyframe={addKeyframe}
@@ -1105,23 +1112,15 @@ function matchCurve(curve?: string): string {
   return "Custom";
 }
 
-// Effect amount ranges [min,max,step]; absent = the effect takes no amount.
-const EFFECT_RANGE: Record<string, [number, number, number]> = {
-  blur: [0, 50, 1],
-  sharpen: [0, 5, 0.1],
-  detail: [0, 1, 0.05],
-  denoise: [0, 30, 1],
-  vignette: [0, 1.5, 0.05],
-  posterize: [2, 32, 1],
-  pixelate: [2, 64, 1],
-};
-const EFFECT_DEFAULT_AMOUNT: Record<string, number | undefined> = {
-  blur: 8, sharpen: 1, detail: 0.5, denoise: 4, posterize: 6, pixelate: 16,
-};
-const EFFECT_TYPE_NAMES = [
-  "blur", "sharpen", "detail", "denoise", "sepia", "grayscale",
-  "vignette", "edges", "posterize", "pixelate", "chromakey",
-  "colorkey", "lumakey",
+/** stabilize_clip options the inspector exposes (the AI has shakiness/accuracy/crop too). */
+type StabilizeUiOptions = { smoothing: number; zoom: "none" | "auto" | number };
+const STAB_ZOOM_OPTIONS: { value: string; label: string }[] = [
+  { value: "auto", label: "Auto — just enough to hide edges" },
+  { value: "none", label: "None — show the moving edges" },
+  { value: "5", label: "5%" },
+  { value: "10", label: "10%" },
+  { value: "15", label: "15%" },
+  { value: "20", label: "20%" },
 ];
 
 /** A compact 3-channel (R/G/B) color-wheel control as three mini sliders. */
@@ -1363,8 +1362,9 @@ type InspectorProps = {
   onFade: (clipId: string, fadeIn: number, fadeOut: number) => void;
   onColor: (clipId: string, patch: Record<string, number>) => void;
   onGrade: (clipId: string, patch: Record<string, unknown>) => void;
-  onApplyEffect: (clipId: string, type: string, amount?: number, effectId?: string) => void;
+  onApplyEffect: (clipId: string, req: EffectRequest, effectId?: string) => void;
   onRemoveEffect: (clipId: string, effectId: string) => void;
+  onReorderEffect: (clipId: string, effectId: string, toIndex: number) => void;
   onApplyKey: (clipId: string, type: string, patch: KeyPatch, effectId?: string) => void;
   onDetectKey: (clipId: string) => Promise<KeyDetection | null>;
   onInspectColor: () => void;
@@ -1380,6 +1380,7 @@ type InspectorProps = {
   onSetBleep: (clipId: string, bleepId: string, patch: Record<string, unknown>) => void;
   onRemoveBleep: (clipId: string, bleepId: string) => void;
   onDeselectBleep: () => void;
+  onStabilize: (clipId: string, opts: StabilizeUiOptions) => void;
   onAudioOffset: (clipId: string, offset: number) => void;
   onTransform: (clipId: string, patch: Record<string, number | boolean>) => void;
   onAddKeyframe: (clipId: string, property: KeyframeProperty, value: number) => void;
@@ -1461,6 +1462,8 @@ function ClipInspector(props: InspectorProps) {
   const [bleepNote, setBleepNote] = useState<string | null>(null);
   const bleepTotal = clip.effects?.bleeps?.length ?? 0;
   const bleepVisible = bleepTotal ? expandBleeps(clip, project?.fps ?? 30).length : 0;
+  const [stabSmoothing, setStabSmoothing] = useState(30);
+  const [stabZoom, setStabZoom] = useState("auto");
 
   const fps = project?.fps ?? 30;
   const dur = clipDurationFrames(clip) / fps;
@@ -1656,41 +1659,32 @@ function ClipInspector(props: InspectorProps) {
 
             <div className="group">
               <div className="group-title"><Sliders size={13} /> Effects</div>
-              <div className="dual">
-                <div className="field">
-                  <label>Add effect</label>
-                  <select value="" onChange={(e) => {
-                    const t = e.target.value;
-                    // Keys start from the detected background colour so the first result already works.
-                    if (t && isKeyEffect(t)) props.onApplyKey(clip.id, t, { color: "auto" });
-                    else if (t) props.onApplyEffect(clip.id, t, EFFECT_DEFAULT_AMOUNT[t]);
-                  }}>
-                    <option value="">Choose…</option>
-                    {EFFECT_TYPE_NAMES.map((t) => <option key={t} value={t}>{EFFECT_LABELS[t] ?? t}</option>)}
-                  </select>
-                </div>
+              <EffectStack clipId={clip.id} filters={filters} disabled={!connected || busy} Range={RangeField}
+                onApply={props.onApplyEffect} onRemove={props.onRemoveEffect} onReorder={props.onReorderEffect}
+                onApplyKey={props.onApplyKey} onDetectKey={props.onDetectKey} />
+            </div>
+
+            <div className="group">
+              <div className="group-title"><Frame size={13} /> Stabilize</div>
+              <RangeField label="Smoothing" unit=" fr" min={1} max={100} step={1} def={30}
+                value={stabSmoothing} onCommit={(v) => setStabSmoothing(v)} />
+              <div className="field">
+                <label>Zoom</label>
+                <select value={stabZoom} onChange={(e) => setStabZoom(e.target.value)} aria-label="Stabilize zoom">
+                  {STAB_ZOOM_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
               </div>
-              {filters.length === 0 ? (
-                <span className="field-hint">Stack blur, sharpen, vignette, keys and more — baked in order after color. Keys preview live; put the keyed clip on the track above.</span>
-              ) : (
-                filters.map((f: VisualEffect) => (
-                  <div className="eff-row" key={f.id}>
-                    <div className="eff-body">
-                      {isKeyEffect(f.type) ? (
-                        <KeyEffectControls clipId={clip.id} effect={f} disabled={!connected || busy} Range={RangeField}
-                          onApply={props.onApplyKey} onDetect={props.onDetectKey} />
-                      ) : EFFECT_RANGE[f.type] ? (
-                        <RangeField label={f.type} min={EFFECT_RANGE[f.type][0]} max={EFFECT_RANGE[f.type][1]} step={EFFECT_RANGE[f.type][2]}
-                          def={EFFECT_DEFAULT_AMOUNT[f.type] ?? 0} value={f.amount ?? EFFECT_DEFAULT_AMOUNT[f.type] ?? 0}
-                          onCommit={(v) => props.onApplyEffect(clip.id, f.type, v, f.id)} />
-                      ) : (
-                        <span className="eff-name">{f.type}</span>
-                      )}
-                    </div>
-                    <button className="icon-btn" aria-label={`Remove ${f.type}`} onClick={() => props.onRemoveEffect(clip.id, f.id)}><X size={13} /></button>
-                  </div>
-                ))
-              )}
+              <button
+                className="btn btn-block"
+                onClick={() => props.onStabilize(clip.id, {
+                  smoothing: stabSmoothing,
+                  zoom: stabZoom === "none" || stabZoom === "auto" ? stabZoom : Number(stabZoom),
+                })}
+                disabled={!connected || busy || !asset?.hasVideo || !!asset?.isImage}
+              >
+                <Frame size={14} /> Stabilize clip
+              </button>
+              <span className="field-hint">Two-pass analysis bakes a steadier copy and re-points the clip (undo restores it). More smoothing = steadier, slower camera moves; zoom hides the edges the correction exposes.</span>
             </div>
 
             <div className="group">

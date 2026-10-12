@@ -10,6 +10,11 @@
  * Both are plain text — no model, no licensing concerns.
  */
 
+import { EFFECTS, isKeyType } from "@aive/core/effects";
+
+/** The effect vocabulary, generated from the core effect registry so the guide never drifts. */
+const LOOK_EFFECTS = EFFECTS.filter((e) => !isKeyType(e.type)).map((e) => e.type).join(", ");
+
 /**
  * Always-on operating manual. Keep it tight but complete: it is injected into
  * every session. Its job is to make the AI treat this as a real editor it has
@@ -124,9 +129,9 @@ with FFmpeg.
 - **Look**: color_grade (brightness/contrast/saturation/gamma), apply_color (the
   richer grade — white balance temperature/tint, hue, lift/gamma/gain color
   wheels for shadows/mids/highlights, and tone curves curve/curveR/G/B as 'x/y'
-  points), apply_lut (.cube), crop_clip, stabilize_clip, auto_reframe.
-- **Effects**: apply_effect stacks FFmpeg-baked effects (blur, sharpen, detail,
-  denoise, sepia, grayscale, vignette, edges, posterize, pixelate) and KEYS,
+  points), apply_lut (.cube), crop_clip, stabilize_clip (smoothing, zoom
+  auto (default)/none/percent, crop keep/black), auto_reframe.
+- **Effects**: apply_effect stacks FFmpeg-baked effects (${LOOK_EFFECTS}) and KEYS,
   which make a clip's background transparent so the track BELOW shows through
   (put the keyed clip on the higher track). Choose the key by background:
   chromakey for saturated green/blue screens (add params.despill 0..1 to clean
@@ -135,8 +140,11 @@ with FFmpeg.
   would erase those neutrals too — they share gray's chroma); lumakey for pure
   black or white backgrounds (params.threshold 0 = black, 1 = white). Pass
   color 'auto' to sample the frame border (detect_key_color previews it with a
-  confidence); verify with get_frame. remove_effect by id; clear_clip_effects
-  wipes color+effects together.
+  confidence); verify with get_frame. Each type's params, ranges and defaults
+  are listed in apply_effect's description (out-of-range values are clamped).
+  Effects bake in stack order: reorder_effect moves one, apply_effect with
+  enabled:false bypasses one (A/B it without losing its settings), remove_effect
+  deletes by id; clear_clip_effects wipes color+effects together.
 - **See color objectively**: inspect_color returns numeric scopes (luma/contrast,
   saturation, hue, mean RGB) + plain notes (cast/exposure) AND histogram/
   waveform/vectorscope images. Use it to verify a grade instead of eyeballing.
