@@ -465,6 +465,21 @@ export function App({ api }: { api: CoreApi }) {
     run("Caption style", () => api.rpc("set_caption_style", { clipId, ...patch }));
   const autoReframe = (clipId: string) =>
     run("Auto-reframing (tracking subject)", () => api.rpc("auto_reframe", { clipId }));
+  // Time effects. Freeze uses the playhead (timeline seconds) relative to the clip.
+  const freezeFrame = (clipId: string, durationSeconds: number) =>
+    run("Freezing frame", async () => {
+      const clip = project?.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+      if (!clip) throw new Error("Clip not found");
+      const local = store.get().playhead - clip.startFrame / fps;
+      if (local < 0 || local > clipDurationFrames(clip) / fps) {
+        throw new Error("Move the playhead onto the selected clip, then freeze.");
+      }
+      await api.rpc("freeze_frame", { clipId, atSeconds: local, durationSeconds });
+    });
+  const reverseClip = (clipId: string) => run("Reversing clip", () => api.rpc("reverse_clip", { clipId }));
+  const smoothSlowMotion = (clipId: string, mode: "blend" | "optical-flow") =>
+    run(mode === "blend" ? "Smoothing slow motion (blend)" : "Smoothing slow motion (optical flow)", () =>
+      api.rpc("smooth_slow_motion", { clipId, mode }));
   const removeBackground = (clipId: string) =>
     run("Removing background (AI)", () => api.rpc("remove_background", { clipId }));
   const bleepClip = async (clipId: string, sound: string): Promise<number | null> => {
@@ -982,6 +997,9 @@ export function App({ api }: { api: CoreApi }) {
               onTransition={setTransition}
               onRemoveTransition={removeTransition}
               onAutoReframe={autoReframe}
+              onFreeze={freezeFrame}
+              onReverse={reverseClip}
+              onSmoothSlow={smoothSlowMotion}
               onRemoveBackground={removeBackground}
               onBleep={bleepClip}
               onRemoveBleeps={removeBleeps}
@@ -1372,6 +1390,9 @@ type InspectorProps = {
   onTransition: (clipId: string, type: string, duration: number) => void;
   onRemoveTransition: (clipId: string) => void;
   onAutoReframe: (clipId: string) => void;
+  onFreeze: (clipId: string, durationSeconds: number) => void;
+  onReverse: (clipId: string) => void;
+  onSmoothSlow: (clipId: string, mode: "blend" | "optical-flow") => void;
   onRemoveBackground: (clipId: string) => void;
   onBleep: (clipId: string, sound: string) => Promise<number | null>;
   onRemoveBleeps: (clipId: string) => void;
@@ -1460,6 +1481,10 @@ function ClipInspector(props: InspectorProps) {
   const [styleOpen, setStyleOpen] = useState<string | null>(null);
   const [bleepSound, setBleepSound] = useState("beep");
   const [bleepNote, setBleepNote] = useState<string | null>(null);
+  const [freezeSecs, setFreezeSecs] = useState(3);
+  const [smoothMode, setSmoothMode] = useState<"blend" | "optical-flow">("optical-flow");
+  // A still never goes on an audio track: no Freeze for a detached audio clip.
+  const onAudioTrack = project?.tracks.some((t) => t.kind === "audio" && t.clips.some((c) => c.id === clip.id)) ?? false;
   const bleepTotal = clip.effects?.bleeps?.length ?? 0;
   const bleepVisible = bleepTotal ? expandBleeps(clip, project?.fps ?? 30).length : 0;
   const [stabSmoothing, setStabSmoothing] = useState(30);
@@ -1565,6 +1590,57 @@ function ClipInspector(props: InspectorProps) {
                 onCommit={(v) => props.onVolume(clip.id, v)}
                 onKey={() => props.onAddKeyframe(clip.id, "volume", fx.volume ?? 1)}
                 onClear={() => props.onClearKeyframes(clip.id, "volume")} />
+              {asset?.hasVideo && (
+                <div className="time-fx">
+                  {!onAudioTrack && (
+                  <div className="field-row">
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => props.onFreeze(clip.id, Math.max(0.1, freezeSecs || 3))}
+                      disabled={!connected || busy}
+                      title="Hold the frame under the playhead as a still, rippling the timeline (linked audio stays in sync)"
+                    >
+                      <Frame size={14} /> Freeze frame (at playhead)
+                    </button>
+                    <input
+                      type="number" min={0.1} max={600} step={0.5}
+                      value={freezeSecs}
+                      onChange={(e) => setFreezeSecs(Number(e.target.value))}
+                      aria-label="Freeze duration in seconds"
+                      style={{ width: 64 }}
+                    />
+                    <span className="field-hint">s</span>
+                  </div>
+                  )}
+                  {!asset.isImage && (
+                    <button
+                      className="btn btn-sm btn-block"
+                      onClick={() => props.onReverse(clip.id)}
+                      disabled={!connected || busy}
+                      title={asset.reversedFrom ? "Point the clip back at the original (forward) media" : "Bake a reversed copy of this clip (picture and sound)"}
+                    >
+                      <RotateCcw size={14} /> {asset.reversedFrom ? "Un-reverse" : "Reverse"}
+                    </button>
+                  )}
+                  {!asset.isImage && (
+                    <div className="field-row">
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => props.onSmoothSlow(clip.id, smoothMode)}
+                        disabled={!connected || busy || (fx.speed ?? 1) >= 1}
+                        title={(fx.speed ?? 1) >= 1 ? "Slow the clip below 1x first" : "Bake interpolated in-between frames so slow motion plays smoothly"}
+                      >
+                        <Sparkles size={14} /> Smooth slow motion
+                      </button>
+                      <select value={smoothMode} onChange={(e) => setSmoothMode(e.target.value as "blend" | "optical-flow")} aria-label="Interpolation mode">
+                        <option value="optical-flow">Optical flow (slow)</option>
+                        <option value="blend">Blend (fast)</option>
+                      </select>
+                    </div>
+                  )}
+                  <span className="field-hint">Freeze ripples the timeline. Reverse / smooth bake new media; Undo restores.</span>
+                </div>
+              )}
             </div>
 
             <div className="group">

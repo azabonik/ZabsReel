@@ -15,8 +15,9 @@ import type { RenderProfile } from "./graph.js";
 /**
  * Bump when the render pipeline changes in a way that invalidates cached pixels.
  * 4: vignette honours its amount (the effect registry) and keeps alpha.
+ * 5: overlay windows open half a frame early (no black first frame at cuts).
  */
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

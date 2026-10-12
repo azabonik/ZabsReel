@@ -894,7 +894,9 @@ export function buildRenderCommand(
           s = `[${padded}]`;
         }
         const out = `vstack${i}`;
-        const enable = `enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'`;
+        // Open the window half a frame early: a start rounded UP to 3 decimals (3.96667 -> 3.967) would hide the clip's
+        // first frame whenever start/fps is a repeating decimal, leaving a one-frame black flash at the cut.
+        const enable = `enable='between(t,${Math.max(0, start - 0.5 / fps).toFixed(4)},${end.toFixed(3)})'`;
         filterParts.push(`${vcur}${s}overlay=0:0:eof_action=pass:${enable}[${out}]`);
         vcur = `[${out}]`;
         return;

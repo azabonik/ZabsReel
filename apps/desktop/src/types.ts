@@ -51,6 +51,8 @@ export interface MediaAsset {
   visualSig?: { samples: unknown[]; bins: number };
   /** Set on the synthesized bleep sound effect assets (one per sound). */
   builtinSfx?: BleepSound;
+  /** Set on an asset baked by reverse_clip: the original span it reverses. */
+  reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
 }
 
 export interface ColorAdjust {

@@ -17,6 +17,8 @@ export type JobType =
   | "reframe"
   | "matte"
   | "stabilize"
+  | "reverse"
+  | "slowmo"
   | "proxy"
   | "index_visual"
   | "graphic";

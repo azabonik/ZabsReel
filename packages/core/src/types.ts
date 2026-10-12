@@ -93,6 +93,12 @@ export interface MediaAsset {
   builtinSfx?: BleepSound;
   /** Cached perceptual visual fingerprint. Same engine-cache lifecycle as `transcript`. */
   visualSig?: VisualSignature;
+  /**
+   * Set on an asset baked by reverse_clip: the span of the ORIGINAL asset it is
+   * the reverse of (project frames). A second reverse_clip on a clip using this
+   * asset re-points it back at the original instead of reversing again.
+   */
+  reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
 }
 
 /** A library folder for organizing imported assets (flat; assets carry folderId). */

@@ -595,6 +595,43 @@ export const methods = {
     },
   },
 
+  freeze_frame: {
+    description:
+      "FREEZE FRAME (CapCut-style): hold one exact frame of a clip for durationSeconds (default 3). atSeconds = TIMELINE seconds inside the clip (0 = its first frame; speed and trim are respected, so it is the frame shown at that moment; on a slowed clip the cut lands on the nearest source frame, up to 1 timeline frame away). Grabs that frame as a lossless PNG (baked into the data dir), imports it as an image asset, splits the clip there and INSERTS a still clip between the halves. THE TIMELINE RIPPLES: the clip's track shifts right by durationSeconds, and LINKED clips (e.g. a detached audio clip of the same footage) are split at the same point and shifted too, so picture and sound stay aligned (the audio is silent under the freeze); clips on UNLINKED tracks (music, overlays) are not moved. The still keeps the clip's color/filters/crop/transform/opacity and has no audio. atSeconds at/before the start puts the still BEFORE the clip; at/after the end holds the last frame (no empty halves). The held frame is also the first frame of the right half, as in any NLE. If you pass the DETACHED AUDIO clip of a linked pair, the linked picture clip is frozen (a still never goes on an audio track). A freeze point inside the next clip's incoming transition overlap is refused (freeze earlier or remove_transition). One undo step. Returns {stillClipId, assetId, startFrame, durationFrames, shiftedClips}. Verify with get_frame.",
+    schema: z
+      .object({ clipId: z.string(), atSeconds: z.number().min(0), durationSeconds: z.number().positive().max(600).optional() })
+      .strict(),
+    handler: async (engine, p) => engine.freezeFrame(p.clipId, p.atSeconds, p.durationSeconds ?? 3),
+  },
+
+  reverse_clip: {
+    description:
+      "REVERSE a clip: bakes a backwards copy of the clip's used span (picture, plus audio when audio:'reverse'; audio:'mute' drops the sound) and re-points the clip at it; the timeline duration is unchanged and other effects (speed, color, fades...) are kept. Frame-exact (every frame appears once, in reverse order) and RAM-bounded (processed in chunks of <=2 s and a decoded-frame budget, so clip length does not matter; measured peak ~1.8 GB for 4K60 8-bit instead of 5.8 GB, 1080p well under 1 GB) but it re-encodes (H.264 CRF 18, AAC 192k; a source with transparency, e.g. a remove_background cutout, is baked lossless with its alpha kept), measured ~0.6x the span length on this machine (3 s of 1080p30 in 1.8 s). CALL IT AGAIN on a reversed clip to restore forward playback — that instantly re-points back at the original media (no bake), keeping any trim you made since. LINKED clips (a detached audio clip) are NOT reversed with it: reverse the linked audio clip too, or use audio:'mute' here and keep the detached audio forward on purpose. Not for still images. Blocks until done and returns {clipId, assetId, restored}; for clips over ~30 s pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the previous clip (the bake is a new asset).",
+    schema: z
+      .object({ clipId: z.string(), audio: z.enum(["reverse", "mute"]).optional(), background: z.boolean().optional() })
+      .strict(),
+    handler: async (engine, p) => {
+      const { job, promise } = engine.startReverseJob(p.clipId, p.audio ?? "reverse");
+      if (p.background && job) return { jobId: job.id, status: job.status, label: job.label };
+      const r = await promise;
+      return { clipId: r.clip.id, assetId: r.asset.id, restored: r.restored };
+    },
+  },
+
+  smooth_slow_motion: {
+    description:
+      "SMOOTH SLOW MOTION for a clip whose speed is below 1 (set it first with set_clip_speed, e.g. 0.5): instead of repeating frames (stutter), bakes the used span with INTERPOLATED in-between frames so it plays at the project fps like real high-frame-rate footage, then re-points the clip at the bake with speed reset to 1. The timeline duration does NOT change. mode 'optical-flow' (default) = motion-compensated interpolation (minterpolate mci/aobmc) — best quality but SLOW (measured on this machine: ~21x the clip's source length at 1080p30, ~9x at 720p; a 10 s 1080p clip at 0.5x takes ~3.5 min) and it can WARP/smear fast or occluding motion (fast pans, hands crossing, water); mode 'blend' = frame blending (framerate filter) — ~40x faster than optical flow (1.5 s vs 63 s for the same 3 s 1080p clip), ghosting instead of warping, fine for gentle motion. Audio is slowed with a pitch-preserving tempo change. A cutout with transparency keeps its alpha but always uses blend. Refuses when speed >= 1. Blocks until done and returns {clipId, assetId, frames}; for anything over a few seconds in optical-flow mode pass background:true to get {jobId} immediately, then poll list_jobs (progress is reported) / cancel_job. undo restores the original clip and speed. Verify with get_frame / render_preview.",
+    schema: z
+      .object({ clipId: z.string(), mode: z.enum(["blend", "optical-flow"]).optional(), background: z.boolean().optional() })
+      .strict(),
+    handler: async (engine, p) => {
+      const { job, promise } = engine.startSmoothSlowJob(p.clipId, p.mode ?? "optical-flow");
+      if (p.background) return { jobId: job.id, status: job.status, label: job.label };
+      const r = await promise;
+      return { clipId: r.clip.id, assetId: r.asset.id, frames: r.frames };
+    },
+  },
+
   clear_clip_effects: {
     description: "Remove all effects (speed, volume, fades, color, crop, transform) from a clip. Its bleeps are kept — use remove_bleeps for those.",
     schema: z.object({ clipId: z.string() }).strict(),

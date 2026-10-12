@@ -139,6 +139,11 @@ npx tsx packages/core/scripts/smoke-matte.ts
 # smoke-composite.ts checks the renderer's bleep expansion against the core's.
 npx tsx packages/core/scripts/smoke-bleep.ts
 
+# Time effects: freeze_frame (ripples the timeline + linked audio), chunked frame-exact
+# reverse_clip (and its un-reverse), smooth_slow_motion (blend + optical flow, no
+# duplicated frames) — self-contained, verified by decoding frame-index-coded media
+npx tsx packages/core/scripts/smoke-time.ts
+
 # Text-based editing: word-level transcripts, delete_transcript_ranges,
 # tighten_talk, edit_by_transcript (self-contained — uses the checked-in fixture)
 npx tsx packages/core/scripts/smoke-textedit.ts

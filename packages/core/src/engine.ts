@@ -31,6 +31,7 @@ import { detectKeyColor, type KeyColorDetection } from "./media/keycolor.js";
 import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
+import { bakeReversed, bakeSmoothSlow, grabFrame, probeVideoFormat } from "./ffmpeg/timefx.js";
 import { renderGraphic } from "./motion/render.js";
 import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
@@ -940,12 +941,15 @@ export class EditorEngine extends EventEmitter {
   }
 
   /** Split a single clip; returns the new ids, or undefined if the cut misses it. */
-  private splitOne(clipId: string, atFrame: number): { left: string; right: string } | undefined {
+  private splitOne(clipId: string, atFrame: number, strict = true, splitSourceFrame?: number): { left: string; right: string } | undefined {
     const { track, clip, index } = this.findClip(clipId);
     const dur = clipDurationFrames(clip);
-    if (atFrame <= MIN_CLIP_FRAMES || atFrame >= dur - MIN_CLIP_FRAMES) return undefined;
+    // `strict` (the default) keeps every half longer than the minimum; freeze
+    // frame passes false so a one-frame half is allowed (first/last frame holds).
+    if (strict ? atFrame <= MIN_CLIP_FRAMES || atFrame >= dur - MIN_CLIP_FRAMES : atFrame < 1 || atFrame >= dur) return undefined;
     const speed = clip.effects?.speed ?? 1;
-    const splitSource = clip.sourceInFrame + Math.round(atFrame * speed);
+    // `splitSourceFrame` lets freeze_frame pick the exact source frame the right half starts on.
+    const splitSource = splitSourceFrame ?? clip.sourceInFrame + Math.round(atFrame * speed);
     const left: Clip = {
       id: newId("clip"),
       assetId: clip.assetId,
@@ -2393,6 +2397,12 @@ export class EditorEngine extends EventEmitter {
         }
       }
     }
+    // A reversed copy remembers its original span in project frames: rescale it too, or un-reverse restores the wrong range.
+    for (const a of this.project.assets) {
+      if (a.reversedFrom) {
+        a.reversedFrom = { ...a.reversedFrom, sourceInFrame: sc(a.reversedFrom.sourceInFrame), sourceOutFrame: sc(a.reversedFrom.sourceOutFrame) };
+      }
+    }
     if (this.project.music) {
       if (this.project.music.fadeInFrames) this.project.music.fadeInFrames = sc(this.project.music.fadeInFrames);
       if (this.project.music.fadeOutFrames) this.project.music.fadeOutFrames = sc(this.project.music.fadeOutFrames);
@@ -3344,17 +3354,26 @@ export class EditorEngine extends EventEmitter {
     return outPath;
   }
 
-  /** Re-point a clip (and any link group) at a freshly baked asset spanning it whole. */
-  private repointClip(clipId: string, baked: MediaAsset): Clip {
+  /**
+   * Re-point a clip (and any link group) at a freshly baked asset spanning it whole.
+   * `mapSec` converts a bleep time from the OLD source's seconds to the new
+   * asset's (default: the bake starts at the old source-in, so subtract it).
+   */
+  private repointClip(clipId: string, baked: MediaAsset, mapSec?: (oldSourceSec: number) => number): Clip {
     const fps = this.project.fps;
     const frames = Math.max(MIN_CLIP_FRAMES, Math.round(baked.duration * fps));
     const { clip: target } = this.findClip(clipId);
-    // Bleeps are in source seconds; the bake starts at the old source-in, so
-    // shift them into the baked asset's time base (dropping any outside it).
+    // Bleeps are in source seconds; move them into the baked asset's time base
+    // (dropping any outside it).
     const shift = target.sourceInFrame / fps;
+    const map = mapSec ?? ((t: number) => t - shift);
     if (target.effects?.bleeps?.length) {
       const moved = target.effects.bleeps
-        .map((b) => ({ ...b, start: roundBleepSec(b.start - shift), end: roundBleepSec(b.end - shift) }))
+        .map((b) => {
+          const a = map(b.start);
+          const z = map(b.end);
+          return { ...b, start: roundBleepSec(Math.min(a, z)), end: roundBleepSec(Math.max(a, z)) };
+        })
         .filter((b) => b.end > 0 && b.start < baked.duration)
         .map((b) => ({ ...b, start: Math.max(0, b.start), end: Math.min(baked.duration, b.end) }));
       EditorEngine.setClipBleeps(target, moved);
@@ -3698,6 +3717,337 @@ export class EditorEngine extends EventEmitter {
       return target;
     });
     return { clip: updated, asset: baked, ...stats };
+  }
+
+  // ---- time effects: freeze frame, reverse, smooth slow motion ---------------
+  /**
+   * FREEZE FRAME. Grabs the exact source frame shown at `atSeconds` (timeline
+   * seconds inside the clip; speed and source-in respected) as a lossless PNG,
+   * imports it as an image asset, splits the clip there and INSERTS a still clip
+   * of `durationSeconds` between the halves. As ONE undo step:
+   *  - the clip's track ripples right by the still's length;
+   *  - LINKED clips (e.g. a detached audio clip of the same footage) are split at
+   *    the same point and their right halves + later clips are moved right by the
+   *    same amount, so picture and sound stay aligned after the freeze (the audio
+   *    gets a silent gap under the still). Unlinked tracks are NOT touched.
+   * The still inherits the clip's color/filters/crop/transform/opacity and has no
+   * audio. `atSeconds` at/before the first frame inserts the still BEFORE the clip;
+   * at/after the last frame holds the last frame and keeps a short tail (no
+   * empty halves; the held frame is always inside the clip's trim, also when it
+   * is slowed). The held frame is shown by the still AND is the first frame of
+   * the right half (the usual freeze-frame behaviour). At speed < 1 the cut
+   * lands on the nearest source-frame boundary (up to 1 frame from `atSeconds`).
+   * On the detached audio clip of a linked pair the PICTURE clip is frozen. A
+   * freeze point inside the next clip's incoming transition overlap is refused.
+   */
+  async freezeFrame(
+    clipId: string,
+    atSeconds: number,
+    durationSeconds = 3,
+  ): Promise<{ stillClipId: string; assetId: string; startFrame: number; durationFrames: number; heldClipFrame: number; shiftedClips: number }> {
+    const fps = this.project.fps;
+    let { clip, track: reqTrack } = this.findClip(clipId);
+    // Timeline frame the caller means (clip-relative seconds on the clip they named).
+    const playAbs = clip.startFrame + Math.round(atSeconds * fps);
+    // A detached audio clip has no picture of its own: freeze the picture it is linked to.
+    if (reqTrack.kind === "audio") {
+      const pic = this.linkedClips(clip).find((m) => {
+        const f = this.findClip(m.id);
+        return f.track.kind !== "audio" && this.project.assets.find((a) => a.id === m.assetId)?.hasVideo;
+      });
+      if (!pic) throw new Error(`Clip "${clipId}" is on an audio track and has no linked picture clip to freeze. Freeze a video-track clip instead.`);
+      clip = pic;
+    }
+    const targetId = clip.id;
+    const asset = this.requireClipAsset(clip, "freeze frame");
+    if (!asset.hasVideo) throw new Error(`Clip "${clipId}" has no picture to freeze (audio-only asset).`);
+    if (!(durationSeconds > 0)) throw new Error("durationSeconds must be > 0");
+    const dur = clipDurationFrames(clip);
+    const cWanted = clamp(playAbs - clip.startFrame, 0, dur - 1);
+    const speed = clip.effects?.speed ?? 1;
+    // The frame the renderer shows at timeline frame `cWanted` (slow clips hold the earlier source frame),
+    // clamped INSIDE the trim so a slowed clip's last frame never reaches past its out-point.
+    const lastSrc = Math.max(clip.sourceInFrame, clip.sourceOutFrame - 1);
+    const shown = speed < 1 ? Math.floor(cWanted * speed + 1e-9) : Math.round(cWanted * speed);
+    const srcFrame = clamp(clip.sourceInFrame + shown, clip.sourceInFrame, lastSrc);
+    // The right half starts on the held frame; the left half keeps the frames before it. At speed < 1 an
+    // odd timeline frame has no exact source boundary, so the cut lands on the nearest one (c may shift by 1
+    // frame) — the halves still tile the clip with no overlap and no empty half.
+    const c = srcFrame <= clip.sourceInFrame ? 0 : clamp(Math.round((srcFrame - clip.sourceInFrame) / speed), 1, dur - 1);
+    // -ss lands on the first frame at/after the time: aim half a frame BEFORE the wanted
+    // frame's timestamp so a rounding hair can never skip to its neighbour.
+    const srcSec = asset.isImage ? 0 : Math.max(0, (srcFrame - 0.5) / fps);
+    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, start: clip.startFrame, speed };
+
+    const dir = join(this.dataDir, "baked");
+    await mkdir(dir, { recursive: true });
+    const pngPath = join(dir, `${targetId}-freeze-${Date.now().toString(36)}-${newId("f").slice(-4)}.png`);
+    let still: MediaAsset;
+    try {
+      await grabFrame(asset.path, srcSec, pngPath);
+      still = await probeAsset(pngPath);
+      still.name = `${asset.name} (freeze ${framesToSeconds(srcFrame, fps).toFixed(2)}s)`;
+      still.duration = Math.max(still.duration, durationSeconds);
+      const { clip: now } = this.findClip(targetId);
+      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF || now.startFrame !== before.start || (now.effects?.speed ?? 1) !== before.speed) {
+        throw new Error(`Clip "${clipId}" changed while its frame was being grabbed — run freeze_frame again.`);
+      }
+    } catch (err) {
+      await rm(pngPath, { force: true });
+      throw err;
+    }
+
+    const stillFrames = Math.max(MIN_CLIP_FRAMES, Math.round(durationSeconds * fps));
+    return this.mutate(() => {
+      const { track, clip: target } = this.findClip(targetId);
+      const splitAbs = target.startFrame + c;
+      const group = this.linkedClips(target);
+      const tracks = new Set<Track>([track]);
+      for (const m of group) tracks.add(this.findClip(m.id).track);
+      // A clip entering through a transition overlaps the end of the clip before it. Freezing INSIDE that
+      // overlap would leave the still and the right half stacked under the incoming clip.
+      for (const m of group) {
+        const mt = this.findClip(m.id).track;
+        const mEnd = clipEndFrame(m);
+        const next = mt.clips.filter((x) => x.id !== m.id && x.startFrame > m.startFrame).sort((p, q) => p.startFrame - q.startFrame)[0];
+        if (next?.transition && next.startFrame < splitAbs && splitAbs < mEnd) {
+          throw new Error(
+            `Frame ${splitAbs - m.startFrame} of the clip is inside the ${next.transition.durationFrames}-frame transition into the next clip (it starts at timeline frame ${next.startFrame}). Freeze before frame ${next.startFrame - m.startFrame} of the clip, or remove that transition first (remove_transition).`,
+          );
+        }
+      }
+      // Ripple by TRACK ORDER (everything after the cut), not by start frame.
+      const later = new Set<string>();
+      for (const t of tracks) {
+        EditorEngine.sortTrack(t);
+        const members = t.clips.filter((x) => group.some((m) => m.id === x.id));
+        const firstIdx = Math.min(...members.map((m) => t.clips.indexOf(m)));
+        for (const x of t.clips.slice(firstIdx + 1)) if (!group.some((m) => m.id === x.id)) later.add(x.id);
+      }
+      this.project.assets.push(still);
+      for (const m of group) {
+        if (m.id === target.id) this.splitOne(m.id, c, false, srcFrame);
+        else this.splitOne(m.id, splitAbs - m.startFrame, false);
+      }
+      let shifted = 0;
+      for (const t of tracks) {
+        for (const x of t.clips) {
+          if (x.startFrame >= splitAbs || later.has(x.id)) {
+            x.startFrame += stillFrames;
+            shifted++;
+          }
+        }
+      }
+      const effects = structuredClone(target.effects) ?? {};
+      for (const k of ["speed", "volume", "fadeInFrames", "fadeOutFrames", "bleeps"] as const) delete effects[k];
+      const stillClip: Clip = {
+        id: newId("clip"),
+        assetId: still.id,
+        startFrame: splitAbs,
+        sourceInFrame: 0,
+        sourceOutFrame: stillFrames,
+        ...(Object.keys(effects).length ? { effects } : {}),
+        ...(target.linkGroupId ? { linkGroupId: target.linkGroupId } : {}),
+      };
+      // Freezing before the clip's first frame: the clip's entry transition now enters the still.
+      if (c === 0 && target.transition) {
+        stillClip.transition = target.transition;
+        delete target.transition;
+      }
+      track.clips.push(stillClip);
+      EditorEngine.sortTrack(track);
+      return { stillClipId: stillClip.id, assetId: still.id, startFrame: splitAbs, durationFrames: stillFrames, heldClipFrame: c, shiftedClips: shifted };
+    });
+  }
+
+  /**
+   * REVERSE a clip's used span (picture + audio). Bakes a reversed copy (in
+   * <= 2 s chunks, so RAM stays flat) and re-points the clip. Calling it on a
+   * clip whose asset was baked by reverse_clip restores the original asset/span
+   * (instant, no bake). Returns `job` only when a bake job was started.
+   */
+  startReverseJob(
+    clipId: string,
+    audio: "reverse" | "mute" = "reverse",
+  ): { job?: Job; promise: Promise<{ clip: Clip; asset: MediaAsset; restored: boolean }> } {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "reverse");
+    if (asset.isImage) throw new Error(`Clip "${clipId}" is a still image — reversing a single frame does nothing.`);
+    if (asset.reversedFrom) {
+      const orig = this.project.assets.find((a) => a.id === asset.reversedFrom!.assetId);
+      if (!orig) {
+        throw new Error(`Clip "${clipId}" is a reversed copy, but its original media was removed from the project — re-import it, or undo.`);
+      }
+      return { promise: Promise.resolve(this.restoreReversed(clipId, asset, orig)) };
+    }
+    if (!asset.hasVideo && !asset.hasAudio) throw new Error(`Clip "${clipId}" has nothing to reverse`);
+    if (!asset.hasVideo && audio === "mute") {
+      throw new Error(`Clip "${clipId}" is audio-only — audio:"mute" would leave nothing. Use audio:"reverse".`);
+    }
+    return this.jobs.start("reverse", `Reverse ${asset.name}`, (signal, onProgress) =>
+      this.reverseClipRun(clipId, audio, signal, onProgress),
+    );
+  }
+
+  async reverseClip(clipId: string, audio: "reverse" | "mute" = "reverse") {
+    return this.startReverseJob(clipId, audio).promise;
+  }
+
+  private restoreReversed(clipId: string, baked: MediaAsset, orig: MediaAsset) {
+    const rf = baked.reversedFrom!;
+    const fps = this.project.fps;
+    const len = rf.sourceOutFrame - rf.sourceInFrame;
+    const clip = this.mutate(() => {
+      const { clip: target } = this.findClip(clipId);
+      const bi = target.sourceInFrame;
+      const bo = target.sourceOutFrame;
+      const origEndSec = (rf.sourceInFrame + len) / fps;
+      this.repointClip(clipId, orig, (t) => origEndSec - t);
+      target.sourceInFrame = clamp(rf.sourceInFrame + (len - bo), rf.sourceInFrame, rf.sourceOutFrame - MIN_CLIP_FRAMES);
+      target.sourceOutFrame = clamp(rf.sourceInFrame + (len - bi), target.sourceInFrame + MIN_CLIP_FRAMES, rf.sourceOutFrame);
+      return target;
+    });
+    return { clip, asset: orig, restored: true };
+  }
+
+  private async reverseClipRun(
+    clipId: string,
+    audio: "reverse" | "mute",
+    signal: AbortSignal,
+    onProgress: (fraction: number) => void,
+  ): Promise<{ clip: Clip; asset: MediaAsset; restored: boolean }> {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "reverse");
+    const fps = this.project.fps;
+    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame };
+    const spanFrames = clip.sourceOutFrame - clip.sourceInFrame;
+    const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
+    const spanSec = framesToSeconds(spanFrames, fps);
+    const withAudio = asset.hasAudio && audio === "reverse";
+
+    const dir = join(this.dataDir, "baked");
+    await mkdir(dir, { recursive: true });
+    const stem = `${clipId}-rev-${Date.now().toString(36)}`;
+    // A remove_background cutout carries alpha: keep it (FFV1 yuva420p in Matroska) instead of flattening to opaque H.264.
+    const fmt = asset.hasVideo ? await probeVideoFormat(asset.path) : undefined;
+    const alpha = fmt?.hasAlpha === true;
+    const outPath = join(dir, `${stem}${asset.hasVideo ? (alpha ? ".mkv" : ".mp4") : ".m4a"}`);
+    let baked: MediaAsset;
+    try {
+      await bakeReversed({
+        alpha,
+        format: fmt,
+        input: asset.path,
+        hasVideo: asset.hasVideo,
+        reverseAudio: withAudio,
+        gridFps: asset.hasVideo ? asset.fps || fps : fps,
+        startSec: sourceInSec,
+        spanSec,
+        outPath,
+        workDir: join(dir, `${stem}.work`),
+        signal,
+        onProgress,
+      });
+      baked = await probeAsset(outPath);
+      baked.name = `${asset.name} (reversed)`;
+      baked.reversedFrom = { assetId: asset.id, sourceInFrame: before.inF, sourceOutFrame: before.outF };
+      const { clip: now } = this.findClip(clipId);
+      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF) {
+        throw new Error(`Clip "${clipId}" was changed while it was being reversed — run reverse_clip again.`);
+      }
+    } catch (err) {
+      await rm(outPath, { force: true });
+      throw err;
+    }
+    const updated = this.mutate(() => {
+      this.project.assets.push(baked);
+      const target = this.repointClip(clipId, baked, (t) => spanSec - (t - sourceInSec));
+      target.sourceOutFrame = Math.min(target.sourceOutFrame, spanFrames);
+      return target;
+    });
+    return { clip: updated, asset: baked, restored: false };
+  }
+
+  /**
+   * SMOOTH SLOW MOTION for a clip with speed < 1: bakes the used span with
+   * interpolated in-between frames (optical flow or blend) so it plays at the
+   * project fps without stutter, then re-points the clip at the bake with speed
+   * reset to 1 — the baked file is ALREADY slow, so the clip's timeline duration
+   * is unchanged. Audio is slowed with pitch-preserving atempo.
+   */
+  startSmoothSlowJob(clipId: string, mode: "blend" | "optical-flow" = "optical-flow"): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset; frames: number }> } {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "smooth slow motion");
+    const speed = clip.effects?.speed ?? 1;
+    if (!(speed < 1)) {
+      throw new Error(
+        `Clip "${clipId}" plays at ${speed}x — smooth_slow_motion only applies to slowed clips (speed < 1). Slow it first with set_clip_speed (e.g. 0.5), then call this.`,
+      );
+    }
+    if (asset.isImage || !asset.hasVideo) throw new Error(`Clip "${clipId}" has no moving picture to interpolate.`);
+    return this.jobs.start("slowmo", `Smooth slow motion ${asset.name} (${mode})`, (signal, onProgress) =>
+      this.smoothSlowRun(clipId, mode, signal, onProgress),
+    );
+  }
+
+  async smoothSlowMotion(clipId: string, mode: "blend" | "optical-flow" = "optical-flow") {
+    return this.startSmoothSlowJob(clipId, mode).promise;
+  }
+
+  private async smoothSlowRun(
+    clipId: string,
+    mode: "blend" | "optical-flow",
+    signal: AbortSignal,
+    onProgress: (fraction: number) => void,
+  ): Promise<{ clip: Clip; asset: MediaAsset; frames: number }> {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "smooth slow motion");
+    const fps = this.project.fps;
+    const speed = clip.effects?.speed ?? 1;
+    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, speed };
+    const outFrames = clipDurationFrames(clip);
+    const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
+    const spanSec = framesToSeconds(clip.sourceOutFrame - clip.sourceInFrame, fps);
+
+    const dir = join(this.dataDir, "baked");
+    await mkdir(dir, { recursive: true });
+    const alpha = (await probeVideoFormat(asset.path))?.hasAlpha === true; // keep a cutout's transparency
+    const outPath = join(dir, `${clipId}-slowmo-${Date.now().toString(36)}.${alpha ? "mkv" : "mp4"}`);
+    let baked: MediaAsset;
+    try {
+      await bakeSmoothSlow({
+        alpha,
+        input: asset.path,
+        hasAudio: asset.hasAudio,
+        projectFps: fps,
+        speed,
+        mode,
+        startSec: sourceInSec,
+        spanSec,
+        outFrames,
+        outPath,
+        signal,
+        onProgress,
+      });
+      baked = await probeAsset(outPath);
+      baked.name = `${asset.name} (smooth ${speed}x)`;
+      const { clip: now } = this.findClip(clipId);
+      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF || (now.effects?.speed ?? 1) !== before.speed) {
+        throw new Error(`Clip "${clipId}" was changed while its slow motion was being baked — run smooth_slow_motion again.`);
+      }
+    } catch (err) {
+      await rm(outPath, { force: true });
+      throw err;
+    }
+    const updated = this.mutate(() => {
+      this.project.assets.push(baked);
+      const target = this.repointClip(clipId, baked, (t) => (t - sourceInSec) / speed);
+      // Keep the exact timeline footprint (the container can round a frame either way).
+      target.sourceOutFrame = Math.min(target.sourceOutFrame, outFrames);
+      if (target.effects) delete target.effects.speed;
+      return target;
+    });
+    return { clip: updated, asset: baked, frames: outFrames };
   }
 
   // ---- motion graphics (Remotion) -------------------------------------------

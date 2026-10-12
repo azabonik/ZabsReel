@@ -1296,3 +1296,9 @@ input[type="range"]:disabled { opacity: 0.45; }
   }
   .sync-pulse { animation: none; opacity: 1; }
 }
+
+/* Time effects (freeze / reverse / smooth slow motion) in the Speed area */
+.time-fx { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.time-fx .field-row { display: flex; align-items: center; gap: 6px; }
+.time-fx .field-row .btn { flex: 1; min-width: 0; }
+.time-fx .field-row select { flex: 0 0 auto; max-width: 46%; }

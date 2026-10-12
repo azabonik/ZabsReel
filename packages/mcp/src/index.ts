@@ -28,7 +28,7 @@ const IMAGE_TOOLS = new Set(["get_frame", "generate_thumbnail", "inspect_timelin
 // so the model watches renders instead of flying blind.
 const LONG_RUNNING = new Set([
   "export_video", "render_preview", "generate_captions", "index_transcript",
-  "auto_reframe", "stabilize_clip", "add_graphic", "tighten_talk",
+  "auto_reframe", "stabilize_clip", "reverse_clip", "smooth_slow_motion", "freeze_frame", "add_graphic", "tighten_talk",
   "generate_proxy", "index_visual", "get_frame", "inspect_timeline",
 ]);
 
