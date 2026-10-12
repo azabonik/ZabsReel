@@ -81,11 +81,29 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   const [filterIdx, setFilterIdx] = useState(0);
   const [showHidden, setShowHidden] = useState(false);
   const [name, setName] = useState(request.mode === "save" ? request.defaultName : "");
+  const dialogRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const loadSeq = useRef(0);
 
   const cancel = useCallback(() => request.resolve(null), [request]);
+
+  // Focus can still leave the dialog: Tab past its last control, or a focused
+  // button turning disabled (Import after it opened a folder) drops it on
+  // <body>. A key pressed then would reach the editor's window shortcuts and,
+  // say, delete the selected clip. Catch those keys first (capture phase on
+  // window), keep them from the editor and bring focus back to the list.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (dialogRef.current?.contains(e.target as Node)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (e.key === "Escape") cancel();
+      else listRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [cancel]);
 
   /** Show `dir`. Resolves with the error (status + message) if it can't be listed. */
   const load = useCallback(async (dir: string): Promise<{ status?: number; message: string } | null> => {
@@ -256,7 +274,7 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
     <>
       <div className="scrim" onClick={cancel} />
       {/* tabIndex -1: a click anywhere inside keeps focus in the dialog, so its keys stay here */}
-      <div className="picker" role="dialog" aria-modal="true" aria-label={request.title} tabIndex={-1} onKeyDown={onDialogKey}>
+      <div ref={dialogRef} className="picker" role="dialog" aria-modal="true" aria-label={request.title} tabIndex={-1} onKeyDown={onDialogKey}>
         <div className="picker-head">
           <h3>{request.title}</h3>
           <button className="icon-btn" onClick={cancel} aria-label="Close"><X /></button>
