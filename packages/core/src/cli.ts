@@ -12,7 +12,7 @@ import { pruneDataDir } from "./gc.js";
  * launcher can capture it; also writes it to <dataDir>/server.json.
  */
 async function main(): Promise<void> {
-  const dataDir = process.env.AIVE_DATA_DIR || join(homedir(), ".aive", "data");
+  const dataDir = process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data");
   const port = process.env.AIVE_PORT ? Number(process.env.AIVE_PORT) : undefined;
 
   try {

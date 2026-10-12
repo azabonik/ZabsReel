@@ -113,7 +113,7 @@ async function main() {
     const c = json(cfg);
     check("config ok", cfg.status === 200 && c.ok === true && typeof c.home === "string");
     check("places include Home", Array.isArray(c.places) && c.places.some((p: { label: string }) => p.label === "Home"));
-    check("MCP config resolved", c.mcp?.available === true && String(c.mcp?.json).includes("ai-video-editor"));
+    check("MCP config resolved", c.mcp?.available === true && !!JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers?.synthcut);
 
     console.log("4. /api/fs/list");
     const list = await request(port, `/api/fs/list?path=${encodeURIComponent(mediaDir)}`, { headers: auth });

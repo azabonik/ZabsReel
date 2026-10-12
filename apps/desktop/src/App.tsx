@@ -11,10 +11,9 @@ import { PreviewPlayer } from "./preview";
 import { Timeline } from "./timeline";
 import {
   Alert, Bot, Captions, Check, ChevronRight, Clock, Crop, Export,
-  Film, FolderPlus, Frame, Import, Music, Pause, Play, Plus, Redo, RotateCcw, Scissors,
+  Film, FolderPlus, Frame, Import, Logo, Music, Pause, Play, Plus, Redo, RotateCcw, Scissors,
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
-import reloLogo from "./assets/relo-logo.png";
 import { platform } from "./platform";
 
 function fmt(seconds: number): string {
@@ -520,8 +519,8 @@ export function App({ api }: { api: CoreApi }) {
     <div className="editor">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark"><img src={reloLogo} alt="" className="brand-logo" /></span>
-          <span className="brand-name">SynthCut<span className="brand-by">by Relo</span></span>
+          <span className="brand-mark"><Logo size={24} /></span>
+          <span className="brand-name">SynthCut</span>
         </div>
         <div className="transport">
           <button className="icon-btn" onClick={undo} disabled={!connected} aria-label="Undo" title="Undo"><Undo /></button>
@@ -1753,13 +1752,13 @@ type McpServer = { command: string; args: string[]; env?: Record<string, string>
 
 /** JSON `mcpServers` block used by Claude Desktop, Cursor, Windsurf, and Gemini CLI. */
 function jsonBlock(server: McpServer): string {
-  return JSON.stringify({ mcpServers: { "ai-video-editor": server } }, null, 2);
+  return JSON.stringify({ mcpServers: { "synthcut": server } }, null, 2);
 }
 
 /** TOML `mcp_servers` block used by Codex CLI. */
 function tomlBlock(server: McpServer): string {
   const lines = [
-    "[mcp_servers.ai-video-editor]",
+    "[mcp_servers.synthcut]",
     `command = ${JSON.stringify(server.command)}`,
     `args = ${JSON.stringify(server.args)}`,
   ];
@@ -1771,7 +1770,7 @@ function tomlBlock(server: McpServer): string {
 function claudeCodeCommand(server: McpServer): string {
   const envFlags = Object.entries(server.env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
   const quote = (s: string) => (s.includes(" ") ? `"${s}"` : s);
-  return ["claude mcp add -s user ai-video-editor", ...envFlags, "--", quote(server.command), ...server.args.map(quote)].join(" ");
+  return ["claude mcp add -s user synthcut", ...envFlags, "--", quote(server.command), ...server.args.map(quote)].join(" ");
 }
 
 interface ClientDef {
@@ -1869,7 +1868,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
   const server: McpServer = useMemo(() => {
     if (!info?.json) return FALLBACK_SERVER;
     try {
-      return JSON.parse(info.json).mcpServers["ai-video-editor"] as McpServer;
+      return JSON.parse(info.json).mcpServers["synthcut"] as McpServer;
     } catch {
       return FALLBACK_SERVER;
     }

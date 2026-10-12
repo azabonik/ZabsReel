@@ -1,10 +1,10 @@
 {
-  "name": "@relo-video/synthcut",
+  "name": "@azabonik/synthcut",
   "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },
-  "description": "Installer for the SynthCut 'video-editor-pro' AI skill — teaches any AI client (Claude Code, Cursor, Codex, Gemini CLI, Windsurf) to operate the SynthCut MCP video editor like a professional.",
+  "description": "Installer for the SynthCut 'synthcut-editor' AI skill — teaches any AI client (Claude Code, Cursor, Codex, Gemini CLI, Windsurf) to operate the SynthCut MCP video editor like a professional.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "bin": {

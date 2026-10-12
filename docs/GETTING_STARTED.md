@@ -1,7 +1,6 @@
 # Getting Started
 
-This guide gets the AI-Native Video Editor running on your machine and connected
-to an AI client.
+This guide gets SynthCut running on your machine and connected to an AI client.
 
 ## 1. Prerequisites
 
@@ -28,10 +27,15 @@ npm start            # builds the renderer (if needed) and opens the editor
 
 The app automatically starts the editor **core** in the background and connects
 to it. You should see the Clip Library, Preview, and Timeline panels. The
-connection indicator (top-right) should read `core :<port>`.
+connection indicator (top-right) should read `core :<port>` (4791 by default).
 
 You can already use it manually: **Import** footage, add clips to the timeline,
 reorder/split/trim them, **Render Preview**, and **Export**.
+
+To use the editor in a browser tab instead, run `npm run web`. It serves the UI
+at `http://127.0.0.1:4790` and opens it with a link that carries the session
+key. A new tab needs that link again. See "Run in your browser" in the
+[README](../README.md#run-in-your-browser).
 
 ## 4. Connect your AI client
 
@@ -46,7 +50,7 @@ First build the project (`npm run build`) so `packages/mcp/dist/index.js` exists
 1. Open Claude Desktop's config file:
    - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
    - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. Merge in the `ai-video-editor` server from
+2. Merge in the `synthcut` server from
    [`claude_desktop_config.example.json`](../claude_desktop_config.example.json),
    setting the path to this repo's `packages/mcp/dist/index.js`.
 3. **Fully restart Claude Desktop.**
@@ -57,7 +61,7 @@ This repo already ships a project-scoped [`.mcp.json`](../.mcp.json), so the
 simplest path is:
 
 1. Run Claude Code **from the repo root** (so the relative server path resolves).
-2. Approve the `ai-video-editor` server when prompted (project-scoped servers
+2. Approve the `synthcut` server when prompted (project-scoped servers
    require a one-time approval), or run `/mcp` to check it's connected.
 
 Prefer an explicit command instead? Register it directly (use the **absolute**
@@ -65,7 +69,7 @@ path to `index.js`):
 
 ```bash
 # default scope = just you, this project
-claude mcp add ai-video-editor -- node /abs/path/to/packages/mcp/dist/index.js
+claude mcp add synthcut -- node /abs/path/to/packages/mcp/dist/index.js
 
 # or make it available everywhere:  -s user
 # verify / inspect:

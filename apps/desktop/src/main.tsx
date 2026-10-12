@@ -8,7 +8,7 @@ import "./styles.css";
 
 // The core port + session token are passed as ?port=NNNN&token=… — by the
 // Electron main process, or in the URL the web shell (web/server.cjs) prints.
-// In a plain browser with no ?port, fall back to the default core port.
+// In a plain browser with no ?port, fall back to the default core port (4791).
 const params = new URLSearchParams(window.location.search);
 let port = Number(params.get("port")) || 0;
 let token = params.get("token");
@@ -35,7 +35,7 @@ if (location.protocol === "http:" || location.protocol === "https:") {
   try { localStorage.removeItem("aive.session"); } catch { /* ignore */ }
   if (params.has("token")) history.replaceState(null, "", location.pathname + location.hash);
 }
-port ||= 4789;
+port ||= 4791;
 token ??= "";
 
 // Desktop shell only: lets CSS make room for the native window controls.

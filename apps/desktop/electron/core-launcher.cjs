@@ -3,7 +3,7 @@
 // client (via the MCP server) share ONE live editing session: whoever starts
 // first launches the core; the other attaches to it. They must agree on the
 // data directory (where the core publishes server.json), so we use the same
-// default the core and MCP server use: ~/.aive/data.
+// default the core and MCP server use: ~/.synthcut/data.
 //
 // Electron-free on purpose, so it can be tested under plain Node.
 const { spawn } = require("node:child_process");
@@ -16,7 +16,7 @@ const path = require("node:path");
 const require_ = createRequire(__filename);
 
 function getDataDir() {
-  return process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".aive", "data");
+  return process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".synthcut", "data");
 }
 
 function coreCliPath() {

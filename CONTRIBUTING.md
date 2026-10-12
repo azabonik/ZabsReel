@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for your interest in the AI-Native Video Editor! This is an open-source
-project and contributions are welcome.
+Thanks for your interest in SynthCut! This is an open-source project and
+contributions are welcome.
 
 ## Project structure
 
@@ -10,7 +10,8 @@ packages/core    @aive/core  — headless engine: timeline (EDL), FFmpeg pipelin
                                HTTP /rpc + WebSocket server. No UI, no AI.
 packages/mcp     @aive/mcp   — MCP server: exposes core's RPC methods as tools to
                                AI clients; forwards calls to the running core.
-apps/desktop     @aive/desktop — Electron + React UI. Connects to core over WS.
+apps/desktop     synthcut-desktop — Electron + React UI. Connects to core over WS.
+                               web/server.cjs serves the same UI to a browser tab.
 ```
 
 The golden rule of the architecture: **the editor core is the single source of
@@ -50,6 +51,7 @@ ffmpeg -f lavfi -i testsrc2=size=640x480:rate=30:duration=4 -pix_fmt yuv420p scr
 
 npx tsx packages/core/scripts/smoke.ts scratch/a.mp4 scratch/b.mp4   # engine + render
 npx tsx packages/mcp/scripts/smoke.ts  scratch/a.mp4 scratch/b.mp4   # full MCP path
+npx tsx apps/desktop/scripts/smoke-web.ts                            # web shell end-to-end
 ```
 
 Per-feature smokes live in `packages/core/scripts/` — e.g. `smoke-effects.ts`,
@@ -70,7 +72,7 @@ downloads on first motion-graphics use.
 node apps/desktop/scripts/prepare-bundle.ts     # stage bundled binaries → apps/desktop/build/resources/aive
 npx tsx packages/core/scripts/smoke-bundled.ts  # verify the staged bundle renders offline
 npm run build
-npm run dist --workspace @aive/desktop          # build the NSIS installer
+npm run dist --workspace synthcut-desktop       # build the NSIS installer
 ```
 
 A few non-obvious things if you touch the packaging:

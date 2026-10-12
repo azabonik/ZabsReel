@@ -13,10 +13,10 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace synthcut-by-relo",
-    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace synthcut-by-relo",
-    "start": "npm run start --workspace synthcut-by-relo",
-    "web": "npm run build && npm run web --workspace synthcut-by-relo --",
+    "build": "npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace synthcut-desktop",
+    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace synthcut-desktop",
+    "start": "npm run start --workspace synthcut-desktop",
+    "web": "npm run build && npm run web --workspace synthcut-desktop --",
     "core": "npm run start --workspace @aive/core",
     "mcp": "npm run start --workspace @aive/mcp",
     "clean": "node -e \"require('fs').rmSync('node_modules',{recursive:true,force:true})\""

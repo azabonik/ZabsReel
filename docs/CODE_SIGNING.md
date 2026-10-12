@@ -1,4 +1,4 @@
-# Code signing — SynthCut by Relo (Windows)
+# Code signing — SynthCut (Windows)
 
 Unsigned installers trigger Windows SmartScreen ("Windows protected your PC").
 A **trusted code‑signing certificate** removes/reduces that warning. This doc
@@ -55,7 +55,7 @@ $env:CSC_KEY_PASSWORD = "your-pfx-password"
 npm run dist
 ```
 
-It signs both `SynthCut by Relo.exe` and the Setup installer.
+It signs both `SynthCut.exe` and the installer.
 
 ### B) Azure Trusted Signing (recommended cloud option)
 
@@ -63,7 +63,7 @@ Add to `package.json` → `build.win`:
 
 ```json
 "azureSignOptions": {
-  "publisherName": "Relo",
+  "publisherName": "<the name on your certificate>",
   "endpoint": "https://eus.codesigning.azure.net",
   "codeSigningAccountName": "<your-account>",
   "certificateProfileName": "<your-profile>"

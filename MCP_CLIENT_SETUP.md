@@ -1,13 +1,12 @@
 # SynthCut MCP Client Setup
 
-This file explains how users connect SynthCut by Relo to AI clients that support
-MCP.
+This file explains how users connect SynthCut to AI clients that support MCP.
 
 ---
 
 ## Developer Setup (running from source)
 
-If you are running SynthCut from source with `npm run dev` or `npm start`, use
+If you are running SynthCut from source with `npm start` or `npm run web`, use
 the built MCP package directly with plain `node` — no Electron binary needed.
 
 **Prerequisites:** build the packages first:
@@ -21,13 +20,13 @@ This produces `packages/mcp/dist/index.js`.
 ### Claude Code (dev)
 
 ```cmd
-claude mcp add -s user ai-video-editor -- node "REPO_ROOT\packages\mcp\dist\index.js"
+claude mcp add -s user synthcut -- node "REPO_ROOT\packages\mcp\dist\index.js"
 ```
 
 Replace `REPO_ROOT` with the absolute path to your clone, e.g.:
 
 ```cmd
-claude mcp add -s user ai-video-editor -- node "C:\Users\Dhruv\Desktop\AI_native_editor\packages\mcp\dist\index.js"
+claude mcp add -s user synthcut -- node "C:\Users\<user>\src\SynthCut\packages\mcp\dist\index.js"
 ```
 
 ### Claude Desktop / other clients (dev)
@@ -35,9 +34,9 @@ claude mcp add -s user ai-video-editor -- node "C:\Users\Dhruv\Desktop\AI_native
 ```json
 {
   "mcpServers": {
-    "ai-video-editor": {
+    "synthcut": {
       "command": "node",
-      "args": ["C:\\Users\\Dhruv\\Desktop\\AI_native_editor\\packages\\mcp\\dist\\index.js"]
+      "args": ["C:\\Users\\<user>\\src\\SynthCut\\packages\\mcp\\dist\\index.js"]
     }
   }
 }
@@ -87,7 +86,7 @@ Paste the generated `mcpServers` JSON from SynthCut:
 ```json
 {
   "mcpServers": {
-    "ai-video-editor": {
+    "synthcut": {
       "command": "PATH_FROM_SYNTHCUT_CONNECT_AI",
       "args": ["MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"],
       "env": {
@@ -105,7 +104,7 @@ Then fully quit and restart Claude Desktop.
 Recommended command:
 
 ```powershell
-claude.cmd mcp add -s user ai-video-editor -e ELECTRON_RUN_AS_NODE=1 -- "PATH_FROM_SYNTHCUT_CONNECT_AI" "MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"
+claude.cmd mcp add -s user synthcut -e ELECTRON_RUN_AS_NODE=1 -- "PATH_FROM_SYNTHCUT_CONNECT_AI" "MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"
 ```
 
 Project-scoped config can also live in:
@@ -135,18 +134,18 @@ macOS/Linux:
 Codex uses TOML, not JSON:
 
 ```toml
-[mcp_servers.ai-video-editor]
+[mcp_servers.synthcut]
 command = "PATH_FROM_SYNTHCUT_CONNECT_AI"
 args = ["MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"]
 
-[mcp_servers.ai-video-editor.env]
+[mcp_servers.synthcut.env]
 ELECTRON_RUN_AS_NODE = "1"
 ```
 
 Command-based setup:
 
 ```powershell
-codex.cmd mcp add ai-video-editor --env ELECTRON_RUN_AS_NODE=1 -- "PATH_FROM_SYNTHCUT_CONNECT_AI" "MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"
+codex.cmd mcp add synthcut --env ELECTRON_RUN_AS_NODE=1 -- "PATH_FROM_SYNTHCUT_CONNECT_AI" "MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"
 ```
 
 ## Cursor
@@ -194,7 +193,7 @@ VS Code uses `servers` instead of `mcpServers`:
 ```json
 {
   "servers": {
-    "ai-video-editor": {
+    "synthcut": {
       "command": "PATH_FROM_SYNTHCUT_CONNECT_AI",
       "args": ["MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"],
       "env": {
@@ -258,7 +257,7 @@ Use:
 ```json
 {
   "mcpServers": {
-    "ai-video-editor": {
+    "synthcut": {
       "command": "PATH_FROM_SYNTHCUT_CONNECT_AI",
       "args": ["MCP_INDEX_PATH_FROM_SYNTHCUT_CONNECT_AI"],
       "env": {

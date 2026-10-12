@@ -246,7 +246,7 @@ function mcpConfig() {
   } catch {
     mcpEntry = null;
   }
-  const config = { mcpServers: { "ai-video-editor": { command: "node", args: [mcpEntry] } } };
+  const config = { mcpServers: { synthcut: { command: "node", args: [mcpEntry] } } };
   return { available: !!mcpEntry, packaged: false, mcpEntry, json: JSON.stringify(config, null, 2) };
 }
 

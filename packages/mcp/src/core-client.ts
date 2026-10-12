@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 
 /** Resolve the data dir the core uses (must match @aive/core's default). */
 export function getDataDir(): string {
-  return process.env.AIVE_DATA_DIR || join(homedir(), ".aive", "data");
+  return process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data");
 }
 
 /** All diagnostic logging MUST go to stderr — stdout is the MCP stdio channel. */

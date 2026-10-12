@@ -11,7 +11,7 @@ via `electron-updater` + GitHub Releases.
 Releases are triggered by **pushing a git tag** — *not* by pushing code to `main`.
 
 ```bash
-# 1. Bump the version in ALL FOUR package.json files (see list below) to X.Y.Z
+# 1. Bump the version in ALL FIVE package.json files (see list below) to X.Y.Z
 # 2. Commit the bump
 git commit -am "Release v0.1.2"
 
@@ -47,14 +47,14 @@ Keep these in lockstep — the app's version is `apps/desktop/package.json`:
 | `package.json` | repo root |
 | `packages/core/package.json` | `@aive/core` |
 | `packages/mcp/package.json` | `@aive/mcp` |
-| `packages/skill-installer/package.json` | `@relo-video/synthcut` (the `npx @relo-video/synthcut` skill installer) |
-| `apps/desktop/package.json` | `synthcut-by-relo` ← **the one the updater compares** |
+| `packages/skill-installer/package.json` | `@azabonik/synthcut` (the `npx @azabonik/synthcut` skill installer) |
+| `apps/desktop/package.json` | `synthcut-desktop` ← **the one the updater compares** |
 
 > Only `apps/desktop/package.json` strictly drives the update check, but bump all
-> five together so versions never diverge. The `@relo-video/synthcut` package additionally
-> ships to npm — after tagging, run `npm publish --workspace @relo-video/synthcut`
-> (that's what makes `npx @relo-video/synthcut add` work for users). It's a scoped
-> package: publishing requires owning the npm `relo` scope (an npm org or the
+> five together so versions never diverge. The `@azabonik/synthcut` package additionally
+> ships to npm — after tagging, run `npm publish --workspace @azabonik/synthcut`
+> (that's what makes `npx @azabonik/synthcut add` work for users). It's a scoped
+> package: publishing requires owning the npm `azabonik` scope (an npm org or the
 > username), and `publishConfig.access: public` is already set in its package.json.
 
 ---
@@ -66,8 +66,8 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
 1. Checks out **the exact commit the tag points to**.
 2. `npm ci` → `npm run build` (core + mcp + renderer).
 3. `npm run dist -- --publish never` — electron-builder produces:
-   - `SynthCut by Relo <ver>.exe` — the installer
-   - `SynthCut by Relo <ver>.exe.blockmap` — the differential-download map
+   - `SynthCut-<ver>.exe` — the installer
+   - `SynthCut-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
 4. Attaches **all** of those to a **published** GitHub Release.
@@ -96,8 +96,12 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 
 - Runs **only in the installed/packaged app** (guarded by `app.isPackaged`) — never
   during `npm start`.
-- The stable `appId` (`com.relo.synthcut`) means updates upgrade in place — no
-  uninstall.
+- The stable `appId` (`io.github.azabonik.synthcut`) means updates upgrade in
+  place — no uninstall.
+- This fork changed the `appId` from Relo's (`com.relo.synthcut`), and
+  `build.publish` in `apps/desktop/package.json` points at **azabonik/SynthCut**.
+  So installs of this fork read only this fork's `latest.yml`: they never upgrade
+  or replace Relo's SynthCut, and Relo's releases never replace them.
 - Unsigned is fine on Windows; SmartScreen only nags on the very first manual
   install, not on self-updates.
 - **macOS/Linux:** no packaged build or auto-update yet. Those users run from source
@@ -108,12 +112,12 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 ## Testing an update end-to-end
 
 1. Build + install an **older** version locally (e.g. v0.1.1):
-   `npm run dist --workspace @aive/desktop`, then run the installer.
+   `npm run dist --workspace synthcut-desktop`, then run the installer.
 2. Bump to a **higher** version (v0.1.2), tag, and push → let CI publish the Release.
 3. Launch the installed **older** app → within a moment it downloads in the
    background → the "Update ready" dialog appears.
 4. To watch the process, add `electron-log` and check the log at
-   `%APPDATA%\SynthCut by Relo\logs`.
+   `%APPDATA%\SynthCut\logs`.
 
 ---
 
@@ -127,6 +131,7 @@ bad Release stops *new* downloads but doesn't downgrade anyone already updated.)
 
 ## Who can trigger a release — and branches
 
-See the dedicated section in the README / your notes, but in short: the trigger is
-the **tag**, not the branch, and only people with **push access to this repo** can
-publish to your users. A tag pushed to a **fork** publishes to that fork, not to you.
+The trigger is the **tag**, not the branch, and only people with **push access to
+azabonik/SynthCut** can publish to this fork's users. A tag pushed to another fork
+publishes to that fork only; its installs do not see it, because they update from
+azabonik/SynthCut.

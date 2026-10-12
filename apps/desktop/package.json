@@ -1,5 +1,5 @@
 {
-  "name": "synthcut-by-relo",
+  "name": "synthcut-desktop",
   "version": "1.0.5",
   "description": "Electron + React desktop UI for the AI-Native Video Editor. Shows the timeline, clip library and preview; reflects AI edits live.",
   "license": "GPL-3.0-or-later",
@@ -34,16 +34,16 @@
     "vite": "^6.0.7"
   },
   "build": {
-    "appId": "com.relo.synthcut",
-    "productName": "SynthCut by Relo",
+    "appId": "io.github.azabonik.synthcut",
+    "productName": "SynthCut",
     "publish": [
       {
         "provider": "github",
-        "owner": "Relo-video",
+        "owner": "azabonik",
         "repo": "SynthCut"
       }
     ],
-    "copyright": "Copyright © 2026 Relo",
+    "copyright": "Copyright © 2026 Relo and SynthCut contributors",
     "electronVersion": "42.4.1",
     "npmRebuild": false,
     "asar": false,
@@ -79,8 +79,8 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "SynthCut by Relo",
-      "uninstallDisplayName": "SynthCut by Relo",
+      "shortcutName": "SynthCut",
+      "uninstallDisplayName": "SynthCut",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

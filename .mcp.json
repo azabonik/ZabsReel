@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ai-video-editor": {
+    "synthcut": {
       "command": "node",
       "args": ["packages/mcp/dist/index.js"]
     }

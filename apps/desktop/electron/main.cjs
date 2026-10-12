@@ -16,11 +16,11 @@ const { applyBundledAssetEnv } = require("./bundled-assets.cjs");
 // groups our windows under one taskbar button. In a DEV run (not packaged) we use
 // a distinct name + AppUserModelID so a source build is a SEPARATE taskbar entry
 // and can't be confused with an installed copy. No effect on the shipped app.
-const APP_NAME = app.isPackaged ? "SynthCut by Relo" : "SynthCut by Relo (DEV)";
+const APP_NAME = app.isPackaged ? "SynthCut" : "SynthCut (DEV)";
 const APP_ICON = path.join(__dirname, "..", "build", "icon.ico");
 app.setName(APP_NAME);
 if (process.platform === "win32") {
-  app.setAppUserModelId(app.isPackaged ? "com.relo.synthcut" : "com.relo.synthcut.dev");
+  app.setAppUserModelId(app.isPackaged ? "io.github.azabonik.synthcut" : "io.github.azabonik.synthcut.dev");
 }
 
 let coreChild = null;
@@ -47,7 +47,8 @@ function buildMenu() {
 // GitHub Release feed (latest.yml), and if a newer version exists electron-updater
 // downloads only the changed chunks (via the .blockmap) in the background, then
 // installs on the next restart. Guarded by app.isPackaged so it NEVER runs during
-// a `npm start` dev session. Update source is the `publish` block in package.json.
+// a `npm start` dev session. Update source is the `publish` block in package.json
+// (the azabonik/SynthCut GitHub releases).
 function setupAutoUpdate() {
   if (!app.isPackaged) return; // dev build — nothing to update against
   let autoUpdater;
@@ -234,7 +235,7 @@ ipcMain.handle("mcp:config", () => {
   const server = packaged
     ? { command: process.execPath, args: [mcpEntry], env: { ELECTRON_RUN_AS_NODE: "1" } }
     : { command: "node", args: [mcpEntry] };
-  const config = { mcpServers: { "ai-video-editor": server } };
+  const config = { mcpServers: { synthcut: server } };
   return {
     available: !!mcpEntry,
     packaged,

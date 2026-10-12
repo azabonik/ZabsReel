@@ -1,7 +1,7 @@
 # Setup & Testing Guide
 
-A complete, do-it-yourself walkthrough to verify **every** feature of the
-AI-Native Video Editor before you make it public. It covers three layers:
+A complete, do-it-yourself walkthrough to verify **every** feature of
+SynthCut before you make it public. It covers three layers:
 
 1. **Automated smoke tests** — the fastest way to confirm the whole pipeline
    works (each one does a *real* FFmpeg render). Start here.
@@ -79,6 +79,10 @@ from `scratch/`.
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
+
+# Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
+# import + stream through the core, and stopping the core it started (needs the build)
+npx tsx apps/desktop/scripts/smoke-web.ts
 
 # Security: session-token auth (HTTP/WS) + /file allowlist (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
@@ -198,13 +202,13 @@ Ensure `npm run build` has produced `packages/mcp/dist/index.js`, then connect
 **either** client (see [`GETTING_STARTED.md` §4](GETTING_STARTED.md) for full
 detail):
 
-- **Claude Desktop:** merge the `ai-video-editor` entry from
+- **Claude Desktop:** merge the `synthcut` entry from
   [`claude_desktop_config.example.json`](../claude_desktop_config.example.json)
   into `%APPDATA%\Claude\claude_desktop_config.json` (absolute path to
   `index.js`), then **fully quit and restart** Claude Desktop.
 - **Claude Code (CLI):** run it **from the repo root** — the shipped
   [`.mcp.json`](../.mcp.json) registers the server (approve it when prompted, or
-  check with `/mcp`). Or `claude mcp add ai-video-editor -- node <abs path to index.js>`.
+  check with `/mcp`). Or `claude mcp add synthcut -- node <abs path to index.js>`.
 
 Optionally open the desktop app (`npm start`) too — every AI edit appears live in
 its timeline. If the app is closed, the MCP server runs a headless core and the
@@ -285,7 +289,7 @@ This verifies the Windows installer ships a self-contained, offline app.
 node apps/desktop/scripts/prepare-bundle.ts        # stage bundled binaries/models (~430 MB)
 npx tsx packages/core/scripts/smoke-bundled.ts     # verify the staged bundle renders OFFLINE
 npm run build
-npm run dist --workspace @aive/desktop             # -> apps/desktop/build/dist/...Setup.exe
+npm run dist --workspace synthcut-desktop          # -> apps/desktop/build/dist/SynthCut-<version>.exe
 ```
 
 `smoke-bundled.ts` points the engine at *only* the staged bundle (no PATH FFmpeg,
@@ -294,7 +298,7 @@ first-run works with no network.
 
 ### 7.2 Install and run
 
-1. Run `apps/desktop/build/dist/AI-Native Video Editor <version> Setup.exe`.
+1. Run `apps/desktop/build/dist/SynthCut-<version>.exe`.
 2. It's **unsigned**, so SmartScreen may warn — click **More info → Run anyway**.
 3. Launch the installed app. Import a clip, add it, **Export** — it should render
    using the bundled FFmpeg with **no internet connection** (try it with Wi-Fi
@@ -316,15 +320,16 @@ first-run works with no network.
   "not a valid Remotion project", make sure you're on the current build.
 - **macOS captions** — no prebuilt whisper-cli is published; `brew install
   whisper-cpp` and set `AIVE_WHISPER_BIN`.
-- **Reset everything** — delete `~/.aive` (the data dir + cached models) to start
-  from a clean slate. `~/.aive/data` holds your shared session/project.
+- **Reset everything** — delete `~/.synthcut` (the data dir) and `~/.aive` (cached
+  models and binaries) to start from a clean slate. `~/.synthcut/data` holds your
+  shared session/project.
 
 ---
 
 ## 9. Quick verification checklist
 
 - [ ] `npm run build` succeeds
-- [ ] All §3 smoke tests print `PASSED` (21 scripts; `smoke-bundled` is §7)
+- [ ] All §3 smoke tests print `PASSED` (30 scripts; `smoke-bundled` is §7)
 - [ ] `smoke-bundled.ts` passes (offline bundle)
 - [ ] Desktop app: import → edit → preview → export by hand
 - [ ] Claude Desktop connected; the §5.2 prompt script completes

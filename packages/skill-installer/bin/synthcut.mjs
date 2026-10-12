@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * synthcut — installer for the SynthCut "video-editor-pro" AI skill.
+ * synthcut — installer for the SynthCut "synthcut-editor" AI skill.
  *
- *   npx synthcut                 interactive: pick client + scope
- *   npx synthcut add --client claude --scope project
- *   npx synthcut add --client codex  --scope global --force
+ *   npx @azabonik/synthcut                 interactive: pick client + scope
+ *   npx @azabonik/synthcut add --client claude --scope project
+ *   npx @azabonik/synthcut add --client codex  --scope global --force
  *   ("skill" and "install" are accepted aliases for "add")
  *
  * The skill itself is one markdown file (skill/SKILL.md in this package).
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
 
-const SKILL_NAME = "video-editor-pro";
+const SKILL_NAME = "synthcut-editor";
 const MARK_START = `<!-- synthcut:${SKILL_NAME}:start -->`;
 const MARK_END = `<!-- synthcut:${SKILL_NAME}:end -->`;
 
@@ -120,7 +120,7 @@ function install(client, scope, projectDir, force) {
         return null;
       }
       const mdc = `---\ndescription: ${description}\nalwaysApply: false\n---\n\n${body}`;
-      return writeFileSafe(join(projectDir, ".cursor", "rules", `synthcut-${SKILL_NAME}.mdc`), mdc, force);
+      return writeFileSafe(join(projectDir, ".cursor", "rules", `${SKILL_NAME}.mdc`), mdc, force);
     }
     case "codex":
       return upsertSection(
@@ -140,7 +140,7 @@ function install(client, scope, projectDir, force) {
         );
         return null;
       }
-      return writeFileSafe(join(projectDir, ".windsurf", "rules", `synthcut-${SKILL_NAME}.md`), body, force);
+      return writeFileSafe(join(projectDir, ".windsurf", "rules", `${SKILL_NAME}.md`), body, force);
     }
     case "agents":
       return upsertSection(
@@ -154,7 +154,7 @@ function install(client, scope, projectDir, force) {
 
 // ---------------------------------------------------------------------- main
 
-const HELP = `synthcut — install the SynthCut video-editor-pro AI skill
+const HELP = `synthcut — install the SynthCut synthcut-editor AI skill
 
 Usage:
   synthcut [add] [--client <name>] [--scope <project|global>] [--dir <path>] [--force]

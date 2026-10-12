@@ -100,8 +100,8 @@ export class EditorServer {
   }
 
   async start(): Promise<number> {
-    // `port: 0` means "pick an ephemeral port"; omit it to use AIVE_PORT or 4789.
-    const desired = this.options.port ?? (process.env.AIVE_PORT ? Number(process.env.AIVE_PORT) : 4789);
+    // `port: 0` means "pick an ephemeral port"; omit it to use AIVE_PORT or 4791.
+    const desired = this.options.port ?? (process.env.AIVE_PORT ? Number(process.env.AIVE_PORT) : 4791);
     await this.listen(desired);
     const addr = this.http.address();
     this.port = typeof addr === "object" && addr ? addr.port : desired;
