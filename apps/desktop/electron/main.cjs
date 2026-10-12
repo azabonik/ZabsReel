@@ -188,11 +188,19 @@ ipcMain.handle("dialog:openFiles", async () => {
   return result.canceled ? [] : result.filePaths;
 });
 
-ipcMain.handle("dialog:saveFile", async () => {
+ipcMain.handle("dialog:saveFile", async (_e, ext) => {
+  // Same containers as the web picker (platform.ts exportFilters); the chosen
+  // preset's container is listed first so it is the default.
+  const formats = [
+    { name: "MP4 Video", extensions: ["mp4"] },
+    { name: "WebM Video", extensions: ["webm"] },
+    { name: "QuickTime Movie", extensions: ["mov"] },
+  ];
+  const want = formats.find((f) => f.extensions[0] === ext) || formats[0];
   const result = await dialog.showSaveDialog({
     title: "Export video",
-    defaultPath: "export.mp4",
-    filters: [{ name: "MP4 Video", extensions: ["mp4"] }],
+    defaultPath: `export.${want.extensions[0]}`,
+    filters: [want, ...formats.filter((f) => f !== want)],
   });
   return result.canceled ? null : result.filePath;
 });

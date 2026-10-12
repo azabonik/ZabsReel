@@ -84,6 +84,7 @@ npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP te
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
 # import + stream through the core, and stopping the core it started (needs the build)
 npx tsx apps/desktop/scripts/smoke-web.ts
+npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches)
 
 # Security: session-token auth (HTTP/WS) + /file allowlist (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts

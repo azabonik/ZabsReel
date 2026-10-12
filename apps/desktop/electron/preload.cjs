@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld("aive", {
   /** Open a native file picker; returns an array of absolute paths. */
   pickFiles: () => ipcRenderer.invoke("dialog:openFiles"),
   /** Open a native save dialog; returns an absolute path or null. */
-  pickSavePath: () => ipcRenderer.invoke("dialog:saveFile"),
+  pickSavePath: (ext) => ipcRenderer.invoke("dialog:saveFile", ext),
   /** Open a native picker for a .aive project; returns an absolute path or null. */
   openProject: () => ipcRenderer.invoke("dialog:openProject"),
   /** Native save dialog for a .aive project; returns an absolute path or null. */

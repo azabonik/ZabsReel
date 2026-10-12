@@ -35,12 +35,12 @@ const ASPECT_PRESETS = [
 
 // Export presets surfaced in the Export menu (mirror packages/core EXPORT_PRESETS).
 const EXPORT_PRESETS = [
-  { id: "youtube", label: "YouTube", desc: "H.264 MP4 · high quality" },
-  { id: "youtube_hevc", label: "YouTube HEVC", desc: "H.265 MP4 · smaller" },
-  { id: "social", label: "Reels / Shorts / TikTok", desc: "H.264 MP4 · faststart" },
-  { id: "square", label: "Square", desc: "H.264 MP4" },
-  { id: "web", label: "Web (WebM)", desc: "VP9 / Opus" },
-  { id: "master", label: "Master", desc: "near-lossless MOV" },
+  { id: "youtube", ext: "mp4", label: "YouTube", desc: "H.264 MP4 · high quality" },
+  { id: "youtube_hevc", ext: "mp4", label: "YouTube HEVC", desc: "H.265 MP4 · smaller" },
+  { id: "social", ext: "mp4", label: "Reels / Shorts / TikTok", desc: "H.264 MP4 · faststart" },
+  { id: "square", ext: "mp4", label: "Square", desc: "H.264 MP4" },
+  { id: "web", ext: "webm", label: "Web (WebM)", desc: "VP9 / Opus" },
+  { id: "master", ext: "mov", label: "Master", desc: "near-lossless MOV" },
 ];
 
 // All transition types the core supports, grouped so the picker reads as an
@@ -312,6 +312,7 @@ export function App({ api }: { api: CoreApi }) {
     if (ok !== null) pushRecent(path);
   };
   const openProject = async () => {
+    setShowProjectMenu(false);
     const path = await platform.openProject();
     if (path) await openProjectPath(path);
   };
@@ -402,9 +403,15 @@ export function App({ api }: { api: CoreApi }) {
   const exportVideo = (preset?: string) => {
     setShowExport(false);
     return run("Exporting", async () => {
-      const out = await platform.pickSavePath();
+      const out = await platform.pickSavePath(EXPORT_PRESETS.find((p) => p.id === preset)?.ext);
       if (!out) return;
-      const r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(preset ? { preset } : {}) });
+      let r: { path: string; duration: number };
+      try {
+        r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(preset ? { preset } : {}) });
+      } finally {
+        // Success, error and cancel all end here; don't rely on a progress event at 100%.
+        setProgress(null);
+      }
       setError(null);
       alert(`Exported ${fmt(r.duration)} video to:\n${r.path}`);
     });

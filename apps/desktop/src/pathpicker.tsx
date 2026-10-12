@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { api, getSnapshot, subscribe, type FileFilter, type FsEntry, type FsListing, type PendingPick, type WebConfig } from "./platform";
+import { resolveSaveName } from "./savename";
 import { Alert, ArrowUp, File, Folder, X } from "./icons";
 
 /** Mounted once beside <App/>: renders the picker on demand and the expired-session notice. */
@@ -175,8 +176,9 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
     if (!n) return;
     if (isAbsolute(n)) {
       // A typed absolute path wins over the folder being shown.
-      const ext = request.filters[0]?.extensions[0];
-      if (ext && ext !== "*" && !n.toLowerCase().endsWith(`.${ext}`)) n += `.${ext}`;
+      const r = resolveSaveName(n, request.filters, filterIdx);
+      n = r.name;
+      setFilterIdx(r.filterIdx);
       const cut = Math.max(n.lastIndexOf("/"), n.lastIndexOf("\\"));
       remember(request.key, n.slice(0, cut > 0 ? cut : 1));
       request.resolve([n]);
@@ -184,8 +186,9 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
     }
     const folder = listing.entries.find((e) => e.dir && e.name === n);
     if (folder) { load(pathOf(folder)); setName(request.mode === "save" ? request.defaultName : ""); return; }
-    const ext = request.filters[0]?.extensions[0];
-    if (ext && ext !== "*" && !n.toLowerCase().endsWith(`.${ext}`)) n += `.${ext}`;
+    const r = resolveSaveName(n, request.filters, filterIdx);
+    n = r.name;
+    setFilterIdx(r.filterIdx);
     // Case-insensitive on purpose: Windows drives (and /mnt/c under WSL) are.
     const clash = listing.entries.find((e) => !e.dir && e.name.toLowerCase() === n.toLowerCase());
     if (clash && !window.confirm(`"${clash.name}" already exists. Replace it?`)) return;

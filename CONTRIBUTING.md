@@ -34,7 +34,7 @@ available to both the AI (as an MCP tool) and the UI.
 ```bash
 npm install
 npm run build
-npm test            # see "Testing" below
+# there is no test runner: the checks are the smoke scripts in docs/TESTING.md (see "Testing" below)
 ```
 
 ## Testing

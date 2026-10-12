@@ -971,8 +971,14 @@ export function buildRenderCommand(
       }
       filterParts.push(`[${mIdx}:a]${mSteps.join(",")}[mraw]`);
       if (music.duck) {
-        filterParts.push(`[paud]asplit=2[pmix][pside]`);
-        filterParts.push(`[mraw][pside]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300:level_sc=1[mduck]`);
+        // FFmpeg 4.4's sidechaincompress fails with "No channel layout for
+        // input 1" unless every pad has an explicit layout, so pin stereo on
+        // both of its inputs and on the mix branch (a no-op on 5+/6).
+        filterParts.push(`[paud]asplit=2[psplit0][psplit1]`);
+        filterParts.push(`[psplit0]aformat=channel_layouts=stereo[pmix]`);
+        filterParts.push(`[psplit1]aformat=channel_layouts=stereo[pside]`);
+        filterParts.push(`[mraw]aformat=channel_layouts=stereo[mstereo]`);
+        filterParts.push(`[mstereo][pside]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300:level_sc=1[mduck]`);
         filterParts.push(`[pmix][mduck]amix=inputs=2:duration=first:normalize=0[outa]`);
       } else {
         filterParts.push(`[paud][mraw]amix=inputs=2:duration=first:normalize=0[outa]`);

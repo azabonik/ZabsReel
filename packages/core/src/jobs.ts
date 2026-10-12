@@ -128,6 +128,22 @@ export class JobManager extends EventEmitter {
     return this.tracked.get(id)?.promise;
   }
 
+  /**
+   * Resolve once a job's work has fully stopped (its run function returned or
+   * threw, so any cleanup such as deleting a partial file has run). Never
+   * rejects. Gives up after `timeoutMs` so a wedged job cannot hang a caller.
+   */
+  async settled(id: string, timeoutMs = 30_000): Promise<void> {
+    const t = this.tracked.get(id);
+    if (!t) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      t.promise.then(() => {}, () => {}),
+      new Promise<void>((res) => { timer = setTimeout(res, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+  }
+
   /** All jobs (newest first); activeOnly limits to status === "running". */
   list(activeOnly = false): Job[] {
     const all = [...this.tracked.values()].map((t) => ({ ...t.job }));

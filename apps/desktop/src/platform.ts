@@ -30,7 +30,18 @@ const PROJECT_FILTERS: FileFilter[] = [
   { name: "SynthCut Project", extensions: ["aive"] },
   { name: "All Files", extensions: ["*"] },
 ];
-const EXPORT_FILTERS: FileFilter[] = [{ name: "MP4 Video", extensions: ["mp4"] }];
+// One filter per container the export presets produce (core EXPORT_PRESETS:
+// mp4 / webm / mov). The preset's own container is listed first so it is the
+// default; typing another of these extensions switches the filter to match.
+const EXPORT_FORMATS: FileFilter[] = [
+  { name: "MP4 Video", extensions: ["mp4"] },
+  { name: "WebM Video", extensions: ["webm"] },
+  { name: "QuickTime Movie", extensions: ["mov"] },
+];
+export function exportFilters(ext = "mp4"): FileFilter[] {
+  const first = EXPORT_FORMATS.find((f) => f.extensions[0] === ext) ?? EXPORT_FORMATS[0];
+  return [first, ...EXPORT_FORMATS.filter((f) => f !== first)];
+}
 
 // ---- tiny external store (read by PlatformHost via useSyncExternalStore) ----
 
@@ -120,12 +131,13 @@ export const platform = {
     return p ? [p] : [];
   },
 
-  async pickSavePath(): Promise<string | null> {
+  /** `ext` (mp4 | webm | mov) is the container of the chosen export preset. */
+  async pickSavePath(ext = "mp4"): Promise<string | null> {
     const h = await host();
-    if (h === "electron") return window.aive!.pickSavePath();
-    if (h === "web") return (await requestPick({ mode: "save", title: "Export video", confirmLabel: "Export here", filters: EXPORT_FILTERS, defaultName: "export.mp4", key: "export" }))?.[0] ?? null;
+    if (h === "electron") return window.aive!.pickSavePath(ext);
+    if (h === "web") return (await requestPick({ mode: "save", title: "Export video", confirmLabel: "Export here", filters: exportFilters(ext), defaultName: `export.${ext}`, key: "export" }))?.[0] ?? null;
     if (h === "expired") return null;
-    return window.prompt("Absolute output path (.mp4):");
+    return window.prompt(`Absolute output path (.${ext}):`);
   },
 
   async openProject(): Promise<string | null> {

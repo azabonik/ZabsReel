@@ -3360,6 +3360,7 @@ export class EditorEngine extends EventEmitter {
         throw new Error("Export canceled");
       }
 
+      this.emit("progress", { job: "export", fraction: 1 });
       void pruneDataDir(this.dataDir).catch(() => {});
       return { path: outputPath, duration: totalDuration } satisfies RenderResult;
     });

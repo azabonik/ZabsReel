@@ -316,7 +316,7 @@ declare global {
     aive?: {
       platform: string;
       pickFiles: () => Promise<string[]>;
-      pickSavePath: () => Promise<string | null>;
+      pickSavePath: (ext?: string) => Promise<string | null>;
       openProject: () => Promise<string | null>;
       saveProjectAs: (defaultName: string) => Promise<string | null>;
       onMenu: (cb: (action: string) => void) => void;

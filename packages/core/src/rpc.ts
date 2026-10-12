@@ -1080,13 +1080,17 @@ export const methods = {
     description:
       "Cancel a RUNNING job by its jobId (from list_jobs or a background export_video). Stops the underlying ffmpeg/model work; a canceled export deletes its partial output file. Returns {canceled:false} if the job already finished or the id is unknown — check list_jobs in that case.",
     schema: z.object({ jobId: z.string().min(1) }).strict(),
-    handler: (engine, p) => {
+    handler: async (engine, p) => {
       const canceled = engine.jobs.cancel(p.jobId);
       if (!canceled && !engine.jobs.get(p.jobId)) {
         throw new Error(
           `No job with id "${p.jobId}". Call list_jobs to see running/recent jobs and use one of their ids.`,
         );
       }
+      // The job is marked canceled at once, but its ffmpeg child exits (and an
+      // export's partial file is deleted) a moment later. Wait for that so the
+      // caller sees the finished state, not a half-cleaned one.
+      if (canceled) await engine.jobs.settled(p.jobId);
       return { canceled, job: engine.jobs.get(p.jobId) };
     },
   },

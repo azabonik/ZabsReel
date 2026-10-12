@@ -18,6 +18,7 @@ export class CoreApi {
   private progressCb?: (i: ProgressInfo) => void;
   private statusCb?: (connected: boolean) => void;
   private closed = false;
+  private attempts = 0;
   // The socket can open — and deliver the first state — before React's effects
   // subscribe (a production bundle on a fast local server usually wins that
   // race), so the latest status and state are kept and replayed to late
@@ -51,14 +52,43 @@ export class CoreApi {
 
   connect(): void {
     this.closed = false;
+    // No session key: the server would answer every upgrade with 401, so there
+    // is nothing to retry. The UI keeps showing "not connected".
+    if (!this.token) {
+      this.statusCb?.(false);
+      return;
+    }
     this.open();
+  }
+
+  /**
+   * Browsers hide the 401 on a rejected WebSocket upgrade (the close is just
+   * 1006), so tell "server rejects our key" from "server is briefly away" by
+   * probing /health: an authenticated reply is CORS-readable, an
+   * unauthenticated one is not, while a no-cors request still succeeds as long
+   * as something is listening.
+   */
+  private async authRejected(): Promise<boolean> {
+    try {
+      const ok = await fetch(`${this.base}/health`, { headers: { "x-aive-token": this.token } });
+      if (ok.ok) return false;
+    } catch { /* unreadable (bad key) or unreachable — decide below */ }
+    try {
+      await fetch(`${this.base}/health`, { mode: "no-cors" });
+      return true; // reachable, but our token did not authenticate
+    } catch {
+      return false; // nothing listening: transient, keep retrying
+    }
   }
 
   private open(): void {
     const ws = new WebSocket(this.wsUrl);
     this.ws = ws;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
+      this.attempts = 0;
       this.connected = true;
       this.statusCb?.(true);
     };
@@ -93,7 +123,15 @@ export class CoreApi {
     ws.onclose = () => {
       this.connected = false;
       this.statusCb?.(false);
-      if (!this.closed) setTimeout(() => this.open(), 1000);
+      if (this.closed) return;
+      const retry = () => {
+        // Back off 1s, 2s, 4s ... 15s while the core is away.
+        const delay = Math.min(15000, 1000 * 2 ** Math.min(this.attempts++, 4));
+        setTimeout(() => { if (!this.closed) this.open(); }, delay);
+      };
+      if (opened) { this.attempts = 0; retry(); return; }
+      // Never opened: maybe the core rejected our key. Stop if so.
+      void this.authRejected().then((rejected) => { if (!rejected) retry(); });
     };
     ws.onerror = () => ws.close();
   }
