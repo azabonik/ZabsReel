@@ -6,14 +6,24 @@
 // two during a transition overlap) — and least-recently-used clips are evicted.
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+/** playbackRate range browsers accept (Chromium: 1/16..16). */
+const MIN_RATE = 0.0625;
+const MAX_RATE = 16;
 
 export interface SyncOpts {
   /** Source time (seconds) this clip should be at. */
   srcTime: number;
   /** Master transport state. */
   playing: boolean;
-  /** Clip speed. */
+  /** Clip speed (a speed ramp's speed at `srcTime`). */
   rate: number;
+  /**
+   * The rate follows a speed CURVE: steer the element toward `srcTime` with a
+   * soft rate correction every frame, and only seek on a drift that grows with
+   * the rate (a 10x part moves 10 source-seconds per second — a fixed 80 ms
+   * window would reseek every frame and stutter).
+   */
+  follow?: boolean;
   /** Linear volume 0..1 (already includes fades); 0 + muted when inaudible. */
   volume: number;
   muted: boolean;
@@ -68,7 +78,8 @@ export class MediaPool {
 
   /** Drive an element toward `srcTime`, correcting drift sparingly while playing. */
   sync(el: HTMLVideoElement, o: SyncOpts): void {
-    el.playbackRate = o.rate > 0 ? o.rate : 1;
+    const rate = o.rate > 0 ? o.rate : 1;
+    if (!o.follow) el.playbackRate = rate;
     if (o.routed) {
       if (el.muted) el.muted = false;
       if (el.volume !== 1) el.volume = 1;
@@ -79,6 +90,21 @@ export class MediaPool {
     if (!Number.isFinite(o.srcTime)) return;
 
     if (o.playing) {
+      if (o.follow) {
+        // Curve speed: rate = the curve's speed + a proportional pull toward the
+        // expected source time (closes the gap in ~0.25 s), clamped to what
+        // browsers play; seek only past a rate-scaled threshold.
+        const err = o.srcTime - el.currentTime;
+        const steer = Math.min(rate * 2, Math.max(rate * 0.5, rate + 8 * err));
+        el.playbackRate = Math.min(MAX_RATE, Math.max(MIN_RATE, steer));
+        if (el.paused) {
+          this.safeSeek(el, o.srcTime);
+          void el.play().catch(() => {});
+        } else if (Math.abs(err) > 0.08 * Math.max(1, rate)) {
+          this.safeSeek(el, o.srcTime);
+        }
+        return;
+      }
       if (el.paused) {
         this.safeSeek(el, o.srcTime);
         void el.play().catch(() => {});
@@ -87,6 +113,7 @@ export class MediaPool {
         this.safeSeek(el, o.srcTime);
       }
     } else {
+      if (o.follow) el.playbackRate = Math.min(MAX_RATE, Math.max(MIN_RATE, rate));
       if (!el.paused) el.pause();
       if (Math.abs(el.currentTime - o.srcTime) > 0.02) this.safeSeek(el, o.srcTime);
     }
@@ -154,6 +181,8 @@ export class MediaPool {
     el.playsInline = true;
     el.preload = "auto";
     el.muted = true;
+    // Speed changes (constant or curve) keep the voice's pitch, like the export's atempo.
+    el.preservesPitch = true;
     el.crossOrigin = "anonymous";
     el.addEventListener("seeked", this.onSeeked);
     el.addEventListener("loadeddata", this.onSeeked);

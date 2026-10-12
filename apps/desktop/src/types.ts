@@ -2,8 +2,10 @@
 // the renderer bundle never pulls in Node-only core code).
 import type { Keyframes, Transform } from "./keyframes";
 import type { BlendMode, ClipMask } from "@aive/core/compositing";
+import { clipFootprintFrames, type SpeedRamp } from "@aive/core/speed";
 
 export type { BlendMode, ClipMask, MaskShape } from "@aive/core/compositing";
+export type { RampAudio, RampPreset, SpeedRamp, SpeedRampPoint } from "@aive/core/speed";
 
 export type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes";
 
@@ -164,7 +166,10 @@ export interface ClipEffects {
   bleeps?: Bleep[];
   /** Audio effects (source time, after bleep mutes, before speed; never on bleep sounds). */
   audioFilters?: AudioEffect[];
+  /** Constant speed (0.25..4); exclusive with `speedRamp`. */
   speed?: number;
+  /** Curve speed (points in asset seconds; the mapping is `@aive/core/speed`, shared with the export). */
+  speedRamp?: SpeedRamp;
   volume?: number;
   fadeInFrames?: number;
   fadeOutFrames?: number;
@@ -319,9 +324,9 @@ export function framesToSeconds(frames: number, fps: number): number {
 export function secondsToFrames(seconds: number, fps: number): number {
   return Math.round(seconds * fps);
 }
-export function clipDurationFrames(clip: Clip): number {
-  const speed = clip.effects?.speed ?? 1;
-  return Math.max(1, Math.round((clip.sourceOutFrame - clip.sourceInFrame) / speed));
+/** Timeline footprint in frames — the SAME function as core's (speed + speed ramps, `@aive/core/speed`). */
+export function clipDurationFrames(clip: Clip, fps: number): number {
+  return clipFootprintFrames(clip, fps);
 }
 
 export interface ProgressInfo {

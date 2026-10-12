@@ -17,6 +17,8 @@
 
 import type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
 import type { BlendMode, ClipMask } from "./effects/compositing.js";
+import { clipFootprintFrames, type SpeedRamp, type SpeedRampPoint } from "./speed.js";
+export type { RampAudio, RampPreset, SpeedRamp, SpeedRampPoint } from "./speed.js";
 
 export type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
 export type { BlendMode, ClipMask, MaskShape } from "./effects/compositing.js";
@@ -431,8 +433,19 @@ export interface Transition {
 
 /** Per-clip effects. All optional; absent fields mean "unchanged". */
 export interface ClipEffects {
-  /** Playback speed multiplier, 0.25..4 (1 = normal). Affects timeline duration. */
+  /**
+   * Constant playback speed multiplier, 0.25..4 (1 = normal). Affects timeline
+   * duration. Mutually exclusive with `speedRamp` (setting one clears the other).
+   */
   speed?: number;
+  /**
+   * CURVE SPEED (speed ramp, CapCut-style): speed piecewise-linear in SOURCE
+   * time between points anchored in ASSET seconds (like bleeps), constant
+   * beyond the first/last point, so trims and splits just window the curve.
+   * Replaces `speed` while set. The mapping (footprint, source↔timeline) lives
+   * in speed.ts, shared with the renderer as `@aive/core/speed`.
+   */
+  speedRamp?: SpeedRamp;
   /** Audio gain multiplier (1 = unchanged, 0 = mute). */
   volume?: number;
   /** Video fade-in / fade-out durations in frames. */
@@ -507,7 +520,7 @@ export interface Bleep {
  * A clip placed on a track at an absolute timeline position. References a region
  * [sourceInFrame, sourceOutFrame) of an asset (in project frames). Its timeline
  * footprint is `durationFrames = round((sourceOutFrame - sourceInFrame) / speed)`
- * — see {@link clipDurationFrames}. Clips on a track may have gaps or overlaps;
+ * (or the integral of its speed ramp) — see {@link clipDurationFrames}. Clips on a track may have gaps or overlaps;
  * an overlap with the previous clip plus a `transition` produces a crossfade.
  */
 export interface Clip {
@@ -644,15 +657,19 @@ export interface Marker {
  */
 export const PROJECT_SCHEMA_VERSION = 4;
 
-/** Timeline footprint of a clip in project frames (accounts for speed). */
-export function clipDurationFrames(clip: Clip): number {
-  const speed = clip.effects?.speed ?? 1;
-  return Math.max(1, Math.round((clip.sourceOutFrame - clip.sourceInFrame) / speed));
+/**
+ * Timeline footprint of a clip in project frames (accounts for speed and speed
+ * ramps — speed.ts clipFootprintFrames; a constant-speed clip is exactly
+ * max(1, round((out - in) / speed)) as always). `fps` is needed because ramp
+ * points are in asset seconds.
+ */
+export function clipDurationFrames(clip: Clip, fps: number): number {
+  return clipFootprintFrames(clip, fps);
 }
 
 /** Absolute end frame (exclusive) of a clip on its track. */
-export function clipEndFrame(clip: Clip): number {
-  return clip.startFrame + clipDurationFrames(clip);
+export function clipEndFrame(clip: Clip, fps: number): number {
+  return clip.startFrame + clipDurationFrames(clip, fps);
 }
 
 /**
@@ -712,6 +729,8 @@ export interface ResolvedKeyframe {
 /** Effects with frame-based fields resolved to seconds for the graph builder. */
 export interface ResolvedEffects {
   speed?: number;
+  /** Speed curve (points in ASSET seconds; graph.ts retimes via speed.ts). Replaces `speed`. */
+  speedRamp?: { points: SpeedRampPoint[]; audio?: "stretch" | "mute" };
   volume?: number;
   /** Fade durations in seconds. */
   fadeIn?: number;
@@ -740,7 +759,7 @@ export interface ResolvedEffects {
    * segment cache. Multiplied into the clip's alpha.
    */
   maskFile?: string;
-  /** Audio effects (effects/audio.ts), baked between the mutes and atempo. */
+  /** Audio effects (effects/audio.ts), baked between the mutes and atempo (or the ramp's stretch). */
   audioFilters?: AudioEffect[];
   /** FFmpeg lacks rubberband: pitch effects use the asetrate+atempo fallback. */
   pitchFallback?: boolean;

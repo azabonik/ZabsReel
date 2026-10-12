@@ -1,9 +1,12 @@
 // Renderer-side mirror of packages/core/src/audio/bleeps.ts — the SAME bleep
 // expansion the FFmpeg export uses, so the live preview plays each sound effect
 // where the export will and the timeline chips sit where the bleeps land. Kept
-// decoupled (no core import) like the rest of the desktop model mirror; keep the
-// two in sync (scripts/smoke-composite.ts compares them on the same inputs).
+// decoupled from core's Node-side code like the rest of the desktop model
+// mirror (only the pure source↔timeline mapping, `@aive/core/speed`, is
+// shared — so speed ramps map identically); keep the two in sync
+// (scripts/smoke-composite.ts compares them on the same inputs).
 
+import { clipTimeMap, hasSpeedRamp, type SpeedRamp } from "@aive/core/speed";
 import type { Bleep, BleepSound } from "./types";
 
 export const BLEEP_DEFAULT_VOLUME = 0.8;
@@ -21,7 +24,7 @@ export interface BleepClip {
   sourceInFrame: number;
   sourceOutFrame: number;
   audioOffsetFrames?: number;
-  effects?: { speed?: number; bleeps?: readonly Bleep[] };
+  effects?: { speed?: number; speedRamp?: SpeedRamp; bleeps?: readonly Bleep[] };
 }
 
 export interface BleepLayer {
@@ -50,7 +53,9 @@ export function expandBleeps(
   const srcIn = clip.sourceInFrame / fps;
   const srcOut = clip.sourceOutFrame / fps;
   const audioStart = (clip.startFrame + (clip.audioOffsetFrames ?? 0)) / fps;
-  const clipEnd = audioStart + (srcOut - srcIn) / speed;
+  const map = hasSpeedRamp(clip) ? clipTimeMap(clip, fps) : undefined;
+  const at = (src: number) => audioStart + (map ? map.timelineAt(src) : (src - srcIn) / speed);
+  const clipEnd = map ? audioStart + map.duration : audioStart + (srcOut - srcIn) / speed;
 
   const visible = bleeps
     .filter((b) => b.end > srcIn + EPS && b.start < srcOut - EPS)
@@ -64,8 +69,8 @@ export function expandBleeps(
       word: b.word,
       srcStart: s,
       srcEnd: e,
-      start: audioStart + (s - srcIn) / speed,
-      windowEnd: audioStart + (e - srcIn) / speed,
+      start: at(s),
+      windowEnd: at(e),
       sfxDuration: 0,
       sound,
       sfxAssetId: b.sfxAssetId,

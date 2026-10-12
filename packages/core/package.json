@@ -22,6 +22,10 @@
       "types": "./dist/effects/audio.d.ts",
       "default": "./dist/effects/audio.js"
     },
+    "./speed": {
+      "types": "./dist/speed.d.ts",
+      "default": "./dist/speed.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

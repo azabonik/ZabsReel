@@ -1,4 +1,8 @@
 import { execa, type ResultPromise } from "execa";
+import { randomUUID } from "node:crypto";
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Thin wrapper around the FFmpeg / ffprobe binaries. We invoke them as external
@@ -75,10 +79,80 @@ export interface FfmpegRunOptions {
 }
 
 /**
+ * Longest `-filter_complex` graph (characters) passed inline on the command
+ * line. A longer one goes to a file (see {@link runFfmpeg}): Linux limits ONE
+ * argument to 128 KiB (MAX_ARG_STRLEN → spawn E2BIG) and Windows limits the
+ * WHOLE command line to 32,767 characters. Speed-ramped clips reach these
+ * limits (their audio is many time-stretched chunks); ordinary graphs are a
+ * few KB and stay inline, so their commands do not change.
+ */
+export const INLINE_FILTERGRAPH_MAX = 16 * 1024;
+
+/**
+ * The options that read a filtergraph from a file. `-filter_complex_script`
+ * works in FFmpeg 4.x–7.x (deprecated in 7.0 and removed later);
+ * `-/filter_complex` (the generic "-/option <file>" form) exists from 7.0.
+ * runFfmpeg uses the current one and changes to the other once when this
+ * ffmpeg does not know it.
+ */
+const FILTER_SCRIPT_FLAGS = ["-filter_complex_script", "-/filter_complex"] as const;
+let filterScriptFlag = 0;
+
+/**
+ * Where `args` has a `-filter_complex` graph longer than `max`: the index of
+ * the `-filter_complex` flag, else -1.
+ */
+export function longFilterGraphIndex(args: readonly string[], max = INLINE_FILTERGRAPH_MAX): number {
+  const at = args.indexOf("-filter_complex");
+  return at >= 0 && at + 1 < args.length && args[at + 1].length > max ? at : -1;
+}
+
+/** `args` with the `-filter_complex <graph>` pair at `at` replaced by `<flag> <file>`. */
+export function withFilterGraphFile(args: readonly string[], at: number, file: string, flag: string): string[] {
+  return [...args.slice(0, at), flag, file, ...args.slice(at + 2)];
+}
+
+/**
  * Run an ffmpeg command to completion. Parses `-progress pipe:1` output (the
  * caller must include those flags) to report progress.
+ *
+ * A `-filter_complex` graph longer than {@link INLINE_FILTERGRAPH_MAX} is
+ * written to a temporary file (in `cwd` and passed by its bare name when a
+ * `cwd` is set, else in the OS temp dir) and passed with
+ * `-filter_complex_script` / `-/filter_complex`; the file is deleted after
+ * the run.
  */
 export async function runFfmpeg(args: string[], opts: FfmpegRunOptions = {}): Promise<void> {
+  const at = longFilterGraphIndex(args);
+  if (at < 0) return runFfmpegOnce(args, opts);
+  const name = `filtergraph-${process.pid}-${randomUUID()}.txt`;
+  const path = join(opts.cwd ?? tmpdir(), name);
+  const graph = args[at + 1];
+  await writeFile(path, graph, "utf8");
+  const ref = opts.cwd ? name : path;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const flag = FILTER_SCRIPT_FLAGS[filterScriptFlag];
+      try {
+        return await runFfmpegOnce(withFilterGraphFile(args, at, ref, flag), opts);
+      } catch (err) {
+        // This ffmpeg does not know the option (it stops before reading any input): use the other one.
+        const unknown = err instanceof FfmpegError && err.stderr.includes(`Unrecognized option '${flag.slice(1)}'`);
+        if (attempt > 0 || !unknown || opts.signal?.aborted) {
+          // Report the command with the graph inline (the file is deleted below).
+          if (err instanceof FfmpegError) throw new FfmpegError(err.message, `${FFMPEG_BIN} ${args.join(" ")}`, err.stderr);
+          throw err;
+        }
+        // (From the flag that failed, not a toggle: concurrent runs may fail on the same one.)
+        filterScriptFlag = flag === FILTER_SCRIPT_FLAGS[0] ? 1 : 0;
+      }
+    }
+  } finally {
+    await rm(path, { force: true }).catch(() => {});
+  }
+}
+
+async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<void> {
   const child: ResultPromise = execa(FFMPEG_BIN, args, {
     reject: true,
     buffer: { stdout: false, stderr: true },

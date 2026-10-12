@@ -9,6 +9,7 @@ import {
   type Track,
   type TransitionType,
 } from "../types.js";
+import { averageSpeed, hasSpeedRamp } from "../speed.js";
 
 /**
  * OpenTimelineIO interop — "start the edit with AI in SynthCut, finish
@@ -20,7 +21,8 @@ import {
  *    file URL + available_range); gaps between absolutely-positioned clips
  *    become Gap.1s; transitions become Transition.1 (SMPTE_Dissolve,
  *    in/out offsets = overlap/2, centered on the cut); speed becomes a
- *    LinearTimeWarp.1. Everything OTIO can't express (effects stack, keyframes,
+ *    LinearTimeWarp.1 (a speed RAMP becomes its average speed + a note — OTIO
+ *    has no standard curve warp). Everything OTIO can't express (effects stack, keyframes,
  *    captions, graphics, adjustment layers, exact overlap frames) rides under
  *    `metadata.synthcut.*`, so a SynthCut→SynthCut round-trip is LOSSLESS.
  *
@@ -117,7 +119,7 @@ export function projectToOtio(project: Project): OtioTimeline {
       let cursor = 0;
 
       for (const clip of clips) {
-        const footprint = clipDurationFrames(clip);
+        const footprint = clipDurationFrames(clip, fps);
         const overlap = clip.transition ? Math.min(clip.transition.durationFrames, footprint - 1) : 0;
 
         if (!clip.transition && clip.startFrame > cursor) {
@@ -140,7 +142,12 @@ export function projectToOtio(project: Project): OtioTimeline {
         }
 
         const asset = clip.assetId ? assetById.get(clip.assetId) : undefined;
-        const speed = clip.effects?.speed ?? 1;
+        // A speed RAMP has no OTIO equivalent (only LinearTimeWarp is standard):
+        // other NLEs get its AVERAGE speed (source span / timeline span, so the
+        // cut lengths match) and a note; the curve itself rides in the clip
+        // metadata, so SynthCut→SynthCut stays lossless.
+        const ramped = hasSpeedRamp(clip);
+        const speed = ramped ? Number(averageSpeed(clip, fps).toFixed(6)) : clip.effects?.speed ?? 1;
         // In the OTIO sequence, a transition doesn't consume time — the item
         // sequence stays butt-cut. Our overlap pulls the clip left, so its
         // sequential duration is footprint - overlap (timeline end matches).
@@ -169,7 +176,21 @@ export function projectToOtio(project: Project): OtioTimeline {
           // Lossless round-trip: the ENTIRE original clip rides in metadata.
           metadata: { synthcut: { clip: structuredClone(clip) } },
         };
-        if (speed !== 1) {
+        if (ramped) {
+          item.effects = [
+            {
+              OTIO_SCHEMA: "LinearTimeWarp.1",
+              name: "speed_ramp_average",
+              time_scalar: speed,
+              metadata: {
+                synthcut: {
+                  note: "SynthCut speed ramp (curve speed) approximated by its average speed; the exact curve is in metadata.synthcut.clip.effects.speedRamp.",
+                  speedRamp: structuredClone(clip.effects!.speedRamp),
+                },
+              },
+            },
+          ];
+        } else if (speed !== 1) {
           item.effects = [{ OTIO_SCHEMA: "LinearTimeWarp.1", name: "speed", time_scalar: speed }];
         }
         children.push(item);
@@ -377,7 +398,7 @@ export async function otioToProject(
         const restored = structuredClone(clipMeta.clip);
         if (assetId && restored.assetId) restored.assetId = assetId;
         track.clips.push(restored);
-        cursor = restored.startFrame + clipDurationFrames(restored);
+        cursor = restored.startFrame + clipDurationFrames(restored, fps);
         pendingTransition = null;
         continue;
       }
@@ -407,7 +428,7 @@ export async function otioToProject(
         if (e.OTIO_SCHEMA !== "LinearTimeWarp.1") warnings.push(`Dropped unsupported OTIO effect "${String(e.OTIO_SCHEMA)}" on "${item.name ?? "clip"}"`);
       }
       track.clips.push(clip);
-      cursor = clip.startFrame + clipDurationFrames(clip);
+      cursor = clip.startFrame + clipDurationFrames(clip, fps);
       pendingTransition = null;
     }
 

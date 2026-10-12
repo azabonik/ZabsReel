@@ -1,4 +1,4 @@
-SynthCut AI Video Editor — Full Tool List (111 tools)
+SynthCut AI Video Editor — Full Tool List (113 tools)
 =====================================================
 
 IMPORT & PROJECT
@@ -61,92 +61,94 @@ TIMELINE STRUCTURE & TRACKS
 
 SPEED, TRANSFORM & ANIMATION
 --------------------------------
-47. set_clip_speed — Change a clip's playback speed (slow-motion to speed-ramp).
-48. set_clip_transform — Position/scale/rotate/flip a clip's picture within the canvas (zooms, punch-ins, picture-in-picture).
-49. set_keyframes — Animate a clip's position/scale/rotation/opacity/volume over time (Ken Burns, fly-ins, animated punch-ins).
-50. clear_keyframes — Remove keyframe animation from a clip.
-51. crop_clip — Crop a clip to a specific pixel rectangle (e.g. manual reframing).
-52. auto_reframe — Automatically reframe a clip to a new aspect ratio (e.g. 16:9 → 9:16) using face tracking.
-53. stabilize_clip — Stabilize shaky handheld footage.
-54. sync_audio — Align a clip to a reference clip by matching their audio (multi-cam/second-take sync).
-55. reverse_clip — Reverse a clip: bakes a backwards copy of its used span (audio reversed or muted) and re-points the clip.
-56. freeze_frame — Freeze frame: hold one exact frame of a clip for a chosen duration.
-57. smooth_slow_motion — Smooth slow motion for a clip slowed below 1x (frame interpolation).
+47. set_clip_speed — Change a clip's constant playback speed (slow motion to fast forward); clears a speed ramp.
+48. set_speed_ramp — Curve speed (speed ramp): presets (montage, hero, bullet, jump cut, flash in, flash out) or custom points; the curve follows trims and splits, audio stretched with pitch kept or muted.
+49. clear_speed_ramp — Remove a clip's speed ramp (back to normal speed).
+50. set_clip_transform — Position/scale/rotate/flip a clip's picture within the canvas (zooms, punch-ins, picture-in-picture).
+51. set_keyframes — Animate a clip's position/scale/rotation/opacity/volume over time (Ken Burns, fly-ins, animated punch-ins).
+52. clear_keyframes — Remove keyframe animation from a clip.
+53. crop_clip — Crop a clip to a specific pixel rectangle (e.g. manual reframing).
+54. auto_reframe — Automatically reframe a clip to a new aspect ratio (e.g. 16:9 → 9:16) using face tracking.
+55. stabilize_clip — Stabilize shaky handheld footage.
+56. sync_audio — Align a clip to a reference clip by matching their audio (multi-cam/second-take sync).
+57. reverse_clip — Reverse a clip: bakes a backwards copy of its used span (audio reversed or muted) and re-points the clip.
+58. freeze_frame — Freeze frame: hold one exact frame of a clip for a chosen duration.
+59. smooth_slow_motion — Smooth slow motion for a clip slowed below 1x (frame interpolation).
 
 COLOR & EFFECTS
 ------------------
-58. color_grade — Basic color grade: brightness, contrast, saturation, gamma.
-59. apply_color — Richer secondary grade: white balance, hue, color wheels (lift/gamma/gain), tone curves.
-60. apply_lut — Apply a cinematic .cube LUT to a clip.
-61. apply_effect — Add a visual effect (blur, sharpen, denoise, sepia, grayscale, vignette, edges, posterize, pixelate, chromakey/green-screen).
-62. remove_effect — Remove one applied effect from a clip.
-63. clear_clip_effects — Remove all color and effects from a clip at once.
-64. add_adjustment_clip — Add an adjustment layer that grades/effects everything on the tracks below it at once.
-65. reorder_effect — Move one visual effect within a clip's effect stack (effects bake in stack order).
-66. apply_audio_effect — Add or update a per-clip audio effect (noise reduction, EQ, compressor, de-esser, normalize, voice changer…); one undo step.
-67. remove_audio_effect — Remove one audio effect from a clip.
-68. reorder_audio_effect — Move one audio effect within a clip's audio effect stack.
-69. enhance_voice — One-click voice cleanup: rumble cut, noise reduction, de-esser, presence/warmth EQ, compression and loudness, scaled by strength.
-70. set_clip_blend_mode — Set how a clip's picture blends onto the video tracks below it (screen, multiply, overlay, add, ...).
-71. set_clip_mask — Give a clip (or adjustment layer) a shape mask: rect, ellipse, linear or mirror, with feather and invert.
-72. detect_key_color — Detect a clip's background/screen colour for keying, with a confidence score.
-73. remove_background — AI background removal for people (local Robust Video Matting): an automatic cutout, no green screen needed.
+60. color_grade — Basic color grade: brightness, contrast, saturation, gamma.
+61. apply_color — Richer secondary grade: white balance, hue, color wheels (lift/gamma/gain), tone curves.
+62. apply_lut — Apply a cinematic .cube LUT to a clip.
+63. apply_effect — Add a visual effect (blur, sharpen, denoise, sepia, grayscale, vignette, edges, posterize, pixelate, chromakey/green-screen).
+64. remove_effect — Remove one applied effect from a clip.
+65. clear_clip_effects — Remove all color and effects from a clip at once.
+66. add_adjustment_clip — Add an adjustment layer that grades/effects everything on the tracks below it at once.
+67. reorder_effect — Move one visual effect within a clip's effect stack (effects bake in stack order).
+68. apply_audio_effect — Add or update a per-clip audio effect (noise reduction, EQ, compressor, de-esser, normalize, voice changer…); one undo step.
+69. remove_audio_effect — Remove one audio effect from a clip.
+70. reorder_audio_effect — Move one audio effect within a clip's audio effect stack.
+71. enhance_voice — One-click voice cleanup: rumble cut, noise reduction, de-esser, presence/warmth EQ, compression and loudness, scaled by strength.
+72. set_clip_blend_mode — Set how a clip's picture blends onto the video tracks below it (screen, multiply, overlay, add, ...).
+73. set_clip_mask — Give a clip (or adjustment layer) a shape mask: rect, ellipse, linear or mirror, with feather and invert.
+74. detect_key_color — Detect a clip's background/screen colour for keying, with a confidence score.
+75. remove_background — AI background removal for people (local Robust Video Matting): an automatic cutout, no green screen needed.
 
 TEXT, CAPTIONS & MOTION GRAPHICS
 ------------------------------------
-74. add_text — Add a burned-in text overlay (title, lower-third, label) with full styling control.
-75. set_text_style — Restyle existing text overlay(s) without recreating them.
-76. set_text_window — Change when a text overlay appears/disappears on a clip.
-77. clear_text — Remove all text overlays from a clip.
-78. remove_text — Remove a single text overlay.
-79. animate_text — Animate a text overlay's position/opacity over time (native fly-ins, slides, fades — no code).
-80. generate_captions — Auto-transcribe and burn in styled captions from a clip's audio.
-81. set_caption_style — Restyle existing captions without re-transcribing.
-82. set_caption_cue — Move/resize a single caption cue.
-83. clear_captions — Remove the caption track from a clip.
-84. export_captions — Write all captions to a sidecar subtitle file (.srt/.vtt).
-85. import_captions — Attach an existing subtitle file to a clip as its captions.
-86. add_graphic — Add an AI-authored animated motion graphic (title card, lower-third, callout, or full motion-graphics clip).
-87. clear_graphics — Remove all motion-graphic overlays from a clip.
-88. remove_graphic — Remove a single motion-graphic overlay.
-89. set_graphic_window — Change when a motion graphic appears/disappears on a clip.
+76. add_text — Add a burned-in text overlay (title, lower-third, label) with full styling control.
+77. set_text_style — Restyle existing text overlay(s) without recreating them.
+78. set_text_window — Change when a text overlay appears/disappears on a clip.
+79. clear_text — Remove all text overlays from a clip.
+80. remove_text — Remove a single text overlay.
+81. animate_text — Animate a text overlay's position/opacity over time (native fly-ins, slides, fades — no code).
+82. generate_captions — Auto-transcribe and burn in styled captions from a clip's audio.
+83. set_caption_style — Restyle existing captions without re-transcribing.
+84. set_caption_cue — Move/resize a single caption cue.
+85. clear_captions — Remove the caption track from a clip.
+86. export_captions — Write all captions to a sidecar subtitle file (.srt/.vtt).
+87. import_captions — Attach an existing subtitle file to a clip as its captions.
+88. add_graphic — Add an AI-authored animated motion graphic (title card, lower-third, callout, or full motion-graphics clip).
+89. clear_graphics — Remove all motion-graphic overlays from a clip.
+90. remove_graphic — Remove a single motion-graphic overlay.
+91. set_graphic_window — Change when a motion graphic appears/disappears on a clip.
 
 TRANSITIONS
 --------------
-90. set_transition — Add a crossfade/wipe/slide/dissolve transition between adjacent clips.
-91. remove_transition — Remove a transition, reverting to a hard cut.
+92. set_transition — Add a crossfade/wipe/slide/dissolve transition between adjacent clips.
+93. remove_transition — Remove a transition, reverting to a hard cut.
 
 AUDIO
 --------
-92. set_clip_volume — Set a clip's audio volume.
-93. set_clip_fade — Set fade-in/out for a clip (video and audio).
-94. set_audio_offset — Slide a clip's audio relative to its video for J-cuts/L-cuts.
-95. set_music — Set background music for the whole timeline, with optional auto-ducking under speech.
-96. remove_music — Remove the background music.
-97. bleep_words — Auto-bleep: censor profanity using the word-level transcript.
-98. add_bleep — Add one manual bleep to a clip, for a word bleep_words missed.
-99. set_bleep — Nudge or resize one bleep's muted window.
-100. remove_bleep — Remove one bleep from a clip, restoring the original audio.
-101. remove_bleeps — Remove every bleep from the given clips (or all clips).
+94. set_clip_volume — Set a clip's audio volume.
+95. set_clip_fade — Set fade-in/out for a clip (video and audio).
+96. set_audio_offset — Slide a clip's audio relative to its video for J-cuts/L-cuts.
+97. set_music — Set background music for the whole timeline, with optional auto-ducking under speech.
+98. remove_music — Remove the background music.
+99. bleep_words — Auto-bleep: censor profanity using the word-level transcript.
+100. add_bleep — Add one manual bleep to a clip, for a word bleep_words missed.
+101. set_bleep — Nudge or resize one bleep's muted window.
+102. remove_bleep — Remove one bleep from a clip, restoring the original audio.
+103. remove_bleeps — Remove every bleep from the given clips (or all clips).
 
 TEXT-BASED (TRANSCRIPT) EDITING
 ------------------------------------
-102. delete_transcript_ranges — Cut spoken content by word range across every placed clip of that asset.
-103. tighten_talk — One-call cleanup: removes filler words and shrinks long pauses for a clip, with a full report.
-104. edit_by_transcript — "Here's my script" — pass kept text and it assembles matching spans into a cut automatically.
+104. delete_transcript_ranges — Cut spoken content by word range across every placed clip of that asset.
+105. tighten_talk — One-call cleanup: removes filler words and shrinks long pauses for a clip, with a full report.
+106. edit_by_transcript — "Here's my script" — pass kept text and it assembles matching spans into a cut automatically.
 
 MARKERS
 ----------
-105. set_markers — Set named/annotated markers on the timeline (notes, snap targets, review flags).
+107. set_markers — Set named/annotated markers on the timeline (notes, snap targets, review flags).
 
 JOBS & RENDERING
 -------------------
-106. list_jobs — List running/completed background jobs (export, transcribe, reframe, etc.) with progress.
-107. cancel_job — Cancel a running job.
-108. render_preview — Render a fast, lower-resolution but true composite of the whole timeline.
-109. export_video — Render the final video to a file, with platform presets (YouTube, Reels/Shorts/TikTok, square, web, master) or custom settings.
+108. list_jobs — List running/completed background jobs (export, transcribe, reframe, etc.) with progress.
+109. cancel_job — Cancel a running job.
+110. render_preview — Render a fast, lower-resolution but true composite of the whole timeline.
+111. export_video — Render the final video to a file, with platform presets (YouTube, Reels/Shorts/TikTok, square, web, master) or custom settings.
 
 INTERCHANGE
 --------------
-110. export_otio — Export the timeline as an OpenTimelineIO file for professional NLEs (DaVinci Resolve, Hiero, RV).
-111. import_otio — Import an OpenTimelineIO file as the current project.
+112. export_otio — Export the timeline as an OpenTimelineIO file for professional NLEs (DaVinci Resolve, Hiero, RV).
+113. import_otio — Import an OpenTimelineIO file as the current project.

@@ -5,7 +5,10 @@
 // (but still play audio), and that muted tracks are silent. Also checks the
 // renderer's bleep expansion (src/bleeps.ts) against the core original on the
 // same inputs (speed, audio slip, trims, fps) and that the plan plays each
-// bleep's sound effect where the export does. Then the preview side of the
+// bleep's sound effect where the export does. Speed ramps: the plan's source
+// time / rate follow the shared curve (@aive/core/speed), footprints agree
+// with core, "mute" ramps are silent, and the ramped bleep mirror == core.
+// Then the preview side of the
 // effect registry: CSS builders, the vignette pass, bypassed effects, and that
 // the renderer's key helpers ARE the registry's. Finally blend modes and shape
 // masks: they flow into draw / adjust plans (a transition run uses its first
@@ -29,7 +32,10 @@ import type { Bleep, Clip, MediaAsset, Project, Track } from "../src/types";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
 import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../../../packages/core/src/audio/bleeps";
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
-import { colorFilter, vignetteAngles } from "../src/playback";
+import { buildSegments, colorFilter, sourceTimeFor, vignetteAngles } from "../src/playback";
+import { clipDurationFrames as deskDuration } from "../src/types";
+import { clipDurationFrames as coreDuration } from "../../../packages/core/src/types";
+import { clipFootprintFrames, clipTimeMap } from "@aive/core/speed";
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/maskdraw";
 import {
@@ -329,6 +335,74 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: no SFX after the beep ends", !activeLayersAt(pj, pAssets, 1 + 1.5).clips.some((c) => c.bleep?.bleepId === "b1"));
   check("plan: muted track plays no bleeps", !activeLayersAt(mk({ muted: true }), pAssets, 2.2).clips.some((c) => c.bleep));
   check("plan: clip volume 0 silences its bleeps", !activeLayersAt(mk({}, { volume: 0 }), pAssets, 2.2).clips.some((c) => c.bleep));
+}
+
+// --- speed ramps: the preview maps through the SHARED curve (@aive/core/speed) ---
+{
+  console.log("\nspeed ramps");
+  const ramp = {
+    points: [{ src: 1, speed: 1 }, { src: 2.2, speed: 3 }, { src: 3.4, speed: 0.5 }, { src: 4.6, speed: 3 }, { src: 6, speed: 1 }],
+    preset: "montage" as const,
+  };
+  const rc = clip("R", "vidA", 30, 0, { sourceInFrame: 30, sourceOutFrame: 180, effects: { speedRamp: ramp } });
+  const pj: Project = { ...project, assets: [vidA], tracks: [track("video", 0, [rc])], music: undefined };
+  const pa = new Map(pj.assets.map((a) => [a.id, a]));
+  const map = clipTimeMap(rc, FPS);
+  let bad = 0;
+  for (let i = 0; i < 120; i++) {
+    const tl = (map.duration * (i + 0.5)) / 120;
+    const p = activeLayersAt(pj, pa, 1 + tl).clips.find((c) => c.clipId === "R");
+    if (!p || Math.abs(p.srcTime - map.sourceAt(tl)) > 1e-9 || Math.abs(p.rate - map.speedAt(p.srcTime)) > 1e-9 || !p.ramped) bad++;
+  }
+  check("ramp: plan srcTime = the curve's sourceAt, rate = its speed there, flagged ramped (120 playheads)", bad === 0, `${bad} bad`);
+  const fp = clipFootprintFrames(rc, FPS);
+  check("ramp: desktop clipDurationFrames == core's == speed.ts footprint", deskDuration(rc, FPS) === fp && coreDuration(rc as never, FPS) === fp && fp !== 150, `${deskDuration(rc, FPS)} / ${coreDuration(rc as never, FPS)} / ${fp}`);
+  check("ramp: timeline length uses the ramped footprint", near(timelineDurationSec(pj), (30 + fp) / FPS, 1e-9));
+  const seg = buildSegments([rc], pa, FPS)[0];
+  check("ramp: segment end = start + curve duration; scrub maps exactly", near(seg.end - seg.start, map.duration, 1e-9) && near(sourceTimeFor(seg, seg.start + 1.234), map.sourceAt(1.234), 1e-12));
+  check("ramp: past the clip end nothing is active", !activeLayersAt(pj, pa, 1 + map.duration + 0.01).clips.some((c) => c.clipId === "R"));
+  const plain = activeLayersAt(project, assetById, 10 / FPS).clips.find((c) => c.clipId === "A")!;
+  check("constant clip: rate = speed, not flagged ramped", plain.rate === 1 && plain.ramped === undefined);
+  // Audio "mute": the picture plays silently and its bleeps are dropped.
+  const beepWav: MediaAsset = asset("sfxbeep", { path: "C:/data/sfx/beep-v1.wav", hasVideo: false, duration: 3, builtinSfx: "beep" });
+  const muted: Project = {
+    ...pj,
+    assets: [vidA, beepWav],
+    tracks: [track("video", 0, [{ ...rc, effects: { speedRamp: { ...ramp, audio: "mute" }, bleeps: [{ id: "m1", start: 2, end: 2.3 }] } }])],
+  };
+  const mp = new Map(muted.assets.map((a) => [a.id, a]));
+  const mAt = activeLayersAt(muted, mp, 1 + map.timelineAt(2.1)).clips;
+  check("ramp audio mute: drawn, silent, no bleep layer", !!mAt.find((c) => c.clipId === "R")?.draw && !mAt.find((c) => c.clipId === "R")?.audio && !mAt.some((c) => c.bleep));
+  // Bleep mirror with ramps: renderer == core over ramps × trims × slips × fps.
+  const BL: Bleep[] = [
+    { id: "r1", start: 1.5, end: 1.9, sound: "beep" },
+    { id: "r2", start: 3.3, end: 3.6, sound: "quack" },
+    { id: "r3", start: 4.9, end: 5.4, sfxAssetId: "custom" },
+  ];
+  const customDuration = (id: string) => (id === "custom" ? 0.7 : undefined);
+  let cmp = 0;
+  let mis = 0;
+  for (const fps of [30, 24, 29.97]) {
+    for (const pts of [ramp.points, [{ src: 0, speed: 0.2 }, { src: 8, speed: 9 }], [{ src: 3, speed: 2.5 }]]) {
+      for (const slip of [0, -10, 14]) {
+        for (const [inS, outS] of [[1, 6], [1.7, 5.2], [0, 7]] as const) {
+          const c = { startFrame: 41, sourceInFrame: Math.round(inS * fps), sourceOutFrame: Math.round(outS * fps), audioOffsetFrames: slip || undefined, effects: { speedRamp: { points: pts }, bleeps: BL } };
+          const mine = expandBleeps(c, fps, customDuration);
+          const core = coreExpand(c, fps, customDuration);
+          cmp++;
+          const m2 = clipTimeMap(c, fps);
+          const same =
+            mine.length === core.length &&
+            mine.every((l, i) => ["srcStart", "srcEnd", "start", "windowEnd", "sfxDuration"].every(
+              (f) => Math.abs((l as unknown as Record<string, number>)[f]! - (core[i] as unknown as Record<string, number>)[f]!) < 1e-9,
+            )) &&
+            mine.every((l) => near(l.start, (41 + slip) / fps + m2.timelineAt(l.srcStart), 1e-9));
+          if (!same) mis++;
+        }
+      }
+    }
+  }
+  check(`ramp: renderer expandBleeps == core on ${cmp} ramped variants, windows on the curve`, mis === 0, `${mis} mismatch(es)`);
 }
 
 // --- effect registry: preview side ------------------------------------------

@@ -488,6 +488,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         // A bleep about to sound is bound + parked at 0 but kept paused.
         playing: playingRef.current && !c.bleep?.preroll,
         rate: c.rate,
+        follow: c.ramped,
         volume: c.audio?.volume ?? 0,
         muted: !c.audio,
         routed,

@@ -58,7 +58,7 @@ export function audioCarrier(project: Project | null, clip: Clip): Clip {
       muted.set(c.id, !!track.muted);
     }
   }
-  return linkedSoundPartners(own.clip, group).find((c) => audible(c, muted.get(c.id))) ?? own.clip;
+  return linkedSoundPartners(own.clip, group, project.fps).find((c) => audible(c, muted.get(c.id))) ?? own.clip;
 }
 
 /** The inspector's "Voice effect" choices, in registry order. */

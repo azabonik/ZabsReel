@@ -13,7 +13,7 @@
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
 import { clipDurationFrames } from "./types";
 import {
-  buildSegments, colorFilter, fadeOpacity, sourceTimeFor, vignetteAngles, type Segment,
+  buildSegments, colorFilter, fadeOpacity, rateAt, sourceTimeFor, vignetteAngles, type Segment,
 } from "./playback";
 import { muteGainAt } from "./mutes";
 import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
@@ -50,7 +50,7 @@ export function timelineDurationSec(project: Project | null): number {
   let endFrames = 0;
   for (const track of project.tracks) {
     for (const clip of track.clips) {
-      const end = clip.startFrame + clipDurationFrames(clip);
+      const end = clip.startFrame + clipDurationFrames(clip, fps);
       endFrames = Math.max(endFrames, end);
       const slip = clip.audioOffsetFrames && clip.audioOffsetFrames > 0 ? clip.audioOffsetFrames : 0;
       if (slip) endFrames = Math.max(endFrames, end + slip);
@@ -71,8 +71,13 @@ export interface ActiveClip {
   isImage?: boolean;
   /** Source time (seconds) to show / hear. */
   srcTime: number;
-  /** Playback rate = clip speed. */
+  /** Playback rate = clip speed (a speed ramp's speed at `srcTime`, re-sampled every frame). */
   rate: number;
+  /**
+   * The clip plays a speed ramp: its rate changes continuously, so the decoder
+   * follows it with a soft rate correction instead of only seeking (mediapool.ts).
+   */
+  ramped?: boolean;
   /** Combined fade + transition gain in [0,1], shared by alpha and volume. */
   gain: number;
   /** Present when this clip should be DRAWN (video track + asset has video). */
@@ -275,7 +280,10 @@ export function activeLayersAt(
       const audible = !!asset?.hasAudio && !track.muted;
       if (!drawable && !audible) continue;
 
-      const localFrames = Math.max(0, (t - seg.start) * seg.speed) * fps;
+      // Source-relative frames into the clip (overlay / caption windows below). NOTE: the export
+      // treats those windows as clip-local TIMELINE frames; the two agree at speed 1 only
+      // (pre-existing preview approximation, kept as-is for constant speed).
+      const localFrames = seg.map ? Math.max(0, srcTime - seg.srcIn) * fps : Math.max(0, (t - seg.start) * seg.speed) * fps;
       // Keyframes/transform are indexed by clip-local TIMELINE frames (post-speed
       // output time), matching the engine's f2s(frame)→T bake.
       const localTL = Math.max(0, (t - seg.start) * fps);
@@ -316,7 +324,8 @@ export function activeLayersAt(
         path: seg.path,
         isImage: asset?.isImage,
         srcTime,
-        rate: seg.speed,
+        rate: rateAt(seg, srcTime),
+        ...(seg.map ? { ramped: true } : {}),
         gain,
         draw: drawable
           ? {
@@ -332,7 +341,8 @@ export function activeLayersAt(
               ...maskField(seg.clip.effects?.mask),
             }
           : undefined,
-        audio: audible
+        // A ramp with audio "mute" plays its picture silently (as the export).
+        audio: audible && !(seg.map && seg.clip.effects?.speedRamp?.audio === "mute")
           ? { volume: clamp01(vol) * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime), ...audioFxField(seg.clip.effects?.audioFilters) }
           : undefined,
         overlays: drawable ? activeOverlays(seg.clip.overlays, localFrames) : [],
@@ -400,7 +410,7 @@ export function bleepLayersOf(project: Project): PlacedBleep[] {
   for (const track of project.tracks) {
     if (track.muted) continue;
     for (const clip of track.clips) {
-      if (!clip.effects?.bleeps?.length || clip.effects.volume === 0) continue;
+      if (!clip.effects?.bleeps?.length || clip.effects.volume === 0 || clip.effects.speedRamp?.audio === "mute") continue;
       const asset = clip.assetId ? assets.get(clip.assetId) : undefined;
       if (!asset?.hasAudio) continue;
       for (const layer of expandBleeps(clip, project.fps, customDuration)) {

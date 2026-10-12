@@ -3,7 +3,10 @@
  *
  * A bleep ({@link Bleep}) belongs to the clip it censors and is stored in the
  * clip's SOURCE time (asset seconds), so it follows the clip through every edit
- * (move, ripple, trim, split, speed, duplicate, delete) with no bookkeeping.
+ * (move, ripple, trim, split, speed, speed ramp, duplicate, delete) with no
+ * bookkeeping. On a ramped clip a word's window lands where the curve plays it
+ * (the beep lasts the mapped window); the sound effect itself always plays at
+ * normal speed and pitch.
  * At render time {@link expandBleeps} turns the clip's bleeps into
  * timeline-positioned sound-effect layers, and {@link bleepMuteSpans} gives the
  * source-time windows the original audio is silenced under.
@@ -14,6 +17,7 @@
 import type { Bleep, BleepSound } from "../types.js";
 import { MUTE_RAMP_SEC, type SourceMute } from "./mutes.js";
 import { sfxDuration } from "./sfx.js";
+import { clipTimeMap, hasSpeedRamp, type SpeedRamp } from "../speed.js";
 
 /** Default SFX gain of a bleep. */
 export const BLEEP_DEFAULT_VOLUME = 0.8;
@@ -30,7 +34,7 @@ export interface BleepClip {
   sourceInFrame: number;
   sourceOutFrame: number;
   audioOffsetFrames?: number;
-  effects?: { speed?: number; bleeps?: readonly Bleep[] };
+  effects?: { speed?: number; speedRamp?: SpeedRamp; bleeps?: readonly Bleep[] };
 }
 
 /** One bleep resolved onto the timeline. */
@@ -76,7 +80,10 @@ export function expandBleeps(
   const srcIn = clip.sourceInFrame / fps;
   const srcOut = clip.sourceOutFrame / fps;
   const audioStart = (clip.startFrame + (clip.audioOffsetFrames ?? 0)) / fps;
-  const clipEnd = audioStart + (srcOut - srcIn) / speed;
+  // A speed ramp maps source → timeline through its curve (speed.ts); constant speed stays linear.
+  const map = hasSpeedRamp(clip) ? clipTimeMap(clip, fps) : undefined;
+  const at = (src: number) => audioStart + (map ? map.timelineAt(src) : (src - srcIn) / speed);
+  const clipEnd = map ? audioStart + map.duration : audioStart + (srcOut - srcIn) / speed;
 
   const visible = bleeps
     .filter((b) => b.end > srcIn + EPS && b.start < srcOut - EPS)
@@ -90,8 +97,8 @@ export function expandBleeps(
       word: b.word,
       srcStart: s,
       srcEnd: e,
-      start: audioStart + (s - srcIn) / speed,
-      windowEnd: audioStart + (e - srcIn) / speed,
+      start: at(s),
+      windowEnd: at(e),
       sfxDuration: 0,
       sound,
       sfxAssetId: b.sfxAssetId,

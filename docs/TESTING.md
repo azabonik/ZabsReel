@@ -78,7 +78,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -164,6 +164,21 @@ npx tsx packages/core/scripts/smoke-voice.ts
 # reverse_clip (and its un-reverse), smooth_slow_motion (blend + optical flow, no
 # duplicated frames) — self-contained, verified by decoding frame-index-coded media
 npx tsx packages/core/scripts/smoke-time.ts
+
+# Speed ramps (curve speed): the shared source↔timeline mapping (speed.ts —
+# constant speed exactly as before, round trips, monotonic, ∫ds/speed), every
+# preset exported with frame-index-coded media (each frame = the mapped source
+# frame, exact footprint), audio stretch (length within a frame, 440 Hz pitch
+# kept, click-free joins, bursts on the curve) and mute, bleeps on the mapped
+# words, split / cut_range / trim keep the curve, cuts in a slow section snap to
+# their source frame (pieces and the next clip stay butted, tracks stay in sync),
+# freeze holds the shown frame, locate / transcript cuts, reverse mirrors the
+# curve, OTIO, undo, long filtergraphs passed from a file (self-contained).
+# RAMPS_BASELINE_REF=<git ref> also checks that constant-speed timelines emit the
+# exact ffmpeg command of the graph builder at that ref (byte-identical renders).
+# smoke-composite.ts checks the preview's ramp mapping and the ramped bleep mirror.
+npx tsx packages/core/scripts/smoke-ramps.ts
+RAMPS_BASELINE_REF=dd38598 npx tsx packages/core/scripts/smoke-ramps.ts
 
 # Text-based editing: word-level transcripts, delete_transcript_ranges,
 # tighten_talk, edit_by_transcript (self-contained — uses the checked-in fixture)

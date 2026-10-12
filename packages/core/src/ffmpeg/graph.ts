@@ -16,6 +16,7 @@ import type {
 import { alphaSafe, effectFilterSteps } from "../effects/registry.js";
 import { blendModeDef, type BlendMode } from "../effects/compositing.js";
 import { AUDIO_FX_RATE, audioEffectFilterSteps } from "../effects/audio.js";
+import { rampAudioChunks, rampSetptsExpr } from "../speed.js";
 
 export interface RenderProfile {
   /** x264 preset (speed/quality tradeoff). */
@@ -552,8 +553,11 @@ function emitClipVideoParts(
   // Creative/utility effects (blur/sharpen/key/…) after color, before transform.
   if (fx.filters?.length) steps.push(...effectSteps(fx.filters, W, H, `c${inputIdx}`));
 
-  // Reset timestamps and apply speed in one go.
-  steps.push(`setpts=(PTS-STARTPTS)/${speed}`);
+  // Reset timestamps and apply speed in one go. A speed RAMP retimes with its
+  // closed-form curve (speed.ts rampSetptsExpr: τ(source seconds) / TB); the
+  // fps filter then picks frames deterministically for both.
+  if (fx.speedRamp?.points.length) steps.push(`setpts='${rampSetptsExpr(fx.speedRamp, clip.sourceIn, clip.sourceSpan)}'`);
+  else steps.push(`setpts=(PTS-STARTPTS)/${speed}`);
   steps.push(`fps=${fps}`);
 
   // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
@@ -666,11 +670,24 @@ function drawTextStep(ov: ResolvedOverlay): string {
   return parts.join(":");
 }
 
-/** Build the per-clip audio filter chain for a clip that has source audio. */
+/** Build the per-clip audio filter chain for a clip that has source audio (constant speed). */
 function audioFilterChain(clip: ResolvedRenderClip): string {
   const fx = clip.effects ?? {};
   const speed = fx.speed ?? 1;
-  const outDur = clip.outDuration;
+  const steps = audioSourceSteps(clip);
+  if (Math.abs(speed - 1) > 1e-6) {
+    for (const f of atempoFactors(speed)) steps.push(`atempo=${f}`);
+  }
+  steps.push(...audioOutputSteps(clip));
+  return steps.join(",");
+}
+
+/**
+ * The SOURCE-time head of a clip's audio chain: reset timestamps, bleep mutes,
+ * audio effects (pinned to the source span). Speed comes after it.
+ */
+function audioSourceSteps(clip: ResolvedRenderClip): string[] {
+  const fx = clip.effects ?? {};
   const steps: string[] = ["asetpts=PTS-STARTPTS"];
 
   // Bleep mutes (derived from the clip's bleeps) live in SOURCE time, so apply
@@ -689,9 +706,14 @@ function audioFilterChain(clip: ResolvedRenderClip): string {
   if (fxSteps.length) {
     steps.push(`aresample=${AUDIO_FX_RATE}`, ...fxSteps, "apad", `atrim=0:${clip.sourceSpan.toFixed(6)}`, "asetpts=PTS-STARTPTS");
   }
-  if (Math.abs(speed - 1) > 1e-6) {
-    for (const f of atempoFactors(speed)) steps.push(`atempo=${f}`);
-  }
+  return steps;
+}
+
+/** The TIMELINE-time tail of a clip's audio chain: volume / keyframes, track gain, fades. */
+function audioOutputSteps(clip: ResolvedRenderClip): string[] {
+  const fx = clip.effects ?? {};
+  const outDur = clip.outDuration;
+  const steps: string[] = [];
   // Animated volume (keyframed) takes precedence over a static gain.
   const volKf = fx.keyframes?.volume;
   if (volKf?.length) {
@@ -708,7 +730,90 @@ function audioFilterChain(clip: ResolvedRenderClip): string {
     steps.push(`afade=t=out:st=${Math.max(0, outDur - fx.fadeOut).toFixed(3)}:d=${fx.fadeOut.toFixed(3)}`);
   }
   steps.push("aresample=48000:async=1");
-  return steps.join(",");
+  return steps;
+}
+
+/** Sample rate the ramp stretch works at (sample-exact chunk boundaries). */
+const RAMP_AUDIO_RATE = 48000;
+/** Crossfade at each junction between stretched chunks (8 ms). */
+const RAMP_XFADE_SAMPLES = 384;
+
+/**
+ * How early (output samples) FFmpeg 4.4's atempo chain plays its input — its
+ * WSOLA window puts content ~6-9 ms (input time) ahead of the ideal t/tempo
+ * position, measured with an energy-centroid burst for tempos 0.1..10. The
+ * ramp stretch trims each chunk this much later so chunks line up with the
+ * video mapping (constant-speed clips are left as they always were).
+ */
+function atempoLeadSamples(tempo: number): number {
+  if (tempo > 2) return 500;
+  return Math.round((tempo < 0.5 ? 400 : 310) / tempo);
+}
+
+/**
+ * Emit a SPEED-RAMPED clip's audio into `filterParts`, ending in `[outLabel]`.
+ * "mute": silence for the clip's timeline length. "stretch": the source-time
+ * head (bleep mutes + audio effects), then the span split into constant-tempo
+ * chunks (speed.ts rampAudioChunks: sample-exact boundaries in source AND
+ * timeline, so the cumulative length follows the video mapping at every
+ * boundary), each time-stretched with a pitch-preserving atempo chain from a
+ * margin of context around it (atempo's start and flush stay outside the
+ * kept part), trimmed to its exact sample count and concatenated; then the
+ * usual timeline tail (volume, fades).
+ */
+function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inputIdx: number, outLabel: string, tag: string): void {
+  const fx = clip.effects ?? {};
+  const ramp = fx.speedRamp!;
+  const outSamples = Math.max(1, Math.round(clip.outDuration * RAMP_AUDIO_RATE));
+  const pin = ["apad", `atrim=end_sample=${outSamples}`, "asetpts=PTS-STARTPTS"];
+  if (ramp.audio === "mute") {
+    filterParts.push(
+      `[${inputIdx}:a]${["asetpts=PTS-STARTPTS", `aresample=${RAMP_AUDIO_RATE}`, "volume=0", ...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`,
+    );
+    return;
+  }
+  const chunks = rampAudioChunks(ramp, clip.sourceIn, clip.sourceSpan, RAMP_AUDIO_RATE);
+  const head = [...audioSourceSteps(clip), `aresample=${RAMP_AUDIO_RATE}`];
+  const spanSamples = Math.round(clip.sourceSpan * RAMP_AUDIO_RATE);
+  if (chunks.length === 0) {
+    filterParts.push(`[${inputIdx}:a]${[...head, "volume=0", ...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`);
+    return;
+  }
+  const split = chunks.map((_, k) => `${tag}s${k}`);
+  filterParts.push(`[${inputIdx}:a]${head.join(",")}${chunks.length > 1 ? `,asplit=${chunks.length}${split.map((l) => `[${l}]`).join("")}` : `[${split[0]}]`}`);
+  // Neighbouring chunks are stretched at slightly different tempos, so their
+  // waveforms don't meet in phase: a short crossfade at every junction (each
+  // chunk but the last runs X samples past its end, acrossfade takes X back)
+  // keeps the joins click-free and the total length exact.
+  const lens = chunks.map((ch) => ch.outEnd - ch.outStart);
+  const xf = chunks.map((_, k) => (k + 1 < chunks.length ? Math.min(RAMP_XFADE_SAMPLES, Math.floor(Math.min(lens[k], lens[k + 1]) / 2)) : 0));
+  const parts: string[] = [];
+  chunks.forEach((ch, k) => {
+    const n = lens[k] + xf[k];
+    const margin = 4096 + Math.ceil(2048 * ch.tempo);
+    const a = Math.max(0, ch.srcStart - margin);
+    const b = Math.min(spanSamples + margin, ch.srcEnd + margin);
+    const b2 = Math.min(spanSamples + margin, b + Math.ceil(xf[k] * ch.tempo));
+    const steps = [`atrim=start_sample=${a}:end_sample=${b2}`, "asetpts=PTS-STARTPTS"];
+    if (Math.abs(ch.tempo - 1) > 1e-6) for (const f of atempoFactors(ch.tempo)) steps.push(`atempo=${f}`);
+    // Where the chunk's own audio starts in the stretched stream, minus atempo's lead.
+    const lead = Math.abs(ch.tempo - 1) > 1e-6 ? atempoLeadSamples(ch.tempo) : 0;
+    const start = Math.round((ch.srcStart - a) / ch.tempo) - lead;
+    if (start < 0) steps.push(`adelay=delays=${-start}S:all=1`);
+    steps.push(`atrim=start_sample=${Math.max(0, start)}:end_sample=${Math.max(0, start) + n}`, "asetpts=PTS-STARTPTS", `apad=whole_len=${n}`);
+    const label = `${tag}c${k}`;
+    filterParts.push(`[${split[k]}]${steps.join(",")}[${label}]`);
+    parts.push(`[${label}]`);
+  });
+  let cur = parts[0];
+  for (let k = 1; k < parts.length; k++) {
+    const x = xf[k - 1];
+    const join = x >= 8 ? `acrossfade=ns=${x}:o=1:c1=tri:c2=tri` : "concat=n=2:v=0:a=1";
+    const label = `${tag}j${k}`;
+    filterParts.push(`${cur}${parts[k]}${join}[${label}]`);
+    cur = `[${label}]`;
+  }
+  filterParts.push(`${cur}${[...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`);
 }
 
 /**
@@ -971,7 +1076,8 @@ export function buildRenderCommand(
       }
     }
     if (clip.hasAudio && !clip.muted && audioIdx.has(i)) {
-      filterParts.push(`[${inputIdx}:a]${audioFilterChain(clip)}[a${i}]`);
+      if (clip.effects?.speedRamp?.points.length) emitRampAudioParts(filterParts, clip, inputIdx, `a${i}`, `ra${i}`);
+      else filterParts.push(`[${inputIdx}:a]${audioFilterChain(clip)}[a${i}]`);
     }
   });
 

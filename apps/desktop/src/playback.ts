@@ -9,6 +9,7 @@
 
 import { useSyncExternalStore } from "react";
 import { DEFAULT_PREVIEW_SCALE, effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
+import { clipTimeMap, hasSpeedRamp, type ClipTimeMap } from "@aive/core/speed";
 import type { Clip, MediaAsset, ColorAdjust, ColorGrade, VisualEffect } from "./types";
 
 export interface PlaybackState {
@@ -78,7 +79,13 @@ export interface Segment {
   start: number;
   end: number;
   tlDur: number;
+  /** Constant speed; for a speed-ramped clip its AVERAGE (use `map` / rateAt for the curve). */
   speed: number;
+  /**
+   * Present for a SPEED-RAMPED clip: the shared source↔timeline map
+   * (`@aive/core/speed`, the same code the export retimes with).
+   */
+  map?: ClipTimeMap;
   srcIn: number;
   srcOut: number;
   path?: string;
@@ -93,14 +100,19 @@ export interface Segment {
  */
 export function buildSegments(clips: Clip[], assetById: Map<string, MediaAsset>, fps: number): Segment[] {
   return clips.map((clip, index) => {
-    const speed = clip.effects?.speed ?? 1;
     const srcIn = clip.sourceInFrame / fps;
     const srcOut = clip.sourceOutFrame / fps;
-    const tlDur = Math.max(0.01, (srcOut - srcIn) / speed);
     const start = clip.startFrame / fps;
     const asset = clip.assetId ? assetById.get(clip.assetId) : undefined; // adjustment layers have no source
-    // Preview prefers a low-res proxy when one exists; export uses the original.
-    return { clip, asset, index, start, end: start + tlDur, tlDur, speed, srcIn, srcOut, path: asset?.proxyPath ?? asset?.path, fps };
+    const path = asset?.proxyPath ?? asset?.path; // preview prefers a low-res proxy; export uses the original
+    if (hasSpeedRamp(clip) && !clip.adjustment) {
+      const map = clipTimeMap(clip, fps);
+      const tlDur = Math.max(0.01, map.duration);
+      return { clip, asset, index, start, end: start + tlDur, tlDur, speed: (srcOut - srcIn) / tlDur, map, srcIn, srcOut, path, fps };
+    }
+    const speed = clip.effects?.speed ?? 1;
+    const tlDur = Math.max(0.01, (srcOut - srcIn) / speed);
+    return { clip, asset, index, start, end: start + tlDur, tlDur, speed, srcIn, srcOut, path, fps };
   });
 }
 
@@ -117,9 +129,15 @@ export function segmentAt(segments: Segment[], time: number): Segment | undefine
   return segments[segments.length - 1];
 }
 
-/** Source time inside a segment for a given timeline time. */
+/** Source time inside a segment for a given timeline time (a ramp maps through its curve, exactly). */
 export function sourceTimeFor(seg: Segment, time: number): number {
+  if (seg.map) return seg.map.sourceAt(Math.max(0, time - seg.start));
   return seg.srcIn + Math.max(0, time - seg.start) * seg.speed;
+}
+
+/** Playback rate of a segment's source at a source time: its constant speed, or the curve's speed there. */
+export function rateAt(seg: Segment, srcTime: number): number {
+  return seg.map ? seg.map.speedAt(srcTime) : seg.speed;
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));

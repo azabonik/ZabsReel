@@ -47,6 +47,22 @@ import {
 } from "./audio/fx.js";
 import { NOISE_FLOOR_TYPES, audioDefaultsFor, linkedSoundPartners } from "./effects/audio.js";
 import {
+  clipTimeMap,
+  denormalizeRampPoints,
+  hasSpeedRamp,
+  localFrameAtSource,
+  mapRampPoints,
+  normalizeRampPoints,
+  presetRampPoints,
+  RAMP_PRESETS,
+  sourceFrameAtLocalFrame,
+  sourceFrameShownAt,
+  type RampAudio,
+  type RampPreset,
+  type SpeedRamp,
+  type SpeedRampPoint,
+} from "./speed.js";
+import {
   sortKeyframes,
   type Keyframe,
   type KeyframeProperty,
@@ -222,6 +238,20 @@ function even(n: number): number {
 
 /** Minimum clip footprint, in frames. */
 const MIN_CLIP_FRAMES = 1;
+
+/** One cut of a ripple delete, on one or more tracks (EditorEngine.planRippleCuts). */
+interface RippleCut {
+  /** Timeline frames [start, end) to remove. */
+  start: number;
+  end: number;
+  /** The requested ranges it serves (index into the request) and their tracks. */
+  members: { index: number; trackIndex: number }[];
+  /** A speed-ramped clip cut at `start`: its track and the source frame its left piece ends on. */
+  rampStart?: { trackIndex: number; source: number };
+  /** A speed-ramped clip cut at `end`: its track and the source frame its remainder starts on. */
+  rampEnd?: { trackIndex: number; source: number };
+}
+
 const MAX_HISTORY = 100;
 
 /** Options for {@link EditorEngine.bleepWords}. */
@@ -581,12 +611,12 @@ export class EditorEngine extends EventEmitter {
 
   /** Frame position just past the last clip on a track (0 if empty). */
   private trackEndFrame(track: Track): number {
-    return track.clips.reduce((m, c) => Math.max(m, clipEndFrame(c)), 0);
+    return track.clips.reduce((m, c) => Math.max(m, clipEndFrame(c, this.project.fps)), 0);
   }
 
   /** Timeline footprint of a clip on the timeline in seconds (accounts for speed). */
   clipDuration(clip: Clip): number {
-    return framesToSeconds(clipDurationFrames(clip), this.project.fps);
+    return framesToSeconds(clipDurationFrames(clip, this.project.fps), this.project.fps);
   }
 
   /**
@@ -913,7 +943,7 @@ export class EditorEngine extends EventEmitter {
     return this.mutate(() => {
       const track = opts.trackIndex === undefined ? this.baseVideoTrack() : this.trackByIndex(opts.trackIndex);
       const clip = this.makeClip(assetId, opts.startFrame, opts.sourceInFrame, opts.sourceOutFrame);
-      const shift = clipDurationFrames(clip);
+      const shift = clipDurationFrames(clip, this.project.fps);
       for (const c of track.clips) if (c.startFrame >= clip.startFrame) c.startFrame += shift;
       track.clips.push(clip);
       EditorEngine.sortTrack(track);
@@ -941,42 +971,60 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Split a clip into two at `atFrame` measured from the clip's own start on the
-   * timeline. Linked clips split at the same timeline frame. Returns ids.
+   * timeline. Linked clips split at the same timeline frame. Returns ids and the
+   * frame the split landed on: `atFrame` itself, except on a speed-ramped clip,
+   * where it snaps to where the source frame at that point starts playing
+   * (see cutPoint).
    */
-  splitClip(clipId: string, atFrame: number): { left: string; right: string } {
+  splitClip(clipId: string, atFrame: number): { left: string; right: string; atFrame: number } {
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
-      const splitAbs = clip.startFrame + Math.round(atFrame);
+      const cut = EditorEngine.cutPoint(clip, Math.round(atFrame), this.project.fps, "split");
+      const splitAbs = clip.startFrame + cut.local;
       const group = this.linkedClips(clip);
-      let result = { left: clip.id, right: clip.id };
+      let result = { left: clip.id, right: clip.id, atFrame: cut.local };
       for (const member of group) {
-        const r = this.splitOne(member.id, splitAbs - member.startFrame);
+        const r = member.id === clip.id ? this.splitOne(member.id, cut.local, true, cut.source) : this.splitOne(member.id, splitAbs - member.startFrame);
         if (member.id === clip.id && r) result = r;
       }
       return result;
     });
   }
 
-  /** Split a single clip; returns the new ids, or undefined if the cut misses it. */
-  private splitOne(clipId: string, atFrame: number, strict = true, splitSourceFrame?: number): { left: string; right: string } | undefined {
+  /**
+   * Split a single clip; returns the new ids and the clip-local frame of the
+   * split, or undefined if the cut misses it. `splitSourceFrame` is the source
+   * frame the right half starts on, with `atFrame` already the frame where it
+   * plays (splitClip / freeze_frame); otherwise cutPoint picks both.
+   */
+  private splitOne(
+    clipId: string,
+    atFrame: number,
+    strict = true,
+    splitSourceFrame?: number,
+  ): { left: string; right: string; atFrame: number } | undefined {
     const { track, clip, index } = this.findClip(clipId);
-    const dur = clipDurationFrames(clip);
+    const fps = this.project.fps;
+    const dur = clipDurationFrames(clip, fps);
     // `strict` (the default) keeps every half longer than the minimum; freeze
     // frame passes false so a one-frame half is allowed (first/last frame holds).
-    if (strict ? atFrame <= MIN_CLIP_FRAMES || atFrame >= dur - MIN_CLIP_FRAMES : atFrame < 1 || atFrame >= dur) return undefined;
-    const speed = clip.effects?.speed ?? 1;
-    // `splitSourceFrame` lets freeze_frame pick the exact source frame the right half starts on.
-    const splitSource = splitSourceFrame ?? clip.sourceInFrame + Math.round(atFrame * speed);
+    const fits = (at: number) => (strict ? at > MIN_CLIP_FRAMES && at < dur - MIN_CLIP_FRAMES : at >= 1 && at < dur);
+    if (!fits(atFrame)) return undefined;
+    // Both halves keep the clip's effects — a speed ramp's points are anchored in asset seconds,
+    // so each half plays its window of the SAME curve.
+    const cut = splitSourceFrame !== undefined ? { local: atFrame, source: splitSourceFrame } : EditorEngine.cutPoint(clip, atFrame, fps, "split");
+    if (!fits(cut.local)) return undefined;
+    const at = cut.local;
     const left: Clip = {
       id: newId("clip"),
       assetId: clip.assetId,
       startFrame: clip.startFrame,
       sourceInFrame: clip.sourceInFrame,
-      sourceOutFrame: splitSource,
+      sourceOutFrame: cut.source,
       effects: structuredClone(clip.effects),
       transition: structuredClone(clip.transition),
       overlays: structuredClone(clip.overlays),
-      captions: EditorEngine.sliceCaptions(clip.captions, 0, atFrame),
+      captions: EditorEngine.sliceCaptions(clip.captions, 0, at),
       graphics: structuredClone(clip.graphics),
       audioOffsetFrames: clip.audioOffsetFrames,
       linkGroupId: clip.linkGroupId,
@@ -984,63 +1032,104 @@ export class EditorEngine extends EventEmitter {
     const right: Clip = {
       id: newId("clip"),
       assetId: clip.assetId,
-      startFrame: clip.startFrame + atFrame,
-      sourceInFrame: splitSource,
+      startFrame: clip.startFrame + at,
+      sourceInFrame: cut.source,
       sourceOutFrame: clip.sourceOutFrame,
       effects: structuredClone(clip.effects),
-      captions: EditorEngine.sliceCaptions(clip.captions, atFrame, dur),
+      captions: EditorEngine.sliceCaptions(clip.captions, at, dur),
       linkGroupId: clip.linkGroupId,
     };
     track.clips.splice(index, 1, left, right);
     EditorEngine.sortTrack(track);
-    return { left: left.id, right: right.id };
+    return { left: left.id, right: right.id, atFrame: at };
+  }
+
+  /**
+   * Where a cut at clip-local timeline frame `local` lands: the source frame
+   * that becomes the out-point of the piece before it (`edge` "out"), the
+   * in-point of the piece after it ("in"), or both ("split"), and the
+   * clip-local frame where that source frame starts playing.
+   *
+   * Constant speed: `local` as given and in + round(local × speed), as always.
+   * A speed ramp maps through its curve, keeps each piece at least one source
+   * frame long, and SNAPS the frame to where that source frame starts playing:
+   * a slow section holds one source frame for several timeline frames (ten at
+   * 0.1x), and a piece ending on source frame S is exactly
+   * localFrameAtSource(S) frames long, so a piece after the cut placed there
+   * butts against the piece before it and its footage does not jump.
+   */
+  private static cutPoint(clip: Clip, local: number, fps: number, edge: "in" | "out" | "split"): { local: number; source: number } {
+    const f = sourceFrameAtLocalFrame(clip, local, fps);
+    if (!hasSpeedRamp(clip)) return { local, source: f };
+    const lo = edge === "in" ? clip.sourceInFrame : clip.sourceInFrame + 1;
+    const hi = Math.max(lo, edge === "out" ? clip.sourceOutFrame : clip.sourceOutFrame - 1);
+    const source = clamp(f, lo, hi);
+    return { local: localFrameAtSource(clip, source / fps, fps), source };
   }
 
   /**
    * Remove a section [startFrame, endFrame) from within a clip (frames from the
    * clip's start). The footage to the right and all later clips on the track
    * close up (ripple left) by the removed amount. Returns the surviving clip ids.
+   * On a speed-ramped clip both cut points snap to where their source frames
+   * start playing (cutPoint): the right piece starts exactly where the left
+   * one ends, and later clips move left by what the clip really lost, so the
+   * next clip stays butted.
    */
   cutRange(clipId: string, startFrame: number, endFrame: number): string[] {
     return this.mutate(() => {
       const { track, clip, index } = this.findClip(clipId);
-      const dur = clipDurationFrames(clip);
+      const fps = this.project.fps;
+      const dur = clipDurationFrames(clip, fps);
       const s = Math.round(startFrame);
       const e = Math.round(endFrame);
       if (s < 0 || e > dur || s >= e) throw new Error(`Cut range [${s}, ${e}) must satisfy 0 <= start < end <= ${dur}`);
-      const removed = e - s;
-      const speed = clip.effects?.speed ?? 1;
+      const cutS = s > MIN_CLIP_FRAMES ? EditorEngine.cutPoint(clip, s, fps, "out") : undefined;
+      const cutE = dur - e > MIN_CLIP_FRAMES ? EditorEngine.cutPoint(clip, e, fps, "in") : undefined;
+      // A ramp can snap a cut onto the clip's first or last frame boundary: no piece is left on that side.
+      const leftCut = cutS && cutS.local > 0 ? cutS : undefined;
+      let rightCut = cutE && cutE.local < dur ? cutE : undefined;
+      // A cut inside one held frame of a slow section: the pieces must not share a source frame.
+      if (leftCut && rightCut && rightCut.source < leftCut.source) rightCut = leftCut;
+      // Clip-local frames the cut really spans (constant speed: s and e).
+      const from = leftCut ? leftCut.local : cutS ? 0 : s;
+      const to = rightCut ? rightCut.local : cutE ? dur : e;
       const remaining: Clip[] = [];
-      if (s > MIN_CLIP_FRAMES) {
+      if (leftCut) {
         remaining.push({
           id: newId("clip"),
           assetId: clip.assetId,
           startFrame: clip.startFrame,
           sourceInFrame: clip.sourceInFrame,
-          sourceOutFrame: clip.sourceInFrame + Math.round(s * speed),
+          sourceOutFrame: leftCut.source,
           effects: structuredClone(clip.effects),
           transition: structuredClone(clip.transition),
           overlays: structuredClone(clip.overlays),
-          captions: EditorEngine.sliceCaptions(clip.captions, 0, s),
+          captions: EditorEngine.sliceCaptions(clip.captions, 0, from),
           graphics: structuredClone(clip.graphics),
           audioOffsetFrames: clip.audioOffsetFrames,
         });
       }
-      if (dur - e > MIN_CLIP_FRAMES) {
-        remaining.push({
+      let right: Clip | undefined;
+      if (rightCut) {
+        right = {
           id: newId("clip"),
           assetId: clip.assetId,
-          startFrame: clip.startFrame + s,
-          sourceInFrame: clip.sourceInFrame + Math.round(e * speed),
+          startFrame: clip.startFrame + from,
+          sourceInFrame: rightCut.source,
           sourceOutFrame: clip.sourceOutFrame,
           effects: structuredClone(clip.effects),
-          captions: EditorEngine.sliceCaptions(clip.captions, e, dur),
-        });
+          captions: EditorEngine.sliceCaptions(clip.captions, to, dur),
+        };
+        remaining.push(right);
       }
+      // Constant speed: e − s, as always. A ramp: the old end minus the right piece's real end
+      // (its footprint rounds on its own), so the next clip stays butted.
+      const removed = right && hasSpeedRamp(clip) ? dur - from - clipDurationFrames(right, fps) : to - from;
       track.clips.splice(index, 1, ...remaining);
       // Close the gap: pull everything after the cut left by the removed amount.
       const cutAbs = clip.startFrame + e;
-      for (const c of track.clips) if (c.startFrame >= cutAbs) c.startFrame -= removed;
+      for (const c of track.clips) if (c.startFrame >= cutAbs && !remaining.includes(c)) c.startFrame -= removed;
       EditorEngine.sortTrack(track);
       return remaining.map((c) => c.id);
     });
@@ -1050,52 +1139,126 @@ export class EditorEngine extends EventEmitter {
    * Ripple-delete timeline frame ranges on tracks: remove the covered footage
    * and close the gap (shift later clips left). Each range is {trackIndex,
    * startFrame, endFrame}. Processed back-to-front so positions stay valid.
+   * Returns the ranges as applied, one per requested range ({trackIndex,
+   * startFrame, endFrame}: the track lost endFrame − startFrame frames at
+   * startFrame; none when they are equal) — the requested ranges, except where
+   * a speed-ramped clip is cut (see planRippleCuts).
    */
-  rippleDeleteRanges(ranges: { trackIndex: number; startFrame: number; endFrame: number }[]): void {
-    this.mutate(() => {
-      for (const range of [...ranges].sort((a, b) => b.startFrame - a.startFrame)) {
-        const track = this.trackByIndex(range.trackIndex);
-        const s = Math.round(range.startFrame);
-        const e = Math.round(range.endFrame);
-        if (e <= s) continue;
-        const removed = e - s;
-        const kept: Clip[] = [];
-        for (const c of track.clips) {
-          const cs = c.startFrame;
-          const ce = clipEndFrame(c);
-          if (ce <= s || cs >= e) {
-            kept.push(c); // fully outside the range
-            continue;
-          }
-          // Trim away the overlapping part; keep left and/or right remainders.
-          const speed = c.effects?.speed ?? 1;
-          const dur = clipDurationFrames(c);
-          if (cs < s) {
-            const leftDur = s - cs;
-            kept.push({
-              ...structuredClone(c),
-              id: newId("clip"),
-              sourceOutFrame: c.sourceInFrame + Math.round(leftDur * speed),
-              captions: EditorEngine.sliceCaptions(c.captions, 0, leftDur),
-            });
-          }
-          if (ce > e) {
-            const cutLocal = e - cs;
-            kept.push({
-              ...structuredClone(c),
-              id: newId("clip"),
-              startFrame: e,
-              sourceInFrame: c.sourceInFrame + Math.round(cutLocal * speed),
-              transition: undefined,
-              captions: EditorEngine.sliceCaptions(c.captions, cutLocal, dur),
-            });
-          }
+  rippleDeleteRanges(ranges: { trackIndex: number; startFrame: number; endFrame: number }[]): { trackIndex: number; startFrame: number; endFrame: number }[] {
+    return this.mutate(() => {
+      const fps = this.project.fps;
+      const applied = ranges.map((r) => ({ trackIndex: r.trackIndex, startFrame: Math.round(r.startFrame), endFrame: Math.round(r.startFrame) }));
+      for (const cut of this.planRippleCuts(ranges).sort((p, q) => q.start - p.start)) {
+        const s = cut.start;
+        // What the cut removes, on the timeline as it is now (later cuts are done): the range's
+        // length, or — when a ramped clip's remainder starts at `end` — that clip's old end minus
+        // the remainder's real end (its footprint rounds on its own), so the next clip stays butted.
+        let removed = cut.end - s;
+        if (cut.rampEnd) {
+          const c = this.trackByIndex(cut.rampEnd.trackIndex).clips.find((x) => hasSpeedRamp(x) && x.startFrame < cut.end && cut.end < clipEndFrame(x, fps));
+          if (c) removed = clipEndFrame(c, fps) - s - clipDurationFrames({ ...c, sourceInFrame: cut.rampEnd.source }, fps);
         }
-        track.clips = kept;
-        for (const c of track.clips) if (c.startFrame >= e) c.startFrame -= removed;
-        EditorEngine.sortTrack(track);
+        if (removed <= 0) continue;
+        for (const { index, trackIndex } of cut.members) {
+          const track = this.trackByIndex(trackIndex);
+          // The ramped track cuts at the snapped end; the cut's other tracks lose the same frames at `start`.
+          const e = cut.rampEnd?.trackIndex === trackIndex ? cut.end : s + removed;
+          const kept: Clip[] = [];
+          // Right remainders of ramped clips: placed at `s` (not moved by `removed`).
+          const placed = new Set<Clip>();
+          for (const c of track.clips) {
+            const cs = c.startFrame;
+            const ce = clipEndFrame(c, fps);
+            if (ce <= s || cs >= e) {
+              kept.push(c); // fully outside the range
+              continue;
+            }
+            // Trim away the overlapping part; keep left and/or right remainders.
+            const dur = clipDurationFrames(c, fps);
+            const ramped = hasSpeedRamp(c);
+            if (cs < s) {
+              const leftDur = s - cs;
+              const snapped = ramped && cut.rampStart?.trackIndex === trackIndex ? cut.rampStart.source : undefined;
+              kept.push({
+                ...structuredClone(c),
+                id: newId("clip"),
+                sourceOutFrame: snapped ?? EditorEngine.cutPoint(c, leftDur, fps, "out").source,
+                captions: EditorEngine.sliceCaptions(c.captions, 0, leftDur),
+              });
+            }
+            if (ce > e) {
+              const cutLocal = e - cs;
+              const snapped = ramped && cut.rampEnd?.trackIndex === trackIndex ? cut.rampEnd.source : undefined;
+              const right: Clip = {
+                ...structuredClone(c),
+                id: newId("clip"),
+                startFrame: ramped ? s : e,
+                sourceInFrame: snapped ?? EditorEngine.cutPoint(c, cutLocal, fps, "in").source,
+                transition: undefined,
+                captions: EditorEngine.sliceCaptions(c.captions, cutLocal, dur),
+              };
+              if (ramped) placed.add(right);
+              kept.push(right);
+            }
+          }
+          track.clips = kept;
+          for (const c of track.clips) if (c.startFrame >= e && !placed.has(c)) c.startFrame -= removed;
+          EditorEngine.sortTrack(track);
+          applied[index] = { trackIndex, startFrame: s, endFrame: s + removed };
+        }
       }
+      return applied;
     });
+  }
+
+  /**
+   * Group ripple-delete ranges into cuts (rounded; empty ones dropped).
+   * Ranges with the same [startFrame, endFrame) on several tracks are ONE cut:
+   * every track loses the same frames at the same place, so they stay in sync.
+   * Constant-speed clips: the range as given — exactly as always.
+   *
+   * A speed-ramped clip cut at a range edge snaps that edge to where its
+   * source frame starts playing (cutPoint), so its pieces butt; the source
+   * frames are kept for the apply step. Snapping is done on the timeline
+   * BEFORE any cut, and is a function of the source frame, so neighbouring
+   * ranges keep their order. A cut that removes nothing (inside one held
+   * frame of a slow section) is dropped.
+   */
+  private planRippleCuts(ranges: { trackIndex: number; startFrame: number; endFrame: number }[]): RippleCut[] {
+    const fps = this.project.fps;
+    const groups = new Map<string, RippleCut>();
+    ranges.forEach((r, index) => {
+      const s = Math.round(r.startFrame);
+      const e = Math.round(r.endFrame);
+      if (e <= s) return;
+      const key = `${s}:${e}`;
+      (groups.get(key) ?? groups.set(key, { start: s, end: e, members: [] }).get(key)!).members.push({ index, trackIndex: r.trackIndex });
+    });
+    const cuts: RippleCut[] = [];
+    for (const cut of groups.values()) {
+      const { start: s, end: e } = cut;
+      const ramped = [...new Set(cut.members.map((m) => m.trackIndex))].flatMap((trackIndex) =>
+        this.trackByIndex(trackIndex).clips.filter((c) => hasSpeedRamp(c)).map((c) => ({ trackIndex, c, cs: c.startFrame, ce: clipEndFrame(c, fps) })),
+      );
+      const atStart = ramped.find((x) => x.cs < s && s < x.ce);
+      if (atStart) {
+        const p = EditorEngine.cutPoint(atStart.c, s - atStart.cs, fps, "out");
+        cut.start = atStart.cs + p.local;
+        cut.rampStart = { trackIndex: atStart.trackIndex, source: p.source };
+      }
+      const atEnd = ramped.find((x) => x.cs < e && e < x.ce);
+      if (atEnd) {
+        let source = EditorEngine.cutPoint(atEnd.c, e - atEnd.cs, fps, "in").source;
+        // A range inside one clip: the pieces must not share a source frame.
+        if (atStart?.c === atEnd.c && source < cut.rampStart!.source) source = cut.rampStart!.source;
+        cut.end = atEnd.cs + localFrameAtSource(atEnd.c, source / fps, fps);
+        // Snapped onto the clip's last frame boundary: no remainder is left.
+        if (cut.end >= atEnd.ce) cut.end = atEnd.ce;
+        else cut.rampEnd = { trackIndex: atEnd.trackIndex, source };
+      }
+      if (cut.end > cut.start) cuts.push(cut);
+    }
+    return cuts;
   }
 
   removeClip(clipId: string): void {
@@ -1170,12 +1333,72 @@ export class EditorEngine extends EventEmitter {
       if (clean.color) next.color = { ...(current.color ?? {}), ...definedOnly(clean.color) };
       if (clean.grade) next.grade = { ...(current.grade ?? {}), ...definedOnly(clean.grade) };
       if (next.speed !== undefined) next.speed = clamp(next.speed, 0.25, 4);
+      // Constant speed and a speed ramp are exclusive: setting speed clears the curve.
+      if (clean.speed !== undefined) delete next.speedRamp;
+      if (clean.speedRamp !== undefined) delete next.speed;
       if (next.volume !== undefined) next.volume = Math.max(0, next.volume);
       if (next.fadeInFrames !== undefined) next.fadeInFrames = Math.max(0, Math.round(next.fadeInFrames));
       if (next.fadeOutFrames !== undefined) next.fadeOutFrames = Math.max(0, Math.round(next.fadeOutFrames));
       clip.effects = next;
       return clip;
     });
+  }
+
+  /**
+   * CURVE SPEED: give a clip a speed ramp (one undo step). `preset` generates
+   * the points across the clip's CURRENT used source range; `points` are
+   * explicit ({src, speed}, src in ASSET seconds — or 0..1 of the used range
+   * with `normalized`); neither = keep the current curve (e.g. only change
+   * `audio`). Replaces any constant `speed`. Like set_clip_speed the clip's
+   * footprint changes in place — later clips are NOT rippled.
+   */
+  setSpeedRamp(
+    clipId: string,
+    opts: { preset?: RampPreset; points?: SpeedRampPoint[]; normalized?: boolean; audio?: RampAudio },
+  ): { clip: Clip; durationFrames: number; previousDurationFrames: number } {
+    const fps = this.project.fps;
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "a speed ramp");
+    if (asset.isImage) throw new Error(`Clip "${clipId}" is a still image — it has no motion to speed up or slow down.`);
+    if (opts.preset && opts.points) throw new Error("Pass either preset or points, not both (points = a custom curve).");
+    const srcIn = clip.sourceInFrame / fps;
+    const srcOut = clip.sourceOutFrame / fps;
+    let points: SpeedRampPoint[] | undefined;
+    if (opts.preset) points = presetRampPoints(opts.preset, srcIn, srcOut);
+    else if (opts.points) {
+      points = normalizeRampPoints(opts.normalized ? denormalizeRampPoints(opts.points, srcIn, srcOut) : opts.points);
+    }
+    const current = clip.effects?.speedRamp;
+    if (!points && !current) {
+      throw new Error(`Clip "${clipId}" has no speed ramp yet — pass a preset (${RAMP_PRESETS.join(", ")}) or points.`);
+    }
+    const previousDurationFrames = clipDurationFrames(clip, fps);
+    const updated = this.mutate(() => {
+      const { clip: target } = this.findClip(clipId);
+      const effects = target.effects ?? (target.effects = {});
+      const ramp: SpeedRamp = points
+        ? { points, ...(opts.preset ? { preset: opts.preset } : {}) }
+        : { ...current! };
+      const audio = opts.audio ?? current?.audio;
+      if (audio === "mute") ramp.audio = "mute";
+      else delete ramp.audio;
+      effects.speedRamp = ramp;
+      delete effects.speed;
+      return target;
+    });
+    return { clip: updated, durationFrames: clipDurationFrames(updated, fps), previousDurationFrames };
+  }
+
+  /** Remove a clip's speed ramp (it plays at normal speed again; one undo step). */
+  clearSpeedRamp(clipId: string): { clip: Clip; durationFrames: number } {
+    const { clip } = this.findClip(clipId);
+    if (!clip.effects?.speedRamp) throw new Error(`Clip "${clipId}" has no speed ramp to clear.`);
+    const updated = this.mutate(() => {
+      const { clip: target } = this.findClip(clipId);
+      if (target.effects) delete target.effects.speedRamp;
+      return target;
+    });
+    return { clip: updated, durationFrames: clipDurationFrames(updated, this.project.fps) };
   }
 
   /** Remove all effects from a clip (its bleeps are kept — see removeBleeps). */
@@ -1540,17 +1763,16 @@ export class EditorEngine extends EventEmitter {
     const fps = this.project.fps;
     const raw: { trackIndex: number; startFrame: number; endFrame: number }[] = [];
     for (const { clip, trackIndex } of clips) {
-      const speed = clip.effects?.speed ?? 1;
       const inSec = clip.sourceInFrame / fps;
       const outSec = clip.sourceOutFrame / fps;
       const clipStart = clip.startFrame;
-      const clipEnd = clipEndFrame(clip);
+      const clipEnd = clipEndFrame(clip, this.project.fps);
       for (const r of ranges) {
         const s = Math.max(r.start, inSec);
         const e = Math.min(r.end, outSec);
         if (e <= s) continue;
-        let startFrame = clip.startFrame + Math.round(((s - inSec) / speed) * fps) - padFrames;
-        let endFrame = clip.startFrame + Math.round(((e - inSec) / speed) * fps) + padFrames;
+        let startFrame = clip.startFrame + localFrameAtSource(clip, s, fps) - padFrames;
+        let endFrame = clip.startFrame + localFrameAtSource(clip, e, fps) + padFrames;
         startFrame = Math.max(clipStart, startFrame);
         endFrame = Math.min(clipEnd, endFrame);
         if (endFrame > startFrame) raw.push({ trackIndex, startFrame, endFrame });
@@ -1619,9 +1841,10 @@ export class EditorEngine extends EventEmitter {
     if (timelineRanges.length === 0) {
       return { cuts: 0, framesRemoved: 0, removedText, ranges: [] };
     }
-    this.rippleDeleteRanges(timelineRanges);
-    const framesRemoved = timelineRanges.reduce((n, r) => n + (r.endFrame - r.startFrame), 0);
-    return { cuts: timelineRanges.length, framesRemoved, removedText, ranges: timelineRanges };
+    // As applied: a speed-ramped clip's cuts snap to its source frames (rippleDeleteRanges).
+    const applied = this.rippleDeleteRanges(timelineRanges).filter((r) => r.endFrame > r.startFrame);
+    const framesRemoved = applied.reduce((n, r) => n + (r.endFrame - r.startFrame), 0);
+    return { cuts: applied.length, framesRemoved, removedText, ranges: applied };
   }
 
   /** Default filler vocabulary for tightenTalk (normalized, lowercase). */
@@ -1705,7 +1928,7 @@ export class EditorEngine extends EventEmitter {
     }
 
     if (removed.length === 0) {
-      return { removed: [], cuts: 0, framesRemoved: 0, oldDurationFrames: clipDurationFrames(clip), newDurationFrames: clipDurationFrames(clip) };
+      return { removed: [], cuts: 0, framesRemoved: 0, oldDurationFrames: clipDurationFrames(clip, this.project.fps), newDurationFrames: clipDurationFrames(clip, this.project.fps) };
     }
 
     const merged = EditorEngine.mergeSecondRanges(removed.map((r) => ({ start: r.start, end: r.end })));
@@ -1720,15 +1943,17 @@ export class EditorEngine extends EventEmitter {
       }
     }
 
-    const oldDurationFrames = clipDurationFrames(clip);
-    if (allRanges.length) this.rippleDeleteRanges(allRanges);
-    const framesRemoved = primaryRanges.reduce((n, r) => n + (r.endFrame - r.startFrame), 0);
+    const oldDurationFrames = clipDurationFrames(clip, this.project.fps);
+    // As applied: a speed-ramped clip's cuts snap to its source frames (rippleDeleteRanges).
+    const applied = allRanges.length ? this.rippleDeleteRanges(allRanges) : [];
+    const primaryApplied = applied.slice(0, primaryRanges.length).filter((r) => r.endFrame > r.startFrame);
+    const framesRemoved = primaryApplied.reduce((n, r) => n + (r.endFrame - r.startFrame), 0);
 
     return {
       removed: removed
         .sort((a, b) => a.start - b.start)
         .map((r) => ({ ...r, start: Number(r.start.toFixed(3)), end: Number(r.end.toFixed(3)) })),
-      cuts: primaryRanges.length,
+      cuts: primaryApplied.length,
       framesRemoved,
       oldDurationFrames,
       newDurationFrames: oldDurationFrames - framesRemoved,
@@ -1814,7 +2039,7 @@ export class EditorEngine extends EventEmitter {
           Math.round(sOut * fps),
         );
         track.clips.push(clip);
-        cursor = clipEndFrame(clip);
+        cursor = clipEndFrame(clip, this.project.fps);
         ids.push(clip.id);
       }
       EditorEngine.sortTrack(track);
@@ -1848,7 +2073,6 @@ export class EditorEngine extends EventEmitter {
         const segs = transcript?.segments;
         if (!asset || !segs?.length) continue;
         const hits = rankTranscript([{ ...asset, transcript }], query, 1000);
-        const speed = clip.effects?.speed ?? 1;
         const inSec = clip.sourceInFrame / fps;
         const outSec = clip.sourceOutFrame / fps;
         for (const h of hits) {
@@ -1856,9 +2080,9 @@ export class EditorEngine extends EventEmitter {
           if (h.end <= inSec || h.start >= outSec) continue;
           const s = Math.max(h.start, inSec);
           const e = Math.min(h.end, outSec);
-          // Source seconds → clip-local timeline frames → absolute timeline frames.
-          const startFrame = clip.startFrame + Math.round(((s - inSec) / speed) * fps);
-          const endFrame = clip.startFrame + Math.round(((e - inSec) / speed) * fps);
+          // Source seconds → clip-local timeline frames (speed / ramp aware) → absolute timeline frames.
+          const startFrame = clip.startFrame + localFrameAtSource(clip, s, fps);
+          const endFrame = clip.startFrame + localFrameAtSource(clip, e, fps);
           if (endFrame > startFrame) out.push({ clipId: clip.id, trackIndex: track.index, startFrame, endFrame, text: h.text });
         }
       }
@@ -2077,12 +2301,20 @@ export class EditorEngine extends EventEmitter {
       end = o.end;
     } else if (o.atSeconds !== undefined) {
       const audioStart = (clip.startFrame + (clip.audioOffsetFrames ?? 0)) / fps;
-      const audioEnd = audioStart + (srcOut - srcIn) / speed;
+      const ramp = hasSpeedRamp(clip) ? clipTimeMap(clip, fps) : undefined;
+      const audioEnd = audioStart + (ramp ? ramp.duration : (srcOut - srcIn) / speed);
       if (o.atSeconds < audioStart - 1e-6 || o.atSeconds >= audioEnd) {
         throw new Error(`atSeconds ${o.atSeconds} is outside clip "${clip.id}" (its audio plays ${audioStart.toFixed(3)}–${audioEnd.toFixed(3)} s on the timeline).`);
       }
-      start = srcIn + (o.atSeconds - audioStart) * speed;
-      end = start + Math.max(BLEEP_MIN_WINDOW, o.duration ?? 0.5) * speed;
+      const tlDur = Math.max(BLEEP_MIN_WINDOW, o.duration ?? 0.5);
+      if (ramp) {
+        // Timeline seconds → source seconds through the curve (the window covers what plays there).
+        start = ramp.sourceAt(o.atSeconds - audioStart);
+        end = Math.max(start + BLEEP_MIN_WINDOW, ramp.sourceAt(o.atSeconds - audioStart + tlDur));
+      } else {
+        start = srcIn + (o.atSeconds - audioStart) * speed;
+        end = start + tlDur * speed;
+      }
     } else {
       throw new Error("Give the window: start + end (source seconds) or atSeconds (+ duration).");
     }
@@ -2182,7 +2414,7 @@ export class EditorEngine extends EventEmitter {
   private soundCarrier(clip: Clip, track: Track): Clip {
     const audible = (c: Clip, t: Track) => !t.muted && c.effects?.volume !== 0;
     if (audible(clip, track)) return clip;
-    return linkedSoundPartners(clip, this.linkedClips(clip)).find((m) => audible(m, this.findClip(m.id).track)) ?? clip;
+    return linkedSoundPartners(clip, this.linkedClips(clip), this.project.fps).find((m) => audible(m, this.findClip(m.id).track)) ?? clip;
   }
 
   /** {@link soundCarrier} for a clip id, refusing clips without sound. `note` says when it's a different clip. */
@@ -2206,7 +2438,7 @@ export class EditorEngine extends EventEmitter {
    */
   private audioEffectOwner(clipId: string, effectId: string): Clip {
     const { clip, track } = this.findClip(clipId);
-    const partners = linkedSoundPartners(clip, this.linkedClips(clip));
+    const partners = linkedSoundPartners(clip, this.linkedClips(clip), this.project.fps);
     const owner = [clip, this.soundCarrier(clip, track), ...partners].find((c) => c.effects?.audioFilters?.some((f) => f.id === effectId));
     if (owner) return owner;
     const stacks = [clip, ...partners].map((c) => describeAudioStack(c) && `${c.id}: ${describeAudioStack(c)}`).filter(Boolean);
@@ -2384,9 +2616,8 @@ export class EditorEngine extends EventEmitter {
     if (ref.clipId) {
       const { clip } = this.findClip(ref.clipId);
       refAssetId = this.requireClipAsset(clip, "visual search by reference frame").id;
-      const speed = clip.effects?.speed ?? 1;
       const local = Math.max(0, ref.atSeconds ?? 0);
-      refSrcSec = clip.sourceInFrame / fps + local * speed;
+      refSrcSec = clipTimeMap(clip, fps).sourceAt(local);
     } else if (ref.assetId) {
       refAssetId = ref.assetId;
       refSrcSec = Math.max(0, ref.atSeconds ?? 0);
@@ -2581,7 +2812,10 @@ export class EditorEngine extends EventEmitter {
     });
   }
 
-  /** Rescale all frame counts when the project fps changes, preserving timing. */
+  /**
+   * Rescale all frame counts when the project fps changes, preserving timing.
+   * Speed-ramp points and bleeps are in asset SECONDS, so they need no rescale.
+   */
   private rescaleToFps(newFps: number): void {
     const ratio = newFps / this.project.fps;
     const sc = (f: number) => Math.round(f * ratio);
@@ -2691,7 +2925,7 @@ export class EditorEngine extends EventEmitter {
           startSec: f2s(clip.startFrame),
           sourceIn: 0,
           sourceSpan: f2s(clip.sourceOutFrame - clip.sourceInFrame),
-          outDuration: framesToSeconds(clipDurationFrames(clip), fps),
+          outDuration: framesToSeconds(clipDurationFrames(clip, this.project.fps), fps),
           hasAudio: false,
           muted: true,
           effects: adjEffects,
@@ -2728,6 +2962,11 @@ export class EditorEngine extends EventEmitter {
           opacity: e.opacity,
           keyframes,
         };
+        // Speed ramp (replaces speed): only set when used, so constant-speed clips keep their segment keys.
+        if (e.speedRamp?.points?.length && !asset.isImage) {
+          effects.speedRamp = { points: e.speedRamp.points, ...(e.speedRamp.audio === "mute" ? { audio: "mute" as const } : {}) };
+          delete effects.speed;
+        }
         // Bleep mutes: source-time windows of the clip's bleeps (audio/bleeps.ts).
         const mutes = asset.hasAudio ? bleepMuteSpans(clip, fps) : [];
         if (mutes.length) effects.mutes = mutes;
@@ -2847,7 +3086,7 @@ export class EditorEngine extends EventEmitter {
         startSec: f2s(clip.startFrame),
         sourceIn: f2s(clip.sourceInFrame),
         sourceSpan: f2s(clip.sourceOutFrame - clip.sourceInFrame),
-        outDuration: framesToSeconds(clipDurationFrames(clip), fps),
+        outDuration: framesToSeconds(clipDurationFrames(clip, this.project.fps), fps),
         isImage: asset.isImage,
         hasAudio: asset.hasAudio,
         muted: !!track.muted,
@@ -2865,7 +3104,8 @@ export class EditorEngine extends EventEmitter {
       // wherever the clip is now. Each is an audio-only layer at normal speed and
       // pitch, mixed like an ordinary clip on the parent's track (track mute and
       // volume apply; a clip silenced with volume 0 silences its bleeps too).
-      if (asset.hasAudio && clip.effects?.bleeps?.length && clip.effects.volume !== 0) {
+      // A ramp with audio "mute" silences the clip's sound, so there is nothing left to censor either.
+      if (asset.hasAudio && clip.effects?.bleeps?.length && clip.effects.volume !== 0 && clip.effects.speedRamp?.audio !== "mute") {
         for (const layer of this.bleepLayers(clip)) {
           if (layer.sfxDuration <= 0) continue;
           const path = await this.bleepSfxPath(layer);
@@ -2977,7 +3217,7 @@ export class EditorEngine extends EventEmitter {
   /** Total timeline length in frames (the furthest clip end across all tracks). */
   timelineDurationFrames(): number {
     let total = 0;
-    for (const { clip } of this.allClips()) total = Math.max(total, clipEndFrame(clip));
+    for (const { clip } of this.allClips()) total = Math.max(total, clipEndFrame(clip, this.project.fps));
     return total;
   }
 
@@ -2998,9 +3238,9 @@ export class EditorEngine extends EventEmitter {
       const idx = track.clips.findIndex((c) => c.id === clipId);
       if (idx <= 0) throw new Error("The first clip on a track cannot have an entering transition");
       const prev = track.clips[idx - 1];
-      const maxOverlap = Math.min(clipDurationFrames(prev), clipDurationFrames(clip)) - 1;
+      const maxOverlap = Math.min(clipDurationFrames(prev, this.project.fps), clipDurationFrames(clip, this.project.fps)) - 1;
       const overlap = clamp(Math.round(durationFrames), 1, Math.max(1, maxOverlap));
-      const desiredStart = clipEndFrame(prev) - overlap;
+      const desiredStart = clipEndFrame(prev, this.project.fps) - overlap;
       const delta = desiredStart - clip.startFrame;
       const from = clip.startFrame;
       for (const c of track.clips) if (c.startFrame >= from) c.startFrame += delta;
@@ -3018,7 +3258,7 @@ export class EditorEngine extends EventEmitter {
       EditorEngine.sortTrack(track);
       const idx = track.clips.findIndex((c) => c.id === clipId);
       const prev = idx > 0 ? track.clips[idx - 1] : undefined;
-      const delta = prev ? clipEndFrame(prev) - clip.startFrame : 0;
+      const delta = prev ? clipEndFrame(prev, this.project.fps) - clip.startFrame : 0;
       const from = clip.startFrame;
       for (const c of track.clips) if (c.startFrame >= from) c.startFrame += delta;
       delete clip.transition;
@@ -3121,7 +3361,10 @@ export class EditorEngine extends EventEmitter {
     const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
     const spanSec = framesToSeconds(clip.sourceOutFrame - clip.sourceInFrame, fps);
     const speed = clip.effects?.speed ?? 1;
-    const durFrames = clipDurationFrames(clip);
+    const durFrames = clipDurationFrames(clip, this.project.fps);
+    // Cue source seconds → clip-local TIMELINE frames: constant speed as before, a ramp through its curve.
+    const cueFrame = (srcOffset: number) =>
+      hasSpeedRamp(clip) ? localFrameAtSource(clip, sourceInSec + srcOffset, fps) : secondsToFrames(srcOffset / speed, fps);
 
     const dir = join(this.dataDir, "captions");
     await mkdir(dir, { recursive: true });
@@ -3158,8 +3401,8 @@ export class EditorEngine extends EventEmitter {
     // Source-span seconds -> clip-local frames (speed-adjusted), clamped.
     const localCues = cues
       .map((c) => ({
-        startFrame: clamp(secondsToFrames(c.start / speed, fps), 0, durFrames),
-        endFrame: clamp(secondsToFrames(c.end / speed, fps), 0, durFrames),
+        startFrame: clamp(cueFrame(c.start), 0, durFrames),
+        endFrame: clamp(cueFrame(c.end), 0, durFrames),
         text: c.text,
       }))
       .filter((c) => c.endFrame > c.startFrame);
@@ -3227,7 +3470,7 @@ export class EditorEngine extends EventEmitter {
       );
     }
     const fps = this.project.fps;
-    const durFrames = clipDurationFrames(clip);
+    const durFrames = clipDurationFrames(clip, this.project.fps);
     const local = parsed
       .map((c) => ({
         startFrame: clamp(secondsToFrames(c.start, fps) - clip.startFrame, 0, durFrames),
@@ -3620,6 +3863,9 @@ export class EditorEngine extends EventEmitter {
         .map((b) => ({ ...b, start: Math.max(0, b.start), end: Math.min(baked.duration, b.end) }));
       EditorEngine.setClipBleeps(target, moved);
     }
+    // A speed ramp is anchored in source seconds too: re-base its points the same way (a reverse mirrors
+    // the curve, so the same moments stay slow / fast and the timeline length is unchanged).
+    if (target.effects?.speedRamp?.points?.length) target.effects.speedRamp = mapRampPoints(target.effects.speedRamp, map);
     target.assetId = baked.id;
     target.sourceInFrame = 0;
     target.sourceOutFrame = frames;
@@ -4012,22 +4258,28 @@ export class EditorEngine extends EventEmitter {
     const asset = this.requireClipAsset(clip, "freeze frame");
     if (!asset.hasVideo) throw new Error(`Clip "${clipId}" has no picture to freeze (audio-only asset).`);
     if (!(durationSeconds > 0)) throw new Error("durationSeconds must be > 0");
-    const dur = clipDurationFrames(clip);
+    const dur = clipDurationFrames(clip, this.project.fps);
     const cWanted = clamp(playAbs - clip.startFrame, 0, dur - 1);
     const speed = clip.effects?.speed ?? 1;
+    const ramped = hasSpeedRamp(clip);
     // The frame the renderer shows at timeline frame `cWanted` (slow clips hold the earlier source frame),
-    // clamped INSIDE the trim so a slowed clip's last frame never reaches past its out-point.
+    // clamped INSIDE the trim so a slowed clip's last frame never reaches past its out-point. A speed ramp
+    // uses the export's retime model through the shared curve (speed.ts sourceFrameShownAt).
     const lastSrc = Math.max(clip.sourceInFrame, clip.sourceOutFrame - 1);
     const shown = speed < 1 ? Math.floor(cWanted * speed + 1e-9) : Math.round(cWanted * speed);
-    const srcFrame = clamp(clip.sourceInFrame + shown, clip.sourceInFrame, lastSrc);
-    // The right half starts on the held frame; the left half keeps the frames before it. At speed < 1 an
-    // odd timeline frame has no exact source boundary, so the cut lands on the nearest one (c may shift by 1
-    // frame) — the halves still tile the clip with no overlap and no empty half.
-    const c = srcFrame <= clip.sourceInFrame ? 0 : clamp(Math.round((srcFrame - clip.sourceInFrame) / speed), 1, dur - 1);
+    const srcFrame = ramped ? sourceFrameShownAt(clip, cWanted, fps) : clamp(clip.sourceInFrame + shown, clip.sourceInFrame, lastSrc);
+    // The right half starts on the held frame; the left half keeps the frames before it. At speed < 1 (or
+    // on a ramp) a timeline frame has no exact source boundary, so the cut lands on the nearest one (c may
+    // shift by 1 frame) — the halves still tile the clip with no overlap and no empty half.
+    const c =
+      srcFrame <= clip.sourceInFrame
+        ? 0
+        : clamp(ramped ? localFrameAtSource(clip, srcFrame / fps, fps) : Math.round((srcFrame - clip.sourceInFrame) / speed), 1, dur - 1);
     // -ss lands on the first frame at/after the time: aim half a frame BEFORE the wanted
     // frame's timestamp so a rounding hair can never skip to its neighbour.
     const srcSec = asset.isImage ? 0 : Math.max(0, (srcFrame - 0.5) / fps);
-    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, start: clip.startFrame, speed };
+    const rampKey = (x: Clip) => JSON.stringify(x.effects?.speedRamp?.points ?? null);
+    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, start: clip.startFrame, speed, ramp: rampKey(clip) };
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
@@ -4039,7 +4291,7 @@ export class EditorEngine extends EventEmitter {
       still.name = `${asset.name} (freeze ${framesToSeconds(srcFrame, fps).toFixed(2)}s)`;
       still.duration = Math.max(still.duration, durationSeconds);
       const { clip: now } = this.findClip(targetId);
-      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF || now.startFrame !== before.start || (now.effects?.speed ?? 1) !== before.speed) {
+      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF || now.startFrame !== before.start || (now.effects?.speed ?? 1) !== before.speed || rampKey(now) !== before.ramp) {
         throw new Error(`Clip "${clipId}" changed while its frame was being grabbed — run freeze_frame again.`);
       }
     } catch (err) {
@@ -4058,7 +4310,7 @@ export class EditorEngine extends EventEmitter {
       // overlap would leave the still and the right half stacked under the incoming clip.
       for (const m of group) {
         const mt = this.findClip(m.id).track;
-        const mEnd = clipEndFrame(m);
+        const mEnd = clipEndFrame(m, this.project.fps);
         const next = mt.clips.filter((x) => x.id !== m.id && x.startFrame > m.startFrame).sort((p, q) => p.startFrame - q.startFrame)[0];
         if (next?.transition && next.startFrame < splitAbs && splitAbs < mEnd) {
           throw new Error(
@@ -4075,21 +4327,23 @@ export class EditorEngine extends EventEmitter {
         for (const x of t.clips.slice(firstIdx + 1)) if (!group.some((m) => m.id === x.id)) later.add(x.id);
       }
       this.project.assets.push(still);
+      // A speed-ramped linked member can split a little before splitAbs (cutPoint): its right half moves too.
+      const rightHalves = new Set<string>();
       for (const m of group) {
-        if (m.id === target.id) this.splitOne(m.id, c, false, srcFrame);
-        else this.splitOne(m.id, splitAbs - m.startFrame, false);
+        const r = m.id === target.id ? this.splitOne(m.id, c, false, srcFrame) : this.splitOne(m.id, splitAbs - m.startFrame, false);
+        if (r) rightHalves.add(r.right);
       }
       let shifted = 0;
       for (const t of tracks) {
         for (const x of t.clips) {
-          if (x.startFrame >= splitAbs || later.has(x.id)) {
+          if (x.startFrame >= splitAbs || later.has(x.id) || rightHalves.has(x.id)) {
             x.startFrame += stillFrames;
             shifted++;
           }
         }
       }
       const effects = structuredClone(target.effects) ?? {};
-      for (const k of ["speed", "volume", "fadeInFrames", "fadeOutFrames", "bleeps"] as const) delete effects[k];
+      for (const k of ["speed", "speedRamp", "volume", "fadeInFrames", "fadeOutFrames", "bleeps"] as const) delete effects[k];
       const stillClip: Clip = {
         id: newId("clip"),
         assetId: still.id,
@@ -4228,6 +4482,11 @@ export class EditorEngine extends EventEmitter {
   startSmoothSlowJob(clipId: string, mode: "blend" | "optical-flow" = "optical-flow"): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset; frames: number }> } {
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "smooth slow motion");
+    if (hasSpeedRamp(clip)) {
+      throw new Error(
+        `Clip "${clipId}" plays a speed ramp (curve speed) — smooth_slow_motion only bakes a CONSTANT slow speed. Use clear_speed_ramp and set_clip_speed (e.g. 0.5) first, or keep the ramp (its slow parts repeat frames).`,
+      );
+    }
     const speed = clip.effects?.speed ?? 1;
     if (!(speed < 1)) {
       throw new Error(
@@ -4255,7 +4514,7 @@ export class EditorEngine extends EventEmitter {
     const fps = this.project.fps;
     const speed = clip.effects?.speed ?? 1;
     const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, speed };
-    const outFrames = clipDurationFrames(clip);
+    const outFrames = clipDurationFrames(clip, this.project.fps);
     const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
     const spanSec = framesToSeconds(clip.sourceOutFrame - clip.sourceInFrame, fps);
 
@@ -4404,7 +4663,7 @@ export class EditorEngine extends EventEmitter {
         if (clipId) {
           // Insert right after the target clip on its track.
           const { track, clip: target } = this.findClip(clipId);
-          const gclip = this.makeClip(baked.id, clipEndFrame(target), 0, bakedFrames);
+          const gclip = this.makeClip(baked.id, clipEndFrame(target, this.project.fps), 0, bakedFrames);
           track.clips.push(gclip);
           EditorEngine.sortTrack(track);
           return { clip: gclip, asset: baked };
@@ -4495,7 +4754,7 @@ export class EditorEngine extends EventEmitter {
     const { track, clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "inspect_clip");
     const fps = this.project.fps;
-    const durationFrames = clipDurationFrames(clip);
+    const durationFrames = clipDurationFrames(clip, this.project.fps);
     const startSec = framesToSeconds(clip.startFrame, fps);
     const durSec = framesToSeconds(durationFrames, fps);
 

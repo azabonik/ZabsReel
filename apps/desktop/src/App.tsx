@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
 import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualHit } from "./types";
 import { clipDurationFrames } from "./types";
+import { SpeedPanel, type SpeedRampParams } from "./speedramp";
 import {
   buildSegments, createPlaybackStore, fmtTime, usePlaybackValue,
   type PlayerHandle,
@@ -426,6 +427,9 @@ export function App({ api }: { api: CoreApi }) {
       return api.rpc("trim_clip", { clipId, [key]: Math.round(value * fps) });
     });
   const setSpeed = (clipId: string, speed: number) => run("Speed", () => api.rpc("set_clip_speed", { clipId, speed }));
+  const setSpeedRamp = (clipId: string, params: SpeedRampParams) =>
+    run("Speed curve", () => api.rpc("set_speed_ramp", { clipId, ...params }));
+  const clearSpeedRamp = (clipId: string) => run("Speed curve", () => api.rpc("clear_speed_ramp", { clipId }));
   const setVolume = (clipId: string, volume: number) => run("Volume", () => api.rpc("set_clip_volume", { clipId, volume }));
   const setFade = (clipId: string, fadeIn: number, fadeOut: number) =>
     run("Fade", () => api.rpc("set_clip_fade", { clipId, fadeInFrames: Math.round(fadeIn * fps), fadeOutFrames: Math.round(fadeOut * fps) }));
@@ -483,7 +487,7 @@ export function App({ api }: { api: CoreApi }) {
       const clip = project?.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
       if (!clip) throw new Error("Clip not found");
       const local = store.get().playhead - clip.startFrame / fps;
-      if (local < 0 || local > clipDurationFrames(clip) / fps) {
+      if (local < 0 || local > clipDurationFrames(clip, fps) / fps) {
         throw new Error("Move the playhead onto the selected clip, then freeze.");
       }
       await api.rpc("freeze_frame", { clipId, atSeconds: local, durationSeconds });
@@ -574,7 +578,7 @@ export function App({ api }: { api: CoreApi }) {
         const clip = clips.find((c) => c.id === selectedClip);
         if (clip) {
           const local = Math.round(store.get().playhead * fps) - clip.startFrame;
-          if (local > 0 && local < clipDurationFrames(clip)) splitClipAt(selectedClip, local);
+          if (local > 0 && local < clipDurationFrames(clip, fps)) splitClipAt(selectedClip, local);
         }
         return;
       }
@@ -999,6 +1003,8 @@ export function App({ api }: { api: CoreApi }) {
               busy={!!busy}
               onTrim={trimClip}
               onSpeed={setSpeed}
+              onSpeedRamp={setSpeedRamp}
+              onClearSpeedRamp={clearSpeedRamp}
               onVolume={setVolume}
               onFade={setFade}
               onColor={setColor}
@@ -1395,6 +1401,8 @@ type InspectorProps = {
   busy: boolean;
   onTrim: (clipId: string, field: "sourceIn" | "sourceOut", value: number) => void;
   onSpeed: (clipId: string, v: number) => void;
+  onSpeedRamp: (clipId: string, params: SpeedRampParams) => void;
+  onClearSpeedRamp: (clipId: string) => void;
   onVolume: (clipId: string, v: number) => void;
   onFade: (clipId: string, fadeIn: number, fadeOut: number) => void;
   onColor: (clipId: string, patch: Record<string, number>) => void;
@@ -1516,7 +1524,7 @@ function ClipInspector(props: InspectorProps) {
   const [stabZoom, setStabZoom] = useState("auto");
 
   const fps = project?.fps ?? 30;
-  const dur = clipDurationFrames(clip) / fps;
+  const dur = clipDurationFrames(clip, fps) / fps;
   const fx = clip.effects ?? {};
   const tf = fx.transform ?? {};
   const grade = fx.grade ?? {};
@@ -1526,7 +1534,7 @@ function ClipInspector(props: InspectorProps) {
   const cues = clip.captions?.cues ?? [];
   const capStyle = clip.captions?.style ?? {};
   const hasEffects =
-    fx.speed !== undefined || fx.volume !== undefined || fx.fadeInFrames || fx.fadeOutFrames ||
+    fx.speed !== undefined || !!fx.speedRamp || fx.volume !== undefined || fx.fadeInFrames || fx.fadeOutFrames ||
     fx.color || fx.grade || (fx.filters?.length ?? 0) > 0 || fx.lut || (fx.audioFilters?.length ?? 0) > 0;
 
   const tabs: { id: Tab; label: string; icon: JSX.Element; count?: number }[] = [
@@ -1608,8 +1616,18 @@ function ClipInspector(props: InspectorProps) {
 
             <div className="group">
               <div className="group-title"><Sliders size={13} /> Speed &amp; audio</div>
-              <RangeField label="Speed" unit="×" min={0.25} max={4} step={0.25} def={1}
-                value={fx.speed ?? 1} onCommit={(v) => props.onSpeed(clip.id, v)} />
+              <SpeedPanel
+                clip={clip}
+                fps={fps}
+                disabled={!connected || busy || !!clip.adjustment || !!asset?.isImage}
+                hasAudio={!!asset?.hasAudio}
+                onRamp={props.onSpeedRamp}
+                onClearRamp={props.onClearSpeedRamp}
+                normal={
+                  <RangeField label="Speed" unit="×" min={0.25} max={4} step={0.25} def={1}
+                    value={fx.speed ?? 1} onCommit={(v) => props.onSpeed(clip.id, v)} />
+                }
+              />
               <AnimRow label="Volume" min={0} max={4} step={0.05} def={1}
                 value={fx.volume ?? 1} keyCount={kfCount("volume")}
                 onCommit={(v) => props.onVolume(clip.id, v)}
@@ -1652,8 +1670,8 @@ function ClipInspector(props: InspectorProps) {
                       <button
                         className="btn btn-sm"
                         onClick={() => props.onSmoothSlow(clip.id, smoothMode)}
-                        disabled={!connected || busy || (fx.speed ?? 1) >= 1}
-                        title={(fx.speed ?? 1) >= 1 ? "Slow the clip below 1x first" : "Bake interpolated in-between frames so slow motion plays smoothly"}
+                        disabled={!connected || busy || !!fx.speedRamp || (fx.speed ?? 1) >= 1}
+                        title={fx.speedRamp ? "Smooth slow motion bakes a constant slow speed — switch Speed to Normal first" : (fx.speed ?? 1) >= 1 ? "Slow the clip below 1x first" : "Bake interpolated in-between frames so slow motion plays smoothly"}
                       >
                         <Sparkles size={14} /> Smooth slow motion
                       </button>

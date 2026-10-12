@@ -7,6 +7,7 @@ import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
 import { EFFECT_TYPE_IDS, describeEffectsForAI, validateEffect } from "./effects/registry.js";
 import { BLEND_MODES, MASK_SHAPES, describeBlendModesForAI } from "./effects/compositing.js";
 import { AUDIO_EFFECT_TYPE_IDS, describeAudioEffectsForAI, validateAudioEffect } from "./effects/audio.js";
+import { RAMP_AUDIO_MODES, RAMP_MAX_POINTS, RAMP_MAX_SPEED, RAMP_MIN_SPEED, RAMP_PRESETS, RAMP_PRESET_DEFS } from "./speed.js";
 
 /**
  * The RPC surface of the editor. Every editing operation is defined exactly
@@ -123,8 +124,8 @@ function summarizeTimeline(engine: EditorEngine) {
           asset: clip.adjustment ? "(adjustment layer)" : asset?.name ?? "(missing)",
           adjustment: clip.adjustment || undefined,
           startFrame: clip.startFrame,
-          durationFrames: clipDurationFrames(clip),
-          endFrame: clipEndFrame(clip),
+          durationFrames: clipDurationFrames(clip, project.fps),
+          endFrame: clipEndFrame(clip, project.fps),
           sourceInFrame: clip.sourceInFrame,
           sourceOutFrame: clip.sourceOutFrame,
           transition: clip.transition,
@@ -342,21 +343,22 @@ export const methods = {
   },
 
   split_clip: {
-    description: "Split a clip into two at `atFrame`, measured in frames from the clip's start on the timeline. Linked clips split at the same point.",
+    description:
+      "Split a clip into two at `atFrame`, measured in frames from the clip's start on the timeline. Linked clips split at the same point. Returns the two clip ids and the atFrame used: on a speed-ramped clip the split moves to where the source frame at that point starts playing (a few frames in a slow section).",
     schema: z.object({ clipId: z.string(), atFrame: z.number().int().positive() }).strict(),
     handler: (engine, p) => engine.splitClip(p.clipId, p.atFrame),
   },
 
   cut_range: {
     description:
-      "Remove a section [startFrame, endFrame) from within a clip (frames from the clip's start). The footage to the right and all later clips on that track close up (ripple left). The 'cut the boring part' operation.",
+      "Remove a section [startFrame, endFrame) from within a clip (frames from the clip's start). The footage to the right and all later clips on that track close up (ripple left). The 'cut the boring part' operation. On a speed-ramped clip each cut moves to where its source frame starts playing (a few frames in a slow section) and later clips close up by what was really removed.",
     schema: z.object({ clipId: z.string(), startFrame: z.number().int().min(0), endFrame: z.number().int().positive() }).strict(),
     handler: (engine, p) => ({ clips: engine.cutRange(p.clipId, p.startFrame, p.endFrame) }),
   },
 
   ripple_delete_ranges: {
     description:
-      "Delete one or more timeline frame ranges and close the gaps (shift later clips left). Each range is { trackIndex, startFrame, endFrame }. Useful for cutting dead air across the timeline in one pass.",
+      "Delete one or more timeline frame ranges and close the gaps (shift later clips left). Each range is { trackIndex, startFrame, endFrame }. Useful for cutting dead air across the timeline in one pass. The same range on several tracks removes the same frames from each. A range edge inside a speed-ramped clip moves to where its source frame starts playing; `ranges` in the result is what was removed, one per requested range (endFrame === startFrame: nothing).",
     schema: z
       .object({
         ranges: z
@@ -364,10 +366,7 @@ export const methods = {
           .min(1),
       })
       .strict(),
-    handler: (engine, p) => {
-      engine.rippleDeleteRanges(p.ranges);
-      return { ok: true };
-    },
+    handler: (engine, p) => ({ ok: true, ranges: engine.rippleDeleteRanges(p.ranges) }),
   },
 
   remove_clip: {
@@ -398,9 +397,44 @@ export const methods = {
   // ---- per-clip effects -----------------------------------------------------
   set_clip_speed: {
     description:
-      "Change a clip's playback speed (0.25..4; 1 = normal, 2 = 2x faster, 0.5 = slow motion). Adjusts video, audio, and the clip's timeline footprint.",
+      "Change a clip's CONSTANT playback speed (0.25..4; 1 = normal, 2 = 2x faster, 0.5 = slow motion). Adjusts video, audio, and the clip's timeline footprint in place (later clips are NOT rippled — move them if the clip got longer/shorter). Clears any speed ramp on the clip (use set_speed_ramp for curve speed).",
     schema: z.object({ clipId: z.string(), speed: z.number().min(0.25).max(4) }).strict(),
     handler: (engine, p) => ({ clip: engine.setClipEffects(p.clipId, { speed: p.speed }) }),
+  },
+
+  set_speed_ramp: {
+    description:
+      `CURVE SPEED (speed ramp, CapCut-style): speed changes smoothly over the clip instead of one constant speed. Either a PRESET generated across the clip's CURRENT used source range — ${RAMP_PRESETS.map((p) => `${p} (${RAMP_PRESET_DEFS[p].description})`).join("; ")} — or custom POINTS [{src, speed}] (speed 0.1..10; src = ASSET seconds, or 0..1 of the clip's used range with normalized:true; speed is linear between points and constant beyond the first/last). ` +
+      "The points are anchored in SOURCE time (like bleeps), so the curve FOLLOWS the clip: a trim windows it, a split gives each half its part of the same curve, a reverse mirrors it. The clip's timeline footprint becomes the integral of 1/speed over its used range and changes IN PLACE (like set_clip_speed, later clips are NOT rippled — check timeline_summary and move/close up neighbours). " +
+      "audio: 'stretch' (default) time-stretches the clip's own sound with pitch preserved, following the curve; 'mute' silences it (and its bleeps). Replaces any constant speed (set_clip_speed later clears the ramp). Omit preset and points to change only audio on an existing ramp. Not for still images or adjustment layers; smooth_slow_motion refuses a ramped clip. A detached LINKED audio clip is not ramped with it — ramp it too (same preset, same source range) or mute it. One undo step. Returns {clip, durationFrames, previousDurationFrames}. Verify with get_frame / render_preview.",
+    schema: z
+      .object({
+        clipId: z.string(),
+        preset: z.enum(RAMP_PRESETS).optional(),
+        points: z
+          .array(z.object({ src: z.number(), speed: z.number().min(RAMP_MIN_SPEED).max(RAMP_MAX_SPEED) }).strict())
+          .min(1)
+          .max(RAMP_MAX_POINTS)
+          .optional(),
+        normalized: z.boolean().optional(),
+        audio: z.enum(RAMP_AUDIO_MODES).optional(),
+      })
+      // "preset XOR points" and the src range are checked in the handler / engine: a top-level
+      // .refine() would make this a ZodEffects with no `.shape` (MCP registration needs it).
+      .strict(),
+    handler: (engine, p) => {
+      if (p.points?.some((pt: { src: number }) => pt.src < 0 || (p.normalized && pt.src > 1))) {
+        throw new Error("Point src must be >= 0 asset seconds (or within 0..1 with normalized:true).");
+      }
+      return engine.setSpeedRamp(p.clipId, { preset: p.preset, points: p.points, normalized: p.normalized, audio: p.audio });
+    },
+  },
+
+  clear_speed_ramp: {
+    description:
+      "Remove a clip's speed ramp (curve speed): it plays at normal speed (1x) again and its footprint changes in place (later clips are NOT rippled). One undo step. Returns {clip, durationFrames}.",
+    schema: z.object({ clipId: z.string() }).strict(),
+    handler: (engine, p) => engine.clearSpeedRamp(p.clipId),
   },
 
   set_clip_volume: {
@@ -599,7 +633,7 @@ export const methods = {
 
   freeze_frame: {
     description:
-      "FREEZE FRAME (CapCut-style): hold one exact frame of a clip for durationSeconds (default 3). atSeconds = TIMELINE seconds inside the clip (0 = its first frame; speed and trim are respected, so it is the frame shown at that moment; on a slowed clip the cut lands on the nearest source frame, up to 1 timeline frame away). Grabs that frame as a lossless PNG (baked into the data dir), imports it as an image asset, splits the clip there and INSERTS a still clip between the halves. THE TIMELINE RIPPLES: the clip's track shifts right by durationSeconds, and LINKED clips (e.g. a detached audio clip of the same footage) are split at the same point and shifted too, so picture and sound stay aligned (the audio is silent under the freeze); clips on UNLINKED tracks (music, overlays) are not moved. The still keeps the clip's color/filters/crop/transform/opacity and has no audio. atSeconds at/before the start puts the still BEFORE the clip; at/after the end holds the last frame (no empty halves). The held frame is also the first frame of the right half, as in any NLE. If you pass the DETACHED AUDIO clip of a linked pair, the linked picture clip is frozen (a still never goes on an audio track). A freeze point inside the next clip's incoming transition overlap is refused (freeze earlier or remove_transition). One undo step. Returns {stillClipId, assetId, startFrame, durationFrames, shiftedClips}. Verify with get_frame.",
+      "FREEZE FRAME (CapCut-style): hold one exact frame of a clip for durationSeconds (default 3). atSeconds = TIMELINE seconds inside the clip (0 = its first frame; speed, speed ramps and trim are respected, so it is the frame shown at that moment; on a slowed or ramped clip the cut snaps to a source-frame boundary, which in a slow section can be several timeline frames from atSeconds — e.g. up to 10 at 0.1x; read startFrame from the result). Grabs that frame as a lossless PNG (baked into the data dir), imports it as an image asset, splits the clip there and INSERTS a still clip between the halves. THE TIMELINE RIPPLES: the clip's track shifts right by durationSeconds, and LINKED clips (e.g. a detached audio clip of the same footage) are split at the same point and shifted too, so picture and sound stay aligned (the audio is silent under the freeze); clips on UNLINKED tracks (music, overlays) are not moved. The still keeps the clip's color/filters/crop/transform/opacity and has no audio. atSeconds at/before the start puts the still BEFORE the clip; at/after the end holds the last frame (no empty halves). The held frame is also the first frame of the right half, as in any NLE. If you pass the DETACHED AUDIO clip of a linked pair, the linked picture clip is frozen (a still never goes on an audio track). A freeze point inside the next clip's incoming transition overlap is refused (freeze earlier or remove_transition). One undo step. Returns {stillClipId, assetId, startFrame, durationFrames, shiftedClips}. Verify with get_frame.",
     schema: z
       .object({ clipId: z.string(), atSeconds: z.number().min(0), durationSeconds: z.number().positive().max(600).optional() })
       .strict(),
@@ -608,7 +642,7 @@ export const methods = {
 
   reverse_clip: {
     description:
-      "REVERSE a clip: bakes a backwards copy of the clip's used span (picture, plus audio when audio:'reverse'; audio:'mute' drops the sound) and re-points the clip at it; the timeline duration is unchanged and other effects (speed, color, fades...) are kept. Frame-exact (every frame appears once, in reverse order) and RAM-bounded (processed in chunks of <=2 s and a decoded-frame budget, so clip length does not matter; measured peak ~1.8 GB for 4K60 8-bit instead of 5.8 GB, 1080p well under 1 GB) but it re-encodes (H.264 CRF 18, AAC 192k; a source with transparency, e.g. a remove_background cutout, is baked lossless with its alpha kept), measured ~0.6x the span length on this machine (3 s of 1080p30 in 1.8 s). CALL IT AGAIN on a reversed clip to restore forward playback — that instantly re-points back at the original media (no bake), keeping any trim you made since. LINKED clips (a detached audio clip) are NOT reversed with it: reverse the linked audio clip too, or use audio:'mute' here and keep the detached audio forward on purpose. Not for still images. Blocks until done and returns {clipId, assetId, restored}; for clips over ~30 s pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the previous clip (the bake is a new asset).",
+      "REVERSE a clip: bakes a backwards copy of the clip's used span (picture, plus audio when audio:'reverse'; audio:'mute' drops the sound) and re-points the clip at it; the timeline duration is unchanged and other effects (speed, color, fades...) are kept; a speed ramp is MIRRORED with the footage (the same moments stay slow/fast). Frame-exact (every frame appears once, in reverse order) and RAM-bounded (processed in chunks of <=2 s and a decoded-frame budget, so clip length does not matter; measured peak ~1.8 GB for 4K60 8-bit instead of 5.8 GB, 1080p well under 1 GB) but it re-encodes (H.264 CRF 18, AAC 192k; a source with transparency, e.g. a remove_background cutout, is baked lossless with its alpha kept), measured ~0.6x the span length on this machine (3 s of 1080p30 in 1.8 s). CALL IT AGAIN on a reversed clip to restore forward playback — that instantly re-points back at the original media (no bake), keeping any trim you made since. LINKED clips (a detached audio clip) are NOT reversed with it: reverse the linked audio clip too, or use audio:'mute' here and keep the detached audio forward on purpose. Not for still images. Blocks until done and returns {clipId, assetId, restored}; for clips over ~30 s pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the previous clip (the bake is a new asset).",
     schema: z
       .object({ clipId: z.string(), audio: z.enum(["reverse", "mute"]).optional(), background: z.boolean().optional() })
       .strict(),
@@ -622,7 +656,7 @@ export const methods = {
 
   smooth_slow_motion: {
     description:
-      "SMOOTH SLOW MOTION for a clip whose speed is below 1 (set it first with set_clip_speed, e.g. 0.5): instead of repeating frames (stutter), bakes the used span with INTERPOLATED in-between frames so it plays at the project fps like real high-frame-rate footage, then re-points the clip at the bake with speed reset to 1. The timeline duration does NOT change. mode 'optical-flow' (default) = motion-compensated interpolation (minterpolate mci/aobmc) — best quality but SLOW (measured on this machine: ~21x the clip's source length at 1080p30, ~9x at 720p; a 10 s 1080p clip at 0.5x takes ~3.5 min) and it can WARP/smear fast or occluding motion (fast pans, hands crossing, water); mode 'blend' = frame blending (framerate filter) — ~40x faster than optical flow (1.5 s vs 63 s for the same 3 s 1080p clip), ghosting instead of warping, fine for gentle motion. Audio is slowed with a pitch-preserving tempo change. A cutout with transparency keeps its alpha but always uses blend. Refuses when speed >= 1. Blocks until done and returns {clipId, assetId, frames}; for anything over a few seconds in optical-flow mode pass background:true to get {jobId} immediately, then poll list_jobs (progress is reported) / cancel_job. undo restores the original clip and speed. Verify with get_frame / render_preview.",
+      "SMOOTH SLOW MOTION for a clip whose speed is below 1 (set it first with set_clip_speed, e.g. 0.5): instead of repeating frames (stutter), bakes the used span with INTERPOLATED in-between frames so it plays at the project fps like real high-frame-rate footage, then re-points the clip at the bake with speed reset to 1. The timeline duration does NOT change. mode 'optical-flow' (default) = motion-compensated interpolation (minterpolate mci/aobmc) — best quality but SLOW (measured on this machine: ~21x the clip's source length at 1080p30, ~9x at 720p; a 10 s 1080p clip at 0.5x takes ~3.5 min) and it can WARP/smear fast or occluding motion (fast pans, hands crossing, water); mode 'blend' = frame blending (framerate filter) — ~40x faster than optical flow (1.5 s vs 63 s for the same 3 s 1080p clip), ghosting instead of warping, fine for gentle motion. Audio is slowed with a pitch-preserving tempo change. A cutout with transparency keeps its alpha but always uses blend. Refuses when speed >= 1 and on a clip with a speed ramp (bakes a constant slow speed only). Blocks until done and returns {clipId, assetId, frames}; for anything over a few seconds in optical-flow mode pass background:true to get {jobId} immediately, then poll list_jobs (progress is reported) / cancel_job. undo restores the original clip and speed. Verify with get_frame / render_preview.",
     schema: z
       .object({ clipId: z.string(), mode: z.enum(["blend", "optical-flow"]).optional(), background: z.boolean().optional() })
       .strict(),
@@ -635,7 +669,7 @@ export const methods = {
   },
 
   clear_clip_effects: {
-    description: "Remove all effects (speed, volume, fades, color, crop, transform, blend mode, mask, visual and audio effects) from a clip. Its bleeps are kept — use remove_bleeps for those.",
+    description: "Remove all effects (speed, speed ramp, volume, fades, color, crop, transform, blend mode, mask, visual and audio effects) from a clip. Its bleeps are kept — use remove_bleeps for those.",
     schema: z.object({ clipId: z.string() }).strict(),
     handler: (engine, p) => {
       engine.clearClipEffects(p.clipId);
@@ -1267,7 +1301,7 @@ export const methods = {
 
   bleep_words: {
     description:
-      "AUTO-BLEEP: censor profanity using the word-level transcript (auto-indexes assets that have none). Every matched word becomes a BLEEP stored ON the clip that carries the asset's audio (clip.effects.bleeps, source seconds, padded): the original is muted under it and a sound effect plays there (sound: beep = TV bleep, quack, squeak, boing, honk; or sfxAssetId for your own imported audio). Bleeps belong to their clip and FOLLOW IT AUTOMATICALLY through every edit — move, ripple, trim (a trimmed-off word's bleep disappears, extending the trim back restores it), split (each half keeps its own range), speed changes (the sound keeps its pitch) and delete — so there is no need to bleep last. Matching is whole-word against a built-in English swear list (no slurs); includeMild adds damn/hell/crap/piss/bloody/arse; pass words to add custom terms (exact, case-insensitive) and useDefaultList:false to use only those. Default scope is every clip with audio; pass clipIds to limit it. Use dryRun:true FIRST to review the matches (nothing changes). Re-running REPLACES the bleeps on the targeted clips (one undo step). Fix one afterwards with set_bleep (nudge/resize/sound/volume), add a missed word with add_bleep, drop one with remove_bleep. Returns {hits:[{clipId,bleepId,text,sourceStart,sourceEnd,startFrame,endFrame}], indexedAssetIds}.",
+      "AUTO-BLEEP: censor profanity using the word-level transcript (auto-indexes assets that have none). Every matched word becomes a BLEEP stored ON the clip that carries the asset's audio (clip.effects.bleeps, source seconds, padded): the original is muted under it and a sound effect plays there (sound: beep = TV bleep, quack, squeak, boing, honk; or sfxAssetId for your own imported audio). Bleeps belong to their clip and FOLLOW IT AUTOMATICALLY through every edit — move, ripple, trim (a trimmed-off word's bleep disappears, extending the trim back restores it), split (each half keeps its own range), speed changes and speed ramps (the sound keeps its pitch) and delete — so there is no need to bleep last. Matching is whole-word against a built-in English swear list (no slurs); includeMild adds damn/hell/crap/piss/bloody/arse; pass words to add custom terms (exact, case-insensitive) and useDefaultList:false to use only those. Default scope is every clip with audio; pass clipIds to limit it. Use dryRun:true FIRST to review the matches (nothing changes). Re-running REPLACES the bleeps on the targeted clips (one undo step). Fix one afterwards with set_bleep (nudge/resize/sound/volume), add a missed word with add_bleep, drop one with remove_bleep. Returns {hits:[{clipId,bleepId,text,sourceStart,sourceEnd,startFrame,endFrame}], indexedAssetIds}.",
     schema: z
       .object({
         clipIds: z.array(z.string()).optional(),

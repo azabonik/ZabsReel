@@ -126,7 +126,7 @@ export function Timeline(props: Props) {
     for (const t of rows) {
       if (t.kind !== "video") continue;
       for (const clip of t.clips) {
-        const dur = clipDurationFrames(clip);
+        const dur = clipDurationFrames(clip, fps);
         const cs = clip.startFrame;
         for (const o of clip.overlays ?? [])
           text.push({ clipId: clip.id, ref: o.id, label: o.text, absS: cs + (o.startFrame ?? 0), absE: cs + (o.endFrame ?? dur), clipStart: cs, clipDur: dur });
@@ -290,7 +290,7 @@ export function Timeline(props: Props) {
       for (const t of rows) {
         for (const c of t.clips) {
           if (c.id === excludeClipId) continue;
-          out.push(c.startFrame, c.startFrame + clipDurationFrames(c));
+          out.push(c.startFrame, c.startFrame + clipDurationFrames(c, fps));
         }
       }
       return out;
@@ -334,7 +334,7 @@ export function Timeline(props: Props) {
         const targets = snapTargets(d.clipId);
         const cur = frameFromClientX(e.clientX);
         const rawStart = Math.max(0, cur - d.grabFrame);
-        const dur = clipDurationFrames(d.seg.clip);
+        const dur = clipDurationFrames(d.seg.clip, fps);
         // Snap either the clip's head or tail to a target.
         const snappedHead = snap(rawStart, targets);
         const snappedTail = snap(rawStart + dur, targets) - dur;
@@ -345,18 +345,24 @@ export function Timeline(props: Props) {
         const targets = snapTargets(d.clipId);
         const f = snap(frameFromClientX(e.clientX), targets);
         const speed = d.seg.speed;
+        // A speed ramp maps the dragged edge through its curve (it extends past the clip at
+        // the first/last point's speed), so the source edge lands where the timeline edge is.
+        const srcAtLocal = (localFrames: number) => (d.seg.map ? Math.round(d.seg.map.sourceAt(localFrames / fps) * fps) : undefined);
         const assetFrames = d.seg.asset ? Math.round(d.seg.asset.duration * fps) : Number.MAX_SAFE_INTEGER;
         if (d.edge === "l") {
-          const maxStart = d.seg.clip.startFrame + clipDurationFrames(d.seg.clip) - 1;
+          const maxStart = d.seg.clip.startFrame + clipDurationFrames(d.seg.clip, fps) - 1;
           const newStart = Math.min(maxStart, Math.max(0, f));
           const deltaFrames = newStart - d.seg.clip.startFrame;
-          const newIn = Math.min(d.seg.clip.sourceOutFrame - 1, Math.max(0, Math.round(d.seg.clip.sourceInFrame + deltaFrames * speed)));
+          const raw = srcAtLocal(deltaFrames) ?? d.seg.clip.sourceInFrame + deltaFrames * speed;
+          const newIn = Math.min(d.seg.clip.sourceOutFrame - 1, Math.max(0, Math.round(raw)));
           setDrag({ ...d, newStart, newIn, newOut: d.seg.clip.sourceOutFrame });
         } else {
           const minEnd = d.seg.clip.startFrame + 1;
           const newEndFrame = Math.max(minEnd, f);
-          const deltaFrames = newEndFrame - (d.seg.clip.startFrame + clipDurationFrames(d.seg.clip));
-          const newOut = Math.min(assetFrames, Math.max(d.seg.clip.sourceInFrame + 1, Math.round(d.seg.clip.sourceOutFrame + deltaFrames * speed)));
+          const durNow = clipDurationFrames(d.seg.clip, fps);
+          const deltaFrames = newEndFrame - (d.seg.clip.startFrame + durNow);
+          const raw = srcAtLocal(durNow + deltaFrames) ?? d.seg.clip.sourceOutFrame + deltaFrames * speed;
+          const newOut = Math.min(assetFrames, Math.max(d.seg.clip.sourceInFrame + 1, Math.round(raw)));
           setDrag({ ...d, newStart: d.seg.clip.startFrame, newIn: d.seg.clip.sourceInFrame, newOut });
         }
       }
@@ -406,11 +412,11 @@ export function Timeline(props: Props) {
     if (track.locked) return;
     const phFrame = Math.round(store.get().playhead * fps);
     const local = phFrame - seg.clip.startFrame;
-    if (local > 1 && local < clipDurationFrames(seg.clip) - 1) onSplit(seg.clip.id, local);
+    if (local > 1 && local < clipDurationFrames(seg.clip, fps) - 1) onSplit(seg.clip.id, local);
   };
   const rippleDeleteClip = (track: Track, seg: Segment) => {
     if (track.locked) return;
-    onRippleDelete(track.index, seg.clip.startFrame, seg.clip.startFrame + clipDurationFrames(seg.clip));
+    onRippleDelete(track.index, seg.clip.startFrame, seg.clip.startFrame + clipDurationFrames(seg.clip, fps));
   };
 
   const addMarker = () => addMarkerAt(Math.round(store.get().playhead * fps));
@@ -673,13 +679,13 @@ function ClipBlock({
 
   // Live position/size while this clip is being dragged or trimmed.
   let startFrame = seg.clip.startFrame;
-  let durFrames = clipDurationFrames(seg.clip);
+  let durFrames = clipDurationFrames(seg.clip, fps);
   let dragging = false;
   if (drag && drag.clipId === seg.clip.id) {
     dragging = true;
     if (drag.kind === "trim") {
       startFrame = drag.newStart;
-      durFrames = Math.max(1, Math.round((drag.newOut - drag.newIn) / seg.speed));
+      durFrames = clipDurationFrames({ ...seg.clip, sourceInFrame: drag.newIn, sourceOutFrame: drag.newOut }, fps);
     } else {
       // Move ghost is drawn separately; keep the source block dimmed in place.
     }
@@ -721,14 +727,17 @@ function ClipBlock({
     const b = seg.clip.effects?.bleeps?.find((x) => x.id === layer.bleepId);
     if (!b) return;
     const speed = seg.speed;
+    const map = seg.map;
     const srcIn = seg.clip.sourceInFrame / fps;
     const srcOut = seg.clip.sourceOutFrame / fps;
     const t0 = secAtClientX(e.clientX);
     let last = { start: b.start, end: b.end };
     bleepDragging.current = true;
     const move = (m: PointerEvent) => {
-      // Timeline seconds moved × speed = source seconds moved.
-      const d = (secAtClientX(m.clientX) - t0) * speed;
+      // Timeline seconds moved × speed = source seconds moved (through the curve on a ramp,
+      // measured from the grabbed point).
+      const t1 = secAtClientX(m.clientX);
+      const d = map ? map.sourceAt(t1 - seg.start) - map.sourceAt(t0 - seg.start) : (t1 - t0) * speed;
       if (mode === "move") {
         const len = b.end - b.start;
         const s0 = Math.max(srcIn, Math.min(srcOut - len, b.start + d));
@@ -777,9 +786,14 @@ function ClipBlock({
 
       {/* Keyframe / transform indicator only — text, captions, graphics and the
           transition are shown as labeled bars on the element rail below. */}
-      {(nKf > 0 || hasTransform) && (
+      {(nKf > 0 || hasTransform || !!seg.map) && (
         <div className="tl-clip-badges">
-          <span className="tl-badge" title={nKf > 0 ? `${nKf} animated propert${nKf === 1 ? "y" : "ies"}` : "Transformed"}>◆</span>
+          {(nKf > 0 || hasTransform) && (
+            <span className="tl-badge" title={nKf > 0 ? `${nKf} animated propert${nKf === 1 ? "y" : "ies"}` : "Transformed"}>◆</span>
+          )}
+          {seg.map && (
+            <span className="tl-badge" title={`Speed ramp${seg.clip.effects?.speedRamp?.preset ? ` (${seg.clip.effects.speedRamp.preset.replace("_", " ")})` : " (custom)"}`}>↝</span>
+          )}
         </div>
       )}
 
@@ -889,6 +903,8 @@ function LaneElementBar({
 /** Canvas waveform for a clip, drawing its source slice of the asset peaks. */
 function ClipWave({ peaks, seg, fps, width, height }: { peaks: Float32Array; seg: Segment; fps: number; width: number; height: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  // Redraw when the CURVE changes, not on every new segment object (each project update builds new ones).
+  const rampKey = seg.map ? JSON.stringify(seg.clip.effects?.speedRamp?.points) : "";
   useEffect(() => {
     const cv = ref.current;
     if (!cv) return;
@@ -903,13 +919,15 @@ function ClipWave({ peaks, seg, fps, width, height }: { peaks: Float32Array; seg
     const outFrac = seg.clip.sourceOutFrame / fps / dur;
     ctx.fillStyle = "rgba(255,255,255,0.42)";
     const mid = H / 2;
+    const map = seg.map;
     for (let x = 0; x < W; x++) {
-      const f = inFrac + (outFrac - inFrac) * (x / W);
+      // A speed ramp stretches the waveform through its curve (slow parts take more room).
+      const f = map ? map.sourceAt((x / W) * seg.tlDur) / dur : inFrac + (outFrac - inFrac) * (x / W);
       const p = peakRange(peaks, f - 0.001, f + 0.001);
       const half = Math.max(0.5, p * (H / 2 - 1));
       ctx.fillRect(x, mid - half, 1, half * 2);
     }
-  }, [peaks, seg.clip.sourceInFrame, seg.clip.sourceOutFrame, seg.asset, fps, width, height]);
+  }, [peaks, seg.clip.sourceInFrame, seg.clip.sourceOutFrame, seg.asset, rampKey, fps, width, height]);
   return <canvas ref={ref} className="tl-wave" />;
 }
 
@@ -920,7 +938,7 @@ function MoveGhost({
   drag: Extract<Drag, { kind: "move" }>; rows: Track[]; pps: number; fps: number;
   laneEls: MutableRefObject<Map<number, HTMLElement>>; contentRef: RefObject<HTMLDivElement>;
 }) {
-  const dur = clipDurationFrames(drag.seg.clip);
+  const dur = clipDurationFrames(drag.seg.clip, fps);
   const left = (drag.ghostStart / fps) * pps + 1;
   const w = Math.max(3, (dur / fps) * pps - 2);
   const laneEl = laneEls.current.get(drag.ghostTrack);

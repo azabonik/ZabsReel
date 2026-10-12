@@ -27,6 +27,8 @@
  * Adding an effect = one entry in AUDIO_EFFECT_TYPE_IDS + one in DEFS below.
  */
 
+import { clipFootprintFrames, hasSpeedRamp, type SpeedRamp } from "../speed.js";
+
 /** Every audio effect type, in a stable order (the rpc enum and the AI description follow it). */
 export const AUDIO_EFFECT_TYPE_IDS = [
   "enhance_voice",
@@ -820,14 +822,19 @@ export interface LinkedSoundClip {
   sourceInFrame: number;
   sourceOutFrame: number;
   audioOffsetFrames?: number;
-  effects?: { speed?: number };
+  effects?: { speed?: number; speedRamp?: SpeedRamp };
 }
 
 const spanOverlap = (a0: number, a1: number, b0: number, b1: number): number => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
 
-/** Timeline frames where a clip's sound plays: its start (+ J/L audio offset) for its timeline length. */
-function soundSpan(c: LinkedSoundClip): [number, number] {
+/**
+ * Timeline frames where a clip's sound plays: its start (+ J/L audio offset)
+ * for its timeline length (a speed ramp's length needs `fps`; without it the
+ * ramp is ranked by its constant-speed span).
+ */
+function soundSpan(c: LinkedSoundClip, fps?: number): [number, number] {
   const s = c.startFrame + (c.audioOffsetFrames ?? 0);
+  if (fps && hasSpeedRamp(c)) return [s, s + clipFootprintFrames(c, fps)];
   return [s, s + Math.max(1, Math.round((c.sourceOutFrame - c.sourceInFrame) / (c.effects?.speed ?? 1)))];
 }
 
@@ -842,13 +849,13 @@ function soundSpan(c: LinkedSoundClip): [number, number] {
  * audioEffectOwner) and the inspector (apps/desktop audiofx.ts) both use it;
  * the caller checks audibility.
  */
-export function linkedSoundPartners<C extends LinkedSoundClip>(clip: LinkedSoundClip, group: readonly C[]): C[] {
+export function linkedSoundPartners<C extends LinkedSoundClip>(clip: LinkedSoundClip, group: readonly C[], fps?: number): C[] {
   if (!clip.linkGroupId) return [];
-  const [t0, t1] = soundSpan(clip);
+  const [t0, t1] = soundSpan(clip, fps);
   const scored = group
     .filter((m) => m.id !== clip.id && m.linkGroupId === clip.linkGroupId && m.assetId === clip.assetId)
     .map((m, i) => {
-      const [m0, m1] = soundSpan(m);
+      const [m0, m1] = soundSpan(m, fps);
       return { m, i, src: spanOverlap(clip.sourceInFrame, clip.sourceOutFrame, m.sourceInFrame, m.sourceOutFrame), tl: spanOverlap(t0, t1, m0, m1) };
     });
   const overlapping = scored.filter((s) => s.src > 0 || s.tl > 0);
