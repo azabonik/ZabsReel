@@ -58,12 +58,34 @@ function ColorSwatch({ value, label, disabled, onCommit }: {
     el.addEventListener("change", onChange);
     return () => el.removeEventListener("change", onChange);
   }, [value]);
+  // The browser/Electron EyeDropper samples any pixel on screen (e.g. the colour to
+  // keep, straight from the preview). Hidden where unsupported.
+  const ED = typeof window !== "undefined" && "EyeDropper" in window
+    ? (window as unknown as { EyeDropper: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper
+    : undefined;
+  const pick = async () => {
+    if (!ED) return;
+    try {
+      const { sRGBHex } = await new ED().open();
+      commitRef.current(keyColorHex(sRGBHex, value));
+    } catch {
+      /* picker cancelled (Esc) */
+    }
+  };
   return (
-    <label className="swatch" title={label}>
-      <input ref={ref} type="color" value={swatch} disabled={disabled}
-        onChange={(e) => setSwatch(e.target.value)} aria-label={label} />
-      {value}
-    </label>
+    <>
+      <label className="swatch" title={label}>
+        <input ref={ref} type="color" value={swatch} disabled={disabled}
+          onChange={(e) => setSwatch(e.target.value)} aria-label={label} />
+        {value}
+      </label>
+      {ED && (
+        <button type="button" className="btn btn-sm" disabled={disabled} onClick={pick}
+          title="Pick the colour from anywhere on screen (the preview, for instance)">
+          Pick
+        </button>
+      )}
+    </>
   );
 }
 
@@ -102,7 +124,7 @@ export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemov
         </select>
       </div>
       {filters.length === 0 ? (
-        <span className="field-hint">Stack blur, sharpen, vignette, keys and more — baked in order after color. Keys preview live; put the keyed clip on the track above.</span>
+        <span className="field-hint">Stack exposure, blur, glow, grain, vignette, keys and more — baked in order after color. Keys preview live; put the keyed clip on the track above.</span>
       ) : (
         <div className="eff-list">
           {filters.map((f, i) => {

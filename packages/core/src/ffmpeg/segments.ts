@@ -3,6 +3,9 @@ import { stat } from "node:fs/promises";
 import type { Canvas, ResolvedRenderClip } from "../types.js";
 import type { RenderProfile } from "./graph.js";
 
+/** Effects that carry state from frame to frame (an echo / temporal filter). */
+const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
+
 /**
  * Segment planning for the PREVIEW render cache. The timeline is cut at every
  * "edit boundary" (any clip start/end across tracks), then greedily merged into
@@ -16,8 +19,9 @@ import type { RenderProfile } from "./graph.js";
  * Bump when the render pipeline changes in a way that invalidates cached pixels.
  * 4: vignette honours its amount (the effect registry) and keeps alpha.
  * 5: overlay windows open half a frame early (no black first frame at cuts).
+ * 6: sharpen / denoise / edges keep alpha (alphaSafe), plus the look and style effects.
  */
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this
@@ -38,6 +42,16 @@ export function planSegments(clips: ResolvedRenderClip[], totalDuration: number)
     if (end > eps && end < totalDuration - eps) cuts.add(Number(end.toFixed(3)));
   }
   cuts.add(Number(totalDuration.toFixed(3)));
+  // A temporal effect on an ADJUSTMENT layer runs over the whole stacked composite from
+  // t = 0 (its history builds up before the layer starts), so a segment that began mid-way
+  // would restart it. Keep everything up to such a layer's end in ONE segment.
+  let keepWhole = 0;
+  for (const c of clips) {
+    if (c.adjustment && c.effects?.filters?.some((f) => TEMPORAL_EFFECTS.has(f.type))) {
+      keepWhole = Math.max(keepWhole, c.startSec + c.outDuration);
+    }
+  }
+  if (keepWhole > eps) for (const p of [...cuts]) if (p > eps && p < keepWhole - eps && p < totalDuration - eps) cuts.delete(p);
   const points = [...cuts].sort((a, b) => a - b);
 
   // Primitive spans between consecutive boundaries → greedy merge.

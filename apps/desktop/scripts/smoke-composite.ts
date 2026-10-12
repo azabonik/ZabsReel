@@ -22,9 +22,9 @@ import type { Bleep, Clip, MediaAsset, Project, Track } from "../src/types";
 import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../../../packages/core/src/audio/bleeps";
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
 import { colorFilter, vignetteAngles } from "../src/playback";
-import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, keyPlan } from "../src/keying";
+import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
 import {
-  EFFECTS, defaultsFor, effectByType, exactOnly, vignetteFactor,
+  EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, exactOnly, previewScaleFor, vignetteFactor,
 } from "@aive/core/effects";
 import type { Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 
@@ -214,7 +214,7 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("key: un-keyed clip has no key plan", !!plain && plain.key === undefined);
   check("key: keyed clip has a plan with both keys in order", key?.keys.map((k) => k.kind).join(",") === "colorkey,chromakey");
   check("key: colour + effects before the first key run first", key?.pre === "brightness(1.1) grayscale(1)", key?.pre);
-  check("key: effects after the first key run on the keyed result", key?.post === "blur(2px)", key?.post);
+  check("key: effects after the first key run on the keyed result", key?.post === "blur(6.6667px)", key?.post);
   check("key: colorkey defaults + parsed colour", !!key && key.keys[0].rgb.join() === "128,128,128" &&
     near(key.keys[0].similarity, 0.08, 1e-9) && near(key.keys[0].blend, 0.04, 1e-9));
   check("key: chromakey #00ff00 is a green screen with despill", !!key && key.keys[1].screen === "green" &&
@@ -321,13 +321,46 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
 {
   const fx = (type: string, extra: Partial<VisualEffect> = {}): VisualEffect => ({ id: `${type}-${Math.random()}`, type, ...extra });
   // CSS builders (byte-identical to the pre-registry colorFilter for blur/grayscale/sepia).
-  check("css: blur 10 → blur(2px)", colorFilter(undefined, undefined, [fx("blur", { amount: 10 })]) === "blur(2px)");
-  check("css: blur default (8) → blur(1.6px)", colorFilter(undefined, undefined, [fx("blur")]) === "blur(1.6px)");
-  check("css: blur clamps at 50 → blur(10px)", colorFilter(undefined, undefined, [fx("blur", { amount: 90 })]) === "blur(10px)");
+  // Blur: CSS blur(r) has std-dev r px = gblur's sigma, so r = sigma × preview scale over the WHOLE slider range.
+  const blurCss = (amount: number | undefined, scale?: number) => colorFilter(undefined, undefined, [fx("blur", amount === undefined ? {} : { amount })], scale);
+  check("css: blur 10 at scale 1 → blur(10px)", blurCss(10, 1) === "blur(10px)", blurCss(10, 1));
+  check("css: blur default (8) at scale 1 → blur(8px)", blurCss(undefined, 1) === "blur(8px)");
+  check("css: blur 100 at scale 1 → blur(100px) (no longer stops at amount 50)", blurCss(100, 1) === "blur(100px)", blurCss(100, 1));
+  check("css: blur clamps at the slider's 100", blurCss(400, 1) === "blur(100px)");
+  const bs = [10, 25, 50, 75, 100].map((a) => parseFloat(blurCss(a, 1).slice(5)));
+  check("css: blur grows strictly over the whole range (10 < 25 < 50 < 75 < 100)", bs.every((v, i) => i === 0 || v > bs[i - 1]), bs.join(","));
+  check("css: blur scales with the preview (100 at 1280/1920 → 66.6667px; at 0.5 → 50px)",
+    blurCss(100) === "blur(66.6667px)" && blurCss(100, 0.5) === "blur(50px)", `${blurCss(100)} / ${blurCss(100, 0.5)}`);
+  check("css: previewScaleFor = the compositor buffer cap (1920 → 2/3, 1280 → 1, 3840 → 1/3)",
+    near(previewScaleFor(1920, 1080), 2 / 3, 1e-12) && previewScaleFor(1280, 720) === 1 && near(previewScaleFor(1080, 3840), 1 / 3, 1e-12));
+  // Look effects with a CSS proxy.
+  const css1 = (type: string, extra: Partial<VisualEffect> = {}) => colorFilter(undefined, undefined, [fx(type, extra)], 1);
+  check("css: exposure +1 EV → brightness(2) (the export's x·2^EV)", css1("exposure", { amount: 1 }) === "brightness(2)", css1("exposure", { amount: 1 }));
+  check("css: exposure -1 EV → brightness(0.5)", css1("exposure", { amount: -1 }) === "brightness(0.5)");
+  check("css: exposure 0 → brightness(1); default stored effect = +0.5 EV", css1("exposure", { amount: 0 }) === "brightness(1)" && css1("exposure") === `brightness(${Math.round(2 ** 0.5 * 10000) / 10000})`, css1("exposure"));
+  // Black level: brightness(m) contrast(c) must equal k·x − k·b on the encoded value.
+  {
+    const m = /brightness\(([\d.]+)\) contrast\(([\d.]+)\)/.exec(css1("exposure", { amount: 1, params: { black: 0.1 } }));
+    const k = 1 / (0.5 - 0.1);
+    const apply = (x: number) => (Number(m?.[2]) * (Number(m?.[1]) * x - 0.5) + 0.5);
+    check("css: exposure with black level = FFmpeg's (x − b)/(2^-EV − b) via brightness+contrast",
+      !!m && [0.2, 0.5, 0.7].every((x) => near(apply(x), k * x - k * 0.1, 1e-3)), css1("exposure", { amount: 1, params: { black: 0.1 } }));
+  }
+  check("css: exposure amount clamps to ±3 EV", css1("exposure", { amount: 9 }) === "brightness(8)", css1("exposure", { amount: 9 }));
+  check("css: vibrance → saturate (0 = 1, +1 = 1.75, -1 = 0.2, -2 floors at 0)",
+    css1("vibrance", { amount: 0 }) === "saturate(1)" && css1("vibrance", { amount: 1 }) === "saturate(1.75)" &&
+    css1("vibrance", { amount: -1 }) === "saturate(0.2)" && css1("vibrance", { amount: -2 }) === "saturate(0)",
+    [0, 1, -1, -2].map((a) => css1("vibrance", { amount: a })).join(" "));
+  check("css: invert → invert(1)", css1("invert") === "invert(1)");
+  check("css: exposure + invert + vibrance stack in order",
+    colorFilter(undefined, undefined, [fx("exposure", { amount: 1 }), fx("invert"), fx("vibrance", { amount: 1 })], 1) === "brightness(2) invert(1) saturate(1.75)");
+  check("css: bypassed look effects add nothing", css1("invert", { enabled: false }) === "none" && css1("exposure", { amount: 1, enabled: false }) === "none");
+  check("css: every CSS proxy documents its accuracy (note)",
+    EFFECTS.every((e) => e.preview === "export-only" || !e.preview.css || !!e.preview.note));
   check("css: grayscale + sepia in stack order",
     colorFilter(undefined, undefined, [fx("grayscale"), fx("sepia")]) === "grayscale(1) sepia(0.85)");
-  check("css: export-only effects add nothing (sharpen/pixelate/edges)",
-    colorFilter(undefined, undefined, [fx("sharpen"), fx("pixelate"), fx("edges")]) === "none");
+  check("css: export-only effects add nothing (sharpen/pixelate/edges/colorhold/grain/glow/rgbsplit/lens/trails)",
+    colorFilter(undefined, undefined, ["sharpen", "pixelate", "edges", "colorhold", "grain", "glow", "rgbsplit", "lens", "trails"].map((t) => fx(t))) === "none");
   check("css: vignette is no longer a contrast/brightness hack", colorFilter(undefined, undefined, [fx("vignette")]) === "none");
   check("css: bypassed effects are skipped",
     colorFilter({ brightness: 0.1 }, undefined, [fx("blur", { amount: 10, enabled: false }), fx("grayscale")]) === "brightness(1.1) grayscale(1)",
@@ -344,8 +377,13 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   // Every registry entry has a preview story: css, key, a canvas pass, or export-only.
   const noStory = EFFECTS.filter((e) => e.preview !== "export-only" && !e.preview.css && !e.preview.key && !e.preview.pass).map((e) => e.type);
   check("registry: every effect has css / key / pass, or is export-only", noStory.length === 0, noStory.join(","));
-  check("registry: Render-exact badge set = sharpen, detail, denoise, edges, posterize, pixelate",
-    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(",") === "sharpen,detail,denoise,edges,posterize,pixelate");
+  check("registry: Render-exact badge set = the old six + colorhold and the style effects",
+    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(",") === "sharpen,detail,denoise,edges,posterize,pixelate,colorhold,grain,glow,rgbsplit,lens,trails",
+    EFFECTS.filter((e) => exactOnly(e.type)).map((e) => e.type).join(","));
+  check("registry: colorhold takes a colour but no 'auto' (generic swatch, not the key controls)",
+    effectByType("colorhold")?.color?.default === "0xFF0000" && effectByType("colorhold")?.color?.auto === false && !isKeyEffect("colorhold"));
+  check("registry: the Look category exists and lists exposure, vibrance, invert, colorhold",
+    EFFECT_CATEGORIES.includes("Look") && EFFECTS.filter((e) => e.category === "Look").map((e) => e.type).join() === "exposure,vibrance,invert,colorhold");
 
   // The renderer's key helpers are derived from the registry, not a copy.
   check("keying: KEY_EFFECT_TYPES from the registry's key flag", KEY_EFFECT_TYPES.join(",") === "chromakey,colorkey,lumakey");
@@ -359,7 +397,7 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
     keyPlan({ filters: [fx("chromakey", { color: "0x00FF00", enabled: false })] }) === undefined);
   const kp = keyPlan({ filters: [fx("colorkey", { enabled: false }), fx("grayscale"), fx("lumakey", { params: { threshold: 1 } }), fx("blur", { amount: 5 })] });
   check("key: bypassed key skipped — the plan starts at the next enabled key",
-    !!kp && kp.keys.map((k) => k.kind).join() === "lumakey" && kp.pre === "grayscale(1)" && kp.post === "blur(1px)",
+    !!kp && kp.keys.map((k) => k.kind).join() === "lumakey" && kp.pre === "grayscale(1)" && kp.post === "blur(3.3333px)",
     JSON.stringify(kp));
   check("key: params clamped by the registry ranges (similarity 5 → 1)",
     keyPlan({ filters: [fx("chromakey", { params: { similarity: 5 } })] })?.keys[0].similarity === 1);

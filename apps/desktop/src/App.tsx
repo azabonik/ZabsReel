@@ -1742,7 +1742,7 @@ function ClipInspector(props: InspectorProps) {
 
             <div className="group">
               <div className="group-title"><Frame size={13} /> Stabilize</div>
-              <RangeField label="Smoothing" unit=" fr" min={1} max={100} step={1} def={30}
+              <RangeField label="Smoothing (± frames)" unit=" fr" min={1} max={100} step={1} def={30}
                 value={stabSmoothing} onCommit={(v) => setStabSmoothing(v)} />
               <div className="field">
                 <label>Zoom</label>
@@ -1760,7 +1760,7 @@ function ClipInspector(props: InspectorProps) {
               >
                 <Frame size={14} /> Stabilize clip
               </button>
-              <span className="field-hint">Two-pass analysis bakes a steadier copy and re-points the clip (undo restores it). More smoothing = steadier, slower camera moves; zoom hides the edges the correction exposes.</span>
+              <span className="field-hint">Two-pass analysis bakes a steadier copy and re-points the clip (undo restores it). Smoothing looks that many frames before and after each frame (a 2N+1-frame window): more = steadier, slower camera moves; zoom hides the edges the correction exposes.</span>
             </div>
 
             <div className="group">

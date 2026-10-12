@@ -8,7 +8,7 @@
 // flow back to it through an imperative ref (see PlayerHandle).
 
 import { useSyncExternalStore } from "react";
-import { effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
+import { DEFAULT_PREVIEW_SCALE, effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
 import type { Clip, MediaAsset, ColorAdjust, ColorGrade, VisualEffect } from "./types";
 
 export interface PlaybackState {
@@ -136,7 +136,13 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n
  * glkey.ts), which splits this filter around the first key; the vignette
  * through a canvas pass (see vignetteAngles). Bypassed effects are skipped.
  */
-export function colorFilter(color?: ColorAdjust, grade?: ColorGrade, filters?: VisualEffect[]): string {
+export function colorFilter(
+  color?: ColorAdjust,
+  grade?: ColorGrade,
+  filters?: VisualEffect[],
+  /** Preview pixels per canvas pixel, for pixel-sized effects (blur). */
+  scale: number = DEFAULT_PREVIEW_SCALE,
+): string {
   const parts: string[] = [];
   if (color) {
     if (color.brightness !== undefined && color.brightness !== 0) parts.push(`brightness(${clamp(1 + color.brightness, 0, 4)})`);
@@ -152,7 +158,7 @@ export function colorFilter(color?: ColorAdjust, grade?: ColorGrade, filters?: V
   for (const f of filters ?? []) {
     if (!isEnabled(f)) continue;
     const preview = effectByType(f.type)?.preview;
-    const css = preview && preview !== "export-only" ? preview.css?.(f) : undefined;
+    const css = preview && preview !== "export-only" ? preview.css?.(f, scale) : undefined;
     if (css) parts.push(css);
   }
   return parts.length ? parts.join(" ") : "none";

@@ -484,7 +484,7 @@ export const methods = {
       "KEYS make the background transparent so the track BELOW shows through (put the keyed clip on a higher video track); pick the key by background as described above. " +
       "color = the key colour as '0x808080', or 'auto' to sample the clip's frame border (resolved to a concrete hex, returned as `color` with a 0..1 `confidence`; for lumakey 'auto' sets the threshold). " +
       "Keys run after the clip's color grade, so key before grading or re-run 'auto' after. Raise similarity if background speckles remain; lower it if the subject gets holes. Verify with get_frame. " +
-      "Pass effectId to UPDATE an existing effect in place (amount/color/params are REPLACED by what you pass — send the full set). enabled:false BYPASSES an effect (kept, but skipped in export and preview), enabled:true turns it back on; {effectId, type, enabled} alone toggles it without touching its values. " +
+      "Pass effectId to UPDATE an existing effect in place (amount/color/params are REPLACED by what you pass — send the full set); an effectId the clip doesn't have is an error — omit effectId to add a new effect. enabled:false BYPASSES an effect (kept, but skipped in export and preview), enabled:true turns it back on; {effectId, type, enabled} alone toggles it without touching its values. " +
       "Returns the effectId (remove_effect deletes it; reorder_effect moves it in the stack).",
     schema: z
       .object({
@@ -539,7 +539,7 @@ export const methods = {
   stabilize_clip: {
     description:
       "Stabilize shaky footage in a clip using two-pass analysis (vidstab). Bakes a stabilized copy and re-points the clip at it (other effects preserved; undo restores the original). May take a while for long clips. " +
-      "Options: shakiness 1..10 (default 6; how shaky/fast the camera is), accuracy 1..15 (default 15), smoothing 1..100 frames (default 30; higher = steadier, slower camera moves), " +
+      "Options: shakiness 1..10 (default 6; how shaky/fast the camera is), accuracy 1..15 (default 15), smoothing 1..100 (default 30; the camera path is smoothed over that many frames before and after each frame, i.e. a window of smoothing×2+1 frames; higher = steadier, slower camera moves), " +
       "zoom 'auto' (default; zoom in just enough to hide the moving borders) | 'none' (no zoom, so the moving borders show) | a fixed percent (e.g. 8), " +
       "crop 'keep' (default; fill the borders from nearby frames) | 'black'.",
     schema: z

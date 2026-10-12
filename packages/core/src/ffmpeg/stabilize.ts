@@ -9,7 +9,11 @@ export interface StabilizeOptions {
   shakiness?: number;
   /** Detection accuracy 1..15 (vidstabdetect accuracy). Default 15. vidstab raises it to ≥ shakiness/2. */
   accuracy?: number;
-  /** Camera-path smoothing window in frames, 1..100 (vidstabtransform smoothing). Default 30. */
+  /**
+   * Camera-path smoothing, 1..100 (vidstabtransform smoothing): each frame's
+   * correction is low-passed over the 'smoothing' frames BEFORE and AFTER it, i.e.
+   * a window of smoothing*2+1 frames (30 = about 2 s at 30 fps). Default 30.
+   */
   smoothing?: number;
   /**
    * "auto" (default) = optimal static zoom that hides the borders — what

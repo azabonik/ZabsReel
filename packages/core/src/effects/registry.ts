@@ -26,11 +26,13 @@ export const EFFECT_TYPE_IDS = [
   "blur", "sharpen", "detail", "denoise", "sepia", "grayscale",
   "vignette", "edges", "posterize", "pixelate", "chromakey",
   "colorkey", "lumakey",
+  "exposure", "vibrance", "invert", "colorhold",
+  "grain", "glow", "rgbsplit", "lens", "trails",
 ] as const;
 export type EffectType = (typeof EFFECT_TYPE_IDS)[number];
 
 /** Inspector groups, in menu order. */
-export const EFFECT_CATEGORIES = ["Blur & sharpen", "Repair", "Stylize", "Key"] as const;
+export const EFFECT_CATEGORIES = ["Blur & sharpen", "Repair", "Look", "Stylize", "Key"] as const;
 export type EffectCategory = (typeof EFFECT_CATEGORIES)[number];
 
 /** One numeric control. `key: "amount"` is the effect's primary strength (stored at the top level). */
@@ -56,8 +58,14 @@ export interface EffectColorSpec {
 
 /** How the live preview shows an effect. */
 export interface EffectPreview {
-  /** CSS filter fragment (the 2D canvas `ctx.filter` colour proxy). */
-  css?: (e: EffectInput) => string;
+  /**
+   * CSS filter fragment (the 2D canvas `ctx.filter` colour proxy). `scale` =
+   * preview pixels per canvas pixel (the compositor buffer is capped at 1280 on
+   * the long edge), for effects measured in canvas pixels such as blur.
+   */
+  css?: (e: EffectInput, scale: number) => string;
+  /** How close the CSS proxy is to the FFmpeg export — shown to people and the AI as the effect's caveat. */
+  note?: string;
   /** Shown by the WebGL key pass (apps/desktop/src/glkey.ts). */
   key?: true;
   /** Shown by a named 2D canvas pass that the renderer draws over the layer. */
@@ -103,6 +111,8 @@ export interface EffectDef {
 /** FFmpeg number formatting — the same 6-decimal form graph.ts uses everywhere. */
 const num = (n: number): string => (Number.isFinite(n) ? n.toFixed(6) : "0");
 const clampN = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
+/** CSS number: at most 4 decimals, no trailing zeros. */
+const fmtCss = (n: number): string => String(Math.round(n * 10000) / 10000);
 
 /** A few colour names the AI tends to use for key colours; everything else must be hex. */
 export const KEY_COLOR_NAMES: Readonly<Record<string, string>> = {
@@ -125,6 +135,18 @@ export function parseKeyColor(c: string | undefined): string | null {
  */
 export function keyColorHex(c: string | undefined, fallback: string): string {
   return parseKeyColor(c) ?? fallback;
+}
+
+/**
+ * Preview pixels per canvas pixel when the project is rendered into the
+ * compositor buffer (long edge capped at 1280): the default for CSS proxies
+ * of pixel-sized effects when the caller doesn't know the project size.
+ */
+export const PREVIEW_MAX_LONG_EDGE = 1280;
+export const DEFAULT_PREVIEW_SCALE = PREVIEW_MAX_LONG_EDGE / 1920;
+export function previewScaleFor(width: number, height: number): number {
+  const long = Math.max(width, height);
+  return long > PREVIEW_MAX_LONG_EDGE ? PREVIEW_MAX_LONG_EDGE / long : 1;
 }
 
 export function hexToRgb(hex: string): [number, number, number] {
@@ -170,6 +192,38 @@ export function vignetteFactor(dnorm: number, angle: number): number {
   if (dnorm > 1) return 0;
   const c = Math.cos(angle * dnorm);
   return c * c * (c * c);
+}
+
+/**
+ * Run a plain filter chain on the colour of an RGBA stream and put the ORIGINAL
+ * alpha back. Several FFmpeg filters have no alpha-capable pixel format
+ * (unsharp, hqdn3d, edgedetect, vignette, lagfun; noise also dirties alpha), so
+ * on their own they turn transparent letterbox padding, keyed areas and
+ * cutouts opaque. `steps` must be a linear chain (no `;` sub-graph); `tag` is a
+ * label prefix, unique in the whole filter_complex. `alphaSteps` (optional)
+ * runs on the extracted alpha plane too, for a temporal filter such as lagfun
+ * whose trail should carry its own coverage. Returns ONE step (empty in, empty out).
+ */
+export function alphaSafe(steps: string[], tag: string, alphaSteps: string[] = [], premultiplied = false): string[] {
+  if (steps.length === 0) return [];
+  const [a, b, v, m] = [`${tag}a`, `${tag}b`, `${tag}v`, `${tag}m`];
+  const alpha = ["alphaextract", ...alphaSteps].join(",");
+  // premultiplied: the spatial / temporal step sees colour x alpha, so the RGB hidden
+  // under alpha = 0 (a keyed-out screen, a cutout's old background) cannot bleed into
+  // the visible subject. Colour is divided by the (lagged) alpha again at the end.
+  const pre = premultiplied ? "premultiply=inplace=1," : "";
+  const un = premultiplied ? "unpremultiply=inplace=1," : "";
+  return [
+    `format=rgba,split[${a}][${b}];[${a}]${pre}${steps.join(",")}[${v}];[${b}]${alpha}[${m}];[${v}][${m}]alphamerge,${un}format=rgba`,
+  ];
+}
+
+/**
+ * Exposure's black point, kept below 2^-EV. FFmpeg computes (in - black) / (2^-EV - black),
+ * so a black at or above 2^-EV divides by zero (all black) or by a negative number (inverted).
+ */
+export function exposureBlack(e: EffectInput): number {
+  return Math.min(paramValue(e, "black"), 2 ** -paramValue(e, "amount") - 0.05);
 }
 
 /**
@@ -228,15 +282,19 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     description: "Gaussian blur (amount = sigma).",
     params: [amountParam("Amount", 0, 100, 1, 8)],
     ffmpeg: (e) => [`gblur=sigma=${num(paramValue(e, "amount"))}`],
-    // The CSS blur radius tops out lower than the export's sigma (a proxy).
-    preview: { css: (e) => `blur(${clampN(e.amount ?? 8, 0, 50) / 5}px)` },
+    // CSS blur(r) is a Gaussian with standard deviation r px, the same quantity as
+    // gblur's sigma, so the proxy is blur(sigma × preview scale) over the whole range.
+    preview: {
+      css: (e, scale) => `blur(${fmtCss(paramValue(e, "amount") * scale)}px)`,
+      note: "Close: both are Gaussians (CSS radius = sigma), scaled to the preview resolution; edges differ slightly (CSS fades, gblur clamps).",
+    },
   },
   sharpen: {
     label: "Sharpen",
     category: "Blur & sharpen",
     description: "Unsharp-mask sharpening.",
     params: [amountParam("Amount", 0, 5, 0.1, 1)],
-    ffmpeg: (e) => [`unsharp=5:5:${num(paramValue(e, "amount"))}:5:5:0`],
+    ffmpeg: (e, ctx) => alphaSafe([`unsharp=5:5:${num(paramValue(e, "amount"))}:5:5:0`], `sharp${ctx.tag}`),
     preview: "export-only",
   },
   detail: {
@@ -252,7 +310,7 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     category: "Repair",
     description: "Spatio-temporal noise reduction for grainy or low-light footage.",
     params: [amountParam("Amount", 0, 30, 1, 4)],
-    ffmpeg: (e) => [`hqdn3d=${num(paramValue(e, "amount"))}`],
+    ffmpeg: (e, ctx) => alphaSafe([`hqdn3d=${num(paramValue(e, "amount"))}`], `dn${ctx.tag}`),
     preview: "export-only",
   },
   sepia: {
@@ -261,7 +319,10 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     description: "Warm brown vintage tone.",
     params: [],
     ffmpeg: () => ["colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131"],
-    preview: { css: () => "sepia(0.85)" },
+    preview: {
+      css: () => "sepia(0.85)",
+      note: "Close: the export applies the full sepia matrix; the preview blends 85% toward it, so it is a touch weaker.",
+    },
   },
   grayscale: {
     label: "Black & white",
@@ -269,7 +330,10 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     description: "Full desaturation to black and white.",
     params: [],
     ffmpeg: () => ["hue=s=0"],
-    preview: { css: () => "grayscale(1)" },
+    preview: {
+      css: () => "grayscale(1)",
+      note: "Close: both fully desaturate; CSS weights the channels with Rec.709 luma, the export keeps the YUV (BT.601) luma, so some colours differ by a few levels.",
+    },
   },
   vignette: {
     label: "Vignette",
@@ -279,14 +343,9 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     ffmpeg: (e, ctx) => {
       const angle = vignetteAngle(e);
       if (angle <= 0) return [];
-      // vignette has no alpha-capable pixel format, so on its own it would turn
-      // transparent letterbox padding / keyed areas opaque: darken a split copy
-      // and merge the original alpha back.
-      const l = `vig${ctx.tag}`;
-      return [
-        `format=rgba,split[${l}a][${l}b];[${l}a]vignette=angle=${num(angle)}[${l}v];` +
-          `[${l}b]alphaextract[${l}m];[${l}v][${l}m]alphamerge,format=rgba`,
-      ];
+      // vignette has no alpha-capable pixel format: darken a split copy and merge
+      // the original alpha back.
+      return alphaSafe([`vignette=angle=${num(angle)}`], `vig${ctx.tag}`);
     },
     preview: { pass: "vignette" },
   },
@@ -295,7 +354,7 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     category: "Stylize",
     description: "Edge-detect / sketch look.",
     params: [],
-    ffmpeg: () => ["edgedetect=mode=colormix"],
+    ffmpeg: (_e, ctx) => alphaSafe(["edgedetect=mode=colormix"], `edge${ctx.tag}`),
     preview: "export-only",
   },
   posterize: {
@@ -358,6 +417,149 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     color: { default: null, auto: true, autoParam: "threshold" },
     ffmpeg: (e, ctx) => [keyStep(e, `key${ctx.tag}`)],
     preview: { key: true },
+  },
+
+  // ---- LOOK: grades with a live CSS-filter preview -------------------------------
+  exposure: {
+    label: "Exposure",
+    category: "Look",
+    description: "Camera-style exposure: amount = EV stops (+1 doubles the light, -1 halves it), params.black lifts (+) or crushes (-) the black point.",
+    params: [amountParam("Exposure", -3, 3, 0.05, 0.5, " EV"), { key: "black", label: "Black level", min: -1, max: 1, step: 0.01, default: 0 }],
+    // FFmpeg: out = (in - black) / (2^-EV - black), on the encoded values. The black point is
+    // kept below 2^-EV (a black at or above it divides by zero / goes negative).
+    ffmpeg: (e) => [`exposure=exposure=${num(paramValue(e, "amount"))}:black=${num(exposureBlack(e))}`],
+    preview: {
+      css: (e) => {
+        const b = exposureBlack(e);
+        const k = 1 / (2 ** -paramValue(e, "amount") - b);
+        if (b === 0) return `brightness(${fmtCss(k)})`;
+        // Target k·(x − b). CSS clamps to 0..1 after EVERY filter function, so each stage must stay in range.
+        if (b < 0) {
+          // contrast(c) then brightness(m): c = 1 / (1 − 2b) < 1 keeps the middle stage inside 0..1,
+          // and m·c = k with a shift of −k·b gives k·(x − b).
+          const c = 1 / (1 - 2 * b);
+          return `contrast(${fmtCss(c)}) brightness(${fmtCss(k / c)})`;
+        }
+        // b > 0: brightness(m) then contrast(c) with c = 1 + 2kb and m = k / c. Any x the first stage
+        // clips already lands at white in the export too.
+        const c = 1 + 2 * k * b;
+        return `brightness(${fmtCss(k / c)}) contrast(${fmtCss(c)})`;
+      },
+      note: "Near exact: the same linear scale-and-offset on the encoded values (CSS brightness = x·2^EV); only the clipping of extreme values can differ.",
+    },
+  },
+  vibrance: {
+    label: "Vibrance",
+    category: "Look",
+    description: "Smart saturation: boosts dull colours more than already-saturated ones (so skin and bright colours don't blow out). Negative mutes. Use apply_color/color_grade for plain saturation.",
+    params: [amountParam("Vibrance", -2, 2, 0.05, 0.8)],
+    ffmpeg: (e) => [`vibrance=intensity=${num(paramValue(e, "amount"))}`],
+    preview: {
+      css: (e) => {
+        const i = paramValue(e, "amount");
+        return `saturate(${fmtCss(Math.max(0, i >= 0 ? 1 + 0.75 * i : 1 + 0.8 * i))})`;
+      },
+      note: "Approximate: CSS saturate boosts every colour equally, so already-saturated colours look stronger than in the export, and below -1.25 FFmpeg overshoots past grey.",
+    },
+  },
+  invert: {
+    label: "Invert",
+    category: "Look",
+    description: "Negative: inverts every colour (alpha is untouched).",
+    params: [],
+    ffmpeg: () => ["negate"],
+    preview: { css: () => "invert(1)", note: "Exact." },
+  },
+  colorhold: {
+    label: "Keep one color",
+    category: "Look",
+    description:
+      "Color pop: keeps ONE colour (params.similarity = how far from it still counts, blend = soft edge) and turns everything else black & white. " +
+      "color = the colour to keep as hex (no 'auto'); sample it from the frame with get_frame / the eyedropper.",
+    params: [
+      { key: "similarity", label: "Similarity", min: 0.01, max: 1, step: 0.01, default: 0.3 },
+      { key: "blend", label: "Blend (soft edge)", min: 0, max: 1, step: 0.01, default: 0.1 },
+    ],
+    color: { default: "0xFF0000", auto: false },
+    ffmpeg: (e) => [
+      `colorhold=color=${keyColorHex(e.color, "0xFF0000")}:similarity=${num(paramValue(e, "similarity"))}:blend=${num(paramValue(e, "blend"))}`,
+    ],
+    preview: "export-only",
+  },
+
+  // ---- STYLE: export-only for now (the WebGL preview stage consumes the same shape) ---
+  // Every control below is stored as `amount` + `params` with the keys and units
+  // declared here; pixel quantities are CANVAS pixels (the project resolution),
+  // so a preview multiplies them by its buffer scale.
+  grain: {
+    label: "Film grain",
+    category: "Stylize",
+    description: "Animated film grain / noise on every frame (amount = strength 0..100; 20 = subtle, 60+ = heavy).",
+    params: [amountParam("Amount", 0, 100, 1, 20)],
+    // t+u = a fresh uniform noise pattern every frame. Fixed seed: the same export twice gives the same grain.
+    ffmpeg: (e, ctx) => {
+      const n = Math.round(paramValue(e, "amount"));
+      return n <= 0 ? [] : alphaSafe([`noise=all_seed=7:alls=${n}:allf=t+u`], `gr${ctx.tag}`);
+    },
+    preview: "export-only",
+  },
+  glow: {
+    label: "Glow",
+    category: "Stylize",
+    description: "Soft bloom: a blurred copy is screened over the picture, so bright areas bleed light (amount = strength 0..1, params.radius = blur in px).",
+    params: [amountParam("Strength", 0, 1, 0.05, 0.6), { key: "radius", label: "Radius", min: 1, max: 100, step: 1, default: 12, unit: "px" }],
+    ffmpeg: (e, ctx) => {
+      const strength = paramValue(e, "amount");
+      if (strength <= 0) return [];
+      const l = `gl${ctx.tag}`;
+      // Screen the blurred (premultiplied: colour hidden under alpha 0 does not bleed in) copy over the colours, then put the ORIGINAL alpha back with alphamerge.
+      // (blend's c3_opacity=0 does not keep alpha in FFmpeg 4.4: the blurred alpha leaked into
+      // letterbox padding and darkened the track below.)
+      return [
+        `format=rgba,split=3[${l}a][${l}b][${l}m];[${l}a]premultiply=inplace=1,gblur=sigma=${num(paramValue(e, "radius"))}[${l}c];` +
+          `[${l}b][${l}c]blend=all_mode=screen:all_opacity=${num(strength)}[${l}v];[${l}m]alphaextract[${l}x];[${l}v][${l}x]alphamerge,format=rgba`,
+      ];
+    },
+    preview: "export-only",
+  },
+  rgbsplit: {
+    label: "RGB split",
+    category: "Stylize",
+    description: "Chromatic-aberration / glitch look: red and blue are pushed apart along an angle (amount = offset in px, params.angle = direction in degrees, 0 = horizontal).",
+    params: [amountParam("Offset", 0, 50, 1, 6, "px"), { key: "angle", label: "Angle", min: 0, max: 360, step: 5, default: 0, unit: "°" }],
+    ffmpeg: (e) => {
+      const r = paramValue(e, "amount");
+      const a = (paramValue(e, "angle") * Math.PI) / 180;
+      const [dx, dy] = [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a))];
+      if (dx === 0 && dy === 0) return [];
+      // Red one way, blue the other, green stays; alpha is not shifted.
+      // Premultiplied, so colour hidden under alpha 0 (a keyed-out screen) is not pulled into the edge.
+      return [`format=rgba,premultiply=inplace=1,rgbashift=rh=${dx}:rv=${dy}:bh=${-dx}:bv=${-dy},unpremultiply=inplace=1,format=rgba`];
+    },
+    preview: "export-only",
+  },
+  lens: {
+    label: "Lens distortion",
+    category: "Stylize",
+    description: "Barrel / pincushion warp around the centre (amount = k1 -1..1: positive = barrel / fisheye bulge with transparent corners, negative = pincushion; params.k2 adds a stronger edge term).",
+    params: [amountParam("Distortion", -1, 1, 0.05, 0.3), { key: "k2", label: "Edge curve (k2)", min: -1, max: 1, step: 0.05, default: 0 }],
+    // Unmapped pixels are transparent (lenscorrection's default fc black@0), so the track below shows at the corners.
+    ffmpeg: (e) => {
+      const [k1, k2] = [paramValue(e, "amount"), paramValue(e, "k2")];
+      return k1 === 0 && k2 === 0 ? [] : [`lenscorrection=cx=0.5:cy=0.5:k1=${num(k1)}:k2=${num(k2)}:i=bilinear`];
+    },
+    preview: "export-only",
+  },
+  trails: {
+    label: "Trails",
+    category: "Stylize",
+    description: "Ghosting / light trails: bright moving things leave a fading echo (amount = decay 0.8..0.99; higher = longer trail). Restarts at each clip's own start (on an adjustment layer it builds up from the start of the timeline, like the export).",
+    params: [amountParam("Decay", 0.8, 0.99, 0.01, 0.9)],
+    ffmpeg: (e, ctx) => {
+      const lag = `lagfun=decay=${num(paramValue(e, "amount"))}`;
+      return alphaSafe([lag], `tr${ctx.tag}`, [lag], true);
+    },
+    preview: "export-only",
   },
 };
 
@@ -486,10 +688,18 @@ export function validateEffect(req: EffectRequest): ValidatedEffect {
     }
   }
 
+  if (d.type === "exposure" && out.amount !== undefined && out.params?.black !== undefined) {
+    const maxBlack = 2 ** -out.amount - 0.05;
+    if (out.params.black > maxBlack) {
+      adjusted.push(`black ${fmtN(out.params.black)} → ${fmtN(maxBlack)} (exposure black must stay below 2^-EV = ${fmtN(2 ** -out.amount)} at ${fmtN(out.amount)} EV)`);
+      out.params.black = maxBlack;
+    }
+  }
+
   if (req.color !== undefined) {
     const spec = d.color;
     const isAuto = req.color.trim().toLowerCase() === "auto";
-    if (!spec) throw new Error(`${d.type} takes no color (only the keys do: chromakey, colorkey, lumakey).`);
+    if (!spec) throw new Error(`${d.type} takes no color (only ${EFFECTS.filter((x) => x.color).map((x) => x.type).join(", ")} do).`);
     if (isAuto) {
       if (!spec.auto) throw new Error(`${d.type} does not support color "auto".`);
       out.color = "auto";
@@ -501,7 +711,7 @@ export function validateEffect(req: EffectRequest): ValidatedEffect {
       const hex = parseKeyColor(req.color);
       if (!hex) {
         throw new Error(
-          `Invalid key color "${req.color}". Use hex like "0x00FF00" or "#00ff00", one of ${Object.keys(KEY_COLOR_NAMES).join("/")}, or "auto".`,
+          `Invalid color "${req.color}". Use hex like "0x00FF00" or "#00ff00", one of ${Object.keys(KEY_COLOR_NAMES).join("/")}${spec.auto ? ', or "auto"' : ""}.`,
         );
       }
       out.color = hex;
@@ -523,7 +733,9 @@ export function describeEffectsForAI(): string {
     if (d.color) {
       parts.push(
         d.color.default
-          ? `color = key colour (default ${d.color.default}${d.color.auto ? ", or 'auto'" : ""})`
+          ? d.color.auto
+            ? `color = key colour (default ${d.color.default}, or 'auto')`
+            : `color = hex colour (default ${d.color.default}; 'auto' not accepted)`
           : `color 'auto' only (sets ${d.color.autoParam})`,
       );
     }

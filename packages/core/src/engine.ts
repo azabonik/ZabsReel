@@ -1196,11 +1196,19 @@ export class EditorEngine extends EventEmitter {
    * is passed — except a bare bypass toggle (only `enabled`, same type), which
    * keeps the values. `enabled` is kept when omitted (false = bypassed, stored
    * only then). Returns the clip and the effect's id.
+   *
+   * `effect.id` means "update THAT effect": an id the clip doesn't have is an
+   * error (a stale id from the UI or the AI used to silently add a fresh
+   * effect with defaults). Omit `id` to add. `opts.createWithId` is the explicit
+   * escape hatch for programmatic callers that want to ADD with their own id
+   * (never set by the rpc layer).
    */
   applyEffect(
     clipId: string,
     effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number>; enabled?: boolean },
+    opts: { createWithId?: boolean } = {},
   ): { clip: Clip; effectId: string } {
+    if (effect.id && !opts.createWithId) this.requireEffect(clipId, effect.id);
     let effectId = "";
     const clip = this.mutate(() => {
       const { clip } = this.findClip(clipId);
@@ -1230,6 +1238,19 @@ export class EditorEngine extends EventEmitter {
       return clip;
     });
     return { clip, effectId };
+  }
+
+  /** Throw a helpful error unless `clipId` has an effect `effectId`. */
+  private requireEffect(clipId: string, effectId: string): VisualEffect {
+    const { clip } = this.findClip(clipId);
+    const list = clip.effects?.filters ?? [];
+    const hit = list.find((f) => f.id === effectId);
+    if (hit) return hit;
+    const ids = list.map((f) => `${f.id} (${f.type})`).join(", ");
+    throw new Error(
+      `Effect "${effectId}" not found on clip "${clipId}"${ids ? ` — its effects: ${ids}` : " — it has no effects"}. ` +
+        "Omit effectId to add a new effect.",
+    );
   }
 
   /** Remove one visual effect from a clip by id. */
@@ -1291,6 +1312,7 @@ export class EditorEngine extends EventEmitter {
     clipId: string,
     effect: { id?: string; type: string; amount?: number; color?: string; params?: Record<string, number>; enabled?: boolean },
   ): Promise<{ clip: Clip; effectId: string; color?: string; confidence?: number }> {
+    if (effect.id) this.requireEffect(clipId, effect.id); // fail before sampling frames
     if (effect.color?.trim().toLowerCase() !== "auto") return this.applyEffect(clipId, effect);
     const spec = effectByType(effect.type)?.color;
     if (!spec?.auto) {
@@ -3419,25 +3441,6 @@ export class EditorEngine extends EventEmitter {
     const outName = `${stem}.mp4`;
     const outPath = join(dir, outName);
 
-    await runFfmpeg(
-      [
-        "-hide_banner",
-        "-ss",
-        sourceInSec.toFixed(6),
-        "-t",
-        spanSec.toFixed(6),
-        "-i",
-        asset.path,
-        "-vf",
-        `${detect}:result=${trfName}`,
-        "-f",
-        "null",
-        "-",
-      ],
-      // Pass 1 (analysis) ≈ first half of the work.
-      { cwd: dir, signal, totalDuration: spanSec, onProgress: (f) => onProgress(f * 0.5) },
-    );
-
     const pass2: string[] = [
       "-hide_banner",
       "-ss",
@@ -3460,13 +3463,40 @@ export class EditorEngine extends EventEmitter {
     if (asset.hasAudio) pass2.push("-c:a", "aac", "-b:a", "192k");
     else pass2.push("-an");
     pass2.push("-movflags", "+faststart", "-y", outName);
+    let baked: MediaAsset;
+    // A failed or canceled run must not leave its uniquely named .trf or a
+    // partial .mp4 in baked/ (nothing references them): mirrors removeBackground.
     try {
+      await runFfmpeg(
+        [
+          "-hide_banner",
+          "-ss",
+          sourceInSec.toFixed(6),
+          "-t",
+          spanSec.toFixed(6),
+          "-i",
+          asset.path,
+          "-vf",
+          `${detect}:result=${trfName}`,
+          "-f",
+          "null",
+          "-",
+        ],
+        // Pass 1 (analysis) ≈ first half of the work.
+        { cwd: dir, signal, totalDuration: spanSec, onProgress: (f) => onProgress(f * 0.5) },
+      );
+      // ffmpeg answers a cancel's SIGTERM by finishing gracefully (a truncated but
+      // valid file) instead of always rejecting, so check the signal ourselves.
+      if (signal.aborted) throw new Error("Stabilize canceled");
       await runFfmpeg(pass2, { cwd: dir, signal, totalDuration: spanSec, onProgress: (f) => onProgress(0.5 + f * 0.5) });
+      if (signal.aborted) throw new Error("Stabilize canceled");
+      baked = await probeAsset(outPath);
+    } catch (err) {
+      await rm(outPath, { force: true }).catch(() => {});
+      throw err;
     } finally {
       await rm(join(dir, trfName), { force: true }).catch(() => {});
     }
-
-    const baked = await probeAsset(outPath);
     baked.name = `${asset.name} (stabilized)`;
 
     return this.mutate(() => {

@@ -13,6 +13,7 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
+import { planSegments } from "../src/ffmpeg/segments.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
 
@@ -85,6 +86,18 @@ async function main() {
     check(engine.renderStats.singlePassRenders === sp + 1, "single-pass path used when cache disabled");
   } finally {
     delete process.env.AIVE_SEGMENT_CACHE;
+  }
+
+  console.log("N. a temporal effect on an adjustment layer keeps the timeline up to its end in ONE segment...");
+  {
+    const rc = (startSec: number, outDuration: number, extra: object = {}) => ({ startSec, outDuration, ...extra }) as never;
+    const plain = [rc(0, 4), rc(4, 4), rc(8, 4)];
+    const adj = (type: string) => rc(0, 8, { adjustment: true, effects: { filters: [{ type }] } });
+    const before = planSegments(plain, 12).length;
+    const withTrails = planSegments([...plain, adj("trails")], 12);
+    const withBlur = planSegments([...plain, adj("blur")], 12);
+    check(before === 3 && withBlur.length === 3, `no temporal effect: cuts at clip edges (${before} / ${withBlur.length} segments)`);
+    check(withTrails.length === 2 && withTrails[0].start === 0 && withTrails[0].end === 8, `trails adjustment 0-8 s: first segment is 0-8 s (${JSON.stringify(withTrails)})`);
   }
 
   console.log(failures === 0 ? "\nCACHE SMOKE TEST PASSED" : `\nCACHE SMOKE TEST FAILED (${failures})`);

@@ -89,7 +89,7 @@ function keySpec(f: VisualEffect & { type: KeyKind }): KeySpec {
 }
 
 /** The key plan for a clip, or undefined when it has no (enabled) key effect. Bypassed effects are left out. */
-export function keyPlan(fx: ClipEffects | undefined): KeyPlan | undefined {
+export function keyPlan(fx: ClipEffects | undefined, scale?: number): KeyPlan | undefined {
   const filters = (fx?.filters ?? []).filter(isEnabled);
   const first = filters.findIndex((f) => isKeyEffect(f.type));
   if (first < 0) return undefined;
@@ -98,10 +98,10 @@ export function keyPlan(fx: ClipEffects | undefined): KeyPlan | undefined {
   const preVignette = vignetteAngles(filters.slice(0, first));
   const postVignette = vignetteAngles(after);
   return {
-    pre: colorFilter(fx?.color, fx?.grade, filters.slice(0, first)),
+    pre: colorFilter(fx?.color, fx?.grade, filters.slice(0, first), scale),
     ...(preVignette.length ? { preVignette } : {}),
     keys,
-    post: colorFilter(undefined, undefined, after.filter((f) => !isKeyEffect(f.type))),
+    post: colorFilter(undefined, undefined, after.filter((f) => !isKeyEffect(f.type)), scale),
     ...(postVignette.length ? { postVignette } : {}),
   };
 }

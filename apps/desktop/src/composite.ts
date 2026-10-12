@@ -18,6 +18,7 @@ import {
 import { muteGainAt } from "./mutes";
 import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
+import { previewScaleFor } from "@aive/core/effects";
 import { keyPlan, type KeyPlan } from "./keying";
 
 /** A text overlay plus its sampled animation (position/opacity) at the current frame. */
@@ -191,6 +192,7 @@ export function activeLayersAt(
   const out: ActiveClip[] = [];
   if (!project) return { clips: out };
   const fps = project.fps;
+  const pvScale = previewScaleFor(project.width, project.height);
   const t = playheadSec;
 
   const tracks = [...project.tracks].sort((a, b) => {
@@ -224,7 +226,7 @@ export function activeLayersAt(
           overlays: [],
           graphics: [],
           adjust: {
-            colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters),
+            colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters, pvScale),
             ...vignetteField(seg.clip.effects?.filters),
           },
         });
@@ -284,11 +286,11 @@ export function activeLayersAt(
           ? {
               opacity: gain * (tf?.opacity ?? 1),
               crop: seg.clip.effects?.crop,
-              colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters),
+              colorFilter: colorFilter(seg.clip.effects?.color, seg.clip.effects?.grade, seg.clip.effects?.filters, pvScale),
               assetWidth: asset!.width,
               assetHeight: asset!.height,
               transform: tf!,
-              key: keyPlan(seg.clip.effects),
+              key: keyPlan(seg.clip.effects, pvScale),
               ...vignetteField(seg.clip.effects?.filters),
             }
           : undefined,
