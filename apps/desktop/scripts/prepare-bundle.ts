@@ -6,21 +6,21 @@
  *
  * Bundling strategy = HYBRID (see docs/PROJECT_STATUS.md §5 / the Phase-5 plan):
  *   bundled here  → FFmpeg + ffprobe, whisper-cli (+ DLLs) + base.en model,
- *                   YuNet ONNX, an OSS font (Noto Sans, OFL-1.1).
+ *                   YuNet + RVM ONNX, an OSS font (Noto Sans, OFL-1.1).
  *   NOT bundled   → Remotion's Chrome Headless Shell (downloaded on first
  *                   motion-graphics use; it is large and Remotion manages its
  *                   own robust cache). Larger whisper models also download on
  *                   demand.
  *
  * The packaged app points the engine's env overrides (AIVE_FFMPEG / AIVE_FFPROBE
- * / AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL / AIVE_YUNET_MODEL / AIVE_FONT) at
+ * / AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL / AIVE_YUNET_MODEL / AIVE_RVM_MODEL / AIVE_FONT) at
  * these staged copies — see apps/desktop/electron/bundled-assets.cjs.
  *
  * Run from the repo root:  npx tsx apps/desktop/scripts/prepare-bundle.ts
  * Re-running is cheap: existing, correctly-sized files are left in place.
  *
  * We deliberately REUSE the engine's own download/setup code (ensureWhisper,
- * ensureYunetModel) so the bundled binaries are byte-identical to what the
+ * ensureYunetModel, ensureRvmModel) so the bundled binaries are byte-identical to what the
  * editor would otherwise fetch at runtime — and so the slow downloads happen at
  * most once on this machine (they are cached under ~/.aive).
  */
@@ -37,6 +37,7 @@ import { delimiter } from "node:path";
 // trips over execa's deep deps on Node 24.
 import { ensureWhisper, DEFAULT_MODEL } from "../../../packages/core/dist/whisper/setup.js";
 import { ensureYunetModel } from "../../../packages/core/dist/reframe/detector.js";
+import { ensureRvmModel } from "../../../packages/core/dist/matting/rvm.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** apps/desktop/build/resources/aive */
@@ -146,6 +147,12 @@ async function main(): Promise<void> {
   await copyIfNeeded(yunet, join(STAGE, "models", basename(yunet)));
   console.log(`  • staged ${basename(yunet)}`);
 
+  // 3b. Robust Video Matting model (GPL-3.0) for remove_background.
+  console.log("RVM:");
+  const rvm = await ensureRvmModel();
+  await copyIfNeeded(rvm, join(STAGE, "models", basename(rvm)));
+  console.log(`  • staged ${basename(rvm)}`);
+
   // 4. OSS font for drawtext/captions (Noto Sans, OFL-1.1).
   console.log("Font:");
   await download(FONT_URL, join(STAGE, "fonts", "NotoSans-Regular.ttf"), "Noto Sans Regular");
@@ -160,7 +167,7 @@ async function main(): Promise<void> {
         profile: "hybrid",
         platform: `${process.platform}-${process.arch}`,
         stagedAt: new Date().toISOString(),
-        bundled: ["ffmpeg", "ffprobe", "whisper-cli", DEFAULT_MODEL, "yunet", "noto-sans"],
+        bundled: ["ffmpeg", "ffprobe", "whisper-cli", DEFAULT_MODEL, "yunet", "rvm", "noto-sans"],
         firstRunDownload: ["remotion-chrome-headless-shell"],
       },
       null,

@@ -439,6 +439,8 @@ export function App({ api }: { api: CoreApi }) {
     run("Caption style", () => api.rpc("set_caption_style", { clipId, ...patch }));
   const autoReframe = (clipId: string) =>
     run("Auto-reframing (tracking subject)", () => api.rpc("auto_reframe", { clipId }));
+  const removeBackground = (clipId: string) =>
+    run("Removing background (AI)", () => api.rpc("remove_background", { clipId }));
   const setAudioOffset = (clipId: string, offset: number) =>
     run("Audio offset (J/L cut)", () => api.rpc("set_audio_offset", { clipId, offsetFrames: Math.round(offset * fps) }));
   const setTransform = (clipId: string, patch: Record<string, number | boolean>) =>
@@ -918,6 +920,7 @@ export function App({ api }: { api: CoreApi }) {
               onTransition={setTransition}
               onRemoveTransition={removeTransition}
               onAutoReframe={autoReframe}
+              onRemoveBackground={removeBackground}
               onAudioOffset={setAudioOffset}
               onTransform={setTransform}
               onAddKeyframe={addKeyframe}
@@ -1301,6 +1304,7 @@ type InspectorProps = {
   onTransition: (clipId: string, type: string, duration: number) => void;
   onRemoveTransition: (clipId: string) => void;
   onAutoReframe: (clipId: string) => void;
+  onRemoveBackground: (clipId: string) => void;
   onAudioOffset: (clipId: string, offset: number) => void;
   onTransform: (clipId: string, patch: Record<string, number | boolean>) => void;
   onAddKeyframe: (clipId: string, property: KeyframeProperty, value: number) => void;
@@ -1545,6 +1549,18 @@ function ClipInspector(props: InspectorProps) {
                 <Crop size={14} /> Auto-reframe to {project?.width}×{project?.height}
               </button>
               <span className="field-hint">Set the aspect ratio above the preview first (e.g. 9:16), then reframe — local face tracking keeps the subject in frame.</span>
+            </div>
+
+            <div className="group">
+              <div className="group-title"><Sparkles size={13} /> Background</div>
+              <button
+                className="btn btn-block"
+                onClick={() => props.onRemoveBackground(clip.id)}
+                disabled={!connected || busy || !asset?.hasVideo || !!asset?.isImage}
+              >
+                <Sparkles size={14} /> Remove background
+              </button>
+              <span className="field-hint">AI cutout for people (no green screen). The track below shows through — put a colour, image or video on a lower track to replace the background.</span>
             </div>
 
             {index > 0 && (

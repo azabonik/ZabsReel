@@ -15,6 +15,7 @@ export type JobType =
   | "preview"
   | "transcribe"
   | "reframe"
+  | "matte"
   | "stabilize"
   | "proxy"
   | "index_visual"

@@ -70,6 +70,7 @@ function applyBundledAssetEnv(app) {
     // whisper-cli loads its sibling DLLs from its own directory automatically.
     AIVE_WHISPER_BIN: path.join(root, "whisper", "bin", withExe("whisper-cli")),
     AIVE_YUNET_MODEL: path.join(root, "models", "face_detection_yunet_2023mar.onnx"),
+    AIVE_RVM_MODEL: path.join(root, "models", "rvm_mobilenetv3_fp32.onnx"),
     AIVE_FONT: path.join(root, "fonts", "NotoSans-Regular.ttf"),
   };
   for (const [key, file] of Object.entries(map)) {

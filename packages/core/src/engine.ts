@@ -27,6 +27,7 @@ import { findAudioOffset, type AudioSyncResult } from "./media/audiosync.js";
 import { rankTranscript, type TranscriptHit } from "./media/search.js";
 import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
+import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { renderGraphic } from "./motion/render.js";
 import {
   sortKeyframes,
@@ -3034,6 +3035,132 @@ export class EditorEngine extends EventEmitter {
     });
 
     return { clip: updated, hitRate, cropWidth: cropW, cropHeight: cropH, keyframes: keys.length };
+  }
+
+  /**
+   * AI background removal for PEOPLE (Robust Video Matting, local). Mattes the
+   * clip's used span into a transparent cutout, bakes it (FFV1 + alpha) with a
+   * VP8/alpha .webm preview proxy, and re-points the clip at it — whatever is
+   * on the track below shows through. Blocks until done; undo restores the
+   * original. `maxLongEdge` is internal (tests force the downscaled path).
+   */
+  async removeBackground(clipId: string, opts: { maxLongEdge?: number } = {}): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
+    return this.startRemoveBackgroundJob(clipId, opts).promise;
+  }
+
+  /**
+   * Start background removal as a Job and return it immediately, alongside its
+   * promise — blocking callers await `.promise`; background callers keep
+   * `.job.id` and poll list_jobs / cancel_job.
+   */
+  startRemoveBackgroundJob(
+    clipId: string,
+    opts: { maxLongEdge?: number } = {},
+  ): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> } {
+    const { clip: pre } = this.findClip(clipId);
+    const preAsset = this.requireClipAsset(pre, "background removal");
+    if (!preAsset.hasVideo || preAsset.width <= 0 || preAsset.height <= 0) {
+      throw new Error("Remove background needs a clip with a decodable video stream");
+    }
+    if (preAsset.isImage) {
+      throw new Error(
+        `Clip "${clipId}" is a still image — remove_background works on video clips. Turn the photo into a video first, or put it on a lower track as a background instead.`,
+      );
+    }
+    if (preAsset.name.endsWith(" (background removed)")) {
+      throw new Error(`Clip "${clipId}" already has its background removed. Undo first to re-run it on the original footage.`);
+    }
+    return this.jobs.start("matte", `Remove background ${preAsset.name}`, (signal, onProgress) =>
+      this.removeBackgroundRun(clipId, opts, signal, onProgress),
+    );
+  }
+
+  private async removeBackgroundRun(
+    clipId: string,
+    opts: { maxLongEdge?: number },
+    signal: AbortSignal,
+    onProgress: (fraction: number) => void,
+  ): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
+    const { clip } = this.findClip(clipId);
+    const asset = this.requireClipAsset(clip, "background removal");
+    const fps = this.project.fps;
+    const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame };
+    const spanFrames = clip.sourceOutFrame - clip.sourceInFrame;
+    const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
+    const spanSec = framesToSeconds(spanFrames, fps);
+
+    const dir = join(this.dataDir, "baked");
+    await mkdir(dir, { recursive: true });
+    // Unique per run: an earlier cutout of this clip may still be referenced by
+    // the undo history, so never overwrite it.
+    const stem = `${clipId}-cutout-${Date.now().toString(36)}`;
+    const outPath = join(dir, `${stem}.mkv`);
+    const proxyPath = join(dir, `${stem}.webm`);
+
+    let baked: MediaAsset;
+    let stats: MatteStats;
+    try {
+      // Matting is ~95% of the work; the preview proxy is the rest.
+      stats = await matteVideo({
+        input: asset.path,
+        sourceIn: sourceInSec,
+        span: spanSec,
+        srcW: asset.width,
+        srcH: asset.height,
+        fps: asset.fps || fps,
+        withAudio: asset.hasAudio,
+        outPath,
+        signal,
+        onProgress: (f) => onProgress(f * 0.95),
+        maxLongEdge: opts.maxLongEdge,
+      });
+      baked = await probeAsset(outPath);
+      baked.name = `${asset.name} (background removed)`;
+
+      // Chromium can't decode FFV1, so the live preview plays a VP8/alpha .webm
+      // proxy — WITH audio, since preview sound comes from the same element.
+      // EXPORT still composites the lossless .mkv.
+      const proxy = ["-hide_banner", "-y", "-i", outPath];
+      if (Math.max(baked.width, baked.height) > PROXY_LONG_EDGE) {
+        proxy.push("-vf", baked.width >= baked.height ? `scale=${PROXY_LONG_EDGE}:-2` : `scale=-2:${PROXY_LONG_EDGE}`);
+      }
+      proxy.push(
+        "-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0",
+        "-b:v", "3M", "-deadline", "realtime", "-cpu-used", "5",
+      );
+      if (baked.hasAudio) proxy.push("-c:a", "libopus", "-b:a", "128k", "-ar", "48000");
+      else proxy.push("-an");
+      proxy.push("-progress", "pipe:1", "-nostats", proxyPath);
+      try {
+        await runFfmpeg(proxy, { signal, totalDuration: baked.duration, onProgress: (f) => onProgress(0.95 + f * 0.05) });
+        baked.proxyPath = proxyPath;
+      } catch (err) {
+        if (signal.aborted) throw err;
+        // Best-effort: export is unaffected; record why preview can't show it.
+        await rm(proxyPath, { force: true });
+        baked.proxyError = err instanceof Error ? err.message : String(err);
+      }
+      if (signal.aborted) throw new Error("Background removal canceled");
+
+      // The clip may have been edited or deleted while the job ran.
+      const { clip: now } = this.findClip(clipId);
+      if (now.assetId !== before.assetId || now.sourceInFrame !== before.inF || now.sourceOutFrame !== before.outF) {
+        throw new Error(`Clip "${clipId}" was changed while its background was being removed — run remove_background again.`);
+      }
+    } catch (err) {
+      await rm(outPath, { force: true });
+      await rm(proxyPath, { force: true });
+      throw err;
+    }
+
+    const updated = this.mutate(() => {
+      this.project.assets.push(baked);
+      const target = this.repointClip(clipId, baked);
+      // Container duration can round one frame past the video; keep the clip's length.
+      target.sourceOutFrame = Math.min(target.sourceOutFrame, spanFrames);
+      return target;
+    });
+    return { clip: updated, asset: baked, ...stats };
   }
 
   // ---- motion graphics (Remotion) -------------------------------------------

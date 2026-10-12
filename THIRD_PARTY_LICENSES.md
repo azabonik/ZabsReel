@@ -46,8 +46,19 @@ redistribution. Packaged installers include a copy of this file.
 - **License:** Apache-2.0 — from OpenCV Zoo (© Shiqi Yu, Yuantao Feng et al.).
 - **Source:** https://github.com/opencv/opencv_zoo
 
+### Robust Video Matting model (`rvm_mobilenetv3_fp32.onnx`)
+- **Role:** local AI background removal for people (`remove_background`).
+- **License:** GPL-3.0 — from the Robust Video Matting project (Shanchuan Lin et
+  al., "Robust High-Resolution Video Matting with Temporal Guidance"). Compatible
+  with this project's GPL-3.0-or-later license.
+- **Source:** https://github.com/PeterL1n/RobustVideoMatting (release v1.0.0).
+- **Note:** dev/source builds download it once on first use into `~/.aive/models`
+  (size + SHA-256 verified); override with `AIVE_RVM_MODEL` (path to a local copy)
+  or `AIVE_MODELS_DIR`.
+
 ### ONNX Runtime (`onnxruntime-node`, incl. `onnxruntime.dll`, `DirectML.dll`)
-- **Role:** runs the YuNet face model and the CLIP semantic-search model.
+- **Role:** runs the YuNet face model, the RVM matting model and the CLIP
+  semantic-search model.
   Prebuilt native binaries (no compilation).
 - **License:** MIT — © Microsoft Corporation.
 - **Source:** https://github.com/microsoft/onnxruntime

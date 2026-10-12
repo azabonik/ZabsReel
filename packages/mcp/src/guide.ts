@@ -54,6 +54,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 ## Order of operations that matter
 - AUTO-REFRAME (16:9 → 9:16 etc.): FIRST set the target aspect with set_project_settings, THEN call auto_reframe on the clip. It face-tracks a moving crop and bakes it. Check the returned hitRate — low means few faces were found (it falls back to a centered crop); consider a different clip or manual crop_clip.
+- REMOVE BACKGROUND (people only): remove_background bakes a transparent cutout of the person (local AI matting, no green screen) and whatever is on the track BELOW shows through — put a color/image/video clip on a lower video track to replace the background. A solid green/blue backdrop → apply_effect chromakey instead (faster, exact); never use it for products, animals or objects. It's slow (~4–5× the clip length at 1080p): pass background:true for clips over ~1 min and poll list_jobs, then get_frame to check the edges.
 - Anything aspect-dependent (reframe, crop for vertical) needs the canvas set first.
 
 ## Text & captions — you choose everything

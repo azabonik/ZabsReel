@@ -520,6 +520,26 @@ export const methods = {
     },
   },
 
+  remove_background: {
+    description:
+      "AI background removal for PEOPLE — a CapCut-style auto cutout, no green screen needed (local Robust Video Matting model). Mattes the clip's used span into a transparent cutout of the person, bakes it, and re-points the clip at it. Transparent areas show the track BELOW: to REPLACE the background, put a color/image/video clip on a LOWER video track under this one; or leave the cutout on top of other footage to composite the person over it. Use ONLY for people / talking-head footage — RVM is a human-matting model and won't cleanly cut out products, cars, animals or objects; for a solid green/blue backdrop use apply_effect chromakey instead (faster and exact). First use downloads a 15 MB model to ~/.aive/models. Slow-ish: on CPU it takes roughly 4–5× the clip's length at 1080p30 (≈2.5× at 720p; a 1-min 1080p clip ≈ 4–5 min). Blocks until done and returns {clipId, assetId, frames, seconds}; for clips longer than ~1 minute pass background:true to get {jobId} immediately, then poll list_jobs / stop with cancel_job. undo restores the original clip. Verify with get_frame.",
+    schema: z.object({ clipId: z.string(), background: z.boolean().optional() }).strict(),
+    handler: async (engine, p) => {
+      if (p.background) {
+        const { job } = engine.startRemoveBackgroundJob(p.clipId);
+        return { jobId: job.id, status: job.status, label: job.label };
+      }
+      const r = await engine.removeBackground(p.clipId);
+      return {
+        clipId: r.clip.id,
+        assetId: r.asset.id,
+        frames: r.frames,
+        seconds: Number(r.seconds.toFixed(1)),
+        ...(r.asset.proxyError ? { previewWarning: `Live preview unavailable (${r.asset.proxyError}); export and get_frame are unaffected.` } : {}),
+      };
+    },
+  },
+
   clear_clip_effects: {
     description: "Remove all effects (speed, volume, fades, color, crop, transform) from a clip.",
     schema: z.object({ clipId: z.string() }).strict(),

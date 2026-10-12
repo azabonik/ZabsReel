@@ -127,6 +127,10 @@ npx tsx packages/core/scripts/smoke-captions.ts    scratch/jfk.wav
 npx tsx packages/core/scripts/smoke-reframe.ts
 npx tsx packages/core/scripts/smoke-jlcut.ts
 
+# AI background removal for people (RVM): cutout over a red V1, native + downscaled
+# paths, VP8/alpha preview proxy, undo, cancel (downloads a portrait + the 15 MB model)
+npx tsx packages/core/scripts/smoke-matte.ts
+
 # Text-based editing: word-level transcripts, delete_transcript_ranges,
 # tighten_talk, edit_by_transcript (self-contained — uses the checked-in fixture)
 npx tsx packages/core/scripts/smoke-textedit.ts
