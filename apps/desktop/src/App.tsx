@@ -15,6 +15,7 @@ import {
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
 import reloLogo from "./assets/relo-logo.png";
+import { platform } from "./platform";
 
 function fmt(seconds: number): string {
   return fmtTime(seconds);
@@ -196,12 +197,7 @@ export function App({ api }: { api: CoreApi }) {
 
   const importMedia = () =>
     run("Importing", async () => {
-      let paths: string[] = [];
-      if (window.aive) paths = await window.aive.pickFiles();
-      else {
-        const p = window.prompt("Absolute path to a media file:");
-        if (p) paths = [p];
-      }
+      const paths = await platform.pickFiles();
       for (const path of paths) await api.rpc("import_video", { path });
     });
 
@@ -299,16 +295,12 @@ export function App({ api }: { api: CoreApi }) {
     if (ok !== null) pushRecent(path);
   };
   const openProject = async () => {
-    let path: string | null = null;
-    if (window.aive) path = await window.aive.openProject();
-    else path = window.prompt("Absolute path to a .aive project:");
+    const path = await platform.openProject();
     if (path) await openProjectPath(path);
   };
   const saveProjectAs = async () => {
     setShowProjectMenu(false);
-    let path: string | null = null;
-    if (window.aive) path = await window.aive.saveProjectAs(project?.name || "Untitled");
-    else path = window.prompt("Absolute path to save (.aive):");
+    const path = await platform.saveProjectAs(project?.name || "Untitled");
     if (!path) return;
     pendingBaseline.current = true;
     const ok = await run("Saving project", () => api.rpc("save_project", { path }));
@@ -393,9 +385,7 @@ export function App({ api }: { api: CoreApi }) {
   const exportVideo = (preset?: string) => {
     setShowExport(false);
     return run("Exporting", async () => {
-      let out: string | null = null;
-      if (window.aive) out = await window.aive.pickSavePath();
-      else out = window.prompt("Absolute output path (.mp4):");
+      const out = await platform.pickSavePath();
       if (!out) return;
       const r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(preset ? { preset } : {}) });
       setError(null);
@@ -1871,7 +1861,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let alive = true;
-    window.aive?.getMcpConfig?.().then((r) => { if (alive) setInfo(r); }).catch(() => {});
+    platform.getMcpConfig().then((r) => { if (alive && r) setInfo(r); }).catch(() => {});
     return () => { alive = false; };
   }, []);
 

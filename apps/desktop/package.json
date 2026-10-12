@@ -12,6 +12,7 @@
     "start": "npm run build:renderer && electron .",
     "dev:renderer": "vite",
     "electron": "electron .",
+    "web": "node web/server.cjs",
     "prepare:bundle": "node scripts/prepare-bundle.ts",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win"

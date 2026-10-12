@@ -18,6 +18,12 @@ export class CoreApi {
   private progressCb?: (i: ProgressInfo) => void;
   private statusCb?: (connected: boolean) => void;
   private closed = false;
+  // The socket can open — and deliver the first state — before React's effects
+  // subscribe (a production bundle on a fast local server usually wins that
+  // race), so the latest status and state are kept and replayed to late
+  // subscribers instead of being dropped.
+  private connected = false;
+  private lastState: { project: Project; filePath: string | null } | null = null;
   /** Absolute .aive path of the open project, or null if never saved. */
   filePath: string | null = null;
 
@@ -33,12 +39,14 @@ export class CoreApi {
 
   onState(cb: (p: Project, filePath: string | null) => void): void {
     this.stateCb = cb;
+    if (this.lastState) cb(this.lastState.project, this.lastState.filePath);
   }
   onProgress(cb: (i: ProgressInfo) => void): void {
     this.progressCb = cb;
   }
   onStatus(cb: (connected: boolean) => void): void {
     this.statusCb = cb;
+    if (this.connected) cb(true);
   }
 
   connect(): void {
@@ -50,7 +58,10 @@ export class CoreApi {
     const ws = new WebSocket(this.wsUrl);
     this.ws = ws;
 
-    ws.onopen = () => this.statusCb?.(true);
+    ws.onopen = () => {
+      this.connected = true;
+      this.statusCb?.(true);
+    };
 
     ws.onmessage = (ev) => {
       let msg: Record<string, unknown>;
@@ -62,6 +73,7 @@ export class CoreApi {
       switch (msg.type) {
         case "state":
           this.filePath = (msg.filePath as string | null) ?? null;
+          this.lastState = { project: msg.project as Project, filePath: this.filePath };
           this.stateCb?.(msg.project as Project, this.filePath);
           break;
         case "progress":
@@ -79,6 +91,7 @@ export class CoreApi {
     };
 
     ws.onclose = () => {
+      this.connected = false;
       this.statusCb?.(false);
       if (!this.closed) setTimeout(() => this.open(), 1000);
     };

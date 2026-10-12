@@ -236,9 +236,7 @@ input[type="range"]:disabled { opacity: 0.45; }
   display: flex;
   align-items: center;
   gap: 16px;
-  /* Right padding clears the native window controls (min/max/close) that the
-     titleBarOverlay paints over the top-right of this bar. */
-  padding: 0 146px 0 14px;
+  padding: 0 14px;
   height: 52px;
   background: var(--surface-1);
   border-bottom: 1px solid var(--line);
@@ -246,6 +244,10 @@ input[type="range"]:disabled { opacity: 0.45; }
   -webkit-app-region: drag;
   user-select: none;
 }
+/* Desktop shell: right padding clears the native window controls
+   (min/max/close) that the titleBarOverlay paints over the top-right of this
+   bar. A browser tab has no overlay, so the bar keeps its normal padding. */
+.is-electron .topbar { padding-right: 146px; }
 /* Interactive elements must opt out of dragging so they stay clickable. */
 .topbar button,
 .topbar select,
@@ -979,6 +981,74 @@ input[type="range"]:disabled { opacity: 0.45; }
 }
 .copy-btn:hover { background: var(--bg); color: var(--ink); border-color: var(--line); }
 .copy-btn svg { width: 13px; height: 13px; }
+
+/* ----- Web shell: file picker (stands in for Electron's native dialogs) ---- */
+.picker,
+.session-notice {
+  position: fixed; inset: 0; margin: auto;
+  background: var(--surface-2); border: 1px solid var(--line-2); border-radius: var(--r-lg);
+  z-index: var(--z-modal); box-shadow: var(--shadow-3);
+  animation: rise var(--dur) var(--ease);
+}
+.picker {
+  width: min(880px, calc(100vw - 32px)); height: min(600px, calc(100vh - 48px));
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.picker:focus { outline: none; }
+.picker-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 10px; }
+.picker-head h3 { margin: 0; font-size: 15px; }
+.picker-bar { display: flex; align-items: center; gap: 8px; padding: 0 16px 12px; border-bottom: 1px solid var(--line); }
+.picker-path { flex: 1; min-width: 0; font: 12.5px var(--mono); }
+.picker-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); white-space: nowrap; cursor: pointer; }
+.picker-toggle input { accent-color: var(--accent); }
+.picker-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 196px 1fr; }
+.picker-places {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px; overflow-y: auto;
+  background: var(--surface-1); border-right: 1px solid var(--line);
+}
+.picker-place {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: var(--r-sm);
+  color: var(--ink-2); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.picker-place span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-place svg { flex: none; color: var(--ink-3); }
+.picker-place:hover { background: var(--surface-2); color: var(--ink); }
+.picker-place.on { background: var(--accent-soft); color: var(--ink); }
+.picker-list { overflow-y: auto; padding: 6px; background: var(--bg); }
+.picker-list:focus { outline: none; }
+.picker-list:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-line); }
+.picker-row {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) 84px 156px; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--r-sm); color: var(--ink-2); font-size: 13px;
+  cursor: default; user-select: none;
+}
+.picker-row:hover { background: var(--surface-1); }
+.picker-row.sel { background: var(--accent-soft); color: var(--ink); }
+.picker-list:focus .picker-row.cursor { box-shadow: inset 0 0 0 1px var(--accent-line); }
+.picker-icon { display: inline-grid; place-items: center; color: var(--ink-3); }
+.picker-row.dir .picker-icon { color: var(--accent); }
+.picker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-size,
+.picker-date { font-size: 12px; color: var(--ink-3); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.picker-empty { padding: 18px 10px; font-size: 13px; color: var(--ink-3); }
+.picker-error { display: flex; align-items: center; gap: 8px; padding: 12px 10px; font-size: 13px; color: var(--bad); }
+.picker-foot { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.picker-filename { flex: 1; display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-2); }
+.picker-filename input { flex: 1; min-width: 0; }
+.picker-count { flex: 1; font-size: 12.5px; }
+.picker-actions { display: flex; gap: 8px; margin-left: auto; }
+@media (max-width: 640px) {
+  .picker-body { grid-template-columns: 1fr; }
+  .picker-places { display: none; }
+  .picker-row { grid-template-columns: 20px minmax(0, 1fr) 72px; }
+  .picker-date { display: none; }
+}
+.session-notice { width: min(460px, calc(100vw - 32px)); height: fit-content; padding: 20px 22px; }
+.session-notice h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 15px; }
+.session-notice h3 svg { color: var(--warn); }
+.session-notice p { margin: 8px 0; color: var(--ink-2); font-size: 13px; line-height: 1.55; }
+.session-notice code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font: 12px var(--mono); }
 
 /* New motion-graphics clip modal (reuses .connect-panel frame). */
 .gfx-modal { width: 560px; }
