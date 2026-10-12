@@ -51,6 +51,8 @@ interface Props {
   project: Project | null;
   assetById: Map<string, MediaAsset>;
   thumbs: Record<string, string>;
+  /** Media path → URL the renderer can fetch (the core's /file route); the waveform decoder needs it. */
+  fileUrl: (path: string) => string;
   store: PlaybackStore;
   selectedClip: string | null;
   justUpdated: boolean;
@@ -101,7 +103,7 @@ type Drag =
 
 export function Timeline(props: Props) {
   const {
-    project, assetById, thumbs, store, selectedClip, justUpdated, connected,
+    project, assetById, thumbs, fileUrl, store, selectedClip, justUpdated, connected,
     music, musicAsset, onSelectClip, onSeek, onSplit, onMoveClip, onTrimClip,
     onRemove, onRippleDelete, onSetTrack, onAddTrack, onRemoveTrack, onSetElementWindow,
     onSetMarkers, selectedBleep, onSelectBleep, onSetBleepWindow,
@@ -524,6 +526,7 @@ export function Timeline(props: Props) {
                     <ClipBlock
                       key={seg.clip.id} seg={seg} track={t} pps={pps} fps={fps} rowH={h}
                       thumb={seg.asset ? thumbs[seg.asset.id] : undefined}
+                      fileUrl={fileUrl}
                       selected={selectedClip === seg.clip.id}
                       drag={drag}
                       onBodyDown={(e) => startMove(e, t, seg)}
@@ -656,10 +659,10 @@ function clipPeaks(seg: Segment): Float32Array | null {
 
 // ---------------------------------------------------------------------------
 function ClipBlock({
-  seg, track, pps, fps, rowH, thumb, selected, drag, onBodyDown, onTrimDown, onSplit, onRipple, onRemove, onSelect,
+  seg, track, pps, fps, rowH, thumb, fileUrl, selected, drag, onBodyDown, onTrimDown, onSplit, onRipple, onRemove, onSelect,
   selectedBleepId, onSelectBleep, onSetBleepWindow, secAtClientX, customDuration,
 }: {
-  seg: Segment; track: Track; pps: number; fps: number; rowH: number; thumb?: string; selected: boolean;
+  seg: Segment; track: Track; pps: number; fps: number; rowH: number; thumb?: string; fileUrl: (path: string) => string; selected: boolean;
   drag: Drag | null;
   onBodyDown: (e: ReactPointerEvent) => void;
   onTrimDown: (e: ReactPointerEvent, edge: "l" | "r") => void;
@@ -674,7 +677,8 @@ function ClipBlock({
   // Waveforms on audio clips (audio tracks or audio-only assets). Video clips
   // show a thumbnail instead — no need to fetch/decode large video files.
   const wantWave = isAudio || (!!seg.asset && !seg.asset.hasVideo);
-  const peaks = usePeaks(wantWave ? seg.path : undefined);
+  // A raw path is not fetchable from the web shell's origin (or a Windows path from file://): use the core's URL.
+  const peaks = usePeaks(wantWave && seg.path ? fileUrl(seg.path) : undefined);
   useEffect(() => { if (peaks && seg.asset) segPeaksCache.set(seg.asset, peaks); }, [peaks, seg.asset]);
 
   // Live position/size while this clip is being dragged or trimmed.

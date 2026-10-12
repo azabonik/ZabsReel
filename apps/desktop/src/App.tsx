@@ -86,6 +86,7 @@ export function App({ api }: { api: CoreApi }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const fileUrlFor = useCallback((path: string) => api.fileUrl(path), [api]);
   const [showConnect, setShowConnect] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
   const [scopes, setScopes] = useState<ColorInspection | null>(null);
@@ -1077,6 +1078,7 @@ export function App({ api }: { api: CoreApi }) {
         project={project}
         assetById={assetById}
         thumbs={thumbs}
+        fileUrl={fileUrlFor}
         store={store}
         selectedClip={selectedClip}
         justUpdated={justUpdated}
