@@ -17,6 +17,7 @@ import { EDITING_GUIDE, PLATFORM_INSTRUCTIONS, PLATFORM_PRESETS } from "./guide.
 // Tools that only read state / analyze — hint this to clients.
 const READ_ONLY = new Set([
   "get_state", "timeline_summary", "analyze_silence", "analyze_scenes", "generate_thumbnail", "get_frame",
+  "storage_report",
 ]);
 
 // Tools whose result `{ path }` is an image file we should hand back to the
@@ -105,7 +106,7 @@ async function main(): Promise<void> {
         inputSchema: shape,
         annotations: READ_ONLY.has(name)
           ? { readOnlyHint: true }
-          : { readOnlyHint: false, destructiveHint: name === "remove_clip" || name === "remove_asset" },
+          : { readOnlyHint: false, destructiveHint: name === "remove_clip" || name === "remove_asset" || name === "clean_up_storage" },
       },
       async (args: Record<string, unknown>, extra) => {
         // Forward core progress as MCP progress notifications while this call runs.

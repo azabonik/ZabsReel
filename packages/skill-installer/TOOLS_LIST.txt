@@ -1,4 +1,4 @@
-SynthCut AI Video Editor — Full Tool List (113 tools)
+SynthCut AI Video Editor — Full Tool List (116 tools)
 =====================================================
 
 IMPORT & PROJECT
@@ -152,3 +152,9 @@ INTERCHANGE
 --------------
 112. export_otio — Export the timeline as an OpenTimelineIO file for professional NLEs (DaVinci Resolve, Hiero, RV).
 113. import_otio — Import an OpenTimelineIO file as the current project.
+
+STORAGE
+----------
+114. storage_report — Disk usage per data-dir area (bakes, proxies, trash, caches) and a dry run of which unused baked/proxy files a clean-up would move to the trash, and why.
+115. clean_up_storage — Move unused baked/proxy files to the trash now (opening a project restores what it needs) and delete expired trash; emptyTrash deletes the trash for good; forgetMissing forgets project files that are gone.
+116. remember_projects — Record existing .aive/.otio files (such as the recent projects) so the clean-up keeps the baked files they use.

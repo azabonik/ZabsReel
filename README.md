@@ -294,6 +294,19 @@ The desktop UI talks to the `core` backend (`127.0.0.1:4791` by default) over a 
 
 This most commonly happens when a **second core process** (e.g. one spawned by an MCP client) starts up and rotates the auth token while the desktop window is still open with the old one — every reconnect attempt then gets rejected. Closing and reopening the app picks up the live token again.
 
+### The data folder uses a lot of disk space
+
+Bakes are stored in `~/.synthcut/data/baked/` (a remove-background cutout is lossless, about 0.9 GB per minute of 1080p; stabilize, auto-reframe, freeze frame, reverse, smooth slow motion and motion graphics bake there too) and preview proxies in `~/.synthcut/data/proxies/`. SynthCut cleans these up by itself, at startup, after saves and bakes, and when you open or start a project:
+
+- A file that the open project, its undo history, a project file SynthCut has saved or opened (listed in `~/.synthcut/data/projects.json`) or an autosave still uses is kept.
+- Any other file older than 1 hour is **moved** to a `.trash` folder next to it, not deleted. A bake stays while its asset is in the project's library or undo can still bring it back. For example, when you undo remove background and run it again, the previous cutout moves to the trash once the undo history no longer holds it; removing a baked asset from the library frees its file the same way.
+- While a project file SynthCut knows about can't be read (for example, it is on an unplugged drive, or it was moved or deleted), nothing is moved to the trash. After 7 days without it, SynthCut forgets that file; **Storage…** can also forget it at once.
+- Opening a project moves any file it needs back out of the trash, so a `.aive` you copied or moved elsewhere still works. Each clean-up also moves back a trashed file that a known project still uses.
+- Trash older than 7 days is deleted (`AIVE_BAKED_TRASH_DAYS` changes this).
+- Files that were already there before SynthCut started keeping `projects.json` are only moved when you ask for a clean-up, because an older project could still use them. SynthCut records the projects in your Recent list, so their files are kept. **Empty trash** puts such older files in the trash for 7 days instead of deleting them.
+
+**Project → Storage…** shows the space each area uses, the unused files and the trash, with **Clean up now** and **Empty trash**. An AI client can do the same with the `storage_report` and `clean_up_storage` tools.
+
 ## License
 
 **GNU General Public License v3.0 (or later)** — see [LICENSE](LICENSE). This fork is a modified version of [SynthCut by Relo](https://github.com/Relo-video/SynthCut) and keeps its copyright and license notices. You are free to use, study, share, and modify this software; derivative works that you distribute must also be released under the GPL-3.0 and include their source. Only permissively licensed (MIT/Apache/BSD) **models** are bundled; AGPL and non-commercial models are intentionally excluded.

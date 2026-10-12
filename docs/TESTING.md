@@ -92,6 +92,23 @@ npx tsx packages/core/scripts/smoke-security.ts
 # Jobs: background export with progress, cancel_job (partial file deleted), crash-recovery surfacing
 npx tsx packages/core/scripts/smoke-jobs.ts
 
+# Storage clean-up of baked/ + proxies/ (auto-trash, restore on load; temp dirs,
+# no downloads): files named by the open project, its undo history, a saved .aive
+# outside the data dir, an autosave or a longer string survive; old orphans (and a
+# stale .work dir) go to .trash/, a young one stays; a file outside the data dir,
+# a sibling baked2/ dir and symlinks are never touched; storage_report's dry run
+# == what clean_up_storage moves; automatic runs skip files older than the
+# known-projects list; nothing runs while a job runs; load() of a copied .aive
+# moves its files back out of the trash; trash retention + emptyTrash; a corrupt
+# projects.json; a symlinked proxies/; the debounced auto run; a known project
+# that is missing (unplugged drive), unreadable, half-written or hangs pauses
+# clean-up until it is back, the retention period passes or forgetMissing; an
+# unreadable autosave pauses too; save() never waits for a hung read; a trashed
+# file a project names again is moved back, never deleted; emptyTrash keeps the
+# pre-tracking files it moves; remember_projects; percent-encoded file: URLs and
+# relative paths count as references
+npx tsx packages/core/scripts/smoke-storage.ts
+
 # Segment render cache: incremental previews (tail edit re-renders only the tail),
 # single-segment get_frame, single-pass fallback (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-cache.ts

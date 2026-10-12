@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { EditorEngine } from "./engine.js";
 import { EditorServer } from "./server.js";
 import { checkBinaries } from "./ffmpeg/executor.js";
@@ -12,7 +12,8 @@ import { pruneDataDir } from "./gc.js";
  * launcher can capture it; also writes it to <dataDir>/server.json.
  */
 async function main(): Promise<void> {
-  const dataDir = process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data");
+  // Absolute, so every path the engine stores under it (bakes, proxies) is too.
+  const dataDir = resolve(process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data"));
   const port = process.env.AIVE_PORT ? Number(process.env.AIVE_PORT) : undefined;
 
   try {
@@ -36,6 +37,10 @@ async function main(): Promise<void> {
         console.error(`[aive-core] gc: removed ${r.deletedFiles} cached files (${(r.freedBytes / 1e6).toFixed(1)} MB)`);
     })
     .catch(() => {});
+  // Move unused baked/proxy files to their area's .trash/ and delete trash older
+  // than AIVE_BAKED_TRASH_DAYS (storage.ts). No project is open yet, so this
+  // relies on <dataDir>/projects.json and the autosaves. Never blocks startup.
+  void engine.storage.cleanUp({ auto: true }).catch(() => {});
 
   console.error(`[aive-core] listening on http://127.0.0.1:${boundPort}`);
   console.error(`[aive-core] data dir: ${dataDir}`);

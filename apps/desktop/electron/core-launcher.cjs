@@ -16,7 +16,7 @@ const path = require("node:path");
 const require_ = createRequire(__filename);
 
 function getDataDir() {
-  return process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".synthcut", "data");
+  return path.resolve(process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".synthcut", "data"));
 }
 
 function coreCliPath() {

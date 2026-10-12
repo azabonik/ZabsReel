@@ -6,6 +6,7 @@ import { join, dirname, basename, isAbsolute, resolve, sep } from "node:path";
 import { newId } from "./ids.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
+import { StorageJanitor } from "./storage.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
   detectSilence,
@@ -470,11 +471,20 @@ export class EditorEngine extends EventEmitter {
    * and extracted again on load. Live assets carry a `transcriptIndexed` marker.
    */
   private assetCaches = new Map<string, { transcript?: AssetTranscript; visualSig?: VisualSignature }>();
+  /** Housekeeping for baked/ + proxies/: trash unused files, restore them on load (see storage.ts). */
+  readonly storage: StorageJanitor;
+  /** Files the last load()/importOtio() moved back out of the storage trash. */
+  lastRestoredFromTrash: string[] = [];
 
   /** Directory where previews, thumbnails and other render artifacts are written. */
   constructor(readonly dataDir: string) {
     super();
+    this.storage = new StorageJanitor(dataDir, {
+      liveProjects: () => [this.project, ...this.undoStack, ...this.redoStack],
+      runningJobs: () => this.jobs.list(true),
+    });
     this.jobs.on("job", (job) => this.emit("job", job));
+    this.jobs.on("job", (job) => this.storage.onJob(job));
     // Crash recovery: 30s after the first unsaved change, snapshot the project
     // to <dataDir>/autosave/current.aive.recovery (cheap — it's JSON). An
     // explicit save clears it. If a previous session left one behind, surface
@@ -5337,6 +5347,9 @@ export class EditorEngine extends EventEmitter {
     await this.clearRecoverySnapshot();
     // Re-emit so clients pick up the new name / file path in the state envelope.
     this.emit("change", this.project);
+    // Its baked files stay in use while this file exists (storage clean-up).
+    await this.storage.remember(path);
+    this.storage.schedule();
   }
 
   async load(path: string): Promise<Project> {
@@ -5345,6 +5358,8 @@ export class EditorEngine extends EventEmitter {
     if (!loaded.tracks || !Array.isArray(loaded.assets)) {
       throw new Error("File is not a valid .aive project");
     }
+    // Bring back any baked/proxy file it names that a clean-up moved to the trash.
+    this.lastRestoredFromTrash = await this.storage.restore(loaded);
     this.undoStack = [];
     this.redoStack = [];
     this.project = migrateProject(loaded);
@@ -5367,6 +5382,8 @@ export class EditorEngine extends EventEmitter {
     this.project.revision += 1;
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
+    await this.storage.remember(path);
+    this.storage.schedule();
     return this.project;
   }
 
@@ -5379,6 +5396,8 @@ export class EditorEngine extends EventEmitter {
     const timeline = projectToOtio(this.serializableProject());
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(timeline, null, 2), "utf8");
+    // Another NLE may now use the baked files it names: keep them (storage clean-up).
+    await this.storage.remember(path);
     return { path, trackCount: this.project.tracks.length, clipCount: this.clipCount() };
   }
 
@@ -5396,6 +5415,7 @@ export class EditorEngine extends EventEmitter {
     } catch {
       throw new Error(`"${basename(path)}" is not valid JSON. OTIO files are plain JSON — check the export from the other tool.`);
     }
+    this.lastRestoredFromTrash = await this.storage.restore(json);
     const result = await otioToProject(json, async (mediaPath) => {
       try {
         return await probeAsset(mediaPath);
@@ -5425,6 +5445,8 @@ export class EditorEngine extends EventEmitter {
     this.project.revision += 1;
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
+    await this.storage.remember(path);
+    this.storage.schedule();
     return { project: this.project, warnings: result.warnings, missing: result.missing };
   }
 
@@ -5438,6 +5460,7 @@ export class EditorEngine extends EventEmitter {
     this.project = defaultProject();
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
+    this.storage.schedule();
   }
 }
 

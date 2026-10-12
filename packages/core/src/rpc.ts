@@ -1506,7 +1506,8 @@ export const methods = {
     handler: async (engine, p) => {
       const autosaved = await engine.autoSaveIfDirty();
       const r = await engine.importOtio(p.path);
-      return { project: r.project, warnings: r.warnings, missing: r.missing, autosaved };
+      const restored = engine.lastRestoredFromTrash;
+      return { project: r.project, warnings: r.warnings, missing: r.missing, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}) };
     },
   },
 
@@ -1538,7 +1539,8 @@ export const methods = {
     handler: async (engine, p) => {
       const autosaved = await engine.autoSaveIfDirty();
       const project = await engine.load(p.path);
-      return { project, autosaved };
+      const restored = engine.lastRestoredFromTrash;
+      return { project, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}) };
     },
   },
 
@@ -1550,6 +1552,28 @@ export const methods = {
       engine.reset();
       return { project: engine.getProject(), autosaved };
     },
+  },
+
+  // ---- storage housekeeping (baked/ + proxies/, see storage.ts) ---------------
+  storage_report: {
+    description:
+      "Disk usage of SynthCut's data dir and what a clean-up would do — a DRY RUN, nothing is moved. Bakes (remove_background cutouts are lossless, ~0.9 GB per minute of 1080p; stabilize, auto_reframe, freeze_frame, reverse_clip, smooth_slow_motion, motion graphics) live in baked/, preview proxies in proxies/. Returns usage per area {baked, proxies, trash, cache, previews, frames, masks, other} in bytes + human sizes; wouldTrash = the unused files an explicit clean_up_storage would move to the trash now, each with size and why (not named by the open project, its undo history, any known .aive/.otio file or the autosaves, and older than the 1 h grace period); predatesTracking = how many of them were made before SynthCut began tracking project files, so an older project not opened since may still use them (tell the user before cleaning up); gracePeriod = unused but too new to move; trash = what is in the trash, with age (deleted for good after settings.trashDays) and inUse (a project names it again: the next clean-up moves it back); emptyTrash = what clean_up_storage {emptyTrash:true} would delete for good; unavailableProjects = known project files that can't be read (pausesCleanUp: nothing is moved to the trash meanwhile); blockedBy = running jobs that pause clean-up. Use it when the user asks why the disk is full or before clean_up_storage.",
+    schema: empty,
+    handler: async (engine) => engine.storage.report(),
+  },
+
+  clean_up_storage: {
+    description:
+      "Run the storage clean-up now: moves the unused baked/proxy files listed by storage_report.wouldTrash into a .trash folder (reversible — opening a project with load_project/import_otio automatically moves back any file it needs, no restore tool needed) and deletes trash older than the retention period (default 7 days). Keeps everything the open project, its undo/redo history, known project files or autosaves reference, and anything newer than 1 h; a trashed file one of them names again is moved back (restored). Unlike the automatic runs, it ALSO moves files made before SynthCut began tracking project files (storage_report.predatesTracking), which a project not opened since may still use — say so to the user first. While a known project file can't be read (unplugged drive, moved or deleted file), nothing is moved to the trash; forgetMissing:true first forgets those project files — only when the user confirms they are gone. Does nothing while a job is running (returns skipped). emptyTrash:true ALSO deletes the trash for good afterwards, including what this run just moved, except files made before tracking (they stay in the trash for the retention period, keptInTrash) — only when the user explicitly asks to free the space now. Returns {moved, movedBytes, restored, purged, freedBytes, keptInTrash, forgotProjects, failed, kept, trashBytes, warnings}. Moving to the trash frees no space until it is emptied.",
+    schema: z.object({ emptyTrash: z.boolean().optional(), forgetMissing: z.boolean().optional() }).strict(),
+    handler: async (engine, p) => engine.storage.cleanUp({ emptyTrash: p.emptyTrash ?? false, forgetMissing: p.forgetMissing ?? false }),
+  },
+
+  remember_projects: {
+    description:
+      "Record .aive/.otio project files (for example the recent-projects list, or project files the user mentions) as known projects, so the storage clean-up keeps the baked/proxy files they use. Saving, opening and exporting already record their file; use this for projects made before SynthCut tracked project files. Paths that don't exist or aren't .aive/.otio files are skipped (returned in skipped). Returns {added, skipped, knownProjects}.",
+    schema: z.object({ paths: z.array(z.string().min(1)).max(500) }).strict(),
+    handler: async (engine, p) => engine.storage.rememberMany(p.paths),
   },
 } satisfies Record<string, RpcMethod>;
 

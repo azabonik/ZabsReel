@@ -22,6 +22,7 @@ import { BlendSelect, MaskGroup, effectiveBlendModeOf, type MaskPatch } from "./
 import type { BlendMode } from "@aive/core/compositing";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
+import { StorageDialog } from "./storagedialog";
 
 function fmt(seconds: number): string {
   return fmtTime(seconds);
@@ -102,6 +103,8 @@ export function App({ api }: { api: CoreApi }) {
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [showStorage, setShowStorage] = useState(false);
+  const closeStorage = useCallback(() => setShowStorage(false), []);
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("aive.recent") || "[]"); } catch { return []; }
   });
@@ -347,6 +350,15 @@ export function App({ api }: { api: CoreApi }) {
     }, 4000);
     return () => clearTimeout(t);
   }, [dirty, projectPath, connected, api]);
+
+  // Once per session, tell the storage clean-up about the recent projects, so
+  // the baked files of a project made before it tracked project files are kept.
+  const recentsRemembered = useRef(false);
+  useEffect(() => {
+    if (!connected || recentsRemembered.current || recents.length === 0) return;
+    recentsRemembered.current = true;
+    api.rpc("remember_projects", { paths: recents }).catch(() => {});
+  }, [connected, recents, api]);
 
   // Ctrl/⌘+S saves (separate listener so it works even while a field is focused).
   useEffect(() => {
@@ -635,6 +647,7 @@ export function App({ api }: { api: CoreApi }) {
                   <button role="menuitem" className="proj-menu-item" onClick={openProject}><Import size={13} /> Open…</button>
                   <button role="menuitem" className="proj-menu-item" onClick={saveProject}><Check size={13} /> Save<span className="menu-kbd">Ctrl+S</span></button>
                   <button role="menuitem" className="proj-menu-item" onClick={saveProjectAs}><Export size={13} /> Save As…</button>
+                  <button role="menuitem" className="proj-menu-item" onClick={() => { setShowProjectMenu(false); setShowStorage(true); }}><Trash size={13} /> Storage…</button>
                   {recents.length > 0 && (
                     <>
                       <div className="proj-menu-head">Recent</div>
@@ -668,6 +681,8 @@ export function App({ api }: { api: CoreApi }) {
           <ConnectPanel onClose={() => setShowConnect(false)} />
         </>
       )}
+
+      {showStorage && <StorageDialog api={api} onClose={closeStorage} />}
 
 
       {exactSrc && (
