@@ -578,6 +578,13 @@ input[type="range"]:disabled { opacity: 0.45; }
 .group-title svg { color: var(--ink-4); }
 .group-title .reset-all { margin-left: auto; }
 
+/* The selected bleep (timeline chip) — shown above the tabs' content. */
+.bleep-panel { padding: 10px 11px 12px; border: 1px solid rgba(245, 180, 84, 0.45); border-radius: var(--r-sm); background: rgba(245, 180, 84, 0.07); }
+.bleep-panel .group-title > svg { color: var(--warn); }
+.bleep-panel .bleep-close { margin-left: auto; width: 22px; height: 22px; }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+.check-row input { accent-color: var(--accent); width: 14px; height: 14px; }
+
 /* number field rows */
 .dual { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
 .field { display: flex; flex-direction: column; gap: 5px; }
@@ -918,6 +925,27 @@ input[type="range"]:disabled { opacity: 0.45; }
 .tl-clip.ghosted { opacity: 0.4; }
 
 .tl-trim { position: absolute; top: 0; bottom: 0; width: 8px; z-index: 2; cursor: ew-resize; }
+
+/* Bleep chips: one per visible bleep, along the clip's bottom edge at the window
+   it mutes. Above the trim handles so a bleep at a clip edge stays grabbable. */
+.tl-clip.has-bleeps .tl-clip-body { bottom: 12px; }
+.tl-bleep {
+  position: absolute; bottom: 1px; height: 11px; min-width: 6px; box-sizing: border-box; z-index: 3;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  border-radius: 3px; cursor: grab; touch-action: none;
+  background: linear-gradient(#ffcf6b, var(--warn));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25), 0 1px 2px rgba(0, 0, 0, 0.55);
+  color: #1b1405; font-size: 9px; line-height: 1;
+}
+.tl-bleep:active { cursor: grabbing; }
+.tl-bleep.locked { cursor: pointer; }
+.tl-bleep.unmuted { background: linear-gradient(#ffe2a6, #e9c37a); opacity: 0.85; }
+.tl-bleep.selected { box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px var(--accent), 0 1px 2px rgba(0, 0, 0, 0.55); z-index: 4; }
+.tl-bleep-glyph { pointer-events: none; white-space: nowrap; }
+.tl-bleep-h { position: absolute; top: 0; bottom: 0; width: 4px; cursor: ew-resize; }
+.tl-bleep-h.l { left: 0; }
+.tl-bleep-h.r { right: 0; }
+.tl-bleep.locked .tl-bleep-h { cursor: pointer; }
 .tl-trim.l { left: 0; }
 .tl-trim.r { right: 0; }
 .tl-clip:hover .tl-trim::after, .tl-clip.selected .tl-trim::after {

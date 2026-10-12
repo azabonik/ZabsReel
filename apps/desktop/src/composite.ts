@@ -15,6 +15,8 @@ import { clipDurationFrames } from "./types";
 import {
   buildSegments, colorFilter, fadeOpacity, sourceTimeFor, type Segment,
 } from "./playback";
+import { muteGainAt } from "./mutes";
+import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
 import { keyPlan, type KeyPlan } from "./keying";
 
@@ -92,6 +94,13 @@ export interface ActiveClip {
   graphics: RenderGraphic[];
   /** Active caption cue at this instant (drawable clips only). */
   caption?: { text: string; style?: TextStyle };
+  /**
+   * Bleep sound effect layer (expanded from its parent clip's bleeps): play from
+   * `srcTime` at rate 1 — the SFX keeps its pitch whatever the clip speed.
+   * `preroll` = starts within the next moment: bind + park the decoder at 0 but
+   * keep it paused, so the sound starts on time.
+   */
+  bleep?: { parentClipId: string; bleepId: string; preroll?: boolean };
   /**
    * Present for an ADJUSTMENT layer active at this instant: its CSS color-proxy
    * filter, to be applied to the composite of every layer below (the renderer
@@ -270,7 +279,7 @@ export function activeLayersAt(
             }
           : undefined,
         audio: audible
-          ? { volume: clamp01(vol) * gain }
+          ? { volume: clamp01(vol) * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime) }
           : undefined,
         overlays: drawable ? activeOverlays(seg.clip.overlays, localFrames) : [],
         graphics,
@@ -279,5 +288,75 @@ export function activeLayersAt(
     }
   }
 
+  // Bleep sound effects: derived from every clip's bleeps (so they sit wherever
+  // the clip is now), independent of the parent segment being under the playhead
+  // (an audio slip can move them past the picture's edges).
+  for (const b of bleepLayersOf(project)) {
+    if (t >= b.layer.start - BLEEP_PREROLL_SEC && t < b.layer.start + b.layer.sfxDuration) {
+      const preroll = t < b.layer.start;
+      out.push({
+        clipId: `bleep:${b.clipId}:${b.layer.bleepId}`,
+        trackIndex: b.trackIndex,
+        trackKind: "audio",
+        assetName: "Bleep",
+        path: b.path,
+        srcTime: preroll ? 0 : t - b.layer.start,
+        rate: 1,
+        gain: 1,
+        audio: preroll ? undefined : { volume: clamp01(b.layer.volume) },
+        overlays: [],
+        graphics: [],
+        bleep: { parentClipId: b.clipId, bleepId: b.layer.bleepId, preroll },
+      });
+    }
+  }
+
   return { clips: out };
+}
+
+/** How early a bleep's decoder is bound and parked at 0 before it sounds. */
+const BLEEP_PREROLL_SEC = 0.6;
+
+/** An audible bleep layer resolved to the file the preview plays. */
+export interface PlacedBleep {
+  clipId: string;
+  trackIndex: number;
+  layer: BleepLayer;
+  path: string;
+}
+
+const bleepCache = new WeakMap<Project, PlacedBleep[]>();
+
+/**
+ * Every audible bleep sound effect in the project, mirroring the engine's
+ * stageRender: unmuted tracks, clips with audio that aren't silenced (volume
+ * 0), a playable sound file (built-in SFX asset or the custom asset). Cached
+ * per project object (state updates replace it).
+ */
+export function bleepLayersOf(project: Project): PlacedBleep[] {
+  const hit = bleepCache.get(project);
+  if (hit) return hit;
+  const out: PlacedBleep[] = [];
+  const assets = new Map(project.assets.map((a) => [a.id, a]));
+  const builtin = new Map(project.assets.filter((a) => a.builtinSfx).map((a) => [a.builtinSfx!, a]));
+  const customDuration = (id: string) => {
+    const a = assets.get(id);
+    return a?.hasAudio ? a.duration : undefined;
+  };
+  for (const track of project.tracks) {
+    if (track.muted) continue;
+    for (const clip of track.clips) {
+      if (!clip.effects?.bleeps?.length || clip.effects.volume === 0) continue;
+      const asset = clip.assetId ? assets.get(clip.assetId) : undefined;
+      if (!asset?.hasAudio) continue;
+      for (const layer of expandBleeps(clip, project.fps, customDuration)) {
+        if (layer.sfxDuration <= 0) continue;
+        const sfx = layer.sfxAssetId ? assets.get(layer.sfxAssetId) : builtin.get(layer.sound);
+        if (!sfx?.hasAudio) continue;
+        out.push({ clipId: clip.id, trackIndex: track.index, layer, path: sfx.path });
+      }
+    }
+  }
+  bleepCache.set(project, out);
+  return out;
 }

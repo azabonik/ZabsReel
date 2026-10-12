@@ -86,6 +86,11 @@ export interface MediaAsset {
    * re-import or relink the file, or remove_asset it.
    */
   missing?: boolean;
+  /**
+   * Set on the synthesized bleep sound effects auto-bleep imports (one asset
+   * per sound, reused by every bleep). Lets clients find the WAV to preview.
+   */
+  builtinSfx?: BleepSound;
   /** Cached perceptual visual fingerprint. Same engine-cache lifecycle as `transcript`. */
   visualSig?: VisualSignature;
 }
@@ -418,6 +423,37 @@ export interface ClipEffects {
   transform?: Transform;
   /** Static opacity 0..1 (multiplies fades + any opacity keyframes). Default 1. */
   opacity?: number;
+  /**
+   * Bleeps censoring this clip's audio (bleep_words / add_bleep). Stored in the
+   * clip's SOURCE time, so they follow the clip through moves, trims, splits and
+   * speed changes; expanded to timeline sound effects + mutes at render time by
+   * audio/bleeps.ts. Never atempo'd — the SFX keeps its pitch at any speed.
+   */
+  bleeps?: Bleep[];
+}
+
+/** Built-in bleep sound effects (synthesized, see audio/sfx.ts). */
+export type BleepSound = "beep" | "quack" | "squeak" | "boing" | "honk";
+
+/**
+ * One censored window of a clip's audio. `start`/`end` are SOURCE (asset)
+ * seconds of the muted window with padding already applied.
+ */
+export interface Bleep {
+  /** Unique within its clip. */
+  id: string;
+  start: number;
+  end: number;
+  /** Built-in sound (default "beep"). */
+  sound?: BleepSound;
+  /** Custom sound: an imported audio asset (overrides `sound`). */
+  sfxAssetId?: string;
+  /** SFX gain (default 0.8). */
+  volume?: number;
+  /** Silence the original audio under the window (default true). */
+  mute?: boolean;
+  /** The matched text, for display. */
+  word?: string;
 }
 
 /**
@@ -609,6 +645,12 @@ export interface ResolvedRenderClip {
   graphics?: ResolvedGraphic[];
   /** Audio slide vs. video in seconds (J/L cuts). */
   audioOffset?: number;
+  /**
+   * A bleep sound effect expanded from its parent clip (audio/bleeps.ts): an
+   * audio-only layer mixed as its own run — never joined to a transition run
+   * or the video graph. `startSec` already includes the parent's audio slip.
+   */
+  sfx?: boolean;
 }
 
 /** A keyframe with its time resolved to clip-local SECONDS (for FFmpeg `T` expressions). */
@@ -636,6 +678,8 @@ export interface ResolvedEffects {
   opacity?: number;
   /** Keyframe tracks with times resolved to clip-local seconds. */
   keyframes?: Partial<Record<KeyframeProperty, ResolvedKeyframe[]>>;
+  /** Source-time mutes (asset seconds) derived from the clip's bleeps (audio/bleeps.ts). */
+  mutes?: Array<{ start: number; end: number }>;
 }
 
 /**

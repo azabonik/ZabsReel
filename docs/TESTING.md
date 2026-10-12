@@ -131,6 +131,11 @@ npx tsx packages/core/scripts/smoke-jlcut.ts
 # AI background removal for people (RVM): cutout over a red V1, native + downscaled
 # paths, VP8/alpha preview proxy, undo, cancel (downloads a portrait + the 15 MB model)
 npx tsx packages/core/scripts/smoke-matte.ts
+# Auto-bleep: matcher, synthesized SFX, bleeps that follow their clip (move, trim,
+# split, speed, audio slip), set/add/remove_bleep, undo — all checked on exported
+# audio (self-contained: synthesizes its own media, injects a fake transcript).
+# smoke-composite.ts checks the renderer's bleep expansion against the core's.
+npx tsx packages/core/scripts/smoke-bleep.ts
 
 # Text-based editing: word-level transcripts, delete_transcript_ranges,
 # tighten_talk, edit_by_transcript (self-contained — uses the checked-in fixture)

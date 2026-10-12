@@ -49,6 +49,8 @@ export interface MediaAsset {
   proxyError?: string;
   /** Present once visually indexed (shape mirrors core; not needed in detail by the UI). */
   visualSig?: { samples: unknown[]; bins: number };
+  /** Set on the synthesized bleep sound effect assets (one per sound). */
+  builtinSfx?: BleepSound;
 }
 
 export interface ColorAdjust {
@@ -122,7 +124,27 @@ export interface ColorInspection {
   scopes: { histogram: string; waveform: string; vectorscope: string };
 }
 
+/** Built-in bleep sounds (mirrors core). */
+export type BleepSound = "beep" | "quack" | "squeak" | "boing" | "honk";
+
+/** A bleep on a clip: a muted window in SOURCE (asset) seconds + the sound played there. */
+export interface Bleep {
+  id: string;
+  start: number;
+  end: number;
+  sound?: BleepSound;
+  /** Custom sound asset (overrides `sound`). */
+  sfxAssetId?: string;
+  /** SFX gain (default 0.8). */
+  volume?: number;
+  /** Silence the original under the window (default true). */
+  mute?: boolean;
+  word?: string;
+}
+
 export interface ClipEffects {
+  /** Bleeps censoring this clip (source seconds; follow the clip through every edit). */
+  bleeps?: Bleep[];
   speed?: number;
   volume?: number;
   fadeInFrames?: number;

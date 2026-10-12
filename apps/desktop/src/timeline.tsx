@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
-import type { Marker, MediaAsset, MusicSettings, Project, Track } from "./types";
+import type { Clip, Marker, MediaAsset, MusicSettings, Project, Track } from "./types";
 import { clipDurationFrames } from "./types";
 import {
   buildSegments, fmtTime, tickInterval, usePlaybackValue,
@@ -17,6 +17,7 @@ import {
 } from "./playback";
 import { timelineDurationSec } from "./composite";
 import { usePeaks, peakRange } from "./waveform";
+import { BLEEP_MIN_WINDOW, BLEEP_SOUND_LABELS, bleepGlyph, expandBleeps, type BleepLayer } from "./bleeps";
 import {
   Captions, Eye, EyeOff, Lock, Music, Plus, Scissors, Sparkles, Type,
   Volume, VolumeX, Waveform, X, ZoomIn, ZoomOut,
@@ -68,6 +69,14 @@ interface Props {
   onRemoveTrack: (trackIndex: number) => void;
   /** Persist the timeline markers — saved with the project. */
   onSetMarkers: (markers: Marker[]) => void;
+  /** The selected bleep chip (its clip is `selectedClip`). */
+  selectedBleep: { clipId: string; bleepId: string } | null;
+  onSelectBleep: (clipId: string, bleepId: string) => void;
+  /**
+   * Commit a bleep's new muted window in SOURCE seconds (one set_bleep = one
+   * undo step). Resolves to null when the edit failed.
+   */
+  onSetBleepWindow: (clipId: string, bleepId: string, start: number, end: number) => Promise<unknown>;
   /** Move/resize a text overlay, motion graphic, or caption cue (clip-local frames). */
   onSetElementWindow: (
     kind: "text" | "graphic" | "caption",
@@ -95,7 +104,7 @@ export function Timeline(props: Props) {
     project, assetById, thumbs, store, selectedClip, justUpdated, connected,
     music, musicAsset, onSelectClip, onSeek, onSplit, onMoveClip, onTrimClip,
     onRemove, onRippleDelete, onSetTrack, onAddTrack, onRemoveTrack, onSetElementWindow,
-    onSetMarkers,
+    onSetMarkers, selectedBleep, onSelectBleep, onSetBleepWindow,
   } = props;
 
   const fps = project?.fps ?? 30;
@@ -237,6 +246,18 @@ export function Timeline(props: Props) {
   }, []);
 
   const contentW = Math.max(viewW - GUTTER_W, total * pps + 64);
+
+  /** Timeline seconds under a pointer x — scroll- and zoom-aware at call time. */
+  const secAtClientX = useCallback((clientX: number): number => {
+    const el = contentRef.current;
+    if (!el) return 0;
+    return (clientX - el.getBoundingClientRect().left) / ppsRef.current;
+  }, []);
+  // A custom bleep sound's length (for chip/SFX expansion), from the library.
+  const customDuration = useCallback((id: string) => {
+    const a = assetById.get(id);
+    return a?.hasAudio ? a.duration : undefined;
+  }, [assetById]);
 
   const frameFromClientX = useCallback(
     (clientX: number) => {
@@ -505,6 +526,11 @@ export function Timeline(props: Props) {
                       onRipple={() => rippleDeleteClip(t, seg)}
                       onRemove={() => onRemove(seg.clip.id)}
                       onSelect={() => onSelectClip(seg.clip.id)}
+                      selectedBleepId={selectedBleep?.clipId === seg.clip.id ? selectedBleep.bleepId : null}
+                      onSelectBleep={(bleepId) => onSelectBleep(seg.clip.id, bleepId)}
+                      onSetBleepWindow={(bleepId, start, end) => onSetBleepWindow(seg.clip.id, bleepId, start, end)}
+                      secAtClientX={secAtClientX}
+                      customDuration={customDuration}
                     />
                   ))}
                 </div>
@@ -625,12 +651,18 @@ function clipPeaks(seg: Segment): Float32Array | null {
 // ---------------------------------------------------------------------------
 function ClipBlock({
   seg, track, pps, fps, rowH, thumb, selected, drag, onBodyDown, onTrimDown, onSplit, onRipple, onRemove, onSelect,
+  selectedBleepId, onSelectBleep, onSetBleepWindow, secAtClientX, customDuration,
 }: {
   seg: Segment; track: Track; pps: number; fps: number; rowH: number; thumb?: string; selected: boolean;
   drag: Drag | null;
   onBodyDown: (e: ReactPointerEvent) => void;
   onTrimDown: (e: ReactPointerEvent, edge: "l" | "r") => void;
   onSplit: () => void; onRipple: () => void; onRemove: () => void; onSelect: () => void;
+  selectedBleepId: string | null;
+  onSelectBleep: (bleepId: string) => void;
+  onSetBleepWindow: (bleepId: string, start: number, end: number) => Promise<unknown>;
+  secAtClientX: (clientX: number) => number;
+  customDuration: (assetId: string) => number | undefined;
 }) {
   const isAudio = track.kind === "audio";
   // Waveforms on audio clips (audio tracks or audio-only assets). Video clips
@@ -655,13 +687,82 @@ function ClipBlock({
   const left = (startFrame / fps) * pps + 1;
   const w = Math.max(3, (durFrames / fps) * pps - 2);
 
+  // ----- bleep chips ---------------------------------------------------------
+  // Each visible bleep, expanded exactly like the export (bleeps.ts), follows
+  // the live trim while an edge of this clip is dragged, and the live window
+  // while one of its chips is dragged (committed as ONE set_bleep on release).
+  const [bleepDrag, setBleepDrag] = useState<{ bleepId: string; start: number; end: number } | null>(null);
+  const bleepDragging = useRef(false);
+  // A fresh project state (the commit landed, or any other edit) drops the
+  // local override — unless a chip drag is still in progress.
+  useEffect(() => { if (!bleepDragging.current) setBleepDrag(null); }, [seg.clip]);
+  let layoutClip: Clip = seg.clip;
+  if (dragging && drag?.kind === "trim") {
+    layoutClip = { ...layoutClip, startFrame: drag.newStart, sourceInFrame: drag.newIn, sourceOutFrame: drag.newOut };
+  }
+  if (bleepDrag && layoutClip.effects?.bleeps) {
+    layoutClip = {
+      ...layoutClip,
+      effects: {
+        ...layoutClip.effects,
+        bleeps: layoutClip.effects.bleeps.map((b) => (b.id === bleepDrag.bleepId ? { ...b, start: bleepDrag.start, end: bleepDrag.end } : b)),
+      },
+    };
+  }
+  const bleepLayers: BleepLayer[] =
+    seg.asset?.hasAudio && layoutClip.effects?.bleeps?.length ? expandBleeps(layoutClip, fps, customDuration) : [];
+
+  const beginBleep = (mode: "move" | "l" | "r", layer: BleepLayer) => (e: ReactPointerEvent) => {
+    // Never let a chip gesture start a clip move/trim or a scrub.
+    e.stopPropagation();
+    e.preventDefault();
+    onSelectBleep(layer.bleepId);
+    if (track.locked || e.button !== 0) return;
+    const b = seg.clip.effects?.bleeps?.find((x) => x.id === layer.bleepId);
+    if (!b) return;
+    const speed = seg.speed;
+    const srcIn = seg.clip.sourceInFrame / fps;
+    const srcOut = seg.clip.sourceOutFrame / fps;
+    const t0 = secAtClientX(e.clientX);
+    let last = { start: b.start, end: b.end };
+    bleepDragging.current = true;
+    const move = (m: PointerEvent) => {
+      // Timeline seconds moved × speed = source seconds moved.
+      const d = (secAtClientX(m.clientX) - t0) * speed;
+      if (mode === "move") {
+        const len = b.end - b.start;
+        const s0 = Math.max(srcIn, Math.min(srcOut - len, b.start + d));
+        last = { start: s0, end: s0 + len };
+      } else if (mode === "l") {
+        last = { start: Math.max(srcIn, Math.min(b.end - BLEEP_MIN_WINDOW, layer.srcStart + d)), end: b.end };
+      } else {
+        last = { start: b.start, end: Math.min(srcOut, Math.max(b.start + BLEEP_MIN_WINDOW, layer.srcEnd + d)) };
+      }
+      setBleepDrag({ bleepId: b.id, ...last });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      bleepDragging.current = false;
+      if (Math.abs(last.start - b.start) < 1e-4 && Math.abs(last.end - b.end) < 1e-4) {
+        setBleepDrag(null);
+        return;
+      }
+      void onSetBleepWindow(b.id, last.start, last.end).then((r) => { if (r === null) setBleepDrag(null); });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+
   const muted = (seg.clip.effects?.volume ?? 1) === 0 || track.muted;
   const nKf = seg.clip.keyframes ? Object.keys(seg.clip.keyframes).length : 0;
   const hasTransform = !!seg.clip.effects?.transform || (seg.clip.effects?.opacity !== undefined && seg.clip.effects.opacity !== 1);
 
   return (
     <div
-      className={`tl-clip ${isAudio ? "audio" : ""} ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${drag?.kind === "move" && drag.clipId === seg.clip.id ? "ghosted" : ""}`}
+      className={`tl-clip ${isAudio ? "audio" : ""} ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${drag?.kind === "move" && drag.clipId === seg.clip.id ? "ghosted" : ""} ${bleepLayers.length ? "has-bleeps" : ""}`}
       style={{ left, width: w } as CSSProperties}
       onPointerDown={onBodyDown}
       onClick={(e) => { e.stopPropagation(); onSelect(); }}
@@ -689,6 +790,30 @@ function ClipBlock({
           <span className="tl-clip-dur">{fmtTime(durFrames / fps)}</span>
         </span>
       </div>
+
+      {/* Bleeps: chips along the bottom edge at the window they mute. Drag the
+          body to move along the source, an edge to resize; click selects. */}
+      {bleepLayers.map((l) => {
+        const cl = (l.start - startFrame / fps) * pps - 2;
+        const cw = Math.max(6, (l.windowEnd - l.start) * pps);
+        const label = l.sfxAssetId ? "Custom sound" : BLEEP_SOUND_LABELS[l.sound];
+        return (
+          <span
+            key={l.bleepId}
+            className={`tl-bleep ${selectedBleepId === l.bleepId ? "selected" : ""} ${l.mute ? "" : "unmuted"} ${track.locked ? "locked" : ""}`}
+            style={{ left: cl, width: cw } as CSSProperties}
+            title={`${l.word ? `“${l.word}”` : "Bleep"} · ${label} · ${fmtTime(l.start, true)}–${fmtTime(l.windowEnd, true)}\nDrag to move · drag an edge to resize · Delete removes`}
+            onPointerDown={beginBleep("move", l)}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            role="button" aria-label={`Bleep${l.word ? ` ${l.word}` : ""}`}
+          >
+            <span className="tl-bleep-h l" onPointerDown={beginBleep("l", l)} />
+            {cw >= 13 && <span className="tl-bleep-glyph">{bleepGlyph(l)}</span>}
+            <span className="tl-bleep-h r" onPointerDown={beginBleep("r", l)} />
+          </span>
+        );
+      })}
 
       {/* Transition entering this clip (text/captions/graphics now live on their
           own lanes below the video tracks, not over the footage). */}

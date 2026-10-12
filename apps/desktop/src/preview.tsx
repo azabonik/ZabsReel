@@ -322,7 +322,8 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       const el = pool.acquire(c.clipId, c.path);
       pool.sync(el, {
         srcTime: c.srcTime,
-        playing: playingRef.current,
+        // A bleep about to sound is bound + parked at 0 but kept paused.
+        playing: playingRef.current && !c.bleep?.preroll,
         rate: c.rate,
         volume: c.audio?.volume ?? 0,
         muted: !c.audio,

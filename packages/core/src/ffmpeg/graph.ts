@@ -1,3 +1,4 @@
+import { muteGainExpr } from "../audio/mutes.js";
 import type {
   Canvas,
   ClipEffects,
@@ -634,6 +635,13 @@ function audioFilterChain(clip: ResolvedRenderClip): string {
   const outDur = clip.outDuration;
   const steps: string[] = ["asetpts=PTS-STARTPTS"];
 
+  // Bleep mutes (derived from the clip's bleeps) live in SOURCE time, so apply
+  // them before atempo (stream t=0 is the clip's source-in). aeval is per-sample,
+  // so the 10 ms ramps are exact (the frame-wise volume filter + small
+  // asetnsamples frames deadlocked amix+atempo).
+  if (fx.mutes?.length) {
+    steps.push(`aeval='val(ch)*${muteGainExpr(fx.mutes, clip.sourceIn)}':c=same`);
+  }
   if (Math.abs(speed - 1) > 1e-6) {
     for (const f of atempoFactors(speed)) steps.push(`atempo=${f}`);
   }
@@ -799,12 +807,15 @@ export function buildRenderCommand(
 
   // ---- group clips into per-track transition runs (FIRST, so a window can
   // drop whole runs — and their file inputs — when they miss it) --------------
-  const byTrack = new Map<number, { clip: ResolvedRenderClip; idx: number }[]>();
+  const byTrack = new Map<string, { clip: ResolvedRenderClip; idx: number }[]>();
   clips.forEach((clip, idx) => {
     if (clip.adjustment) return; // no source/run — applied to the stack below
-    const list = byTrack.get(clip.trackIndex) ?? [];
+    // A bleep SFX layer is its own audio-only run: it must never join (or break)
+    // a transition run of its parent's track.
+    const key = clip.sfx ? `sfx${idx}` : `t${clip.trackIndex}`;
+    const list = byTrack.get(key) ?? [];
     list.push({ clip, idx });
-    byTrack.set(clip.trackIndex, list);
+    byTrack.set(key, list);
   });
   const runIntersects = (run: Run): boolean => {
     if (!window) return true;

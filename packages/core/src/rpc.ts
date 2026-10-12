@@ -97,6 +97,8 @@ const TRANSITION_TYPES = [
 ] as const;
 
 const KEYFRAME_PROPERTIES = ["x", "y", "scale", "rotation", "opacity", "volume"] as const;
+/** Built-in bleep sounds (synthesized, see audio/sfx.ts). */
+const BLEEP_SOUNDS = ["beep", "quack", "squeak", "boing", "honk"] as const;
 const EASE_KINDS = ["linear", "hold", "ease", "easeIn", "easeOut"] as const;
 /** The documented visual-effect vocabulary (each maps to an FFmpeg filter in graph.ts). */
 const EFFECT_TYPES = [
@@ -130,6 +132,16 @@ function summarizeTimeline(engine: EditorEngine) {
           sourceOutFrame: clip.sourceOutFrame,
           transition: clip.transition,
           effects: clip.effects ?? undefined,
+          // Where each visible bleep lands on the timeline now (ids for set_bleep).
+          bleeps: clip.effects?.bleeps?.length
+            ? engine.bleepLayers(clip).map((l) => ({
+                bleepId: l.bleepId,
+                word: l.word,
+                sound: l.sfxAssetId ? "custom" : l.sound,
+                startFrame: Math.round(l.start * project.fps),
+                endFrame: Math.max(Math.round(l.start * project.fps) + 1, Math.round(l.windowEnd * project.fps)),
+              }))
+            : undefined,
           linkGroupId: clip.linkGroupId,
         };
       }),
@@ -553,7 +565,7 @@ export const methods = {
   },
 
   clear_clip_effects: {
-    description: "Remove all effects (speed, volume, fades, color, crop, transform) from a clip.",
+    description: "Remove all effects (speed, volume, fades, color, crop, transform) from a clip. Its bleeps are kept — use remove_bleeps for those.",
     schema: z.object({ clipId: z.string() }).strict(),
     handler: (engine, p) => {
       engine.clearClipEffects(p.clipId);
@@ -1144,6 +1156,78 @@ export const methods = {
       })
       .strict(),
     handler: (engine, p) => engine.editByTranscript(p.assetId, p.keep, p.padSec ?? 0.08),
+  },
+
+  bleep_words: {
+    description:
+      "AUTO-BLEEP: censor profanity using the word-level transcript (auto-indexes assets that have none). Every matched word becomes a BLEEP stored ON the clip that carries the asset's audio (clip.effects.bleeps, source seconds, padded): the original is muted under it and a sound effect plays there (sound: beep = TV bleep, quack, squeak, boing, honk; or sfxAssetId for your own imported audio). Bleeps belong to their clip and FOLLOW IT AUTOMATICALLY through every edit — move, ripple, trim (a trimmed-off word's bleep disappears, extending the trim back restores it), split (each half keeps its own range), speed changes (the sound keeps its pitch) and delete — so there is no need to bleep last. Matching is whole-word against a built-in English swear list (no slurs); includeMild adds damn/hell/crap/piss/bloody/arse; pass words to add custom terms (exact, case-insensitive) and useDefaultList:false to use only those. Default scope is every clip with audio; pass clipIds to limit it. Use dryRun:true FIRST to review the matches (nothing changes). Re-running REPLACES the bleeps on the targeted clips (one undo step). Fix one afterwards with set_bleep (nudge/resize/sound/volume), add a missed word with add_bleep, drop one with remove_bleep. Returns {hits:[{clipId,bleepId,text,sourceStart,sourceEnd,startFrame,endFrame}], indexedAssetIds}.",
+    schema: z
+      .object({
+        clipIds: z.array(z.string()).optional(),
+        words: z.array(z.string().min(1)).max(200).optional(),
+        useDefaultList: z.boolean().optional(),
+        includeMild: z.boolean().optional(),
+        sound: z.enum(BLEEP_SOUNDS).optional(),
+        sfxAssetId: z.string().optional(),
+        padBeforeMs: z.number().min(0).max(1000).optional(),
+        padAfterMs: z.number().min(0).max(1000).optional(),
+        sfxVolume: z.number().min(0).max(4).optional(),
+        muteOriginal: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+      })
+      .strict(),
+    handler: async (engine, p) => engine.bleepWords(p),
+  },
+
+  add_bleep: {
+    description:
+      "Add ONE manual bleep to a clip — for a word bleep_words missed. Give the muted window either as start+end in the clip's SOURCE (asset) seconds (e.g. a word's times from get_transcript, plus ~0.06 s padding each side), or as atSeconds (TIMELINE seconds) + duration (timeline seconds, default 0.5). The bleep belongs to the clip and follows it through every edit. sound (default beep) or sfxAssetId (custom audio asset), volume (SFX gain, default 0.8), mute (silence the original under it, default true). One undo step. Returns {clipId, bleep, startFrame, endFrame} (timeline frames where it lands now).",
+    schema: z
+      .object({
+        clipId: z.string(),
+        start: z.number().min(0).optional(),
+        end: z.number().positive().optional(),
+        atSeconds: z.number().min(0).optional(),
+        duration: z.number().positive().max(30).optional(),
+        sound: z.enum(BLEEP_SOUNDS).optional(),
+        sfxAssetId: z.string().optional(),
+        volume: z.number().min(0).max(4).optional(),
+        mute: z.boolean().optional(),
+        word: z.string().max(200).optional(),
+      })
+      .strict(),
+    handler: async (engine, p) => engine.addBleep(p),
+  },
+
+  set_bleep: {
+    description:
+      "Change ONE bleep on a clip (ids from bleep_words / add_bleep / timeline_summary's clip.bleeps): nudge or resize its muted window with start/end in SOURCE seconds (start < end, clamped to the asset, min 0.04 s — e.g. +0.3 s on both to shift it later), switch sound (a built-in sound clears a custom sfxAssetId) or sfxAssetId, volume (SFX gain 0–4), mute (silence the original under it). One undo step. Returns {clipId, bleep, startFrame, endFrame} (null frames = currently trimmed out of view).",
+    schema: z
+      .object({
+        clipId: z.string(),
+        bleepId: z.string(),
+        start: z.number().min(0).optional(),
+        end: z.number().positive().optional(),
+        sound: z.enum(BLEEP_SOUNDS).optional(),
+        sfxAssetId: z.string().optional(),
+        volume: z.number().min(0).max(4).optional(),
+        mute: z.boolean().optional(),
+      })
+      .strict(),
+    handler: async (engine, p) => engine.setBleep(p),
+  },
+
+  remove_bleep: {
+    description: "Remove ONE bleep from a clip (restores the original audio under it). One undo step. Returns {removed}.",
+    schema: z.object({ clipId: z.string(), bleepId: z.string() }).strict(),
+    handler: (engine, p) => engine.removeBleep(p.clipId, p.bleepId),
+  },
+
+  remove_bleeps: {
+    description:
+      "Remove EVERY bleep from the given clips (all clips if clipIds is omitted), restoring the original audio. One undo step. Returns {clearedClips, removedBleeps}.",
+    schema: z.object({ clipIds: z.array(z.string()).optional() }).strict(),
+    handler: (engine, p) => engine.removeBleeps(p),
   },
 
   locate_in_timeline: {

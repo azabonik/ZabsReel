@@ -79,6 +79,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 - RECOMMENDED talking-head flow: import → index_transcript → tighten_talk (one call: strips um/uh fillers + shrinks pauses >1s, reports every removal) → render_preview to review → refine with delete_transcript_ranges (word-index ranges from get_transcript) → captions/color → export.
 - delete_transcript_ranges cuts the SPOKEN content wherever that asset is placed (all its clips), merged into one undo step. tighten_talk works on ONE clip (and keeps linked detached audio in sync).
 - edit_by_transcript = "here's my script, assemble the cut": pass the kept text verbatim (quote the transcript's real wording) and it appends one clip per kept span to the base track.
+- bleep_words = auto-censor: every swear word (built-in list; words adds custom terms, includeMild adds damn/hell) becomes a bleep ON the clip — the original is muted under it and a sound (beep/quack/squeak/boing/honk) plays there. Bleeps follow their clip automatically through moves, trims, splits, speed changes and deletes, so bleep whenever you like (no need to bleep last). Run with dryRun:true first; re-running replaces a clip's bleeps. Nudge one with set_bleep (start/end in source seconds), add a missed word with add_bleep, drop one with remove_bleep; remove_bleeps restores the original audio. timeline_summary lists each clip's bleeps with their timeline frames.
 - Everything is one undo step — if the result sounds clipped, undo, then retry with a larger padFrames.
 
 ## Long-running work: jobs

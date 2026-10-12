@@ -30,6 +30,9 @@ import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { renderGraphic } from "./motion/render.js";
+import { findProfanity } from "./audio/profanity.js";
+import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
+import { BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
 import {
   sortKeyframes,
   type Keyframe,
@@ -56,6 +59,7 @@ import {
   type CaptionStyle,
   type AssetTranscript,
   type TranscriptWord,
+  type Bleep,
   type Clip,
   type ClipEffects,
   type ColorGrade,
@@ -205,6 +209,92 @@ function even(n: number): number {
 /** Minimum clip footprint, in frames. */
 const MIN_CLIP_FRAMES = 1;
 const MAX_HISTORY = 100;
+
+/** Options for {@link EditorEngine.bleepWords}. */
+export interface BleepOptions {
+  /** Clips to censor (default: every clip whose asset has audio). */
+  clipIds?: string[];
+  /** Extra words to bleep (exact tokens, case-insensitive). */
+  words?: string[];
+  /** Use the built-in profanity list (default true). */
+  useDefaultList?: boolean;
+  /** Also bleep mild words: damn, hell, crap, piss, bloody, arse (default false). */
+  includeMild?: boolean;
+  /** Built-in sound (default "beep"). */
+  sound?: SfxName;
+  /** Use this imported audio asset as the sound instead. */
+  sfxAssetId?: string;
+  /** Silence padded before / after each word, in ms (defaults 60 / 80). */
+  padBeforeMs?: number;
+  padAfterMs?: number;
+  /** Gain of the sound effect (default 0.8). */
+  sfxVolume?: number;
+  /** Mute the original audio under each word (default true). */
+  muteOriginal?: boolean;
+  /** Only report matches; change nothing (default false). */
+  dryRun?: boolean;
+}
+
+/** One bleeped word. Frames are the PADDED window as it lands on the timeline now. */
+export interface BleepHit {
+  clipId: string;
+  /** Id of the Bleep written onto the clip (absent on a dry run). */
+  bleepId?: string;
+  text: string;
+  /** The word's own span in asset seconds. */
+  sourceStart: number;
+  sourceEnd: number;
+  startFrame: number;
+  endFrame: number;
+}
+
+export interface BleepResult {
+  hits: BleepHit[];
+  /** Assets that had no transcript and were indexed first. */
+  indexedAssetIds: string[];
+}
+
+/** Options for {@link EditorEngine.addBleep}: a window in SOURCE seconds, or a timeline time + length. */
+export interface AddBleepOptions {
+  clipId: string;
+  /** Muted window in the clip's SOURCE (asset) seconds. */
+  start?: number;
+  end?: number;
+  /** Alternative: timeline seconds where the window starts … */
+  atSeconds?: number;
+  /** … and its length in timeline seconds (default 0.5). */
+  duration?: number;
+  sound?: SfxName;
+  sfxAssetId?: string;
+  volume?: number;
+  mute?: boolean;
+  /** Label shown on the chip / in the inspector. */
+  word?: string;
+}
+
+/** Fields {@link EditorEngine.setBleep} can change. */
+export interface SetBleepPatch {
+  start?: number;
+  end?: number;
+  sound?: SfxName;
+  sfxAssetId?: string;
+  volume?: number;
+  mute?: boolean;
+}
+
+/** A bleep plus where it lands on the timeline now (frames; null = trimmed out of view). */
+export interface BleepPlacement {
+  clipId: string;
+  bleep: Bleep;
+  startFrame: number | null;
+  endFrame: number | null;
+}
+
+/** Max SFX gain a bleep accepts. */
+const BLEEP_MAX_VOLUME = 4;
+
+/** Round a bleep time to 0.1 ms (keeps UI drags from storing float noise). */
+const roundBleepSec = (s: number): number => Math.round(s * 1e4) / 1e4;
 
 export interface RenderResult {
   /** Absolute path to the rendered file. */
@@ -1063,11 +1153,13 @@ export class EditorEngine extends EventEmitter {
     });
   }
 
-  /** Remove all effects from a clip. */
+  /** Remove all effects from a clip (its bleeps are kept — see removeBleeps). */
   clearClipEffects(clipId: string): void {
     this.mutate(() => {
       const { clip } = this.findClip(clipId);
+      const bleeps = clip.effects?.bleeps;
       delete clip.effects;
+      if (bleeps?.length) clip.effects = { bleeps };
     });
   }
 
@@ -1692,6 +1784,309 @@ export class EditorEngine extends EventEmitter {
     return out.slice(0, limit);
   }
 
+  // ---- auto-bleep ------------------------------------------------------------
+  // Bleeps live on the clip they censor (`effects.bleeps`, SOURCE seconds), so
+  // every edit carries them; audio/bleeps.ts expands them at render time.
+
+  /** A clip's bleeps resolved onto the timeline now (visible ones only, sorted). */
+  bleepLayers(clip: Clip): BleepLayer[] {
+    return expandBleeps(clip, this.project.fps, (id) => {
+      const a = this.project.assets.find((x) => x.id === id);
+      return a?.hasAudio ? a.duration : undefined;
+    });
+  }
+
+  /** The asset a bleep can censor (throws a teaching error otherwise). */
+  private bleepableAsset(clip: Clip): MediaAsset {
+    if (clip.adjustment || !clip.assetId) throw new Error(`Clip "${clip.id}" is an adjustment layer — it has no audio to bleep.`);
+    const asset = this.clipAsset(clip);
+    if (!asset?.hasAudio) throw new Error(`Clip "${clip.id}" has no audio to bleep.`);
+    return asset;
+  }
+
+  /** Validate a custom bleep sound asset. */
+  private requireSfxAsset(assetId: string): MediaAsset {
+    const a = this.getAsset(assetId);
+    if (!a.hasAudio) throw new Error(`Asset "${assetId}" has no audio — pick an audio asset for sfxAssetId.`);
+    return a;
+  }
+
+  /**
+   * The built-in SFX WAV as a NEW asset to push inside the caller's mutate()
+   * (so it lands in the same undo step), or null when already imported.
+   */
+  private async newBuiltinSfxAsset(sound: SfxName): Promise<MediaAsset | null> {
+    if (!SFX_NAMES.includes(sound)) throw new Error(`Unknown sound "${sound}" — use one of ${SFX_NAMES.join(", ")}`);
+    if (this.project.assets.some((a) => a.builtinSfx === sound)) return null;
+    const path = await ensureSfxFile(this.dataDir, sound);
+    const asset = await probeAsset(path);
+    // Distinguishing word first: library cards truncate long names.
+    asset.name = `${sound[0]!.toUpperCase()}${sound.slice(1)} (bleep sound).wav`;
+    asset.builtinSfx = sound;
+    return asset;
+  }
+
+  /** Push a prepared built-in SFX asset unless one appeared meanwhile; call inside mutate(). */
+  private adoptBuiltinSfx(asset: MediaAsset | null): void {
+    if (asset && !this.project.assets.some((a) => a.builtinSfx === asset.builtinSfx)) this.project.assets.push(asset);
+  }
+
+  /** Validate + clamp a muted window (source seconds) to the asset, min {@link BLEEP_MIN_WINDOW}. */
+  private static bleepWindow(start: number, end: number, assetDuration: number): { start: number; end: number } {
+    if (!Number.isFinite(start) || !Number.isFinite(end)) throw new Error("Bleep start/end must be finite numbers (source seconds).");
+    if (start >= end) throw new Error(`Bleep start (${start}) must be before its end (${end}).`);
+    const max = assetDuration > 0 ? assetDuration : Number.POSITIVE_INFINITY;
+    let s = clamp(start, 0, max);
+    let e = clamp(end, 0, max);
+    if (e - s < BLEEP_MIN_WINDOW) {
+      e = Math.min(max, s + BLEEP_MIN_WINDOW);
+      s = Math.max(0, e - BLEEP_MIN_WINDOW);
+    }
+    return { start: roundBleepSec(s), end: roundBleepSec(e) };
+  }
+
+  /** Replace a clip's bleep list (dropping empty containers); call inside mutate(). */
+  private static setClipBleeps(clip: Clip, bleeps: Bleep[]): void {
+    if (bleeps.length) {
+      clip.effects = { ...(clip.effects ?? {}), bleeps: [...bleeps].sort((a, b) => a.start - b.start) };
+      return;
+    }
+    if (!clip.effects?.bleeps) return;
+    delete clip.effects.bleeps;
+    if (Object.keys(clip.effects).length === 0) delete clip.effects;
+  }
+
+  /** Where a clip's bleep lands on the timeline now. */
+  private bleepPlacement(clip: Clip, bleep: Bleep): BleepPlacement {
+    const fps = this.project.fps;
+    const layer = this.bleepLayers(clip).find((l) => l.bleepId === bleep.id);
+    if (!layer) return { clipId: clip.id, bleep: { ...bleep }, startFrame: null, endFrame: null };
+    const startFrame = Math.round(layer.start * fps);
+    return { clipId: clip.id, bleep: { ...bleep }, startFrame, endFrame: Math.max(startFrame + 1, Math.round(layer.windowEnd * fps)) };
+  }
+
+  /** Find a bleep on a clip (teaching error listing the clip's bleep ids). */
+  private findBleep(clip: Clip, bleepId: string): Bleep {
+    const b = clip.effects?.bleeps?.find((x) => x.id === bleepId);
+    if (!b) {
+      const ids = (clip.effects?.bleeps ?? []).map((x) => x.id);
+      throw new Error(`No bleep "${bleepId}" on clip "${clip.id}"${ids.length ? ` (its bleeps: ${ids.join(", ")})` : " — it has no bleeps"}.`);
+    }
+    return b;
+  }
+
+  /**
+   * AUTO-BLEEP: censor profanity using the word-level transcript. Every matched
+   * word becomes a Bleep on the clip that carries the asset's audio (source
+   * seconds, padded): the original is muted under it and a sound effect plays
+   * there. Bleeps follow the clip through every later edit. Assets without a
+   * transcript are indexed first. Re-running REPLACES the bleeps on the
+   * targeted clips. One undo step. `dryRun` only reports matches.
+   */
+  async bleepWords(opts: BleepOptions = {}): Promise<BleepResult> {
+    const fps = this.project.fps;
+    const sound: SfxName = opts.sound ?? "beep";
+    if (!SFX_NAMES.includes(sound)) throw new Error(`Unknown sound "${sound}" — use one of ${SFX_NAMES.join(", ")}`);
+    if (opts.sfxAssetId) this.requireSfxAsset(opts.sfxAssetId);
+    const padBefore = Math.max(0, opts.padBeforeMs ?? 60) / 1000;
+    const padAfter = Math.max(0, opts.padAfterMs ?? 80) / 1000;
+    const volume = clamp(opts.sfxVolume ?? BLEEP_DEFAULT_VOLUME, 0, BLEEP_MAX_VOLUME);
+    const mute = opts.muteOriginal ?? true;
+    const dryRun = opts.dryRun ?? false;
+
+    // Targeted clips, expanded with their link group's clips of the same asset
+    // (a video clip and its detached audio) so whichever carries the sound is bleeped.
+    const targets: Clip[] = [];
+    const seen = new Set<string>();
+    const consider = (c: Clip): void => {
+      if (seen.has(c.id) || c.adjustment || !c.assetId) return;
+      if (!this.clipAsset(c)?.hasAudio) return;
+      seen.add(c.id);
+      targets.push(c);
+    };
+    if (opts.clipIds?.length) {
+      for (const id of opts.clipIds) {
+        const { clip } = this.findClip(id);
+        this.bleepableAsset(clip);
+        for (const m of this.linkedClips(clip)) if (m.assetId === clip.assetId) consider(m);
+      }
+    } else {
+      for (const t of this.project.tracks) for (const c of t.clips) consider(c);
+    }
+
+    // The "auto": make sure every targeted asset has a word-level transcript.
+    const indexedAssetIds: string[] = [];
+    for (const assetId of new Set(targets.map((c) => c.assetId!))) {
+      if (this.cachedTranscript(assetId)?.words?.length) continue;
+      await this.indexTranscript(assetId);
+      indexedAssetIds.push(assetId);
+    }
+
+    const profanity = { extraWords: opts.words, useDefaultList: opts.useDefaultList, includeMild: opts.includeMild };
+    const hits: BleepHit[] = [];
+    const planned = new Map<string, Bleep[]>();
+    for (const clip of targets) {
+      const { track } = this.findClip(clip.id);
+      // Only the clip that actually carries the sound (not on a muted track, not silenced).
+      if (track.muted || clip.effects?.volume === 0) continue;
+      const asset = this.clipAsset(clip)!;
+      const words = this.cachedTranscript(asset.id)?.words ?? [];
+      const inSec = clip.sourceInFrame / fps;
+      const outSec = clip.sourceOutFrame / fps;
+      const list: Bleep[] = [];
+      const wordOf = new Map<string, { text: string; start: number; end: number }>();
+      for (const { word } of findProfanity(words, profanity)) {
+        if (word.end <= inSec || word.start >= outSec) continue;
+        const win = EditorEngine.bleepWindow(word.start - padBefore, word.end + padAfter, asset.duration);
+        const b: Bleep = { id: newId("bleep"), ...win, sound, volume, mute, word: word.text };
+        if (opts.sfxAssetId) b.sfxAssetId = opts.sfxAssetId;
+        list.push(b);
+        wordOf.set(b.id, word);
+      }
+      planned.set(clip.id, list);
+      const layers = this.bleepLayers({ ...clip, effects: { ...clip.effects, bleeps: list } });
+      for (const l of layers) {
+        const w = wordOf.get(l.bleepId)!;
+        const startFrame = Math.round(l.start * fps);
+        hits.push({
+          clipId: clip.id,
+          bleepId: dryRun ? undefined : l.bleepId,
+          text: w.text,
+          sourceStart: w.start,
+          sourceEnd: w.end,
+          startFrame,
+          endFrame: Math.max(startFrame + 1, Math.round(l.windowEnd * fps)),
+        });
+      }
+    }
+    hits.sort((a, b) => a.startFrame - b.startFrame);
+    if (dryRun) return { hits, indexedAssetIds };
+
+    // Resolve the sound asset before mutating so everything lands in ONE undo step.
+    const newSfx = !opts.sfxAssetId && hits.length ? await this.newBuiltinSfxAsset(sound) : null;
+    return this.mutate(() => {
+      this.adoptBuiltinSfx(newSfx);
+      for (const [clipId, list] of planned) {
+        const live = this.project.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+        if (live) EditorEngine.setClipBleeps(live, list);
+      }
+      return { hits, indexedAssetIds };
+    });
+  }
+
+  /**
+   * Add ONE manual bleep to a clip (a word the matcher missed): a window in
+   * SOURCE seconds (`start`/`end`), or at a timeline time (`atSeconds`) for
+   * `duration` timeline seconds. One undo step.
+   */
+  async addBleep(o: AddBleepOptions): Promise<BleepPlacement> {
+    const fps = this.project.fps;
+    const { clip } = this.findClip(o.clipId);
+    const asset = this.bleepableAsset(clip);
+    const speed = clip.effects?.speed ?? 1;
+    const srcIn = clip.sourceInFrame / fps;
+    const srcOut = clip.sourceOutFrame / fps;
+    let start: number;
+    let end: number;
+    if (o.start !== undefined || o.end !== undefined) {
+      if (o.start === undefined || o.end === undefined) throw new Error("Pass both start and end (source seconds), or atSeconds (+ duration, timeline seconds).");
+      start = o.start;
+      end = o.end;
+    } else if (o.atSeconds !== undefined) {
+      const audioStart = (clip.startFrame + (clip.audioOffsetFrames ?? 0)) / fps;
+      const audioEnd = audioStart + (srcOut - srcIn) / speed;
+      if (o.atSeconds < audioStart - 1e-6 || o.atSeconds >= audioEnd) {
+        throw new Error(`atSeconds ${o.atSeconds} is outside clip "${clip.id}" (its audio plays ${audioStart.toFixed(3)}–${audioEnd.toFixed(3)} s on the timeline).`);
+      }
+      start = srcIn + (o.atSeconds - audioStart) * speed;
+      end = start + Math.max(BLEEP_MIN_WINDOW, o.duration ?? 0.5) * speed;
+    } else {
+      throw new Error("Give the window: start + end (source seconds) or atSeconds (+ duration).");
+    }
+    const win = EditorEngine.bleepWindow(start, end, asset.duration);
+    if (win.end <= srcIn || win.start >= srcOut) {
+      throw new Error(`Window ${win.start}–${win.end} s is outside the clip's used source range ${srcIn.toFixed(3)}–${srcOut.toFixed(3)} s — it would never be heard.`);
+    }
+    const sound: SfxName = o.sound ?? "beep";
+    if (o.sfxAssetId) this.requireSfxAsset(o.sfxAssetId);
+    const newSfx = o.sfxAssetId ? null : await this.newBuiltinSfxAsset(sound);
+    return this.mutate(() => {
+      this.adoptBuiltinSfx(newSfx);
+      const live = this.findClip(o.clipId).clip;
+      const b: Bleep = {
+        id: newId("bleep"),
+        ...win,
+        sound,
+        volume: clamp(o.volume ?? BLEEP_DEFAULT_VOLUME, 0, BLEEP_MAX_VOLUME),
+        mute: o.mute ?? true,
+      };
+      if (o.sfxAssetId) b.sfxAssetId = o.sfxAssetId;
+      if (o.word) b.word = o.word;
+      EditorEngine.setClipBleeps(live, [...(live.effects?.bleeps ?? []), b]);
+      return this.bleepPlacement(live, b);
+    });
+  }
+
+  /**
+   * Change one bleep: nudge/resize its window (SOURCE seconds; validated,
+   * clamped to the asset, min 0.04 s), its sound (a built-in `sound` clears any
+   * custom `sfxAssetId`), volume or mute. One undo step.
+   */
+  async setBleep(o: { clipId: string; bleepId: string } & SetBleepPatch): Promise<BleepPlacement> {
+    const { clip } = this.findClip(o.clipId);
+    const asset = this.bleepableAsset(clip);
+    const cur = this.findBleep(clip, o.bleepId);
+    const win = EditorEngine.bleepWindow(o.start ?? cur.start, o.end ?? cur.end, asset.duration);
+    if (o.sfxAssetId) this.requireSfxAsset(o.sfxAssetId);
+    const newSfx = o.sound && !o.sfxAssetId ? await this.newBuiltinSfxAsset(o.sound) : null;
+    return this.mutate(() => {
+      this.adoptBuiltinSfx(newSfx);
+      const live = this.findClip(o.clipId).clip;
+      const b = this.findBleep(live, o.bleepId);
+      b.start = win.start;
+      b.end = win.end;
+      if (o.sound !== undefined) {
+        b.sound = o.sound;
+        if (o.sfxAssetId === undefined) delete b.sfxAssetId;
+      }
+      if (o.sfxAssetId !== undefined) b.sfxAssetId = o.sfxAssetId;
+      if (o.volume !== undefined) b.volume = clamp(o.volume, 0, BLEEP_MAX_VOLUME);
+      if (o.mute !== undefined) b.mute = o.mute;
+      EditorEngine.setClipBleeps(live, live.effects!.bleeps!);
+      return this.bleepPlacement(live, b);
+    });
+  }
+
+  /** Remove one bleep from a clip. One undo step. */
+  removeBleep(clipId: string, bleepId: string): { removed: Bleep } {
+    const { clip } = this.findClip(clipId);
+    const b = this.findBleep(clip, bleepId);
+    return this.mutate(() => {
+      EditorEngine.setClipBleeps(clip, (clip.effects?.bleeps ?? []).filter((x) => x.id !== bleepId));
+      return { removed: { ...b } };
+    });
+  }
+
+  /** Remove every bleep from the given clips (all clips if omitted), restoring the original audio. */
+  removeBleeps(opts: { clipIds?: string[] } = {}): { clearedClips: number; removedBleeps: number } {
+    const only = opts.clipIds?.length ? new Set(opts.clipIds.map((id) => this.findClip(id).clip.id)) : undefined;
+    return this.mutate(() => {
+      let clearedClips = 0;
+      let removedBleeps = 0;
+      for (const t of this.project.tracks) {
+        for (const c of t.clips) {
+          if (only && !only.has(c.id)) continue;
+          const n = c.effects?.bleeps?.length ?? 0;
+          if (!n) continue;
+          EditorEngine.setClipBleeps(c, []);
+          clearedClips += 1;
+          removedBleeps += n;
+        }
+      }
+      return { clearedClips, removedBleeps };
+    });
+  }
+
   /**
    * Build (and cache) an asset's perceptual visual fingerprint. If a CLIP image
    * model is installed (AIVE_CLIP_VISION) each sample also gets a semantic
@@ -2068,6 +2463,9 @@ export class EditorEngine extends EventEmitter {
           opacity: e.opacity,
           keyframes,
         };
+        // Bleep mutes: source-time windows of the clip's bleeps (audio/bleeps.ts).
+        const mutes = asset.hasAudio ? bleepMuteSpans(clip, fps) : [];
+        if (mutes.length) effects.mutes = mutes;
         if (effects.lut) {
           let name = lutMap.get(effects.lut);
           if (!name) {
@@ -2186,9 +2584,44 @@ export class EditorEngine extends EventEmitter {
         graphics,
         audioOffset: clip.audioOffsetFrames ? f2s(clip.audioOffsetFrames) : undefined,
       });
+
+      // Bleep SFX: expanded from the clip's own bleeps every render, so they sit
+      // wherever the clip is now. Each is an audio-only layer at normal speed and
+      // pitch, mixed like an ordinary clip on the parent's track (track mute and
+      // volume apply; a clip silenced with volume 0 silences its bleeps too).
+      if (asset.hasAudio && clip.effects?.bleeps?.length && clip.effects.volume !== 0) {
+        for (const layer of this.bleepLayers(clip)) {
+          if (layer.sfxDuration <= 0) continue;
+          const path = await this.bleepSfxPath(layer);
+          if (!path) continue;
+          resolved.push({
+            path,
+            trackIndex: track.index,
+            showVideo: false,
+            startSec: layer.start,
+            sourceIn: 0,
+            sourceSpan: layer.sfxDuration,
+            outDuration: layer.sfxDuration,
+            hasAudio: true,
+            muted: !!track.muted,
+            trackVolume: track.volume,
+            effects: { volume: layer.volume },
+            sfx: true,
+          });
+        }
+      }
     }
 
     return { clips: resolved, cwd: work };
+  }
+
+  /** File a bleep layer plays: its custom asset, or the built-in WAV (re-synthesized if missing). */
+  private async bleepSfxPath(layer: BleepLayer): Promise<string | undefined> {
+    if (layer.sfxAssetId) {
+      const a = this.project.assets.find((x) => x.id === layer.sfxAssetId);
+      return a?.hasAudio ? a.path : undefined;
+    }
+    return ensureSfxFile(this.dataDir, layer.sound);
   }
 
   private async resolveFont(
@@ -2878,6 +3311,16 @@ export class EditorEngine extends EventEmitter {
     const fps = this.project.fps;
     const frames = Math.max(MIN_CLIP_FRAMES, Math.round(baked.duration * fps));
     const { clip: target } = this.findClip(clipId);
+    // Bleeps are in source seconds; the bake starts at the old source-in, so
+    // shift them into the baked asset's time base (dropping any outside it).
+    const shift = target.sourceInFrame / fps;
+    if (target.effects?.bleeps?.length) {
+      const moved = target.effects.bleeps
+        .map((b) => ({ ...b, start: roundBleepSec(b.start - shift), end: roundBleepSec(b.end - shift) }))
+        .filter((b) => b.end > 0 && b.start < baked.duration)
+        .map((b) => ({ ...b, start: Math.max(0, b.start), end: Math.min(baked.duration, b.end) }));
+      EditorEngine.setClipBleeps(target, moved);
+    }
     target.assetId = baked.id;
     target.sourceInFrame = 0;
     target.sourceOutFrame = frames;

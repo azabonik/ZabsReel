@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
-import type { Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualEffect, VisualHit } from "./types";
+import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualEffect, VisualHit } from "./types";
 import { clipDurationFrames } from "./types";
 import {
   buildSegments, createPlaybackStore, fmtTime, usePlaybackValue,
@@ -17,6 +17,7 @@ import {
 import { platform } from "./platform";
 import { EFFECT_LABELS, KeyEffectControls, type KeyDetection, type KeyPatch } from "./keyfx";
 import { isKeyEffect } from "./keying";
+import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 
 function fmt(seconds: number): string {
   return fmtTime(seconds);
@@ -75,6 +76,8 @@ export function App({ api }: { api: CoreApi }) {
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [exactSrc, setExactSrc] = useState<string | null>(null);
   const [selectedClip, setSelectedClip] = useState<string | null>(null);
+  // A selected bleep chip (its clip is also the selected clip).
+  const [selectedBleep, setSelectedBleep] = useState<{ clipId: string; bleepId: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
@@ -168,6 +171,19 @@ export function App({ api }: { api: CoreApi }) {
     project?.assets.forEach((a) => map.set(a.id, a));
     return map;
   }, [project]);
+  // The selected bleep resolved against the live project (null once it's gone —
+  // removed, undone, or its clip deleted).
+  const activeBleep = useMemo(() => {
+    if (!selectedBleep || !project) return null;
+    for (const t of project.tracks) {
+      const c = t.clips.find((x) => x.id === selectedBleep.clipId);
+      if (!c) continue;
+      const bleep = c.effects?.bleeps?.find((b) => b.id === selectedBleep.bleepId);
+      return bleep ? { clipId: c.id, clip: c, bleep } : null;
+    }
+    return null;
+  }, [selectedBleep, project]);
+  useEffect(() => { if (selectedBleep && !activeBleep) setSelectedBleep(null); }, [selectedBleep, activeBleep]);
   const folders = useMemo(() => [...(project?.folders ?? [])].sort((a, b) => a.createdAt - b.createdAt), [project]);
   const visibleAssets = useMemo(() => {
     const all = project?.assets ?? [];
@@ -448,6 +464,27 @@ export function App({ api }: { api: CoreApi }) {
     run("Auto-reframing (tracking subject)", () => api.rpc("auto_reframe", { clipId }));
   const removeBackground = (clipId: string) =>
     run("Removing background (AI)", () => api.rpc("remove_background", { clipId }));
+  const bleepClip = async (clipId: string, sound: string): Promise<number | null> => {
+    const r = (await run("Bleeping swear words", () => api.rpc<{ hits: unknown[] }>("bleep_words", { clipIds: [clipId], sound }))) as { hits: unknown[] } | null;
+    return r ? r.hits.length : null;
+  };
+  const removeBleeps = (clipId: string) => run("Remove bleeps", () => api.rpc("remove_bleeps", { clipIds: [clipId] }));
+  // One bleep: each call is ONE set_bleep / remove_bleep = one undo step.
+  const setBleep = (clipId: string, bleepId: string, patch: Record<string, unknown>) =>
+    run("Bleep", () => api.rpc("set_bleep", { clipId, bleepId, ...patch }));
+  const setBleepWindow = (clipId: string, bleepId: string, start: number, end: number) =>
+    setBleep(clipId, bleepId, { start, end });
+  const removeBleep = (clipId: string, bleepId: string) =>
+    run("Remove bleep", async () => {
+      await api.rpc("remove_bleep", { clipId, bleepId });
+      setSelectedBleep((b) => (b?.clipId === clipId && b.bleepId === bleepId ? null : b));
+    });
+  // Selecting a clip drops any bleep selection; selecting a bleep selects its clip.
+  const selectClip = useCallback((id: string) => { setSelectedClip(id); setSelectedBleep(null); }, []);
+  const selectBleep = useCallback((clipId: string, bleepId: string) => {
+    setSelectedClip(clipId);
+    setSelectedBleep({ clipId, bleepId });
+  }, []);
   const setAudioOffset = (clipId: string, offset: number) =>
     run("Audio offset (J/L cut)", () => api.rpc("set_audio_offset", { clipId, offsetFrames: Math.round(offset * fps) }));
   const setTransform = (clipId: string, patch: Record<string, number | boolean>) =>
@@ -505,6 +542,9 @@ export function App({ api }: { api: CoreApi }) {
         }
         return;
       }
+      // With a bleep chip selected, Delete/Backspace removes ONLY that bleep.
+      if ((e.key === "Delete" || e.key === "Backspace") && activeBleep) { e.preventDefault(); removeBleep(activeBleep.clipId, activeBleep.bleep.id); return; }
+      if (e.key === "Escape" && activeBleep) { e.preventDefault(); setSelectedBleep(null); return; }
       if ((e.key === "Delete" || e.key === "Backspace") && selectedClip) { e.preventDefault(); removeClip(selectedClip); return; }
       // ----- transport -----
       if (e.key === " ") { e.preventDefault(); playerRef.current?.toggle(); }
@@ -516,10 +556,15 @@ export function App({ api }: { api: CoreApi }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedClip, clips, fps, store, undo, redo, splitClipAt, removeClip]);
+  }, [selectedClip, clips, fps, store, undo, redo, splitClipAt, removeClip, activeBleep, removeBleep]);
 
-  // Inspect a clip on ANY video track (a keyed overlay lives above the base track).
-  const selectedTrackClips = project?.tracks.find((t) => t.kind === "video" && t.clips.some((c) => c.id === selectedClip))?.clips ?? clips;
+  // The inspector follows the selection on ANY track (base-track clips first),
+  // so e.g. a detached-audio clip's bleeps can be edited too.
+  const selectedTrackClips = useMemo(() => {
+    if (!selectedClip || clips.some((c) => c.id === selectedClip)) return clips;
+    const t = project?.tracks.find((tr) => tr.clips.some((c) => c.id === selectedClip));
+    return t ? [...t.clips].sort((a, b) => a.startFrame - b.startFrame) : clips;
+  }, [selectedClip, clips, project]);
   const selected = selectedTrackClips.find((c) => c.id === selectedClip) ?? null;
   const selectedIndex = selectedTrackClips.findIndex((c) => c.id === selectedClip);
   const audioAssets = project?.assets.filter((a) => a.hasAudio) ?? [];
@@ -828,7 +873,7 @@ export function App({ api }: { api: CoreApi }) {
               musicAsset={musicAsset}
               api={api}
               store={store}
-              onSelectClip={setSelectedClip}
+              onSelectClip={selectClip}
             />
           </div>
 
@@ -932,6 +977,12 @@ export function App({ api }: { api: CoreApi }) {
               onRemoveTransition={removeTransition}
               onAutoReframe={autoReframe}
               onRemoveBackground={removeBackground}
+              onBleep={bleepClip}
+              onRemoveBleeps={removeBleeps}
+              selectedBleep={activeBleep?.clipId === selected.id ? activeBleep.bleep : null}
+              onSetBleep={setBleep}
+              onRemoveBleep={removeBleep}
+              onDeselectBleep={() => setSelectedBleep(null)}
               onAudioOffset={setAudioOffset}
               onTransform={setTransform}
               onAddKeyframe={addKeyframe}
@@ -967,7 +1018,10 @@ export function App({ api }: { api: CoreApi }) {
         connected={connected}
         music={music}
         musicAsset={musicAsset}
-        onSelectClip={setSelectedClip}
+        onSelectClip={selectClip}
+        selectedBleep={activeBleep ? { clipId: activeBleep.clipId, bleepId: activeBleep.bleep.id } : null}
+        onSelectBleep={selectBleep}
+        onSetBleepWindow={setBleepWindow}
         onSeek={seek}
         onSplit={splitClipAt}
         onMoveClip={moveClipTo}
@@ -1319,6 +1373,13 @@ type InspectorProps = {
   onRemoveTransition: (clipId: string) => void;
   onAutoReframe: (clipId: string) => void;
   onRemoveBackground: (clipId: string) => void;
+  onBleep: (clipId: string, sound: string) => Promise<number | null>;
+  onRemoveBleeps: (clipId: string) => void;
+  /** The selected bleep on this clip (shows the Bleep panel). */
+  selectedBleep: Bleep | null;
+  onSetBleep: (clipId: string, bleepId: string, patch: Record<string, unknown>) => void;
+  onRemoveBleep: (clipId: string, bleepId: string) => void;
+  onDeselectBleep: () => void;
   onAudioOffset: (clipId: string, offset: number) => void;
   onTransform: (clipId: string, patch: Record<string, number | boolean>) => void;
   onAddKeyframe: (clipId: string, property: KeyframeProperty, value: number) => void;
@@ -1334,6 +1395,61 @@ type InspectorProps = {
 
 type Tab = "adjust" | "text" | "captions";
 
+/** Inspector panel for ONE selected bleep chip (sound, volume, mute, delete). */
+function BleepPanel({ clip, bleep, project, disabled, onSet, onRemove, onClose }: {
+  clip: Clip; bleep: Bleep; project: Project | null; disabled: boolean;
+  onSet: (patch: Record<string, unknown>) => void; onRemove: () => void; onClose: () => void;
+}) {
+  const fps = project?.fps ?? 30;
+  const layer = expandBleeps(clip, fps).find((l) => l.bleepId === bleep.id);
+  // Custom sounds: the project's own audio-only imports (not the built-in SFX).
+  const customs = (project?.assets ?? []).filter((a) => a.hasAudio && !a.hasVideo && !a.builtinSfx);
+  const value = bleep.sfxAssetId ? `asset:${bleep.sfxAssetId}` : bleep.sound ?? "beep";
+  return (
+    <div className="group bleep-panel">
+      <div className="group-title">
+        <Waveform size={13} /> Bleep{bleep.word ? ` “${bleep.word}”` : ""}
+        <button type="button" className="icon-btn sm bleep-close" onClick={onClose} aria-label="Deselect bleep" title="Deselect (Esc)"><X size={12} /></button>
+      </div>
+      <span className="field-note">
+        {layer
+          ? `On the timeline ${fmtTime(layer.start, true)}–${fmtTime(layer.windowEnd, true)} · source ${bleep.start.toFixed(2)}–${bleep.end.toFixed(2)} s`
+          : `Trimmed out of view · source ${bleep.start.toFixed(2)}–${bleep.end.toFixed(2)} s`}
+      </span>
+      <div className="field">
+        <label>Sound</label>
+        <select
+          value={value} disabled={disabled} aria-label="Bleep sound"
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v.startsWith("asset:")) onSet({ sfxAssetId: v.slice(6) });
+            else onSet({ sound: v as BleepSound });
+          }}
+        >
+          {(Object.keys(BLEEP_SOUND_LABELS) as BleepSound[]).map((s) => (
+            <option key={s} value={s}>{BLEEP_SOUND_LABELS[s]}</option>
+          ))}
+          {customs.length > 0 && (
+            <optgroup label="Custom…">
+              {customs.map((a) => <option key={a.id} value={`asset:${a.id}`}>{a.name}</option>)}
+            </optgroup>
+          )}
+        </select>
+      </div>
+      <RangeField label="Volume" min={0} max={2} step={0.05} def={BLEEP_DEFAULT_VOLUME}
+        value={bleep.volume ?? BLEEP_DEFAULT_VOLUME} onCommit={(v) => onSet({ volume: v })} />
+      <label className="check-row">
+        <input type="checkbox" checked={bleep.mute !== false} disabled={disabled}
+          onChange={(e) => onSet({ mute: e.target.checked })} />
+        Mute the original under it
+      </label>
+      <button className="btn btn-danger btn-block" onClick={onRemove} disabled={disabled} title="Delete this bleep (Delete / Backspace)">
+        <Trash size={14} /> Delete bleep
+      </button>
+    </div>
+  );
+}
+
 function ClipInspector(props: InspectorProps) {
   const { clip, index, asset, thumb, project, connected, busy } = props;
   const [tab, setTab] = useState<Tab>("adjust");
@@ -1341,6 +1457,10 @@ function ClipInspector(props: InspectorProps) {
   const [newPos, setNewPos] = useState("bottom");
   const [capModel, setCapModel] = useState("base.en");
   const [styleOpen, setStyleOpen] = useState<string | null>(null);
+  const [bleepSound, setBleepSound] = useState("beep");
+  const [bleepNote, setBleepNote] = useState<string | null>(null);
+  const bleepTotal = clip.effects?.bleeps?.length ?? 0;
+  const bleepVisible = bleepTotal ? expandBleeps(clip, project?.fps ?? 30).length : 0;
 
   const fps = project?.fps ?? 30;
   const dur = clipDurationFrames(clip) / fps;
@@ -1394,6 +1514,18 @@ function ClipInspector(props: InspectorProps) {
       </div>
 
       <div className="insp-scroll">
+        {props.selectedBleep && (
+          <BleepPanel
+            key={props.selectedBleep.id}
+            clip={clip}
+            bleep={props.selectedBleep}
+            project={project}
+            disabled={!connected || busy}
+            onSet={(patch) => props.onSetBleep(clip.id, props.selectedBleep!.id, patch)}
+            onRemove={() => props.onRemoveBleep(clip.id, props.selectedBleep!.id)}
+            onClose={props.onDeselectBleep}
+          />
+        )}
         {tab === "adjust" && (
           <>
             <div className="group">
@@ -1584,6 +1716,42 @@ function ClipInspector(props: InspectorProps) {
               </button>
               <span className="field-hint">AI cutout for people (no green screen). The track below shows through — put a colour, image or video on a lower track to replace the background.</span>
             </div>
+            {asset?.hasAudio && (
+              <div className="group">
+                <div className="group-title"><Waveform size={13} /> Bleep swear words</div>
+                <div className="add-row">
+                  <select value={bleepSound} onChange={(e) => setBleepSound(e.target.value)} disabled={!connected || busy} aria-label="Bleep sound">
+                    <option value="beep">Beep</option>
+                    <option value="quack">Duck quack</option>
+                    <option value="squeak">Squeaky toy</option>
+                    <option value="boing">Boing</option>
+                    <option value="honk">Clown horn</option>
+                  </select>
+                  <button
+                    className="btn"
+                    onClick={async () => {
+                      const n = await props.onBleep(clip.id, bleepSound);
+                      setBleepNote(n === null ? null : n === 0 ? "No swear words found" : `Bleeped ${n} word${n === 1 ? "" : "s"}`);
+                    }}
+                    disabled={!connected || busy}
+                    title="Transcribes the clip if needed, then mutes each swear word and plays the sound there (re-running replaces this clip's bleeps)"
+                  >
+                    Bleep
+                  </button>
+                  {bleepTotal > 0 && (
+                    <button className="btn btn-danger" onClick={() => { props.onRemoveBleeps(clip.id); setBleepNote(null); }} disabled={!connected || busy}>
+                      Remove bleeps
+                    </button>
+                  )}
+                </div>
+                {bleepNote && <span className="field-hint">{bleepNote}</span>}
+                <span className="field-hint">
+                  {bleepTotal === 0
+                    ? "No bleeps on this clip."
+                    : `${bleepVisible} bleep${bleepVisible === 1 ? "" : "s"} on this clip${bleepTotal > bleepVisible ? ` (${bleepTotal - bleepVisible} more in trimmed-off audio)` : ""}. They follow the clip through every edit — drag a chip on the timeline to nudge one, click it to change its sound.`}
+                </span>
+              </div>
+            )}
 
             {index > 0 && (
               <div className="group">
