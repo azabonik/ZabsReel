@@ -34,11 +34,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
-import { FFMPEG_BIN, runFfmpegCaptureStderr } from "../src/ffmpeg/executor.js";
+import { FFMPEG_BIN, FFPROBE_BIN, runFfmpegCaptureStderr } from "../src/ffmpeg/executor.js";
 import { planSegments, segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
+import { audioFilterCaps } from "../src/audio/fx.js";
 import { PREVIEW_PROFILE, previewCanvas } from "../src/ffmpeg/graph.js";
 import {
-  AUDIO_EFFECTS, audioEffectFilterSteps, audioPreviewPlan, validateAudioEffect,
+  AUDIO_EFFECTS, audioEffectFilterSteps, audioPreviewPlan, robotTaps, validateAudioEffect,
 } from "../src/effects/audio.js";
 import type { AssetTranscript, Clip, ResolvedRenderClip, TranscriptWord } from "../src/types.js";
 
@@ -330,7 +331,7 @@ async function lufs(file: string): Promise<number> {
   return m.length ? Number(m[m.length - 1][1]) : NaN;
 }
 async function durationSec(file: string): Promise<number> {
-  const { stdout } = await execa("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0", file]);
+  const { stdout } = await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0", file]);
   return Number(stdout.trim());
 }
 
@@ -458,7 +459,9 @@ async function main() {
       let ok = false;
       let note = "";
       try {
-        const steps = audioEffectFilterSteps([{ id: "x", type: d.type, params }]);
+        // With this FFmpeg's caps, as a render resolves them (afftdn v2, anlmdn crashing 9.0).
+        const fx = [{ id: "x", type: d.type, params }];
+        const steps = audioEffectFilterSteps(fx, { caps: await audioFilterCaps(fx) });
         const y = await filtered(voiceWav, steps);
         // Never shorter (echo/reverb tails may run longer — graph.ts trims those to the clip).
         ok = y.length >= wavLen - 0.05 * SR && y.every(Number.isFinite);
@@ -470,6 +473,36 @@ async function main() {
     }
   }
   check(audioEffectFilterSteps([{ type: "eq_custom", params: { low: 3, mid: -2, high: 4 } }]).length === 3, "eq_custom emits its three bands when non-zero");
+  // vibrato reads its delay line before writing it (FFmpeg 4.4 – 9.0 leave it
+  // uncleared): underwater primes it with silence and cuts that back off.
+  const uw = audioEffectFilterSteps([{ type: "underwater" }]);
+  const vi = uw.findIndex((x) => x.startsWith("vibrato="));
+  check(vi > 0 && /^adelay=delays=(\d+)S:all=1$/.test(uw[vi - 1]) && uw[vi + 1] === `atrim=start_sample=${/^adelay=delays=(\d+)S/.exec(uw[vi - 1])?.[1]}`,
+    `underwater primes vibrato's delay line (${uw.slice(Math.max(0, vi - 1), vi + 2).join(",")})`);
+  // FFmpeg ≥ 5's afftdn: no tn, nf 5 dB lower, each pass trimmed by its 25 ms delay; 4.4's: unchanged.
+  const nr44 = audioEffectFilterSteps([{ type: "noise_reduction", params: { floor: -52, amount: 0.5, heavy: 1 } }]);
+  const nr5 = audioEffectFilterSteps([{ type: "noise_reduction", params: { floor: -52, amount: 0.5, heavy: 1 } }], { caps: { afftdnV2: true } });
+  const nr9 = audioEffectFilterSteps([{ type: "noise_reduction", params: { floor: -52, amount: 0.5, heavy: 1 } }], { caps: { afftdnV2: true, noAnlmdn: true } });
+  check(nr44.join() === "afftdn=nr=24.000000:nf=-25.000000:tn=1,afftdn=nr=24.000000:nf=-37.000000:tn=1,anlmdn=s=0.001262:p=0.002:r=0.006:m=11",
+    `noise_reduction on FFmpeg 4.4: ${nr44.join()}`);
+  check(nr5.join() === "afftdn=nr=24.000000:nf=-30.000000,atrim=start_sample=1200,asetpts=PTS-STARTPTS,afftdn=nr=24.000000:nf=-42.000000,atrim=start_sample=1200,asetpts=PTS-STARTPTS,anlmdn=s=0.001262:p=0.002:r=0.006:m=11",
+    `noise_reduction on FFmpeg ≥ 5: ${nr5.join()}`);
+  check(!nr9.some((x) => x.startsWith("anlmdn")) && nr9.length === nr5.length - 1, "noise_reduction skips anlmdn where it crashes (FFmpeg 9.0)");
+  // robot: 4.4/5.0's afftfilt string as it always was; ≥ 5.1 (afftfilt rewritten) rect + a spectral Hann, latency padded and trimmed, pre-roll gated.
+  for (const [tone, W] of [[0, 2048], [1, 1024], [2, 512]] as const) {
+    const D = (3 * W) / 4;
+    const a = audioEffectFilterSteps([{ type: "robot", params: { tone } }]);
+    const b = audioEffectFilterSteps([{ type: "robot", params: { tone } }], { caps: { afftfiltV2: true } });
+    check(a.join() === `afftfilt=real='hypot(re,im)':imag='0':win_size=${W}:overlap=0.75`, `robot tone ${tone} on FFmpeg 4.4/5.0: ${a.join()}`);
+    check(b.length === 7 && b[0] === `asetnsamples=n=${W / 4}:p=1` && b[1] === "asettb=1/sr" && b[2] === "asetpts=N" && b[3] === `apad=pad_len=${D}` &&
+      b[4].startsWith(`afftfilt=win_func=rect:overlap=0.75:win_size=${W}:real='`) && b[4].endsWith(`*gte(pts,${D})':imag='0'`) &&
+      b[5] === `atrim=start_sample=${D}` && b[6] === "asetpts=PTS-STARTPTS" && !b.join().includes("|"),
+      `robot tone ${tone} on FFmpeg ≥ 5.1: input padded to a whole hop, rect afftfilt between apad/atrim of ${D}, pre-roll gated, no '|' (${b.join().length} chars)`);
+  }
+  const taps = robotTaps(1024);
+  const wantTaps = [[0.499511717614, 0], [-0.25012056001, -7.67362674995e-4], [1.63181340229e-4, 1.00128072937e-6]];
+  check(taps.every(([re, im], m) => Math.abs(re - wantTaps[m][0]) < 1e-9 && Math.abs(im - wantTaps[m][1]) < 1e-9),
+    `robot's spectral Hann taps at win 1024: ${taps.map(([re, im]) => `${re.toPrecision(6)}${im < 0 ? "−" : "+"}${Math.abs(im).toPrecision(3)}i`).join(", ")}`);
 
   // ---- cleanup ---------------------------------------------------------------------
   console.log("cleanup");
@@ -652,7 +685,9 @@ async function main() {
   // ---- channel layouts + speed: the export negotiates and finishes ----------------------
   // The soft clip (telephone/megaphone) must negotiate any channel layout, also
   // after enhance_voice and with a bleep's mix; effect chains in front of
-  // atempo must not stall the export graph. Every export has a deadline.
+  // atempo must not stall the export graph. Every export has a deadline. The
+  // mix is stereo whatever the source's layout (graph.ts pins it: FFmpeg 4.4
+  // kept the first clip's layout, 6.1+ gave stereo).
   console.log("channel layouts + speed (the export negotiates and finishes)");
   const layoutClip = async (layout: string): Promise<string> => {
     const out = join(dir, `tone_${layout.replace(".", "_")}.mkv`);
@@ -682,7 +717,7 @@ async function main() {
     }
   };
   const channels = async (file: string): Promise<number> =>
-    Number((await execa("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", file])).stdout.trim());
+    Number((await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", file])).stdout.trim());
   const layouts: Array<[string, number]> = [["mono", 1], ["stereo", 2], ["quad", 4], ["5.1", 6]];
   for (const [layout, nch] of layouts) {
     const media = await layoutClip(layout);
@@ -690,7 +725,7 @@ async function main() {
       const r = await exportWithin(media, async (id) => { await call("apply_audio_effect", { clipId: id, type }); });
       const ch = r.out ? await channels(r.out) : 0;
       const lvl = r.out ? rmsDb(slice(await decode(r.out), 0.5, 3.5)) : -999;
-      check(!!r.out && ch === nch && lvl > -30, `${layout} ${type}: exports (${r.err ?? `${ch} ch, ${f1(lvl)} dBFS`})`);
+      check(!!r.out && ch === 2 && lvl > -30, `${layout} ${type}: exports stereo from ${nch} ch (${r.err ?? `${ch} ch, ${f1(lvl)} dBFS`})`);
     }
     const combo = await exportWithin(media, async (id) => {
       await call("enhance_voice", { clipId: id });

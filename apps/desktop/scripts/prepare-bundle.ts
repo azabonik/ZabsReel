@@ -19,6 +19,14 @@
  * Run from the repo root:  npx tsx apps/desktop/scripts/prepare-bundle.ts
  * Re-running is cheap: existing, correctly-sized files are left in place.
  *
+ * FFmpeg is PINNED to a tested release: the staged ffmpeg must report one of
+ * core's TESTED_FFMPEG_VERSIONS (packages/core/src/ffmpeg/version.ts, the
+ * versions the full smoke matrix ran against) and ffprobe the same version,
+ * else staging stops. AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG=1 ships another build
+ * anyway (it is then marked untested in the manifest). Point AIVE_FFMPEG /
+ * AIVE_FFPROBE at the build to ship; its version and the sha256 of the staged
+ * binaries go into bundle-manifest.json (scripts/bundle-ffmpeg.ts).
+ *
  * We deliberately REUSE the engine's own download/setup code (ensureWhisper,
  * ensureYunetModel, ensureRvmModel) so the bundled binaries are byte-identical to what the
  * editor would otherwise fetch at runtime — and so the slow downloads happen at
@@ -38,6 +46,7 @@ import { delimiter } from "node:path";
 import { ensureWhisper, DEFAULT_MODEL } from "../../../packages/core/dist/whisper/setup.js";
 import { ensureYunetModel } from "../../../packages/core/dist/reframe/detector.js";
 import { ensureRvmModel } from "../../../packages/core/dist/matting/rvm.js";
+import { stageFfmpeg } from "./bundle-ffmpeg.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** apps/desktop/build/resources/aive */
@@ -123,13 +132,15 @@ async function main(): Promise<void> {
   console.log(`Staging bundled assets into ${STAGE}\n`);
   await mkdir(STAGE, { recursive: true });
 
-  // 1. FFmpeg + ffprobe (subprocess; gyan.dev/BtbN static builds are self-contained).
+  // 1. FFmpeg + ffprobe (subprocess; gyan.dev/BtbN static builds are self-contained),
+  //    pinned to a tested release (checked before anything is staged); the staged
+  //    copies are verified byte-identical and their sha256 recorded.
   console.log("FFmpeg:");
   const ffmpeg = await findOnPath("ffmpeg", "AIVE_FFMPEG");
   const ffprobe = await findOnPath("ffprobe", "AIVE_FFPROBE");
-  await copyIfNeeded(ffmpeg, join(STAGE, "ffmpeg", "ffmpeg" + EXE));
-  await copyIfNeeded(ffprobe, join(STAGE, "ffmpeg", "ffprobe" + EXE));
-  console.log(`  • staged ffmpeg + ffprobe from ${dirname(ffmpeg)}`);
+  const build = await stageFfmpeg(ffmpeg, ffprobe, join(STAGE, "ffmpeg"));
+  console.log(`  • staged FFmpeg ${build.version}${build.tested ? "" : " (UNTESTED)"} from ${dirname(ffmpeg)}`);
+  console.log(`    ffmpeg  sha256 ${build.sha256.ffmpeg}\n    ffprobe sha256 ${build.sha256.ffprobe}`);
 
   // 2. whisper-cli + sibling DLLs + base.en model (reuses ~/.aive cache).
   console.log("whisper.cpp:");
@@ -168,6 +179,7 @@ async function main(): Promise<void> {
         platform: `${process.platform}-${process.arch}`,
         stagedAt: new Date().toISOString(),
         bundled: ["ffmpeg", "ffprobe", "whisper-cli", DEFAULT_MODEL, "yunet", "rvm", "noto-sans"],
+        ffmpeg: build,
         firstRunDownload: ["remotion-chrome-headless-shell"],
       },
       null,

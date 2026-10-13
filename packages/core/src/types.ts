@@ -789,6 +789,13 @@ export interface ResolvedEffects {
   audioFilters?: AudioEffect[];
   /** FFmpeg lacks rubberband: pitch effects use the asetrate+atempo fallback. */
   pitchFallback?: boolean;
+  /**
+   * How the rendering FFmpeg's audio filters differ from 4.4's (effects/audio.ts
+   * AudioFilterCaps, from audio/fx.ts), plus `mixCrossfade`: FFmpeg 7.x, whose
+   * acrossfade is unreliable — ramp chunks and transitions are joined by mixing
+   * (graph.ts emitMixCrossfades; set by the engine's render staging).
+   */
+  audioCaps?: { afftdnV2?: boolean; afftfiltV2?: boolean; noAnlmdn?: boolean; mixCrossfade?: boolean };
   /** Measured loudness (LUFS) entering each audio effect's loudness stage, by effect id (audio/fx.ts). */
   loudness?: Record<string, number>;
 }

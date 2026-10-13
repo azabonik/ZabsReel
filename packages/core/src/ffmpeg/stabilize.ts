@@ -46,8 +46,13 @@ export function stabilizeFilters(opts: StabilizeOptions = {}): { detect: string;
       ? "optzoom=1"
       : `optzoom=0:zoom=${typeof zoom === "number" && Number.isFinite(zoom) ? Math.max(-100, Math.min(100, zoom)) : 0}`;
   const crop = opts.crop === "black" ? "black" : "keep";
+  // optalgo=gauss: the camera path is the Gaussian low-pass `smoothing`
+  // describes. It was what the default ("opt") did in libvidstab ≤ 1.1.x;
+  // newer libvidstab builds (static FFmpeg builds from mid-2026 on, any FFmpeg
+  // version) implement "opt" as an L1-optimal path that ignores zoom "none"
+  // (it needs a zoom budget), so the default no longer meant the same thing.
   return {
     detect: `vidstabdetect=shakiness=${shakiness}:accuracy=${accuracy}`,
-    transform: `smoothing=${smoothing}:${zoomOpts}:crop=${crop}`,
+    transform: `smoothing=${smoothing}:${zoomOpts}:crop=${crop}:optalgo=gauss`,
   };
 }

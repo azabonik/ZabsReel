@@ -18,7 +18,8 @@ import {
   type SceneCut,
   type ColorInspection,
 } from "./ffmpeg/analysis.js";
-import { ffmpegMajorVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
+import { acrossfadeNeedsMix, ffmpegVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
+import { xfadeNeedsEofPad } from "./ffmpeg/version.js";
 import { stabilizeFilters, type StabilizeOptions } from "./ffmpeg/stabilize.js";
 import { EFFECTS, effectByType } from "./effects/registry.js";
 import type { BlendMode } from "./effects/compositing.js";
@@ -245,10 +246,9 @@ function even(n: number): number {
 
 /** Minimum clip footprint, in frames. */
 const MIN_CLIP_FRAMES = 1;
-/** xfade's end-of-stream bug before FFmpeg 7 (graph.ts RenderOptions.xfadeEofPad). */
+/** xfade's end-of-stream bug before FFmpeg 7 (graph.ts RenderOptions.xfadeEofPad; version.ts xfadeNeedsEofPad). */
 async function needsXfadeEofPad(): Promise<boolean> {
-  const v = await ffmpegMajorVersion();
-  return v > 0 && v < 7;
+  return xfadeNeedsEofPad(await ffmpegVersion().catch(() => null));
 }
 /** How many source frames around a constant-speed split cutPoint searches for halves that add up. */
 const CUT_SEARCH_FRAMES = 16;
@@ -3790,6 +3790,10 @@ export class EditorEngine extends EventEmitter {
           }
           effects = { ...effects, lut: name };
         }
+      }
+      // FFmpeg 7.x's acrossfade is unreliable: ramp chunks and transitions are mixed instead (graph.ts).
+      if (asset.hasAudio && (effects?.speedRamp || clip.transition) && (await acrossfadeNeedsMix())) {
+        effects = { ...effects, audioCaps: { ...effects?.audioCaps, mixCrossfade: true } };
       }
 
       let overlays: ResolvedOverlay[] | undefined;

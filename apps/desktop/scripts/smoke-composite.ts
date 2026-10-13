@@ -784,8 +784,9 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   // Registry: every type has a preview story; the render-only set is what the UI badges.
   check("registry: render-only = noise_reduction, de_esser, gate, declick, normalize",
     AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type)).map((d) => d.type).join() === "noise_reduction,de_esser,gate,declick,normalize");
-  check("registry: pitch, chipmunk, deep and robot play live, marked approximate",
-    AUDIO_EFFECTS.filter((d) => audioPreviewFidelity(d.type) === "approx").map((d) => d.type).join() === "pitch,chipmunk,deep,robot");
+  check("registry: pitch, chipmunk and deep play live, marked approximate; robot plays live unmarked (the export's own maths)",
+    AUDIO_EFFECTS.filter((d) => audioPreviewFidelity(d.type) === "approx").map((d) => d.type).join() === "pitch,chipmunk,deep" &&
+      audioPreviewFidelity("robot") === "live");
   check("registry: without the AudioWorklet they are render-only again",
     AUDIO_EFFECTS.filter((d) => audioExactOnly(d.type, { worklet: false })).map((d) => d.type).join() ===
       "noise_reduction,de_esser,gate,declick,normalize,pitch,chipmunk,deep,robot");

@@ -70,13 +70,14 @@ async function main() {
   console.log("5. stabilize options → vidstab filters...");
   const def = stabilizeFilters();
   if (def.detect !== "vidstabdetect=shakiness=6:accuracy=15") throw new Error(`default detect: ${def.detect}`);
-  // The no-option default must equal the old fixed `smoothing=30:zoom=0` (optzoom 1 = auto, crop keep).
-  if (def.transform !== "smoothing=30:optzoom=1:crop=keep") throw new Error(`default transform: ${def.transform}`);
+  // The no-option default must equal the old fixed `smoothing=30:zoom=0` (optzoom 1 = auto, crop keep),
+  // with the Gaussian camera path spelled out (newer libvidstab made "opt" an L1 path that ignores zoom none).
+  if (def.transform !== "smoothing=30:optzoom=1:crop=keep:optalgo=gauss") throw new Error(`default transform: ${def.transform}`);
   const noZoom = stabilizeFilters({ zoom: "none" });
-  if (noZoom.transform !== "smoothing=30:optzoom=0:zoom=0:crop=keep") throw new Error(`zoom none transform: ${noZoom.transform}`);
+  if (noZoom.transform !== "smoothing=30:optzoom=0:zoom=0:crop=keep:optalgo=gauss") throw new Error(`zoom none transform: ${noZoom.transform}`);
   const opt = stabilizeFilters({ shakiness: 8, accuracy: 2, smoothing: 12, zoom: "auto", crop: "black" });
   if (opt.detect !== "vidstabdetect=shakiness=8:accuracy=4") throw new Error(`options detect: ${opt.detect}`);
-  if (opt.transform !== "smoothing=12:optzoom=1:crop=black") throw new Error(`options transform: ${opt.transform}`);
+  if (opt.transform !== "smoothing=12:optzoom=1:crop=black:optalgo=gauss") throw new Error(`options transform: ${opt.transform}`);
   const fixed = stabilizeFilters({ zoom: 7.5 });
   if (!fixed.transform.includes("optzoom=0:zoom=7.5")) throw new Error(`fixed zoom: ${fixed.transform}`);
   console.log(`   defaults ${def.detect} | ${def.transform}; options ${opt.detect} | ${opt.transform}`);

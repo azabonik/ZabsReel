@@ -491,7 +491,7 @@ function emitBlendDecorations(
       if (w.end <= w.start) return;
       const off = S + gStart; // the graphic's first frame, stack time
       const gl = `${tag}g${k}_${j}`;
-      const prep = [`[${gi.inputIdx}:v]format=rgba`, `scale=${W}:${H}`, `fps=${fps}`];
+      const prep = [`[${gi.inputIdx}:v]format=rgba`, `scale=${W}:${H}:flags=bilinear`, `fps=${fps}`];
       if (gi.g.opacity !== undefined && gi.g.opacity < 1) {
         prep.push(`colorchannelmixer=aa=${Math.max(0, Math.min(1, gi.g.opacity)).toFixed(3)}`);
       }
@@ -568,19 +568,36 @@ function emitClipVideoParts(
   const fxSteps = fx.filters?.length ? effectSteps(fx.filters, W, H, `c${inputIdx}`) : [];
   if (fxSteps.length) steps.push(...fxSteps, EFFECTS_RGBA_PIN);
 
+  // A sub-graph above (the alpha-keeping keys, colour grade, sharpen, grain, …)
+  // ends in a two-input filter (blend / alphamerge). On FFmpeg 4.4 – 6.1 that
+  // filter ends its stream with no end time, so the fps below took the clip as
+  // ending where its last frame starts and dropped that frame (two at 0.5x): a
+  // black frame at every cut after such a clip. Two padding frames go in BEFORE
+  // the sub-graph, where the stream's end is still exact: the lost end time then
+  // falls on a padding frame, and every real frame keeps its slots. They are
+  // transparent, so a clip whose video ends before its length (an old cutout
+  // behind its audio's delay) still ends where it does without the effect; a
+  // ramp clones instead, since its end guard below holds the last frame to its footprint.
+  const ramped = !!fx.speedRamp?.points.length;
+  const pinLength = steps.some((s) => s.includes(";"));
+  if (pinLength) {
+    steps.splice(steps.indexOf("setsar=1") + 1, 0, ramped ? "tpad=stop=2:stop_mode=clone" : "tpad=stop=2:stop_mode=add:color=0x00000000");
+  }
+
   // Reset timestamps and apply speed in one go. A speed RAMP retimes with its
   // closed-form curve (speed.ts rampSetptsExpr: the frame slot of each source
   // frame); the fps filter then picks frames deterministically for both.
-  const ramped = !!fx.speedRamp?.points.length;
   if (ramped) steps.push(`setpts='${rampSetptsExpr(fx.speedRamp!, clip.sourceIn, clip.sourceSpan, fps)}'`, `fps=${fps}`);
   else steps.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${fps}`);
-  // One end guard, then one cut to the clip's length. A ramp's setpts emits the shared frame model's slots
-  // (speed.ts "Ramp frames"): its length is the model's footprint, not what the fps filter derives from the
-  // input's end, so clone-pad first. A matte-backed cutout's merged picture already carries one held frame
-  // past its end (see the merge).
+  // One end guard per cause, then ONE cut to the clip's length. A ramp's setpts emits the shared frame
+  // model's slots (speed.ts "Ramp frames"): its length is the model's footprint, not what the fps filter
+  // derives from the input's end, so clone-pad to the footprint first (the model holds the last frame,
+  // also where the video ends before the clip's span). A sub-graph's padding frames (pinLength above) and
+  // a matte-backed cutout's merged picture (one held frame past its end, see the merge) came before the retime.
   const cutoutMerged = !!clip.cutout && srcLabel !== `[${inputIdx}:v]`;
-  if (ramped) steps.push("tpad=stop_mode=clone:stop=2");
-  if (ramped || cutoutMerged) steps.push(`trim=end_frame=${Math.max(1, Math.round(outDur * fps))}`);
+  const frames = Math.max(1, Math.round(outDur * fps));
+  if (ramped) steps.push(`tpad=stop_mode=clone:stop=${frames}`);
+  if (ramped || cutoutMerged || pinLength) steps.push(`trim=end_frame=${frames}`);
 
   // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
   // space, after color/effects/keys and BEFORE the transform, so it moves,
@@ -724,7 +741,7 @@ function audioSourceSteps(clip: ResolvedRenderClip): string[] {
   // a known rate; apad+atrim pins the stream to the clip's source span (echo
   // tails would lengthen it, FFT/pitch filters can flush short), keeping the
   // timing of transition runs and concat exact.
-  const fxSteps = audioEffectFilterSteps(fx.audioFilters, { pitchFallback: fx.pitchFallback, loudness: fx.loudness });
+  const fxSteps = audioEffectFilterSteps(fx.audioFilters, { pitchFallback: fx.pitchFallback, loudness: fx.loudness, caps: fx.audioCaps });
   if (fxSteps.length) {
     steps.push(`aresample=${AUDIO_FX_RATE}`, ...fxSteps, "apad", `atrim=0:${clip.sourceSpan.toFixed(6)}`, "asetpts=PTS-STARTPTS");
   }
@@ -827,6 +844,14 @@ function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inp
     filterParts.push(`[${split[k]}]${steps.join(",")}[${label}]`);
     parts.push(`[${label}]`);
   });
+  if (fx.audioCaps?.mixCrossfade && parts.length > 1) {
+    // FFmpeg 7.x: the same joins as faded chunks mixed at their sample positions
+    // (emitMixCrossfades) — its acrossfade drops or cuts short chunks at random.
+    const pieces = chunks.map((_, k) => ({ label: parts[k], len: lens[k] + xf[k], fadeIn: k > 0 && xf[k - 1] >= 8 ? xf[k - 1] : 0 }));
+    const mixed = emitMixCrossfades(filterParts, pieces, `${tag}m`);
+    filterParts.push(`${mixed}${[...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`);
+    return;
+  }
   let cur = parts[0];
   for (let k = 1; k < parts.length; k++) {
     const x = xf[k - 1];
@@ -836,6 +861,35 @@ function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inp
     cur = `[${label}]`;
   }
   filterParts.push(`${cur}${[...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`);
+}
+
+/**
+ * Join audio pieces end to end at 48 kHz, each piece crossfading (linear, like
+ * acrossfade's tri curves) into the next over the NEXT piece's `fadeIn`
+ * samples (0 = butt join), by fading each piece and mixing them all at their
+ * sample positions. Used instead of chained acrossfade on FFmpeg 7.x, whose
+ * acrossfade returns a cut-short or empty stream at random when its inputs are
+ * short (version.ts acrossfadeUnreliable); mixing by position gives the same
+ * samples on every run. Every piece must be exactly `len` samples long.
+ * Returns the joined stream's label.
+ */
+function emitMixCrossfades(filterParts: string[], pieces: { label: string; len: number; fadeIn: number }[], tag: string): string {
+  const labels: string[] = [];
+  let pos = 0;
+  pieces.forEach((p, k) => {
+    const fadeOut = pieces[k + 1]?.fadeIn ?? 0;
+    const steps: string[] = [];
+    if (p.fadeIn > 0) steps.push(`afade=t=in:ns=${p.fadeIn}:curve=tri`);
+    if (fadeOut > 0) steps.push(`afade=t=out:start_sample=${p.len - fadeOut}:ns=${fadeOut}:curve=tri`);
+    pos -= p.fadeIn;
+    if (pos > 0) steps.push(`adelay=delays=${pos}S:all=1`);
+    steps.push("asetnsamples=n=1024:p=0");
+    filterParts.push(`${p.label}${steps.join(",")}[${tag}${k}]`);
+    labels.push(`[${tag}${k}]`);
+    pos += p.len;
+  });
+  filterParts.push(`${labels.join("")}amix=inputs=${labels.length}:duration=longest:normalize=0[${tag}]`);
+  return `[${tag}]`;
 }
 
 /**
@@ -945,7 +999,7 @@ export interface RenderOptions {
   /**
    * Work around xfade's end-of-stream bug before FFmpeg 7 (a transition one
    * frame short, the incoming clip one frame late): set it from
-   * ffmpegMajorVersion() < 7. Off for FFmpeg 7+, where it would leave a hair
+   * version.ts xfadeNeedsEofPad. Off for FFmpeg 7+, where it would leave a hair
    * of the outgoing clip in the frame after a wipe.
    */
   xfadeEofPad?: boolean;
@@ -1102,7 +1156,9 @@ export function buildRenderCommand(
           const start = Math.max(0, gi.g.start ?? 0);
           const end = gi.g.end ?? 1e9;
           const gl = `g${i}_${k}`;
-          const prep = [`[${gi.inputIdx}:v]format=rgba`, `scale=${W}:${H}`, `fps=${fps}`];
+          // flags spelled out: a filter_complex scale without them is bilinear in
+          // FFmpeg 4.4 and bicubic from 5.0 (preview canvases scale graphics down).
+          const prep = [`[${gi.inputIdx}:v]format=rgba`, `scale=${W}:${H}:flags=bilinear`, `fps=${fps}`];
           if (gi.g.opacity !== undefined && gi.g.opacity < 1) {
             prep.push(`colorchannelmixer=aa=${Math.max(0, Math.min(1, gi.g.opacity)).toFixed(3)}`);
           }
@@ -1318,7 +1374,18 @@ export function buildRenderCommand(
         .filter((m) => m.clip.hasAudio && !m.clip.muted);
       if (members.length === 0) return;
       let cur = `[a${members[0].idx}]`;
-      for (let i = 1; i < members.length; i++) {
+      const mixJoins = members.length > 1 && members.some((m) => m.clip.effects?.audioCaps?.mixCrossfade);
+      if (mixJoins) {
+        // FFmpeg 7.x (see emitMixCrossfades): each clip pinned to its timeline length.
+        const pieces = members.map((m, i) => {
+          const len = Math.max(1, Math.round(m.clip.outDuration * 48000));
+          filterParts.push(`[a${m.idx}]apad,atrim=end_sample=${len},asetpts=PTS-STARTPTS[ap${m.idx}]`);
+          const d = i > 0 ? clampOverlap(m.clip.transition?.duration ?? 0, members[i - 1].clip.outDuration, m.clip.outDuration, fps) : 0;
+          return { label: `[ap${m.idx}]`, len, fadeIn: Math.round(Number(d.toFixed(3)) * 48000) };
+        });
+        cur = emitMixCrossfades(filterParts, pieces, `arun${r}m`);
+      }
+      for (let i = 1; i < members.length && !mixJoins; i++) {
         const d = clampOverlap(members[i].clip.transition?.duration ?? 0, members[i - 1].clip.outDuration, members[i].clip.outDuration, fps);
         const out = `arun${r}_${i}`;
         if (d > 0) {
@@ -1344,7 +1411,10 @@ export function buildRenderCommand(
     });
 
     filterParts.push(
-      `${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0[amixraw]`,
+      // Pinned to stereo (the silent base's layout, the preview's and the music's):
+      // left to FFmpeg the mix took the FIRST audio clip's layout up to 5.x (a mono
+      // first clip collapsed a stereo second one to mono) and stereo from 6.1.
+      `${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,aformat=channel_layouts=stereo[amixraw]`,
     );
     filterParts.push(`[amixraw]apad,atrim=0:${total.toFixed(6)},aresample=48000[paud]`);
 

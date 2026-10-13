@@ -859,7 +859,11 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     category: "Look",
     description: "Smart saturation: boosts dull colours more than already-saturated ones (so skin and bright colours don't blow out). Negative mutes. Use apply_color/color_grade for plain saturation.",
     params: [amountParam("Vibrance", -2, 2, 0.05, 0.8)],
-    ffmpeg: (e) => [`vibrance=intensity=${num(paramValue(e, "amount"))}`],
+    // The luma weights are spelled out: FFmpeg 8.0 swapped the red/blue defaults
+    // (rlum 0.212656, blum 0.072186), so relying on them made the same project
+    // export different colours on 4.4–7.1 and 8.0+. These are 4.4's values,
+    // which the preview shader (glsl.ts GLSL_VIBRANCE) uses too.
+    ffmpeg: (e) => [`vibrance=intensity=${num(paramValue(e, "amount"))}:rlum=0.072186:blum=0.212656`],
     preview: {
       css: (e) => {
         const i = paramValue(e, "amount");
@@ -868,7 +872,7 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
       note: "Approximate: CSS saturate boosts every colour equally, so already-saturated colours look stronger than in the export, and below -1.25 FFmpeg overshoots past grey.",
       gl: {
         fidelity: "exact",
-        note: "vibrance's per-channel push from its weighted luma, with FFmpeg's default coefficients.",
+        note: "vibrance's per-channel push from its weighted luma, with FFmpeg 4.4's default coefficients (the export passes them explicitly).",
         passes: [{
           frag: GLSL_VIBRANCE, point: true, domain: "rgb",
           uniforms: (e) => {

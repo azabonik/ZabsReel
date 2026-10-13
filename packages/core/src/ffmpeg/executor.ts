@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  FILTERGRAPH_OPTIONS, acrossfadeUnreliable, adaptFilterGraph, parseFfmpegVersion, preferredFilterScriptFlag, usesPremultiply,
+  type FfmpegVersion,
+} from "./version.js";
 
 /**
  * Thin wrapper around the FFmpeg / ffprobe binaries. We invoke them as external
@@ -17,20 +21,14 @@ import { join } from "node:path";
 export const FFMPEG_BIN = process.env.AIVE_FFMPEG || "ffmpeg";
 export const FFPROBE_BIN = process.env.AIVE_FFPROBE || "ffprobe";
 
-let versionLine: Promise<string> | undefined;
-/** First line of FFMPEG_BIN's `-version` banner, probed once ("" when it does not run). */
+/** First line of FFMPEG_BIN's `-version` banner ("" when it does not run); the one probe ffmpegVersion makes. */
 export function ffmpegVersionLine(): Promise<string> {
-  versionLine ??= execa(FFMPEG_BIN, ["-version"]).then(
-    (r) => r.stdout.split("\n")[0].trim(),
-    () => "",
-  );
-  return versionLine;
+  return ffmpegVersion().then((v) => v.banner, () => "");
 }
 
-/** Major version of FFMPEG_BIN (0 when the banner has none, e.g. a git snapshot build). */
+/** FFmpeg generation of FFMPEG_BIN: its release major, or the one its libavfilter implies for a git build (0 when unknown). */
 export async function ffmpegMajorVersion(): Promise<number> {
-  const m = /^ffmpeg version n?(\d+)\.\d/.exec(await ffmpegVersionLine());
-  return m ? Number(m[1]) : 0;
+  return (await ffmpegVersion().catch(() => null))?.generation ?? 0;
 }
 
 export class FfmpegError extends Error {
@@ -106,13 +104,99 @@ export const INLINE_FILTERGRAPH_MAX = 16 * 1024;
 
 /**
  * The options that read a filtergraph from a file. `-filter_complex_script`
- * works in FFmpeg 4.x–7.x (deprecated in 7.0 and removed later);
+ * works in FFmpeg 4.x–8.x (deprecated from 7.0, removed in 9.0);
  * `-/filter_complex` (the generic "-/option <file>" form) exists from 7.0.
- * runFfmpeg uses the current one and changes to the other once when this
- * ffmpeg does not know it.
+ * runFfmpeg starts with the one this version prefers (ffmpegVersion) and
+ * changes to the other once when this ffmpeg does not know it.
  */
 const FILTER_SCRIPT_FLAGS = ["-filter_complex_script", "-/filter_complex"] as const;
-let filterScriptFlag = 0;
+/** Index into FILTER_SCRIPT_FLAGS; null until the first long graph picks it from the version. */
+let filterScriptFlag: number | null = null;
+
+/** The filtergraph-file option the next long graph starts with (null: not chosen yet). */
+export function filterScriptFlagInUse(): (typeof FILTER_SCRIPT_FLAGS)[number] | null {
+  return filterScriptFlag === null ? null : FILTER_SCRIPT_FLAGS[filterScriptFlag];
+}
+
+/**
+ * Make the next long graph start with `flag` (null: choose from the version
+ * again). smoke-ffcompat uses it to run the fallback against a real binary.
+ */
+export function setFilterScriptFlag(flag: (typeof FILTER_SCRIPT_FLAGS)[number] | null): void {
+  filterScriptFlag = flag === null ? null : FILTER_SCRIPT_FLAGS.indexOf(flag);
+}
+
+let versionPromise: Promise<FfmpegVersion> | null = null;
+
+/**
+ * The running FFmpeg's version (`ffmpeg -version`, probed once per process; a
+ * failed probe is not cached, so installing FFmpeg later is picked up).
+ * Rejects when ffmpeg can't be run.
+ */
+export function ffmpegVersion(): Promise<FfmpegVersion> {
+  if (!versionPromise) {
+    versionPromise = execa(FFMPEG_BIN, ["-version"], { reject: true }).then(
+      (r) => parseFfmpegVersion(r.stdout),
+      (err: unknown) => {
+        versionPromise = null;
+        throw err;
+      },
+    );
+  }
+  return versionPromise;
+}
+
+/** True when this FFmpeg's acrossfade can't be trusted (7.x; version.ts acrossfadeUnreliable). */
+export async function acrossfadeNeedsMix(): Promise<boolean> {
+  return acrossfadeUnreliable(await ffmpegVersion().catch(() => null));
+}
+
+let alphaModesPromise: Promise<boolean> | null = null;
+
+/**
+ * True when this FFmpeg negotiates alpha modes (8.1+; its `setparams` has an
+ * `alpha_mode` option). Probed once, only when a graph uses (un)premultiply.
+ */
+export function hasAlphaModes(): Promise<boolean> {
+  if (!alphaModesPromise) {
+    alphaModesPromise = execa(FFMPEG_BIN, ["-hide_banner", "-h", "filter=setparams"], { reject: false })
+      .then((r) => /^\s*alpha_mode\s/m.test(r.stdout))
+      .catch(() => false);
+  }
+  return alphaModesPromise;
+}
+
+let anlmdnPromise: Promise<boolean> | null = null;
+
+/**
+ * False when this FFmpeg's anlmdn crashes (FFmpeg 9.0 corrupts its heap on
+ * any input, which would kill the whole export). A 0.25 s run on generated
+ * noise, once per process, only when a render would use anlmdn.
+ */
+export function anlmdnWorks(): Promise<boolean> {
+  if (!anlmdnPromise) {
+    anlmdnPromise = execa(
+      FFMPEG_BIN,
+      ["-hide_banner", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=0.25:sample_rate=48000:amplitude=0.1", "-af", "anlmdn", "-f", "null", "-"],
+      { reject: false },
+    )
+      .then((r) => r.exitCode === 0)
+      .catch(() => false);
+  }
+  return anlmdnPromise;
+}
+
+/**
+ * `args` adapted to this FFmpeg: every filtergraph option goes through
+ * version.ts adaptFilterGraph (only 8.1+ with (un)premultiply in the graph
+ * changes anything). Returns `args` itself otherwise, so FFmpeg 4.4 – 8.0 run
+ * exactly the command the graph builders produced.
+ */
+export async function adaptFfmpegArgs(args: string[]): Promise<string[]> {
+  const isGraph = (i: number) => i > 0 && FILTERGRAPH_OPTIONS.has(args[i - 1]);
+  if (!args.some((a, i) => isGraph(i) && usesPremultiply(a)) || !(await hasAlphaModes())) return args;
+  return args.map((a, i) => (isGraph(i) ? adaptFilterGraph(a, { alphaModes: true }) : a));
+}
 
 /**
  * Where `args` has a `-filter_complex` graph longer than `max`: the index of
@@ -138,9 +222,14 @@ export function withFilterGraphFile(args: readonly string[], at: number, file: s
  * `-filter_complex_script` / `-/filter_complex`; the file is deleted after
  * the run.
  */
-export async function runFfmpeg(args: string[], opts: FfmpegRunOptions = {}): Promise<void> {
+export async function runFfmpeg(built: string[], opts: FfmpegRunOptions = {}): Promise<void> {
+  const args = await adaptFfmpegArgs(built);
   const at = longFilterGraphIndex(args);
   if (at < 0) return runFfmpegOnce(args, opts);
+  if (filterScriptFlag === null) {
+    const v = await ffmpegVersion().catch(() => null);
+    filterScriptFlag = FILTER_SCRIPT_FLAGS.indexOf(preferredFilterScriptFlag(v));
+  }
   const name = `filtergraph-${process.pid}-${randomUUID()}.txt`;
   const path = join(opts.cwd ?? tmpdir(), name);
   const graph = args[at + 1];
@@ -148,7 +237,7 @@ export async function runFfmpeg(args: string[], opts: FfmpegRunOptions = {}): Pr
   const ref = opts.cwd ? name : path;
   try {
     for (let attempt = 0; ; attempt++) {
-      const flag = FILTER_SCRIPT_FLAGS[filterScriptFlag];
+      const flag: (typeof FILTER_SCRIPT_FLAGS)[number] = FILTER_SCRIPT_FLAGS[filterScriptFlag ?? 0];
       try {
         return await runFfmpegOnce(withFilterGraphFile(args, at, ref, flag), opts);
       } catch (err) {
@@ -220,7 +309,7 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
  * pipe rawvideo to `pipe:1`, e.g. reading the mean RGB of a frame as 3 bytes).
  */
 export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
-  const { stdout } = await execa(FFMPEG_BIN, args, {
+  const { stdout } = await execa(FFMPEG_BIN, await adaptFfmpegArgs(args), {
     reject: true,
     encoding: "buffer",
   });
@@ -230,7 +319,7 @@ export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
 /** Run ffmpeg and return combined stderr (used by analysis filters that log to stderr). */
 export async function runFfmpegCaptureStderr(args: string[]): Promise<string> {
   try {
-    const result = await execa(FFMPEG_BIN, args, { reject: false, all: false });
+    const result = await execa(FFMPEG_BIN, await adaptFfmpegArgs(args), { reject: false, all: false });
     return result.stderr ?? "";
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string };
@@ -281,10 +370,25 @@ export async function pickHwEncoder(codec: "h264" | "h265"): Promise<string | nu
   return HW_ENCODERS[codec].find((e) => available.has(e)) ?? null;
 }
 
-export async function checkBinaries(): Promise<{ ffmpeg: string; ffprobe: string }> {
-  const [ff, fp] = await Promise.all([
-    execa(FFMPEG_BIN, ["-version"]).then((r) => r.stdout.split("\n")[0]),
-    execa(FFPROBE_BIN, ["-version"]).then((r) => r.stdout.split("\n")[0]),
-  ]);
-  return { ffmpeg: ff, ffprobe: fp };
+let binariesPromise: Promise<{ ffmpeg: string; ffprobe: string }> | null = null;
+
+/**
+ * The ffmpeg and ffprobe version banners. Probed once (the authenticated
+ * /health asks on every call); a failure is not cached, so installing FFmpeg
+ * while the core runs is picked up.
+ */
+export function checkBinaries(): Promise<{ ffmpeg: string; ffprobe: string }> {
+  if (!binariesPromise) {
+    binariesPromise = Promise.all([
+      ffmpegVersion().then((v) => v.banner),
+      execa(FFPROBE_BIN, ["-version"]).then((r) => r.stdout.split("\n")[0]),
+    ]).then(
+      ([ffmpeg, ffprobe]) => ({ ffmpeg, ffprobe }),
+      (err: unknown) => {
+        binariesPromise = null;
+        throw err;
+      },
+    );
+  }
+  return binariesPromise;
 }

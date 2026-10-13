@@ -54,7 +54,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
-import { FFMPEG_BIN, INLINE_FILTERGRAPH_MAX, longFilterGraphIndex } from "../src/ffmpeg/executor.js";
+import { FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, longFilterGraphIndex } from "../src/ffmpeg/executor.js";
 import { buildRenderCommand, EXPORT_PROFILE, PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
 import { segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
 import { expandBleeps } from "../src/audio/bleeps.js";
@@ -167,7 +167,7 @@ function zcFreq(s: Float32Array, i0: number, i1: number): number {
 }
 
 async function probeDur(file: string, stream: "v" | "a"): Promise<number> {
-  const { stdout } = await execa("ffprobe", ["-v", "error", "-select_streams", `${stream}:0`, "-show_entries", "stream=duration", "-of", "csv=p=0", file]);
+  const { stdout } = await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", `${stream}:0`, "-show_entries", "stream=duration", "-of", "csv=p=0", file]);
   return Number(stdout.trim());
 }
 
@@ -371,6 +371,9 @@ async function constantUntouched(dir: string, engine: EditorEngine, codedId: str
       for (const opts of [{}, { videoOnly: true, window: { start: 0.5, end: 1.5 } }, { audioOnly: true }]) {
         const a = buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts);
         const b = old.buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts);
+        // The one intended change since the ref: the audio mix is pinned to stereo
+        // (FFmpeg 4.4/5.x took the first clip's channel layout, 6.1+ stereo).
+        b.args = b.args.map((x) => x.replace(/(amix=inputs=\d+:duration=longest:normalize=0)\[amixraw\]/, "$1,aformat=channel_layouts=stereo[amixraw]"));
         if (JSON.stringify(a) === JSON.stringify(b)) same++;
         else console.error("    differs:", JSON.stringify(opts), "\n     new:", a.args.join(" ").slice(0, 400), "\n     old:", b.args.join(" ").slice(0, 400));
       }

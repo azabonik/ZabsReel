@@ -4,9 +4,9 @@
 // rendered generically from the registry (`@aive/core/audio-effects`) — add,
 // bypass, reorder, remove, every param as a slider (0|1 params as a checkbox).
 // Rows whose effect the live preview can't (fully) play carry a "Render exact"
-// badge; ones it plays whole but not sample-for-sample (pitch, robot via the
-// voice AudioWorklet) a quieter "Approx." mark — "Render exact" where the
-// worklet can't load. Edits go to the clip that carries the sound (a linked detached-audio
+// badge; ones it plays whole but not sample-for-sample (pitch via the voice
+// AudioWorklet) a quieter "Approx." mark — "Render exact" where the worklet
+// can't load, for robot too. Edits go to the clip that carries the sound (a linked detached-audio
 // clip when this one is silenced) — the same clip the core picks.
 
 import { useSyncExternalStore, type ComponentType, type ReactNode } from "react";
@@ -215,7 +215,7 @@ export function AudioEffectsGroup({ clip, project, disabled, Range, rpc }: {
       {filters.length === 0 ? (
         <span className="field-hint">
           Effects run on the clip&apos;s own sound in order — before speed changes, after bleeps. The preview plays EQ, filters,
-          compressor, echo, telephone-style, pitch and robot voices live (pitch and robot approximately); noise reduction and normalize need Render exact.
+          compressor, echo, telephone-style, pitch and robot voices live (pitch approximately); noise reduction and normalize need Render exact.
         </span>
       ) : (
         <div className="eff-list">

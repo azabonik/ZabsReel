@@ -15,8 +15,11 @@
  *    Hann analysis window (no synthesis window), every bin's phase zeroed, the
  *    inverse FFT scaled by 1/(N/2), overlap-added, ×(1 − overlap). Frames lie
  *    on the same hop grid, so after the first N samples the output equals the
- *    render's (delayed by the latency). Runs at the effect rate (48 kHz) when
- *    the context does; at another rate N is scaled to the nearest power of two.
+ *    render's (delayed by the latency). On FFmpeg ≥ 5.1 the export rebuilds
+ *    the same maths (win_func=rect + a 5-tap spectral Hann, latency trimmed;
+ *    audio.ts robotSteps), so this matches the render on every version. Runs
+ *    at the effect rate (48 kHz) when the context does; at another rate N is
+ *    scaled to the nearest power of two.
  *  - pitch: a peak-locked phase vocoder (N 2048 at 48 kHz, 4× overlap,
  *    periodic Hann analysis + synthesis): each spectral peak's true frequency
  *    comes from its phase advance; the peak and the bins around it move by a

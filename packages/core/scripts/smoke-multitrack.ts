@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { EditorEngine } from "../src/engine.js";
-import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
+import { FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
 
 const FPS = 30;
 const W = 1280;
@@ -109,7 +109,7 @@ async function main() {
   // ---- render + probe -------------------------------------------------------
   const out = join(dir, "out.mp4");
   const result = await engine.exportVideo(out);
-  const { stdout: probeJson } = await execa("ffprobe", [
+  const { stdout: probeJson } = await execa(FFPROBE_BIN, [
     "-v", "error", "-select_streams", "v:0",
     "-show_entries", "stream=width,height", "-show_entries", "format=duration",
     "-of", "json", out,

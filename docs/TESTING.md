@@ -21,7 +21,7 @@ Plus how to test the **packaged installer** offline.
 | Need | Check | Install |
 |---|---|---|
 | Node.js ≥ 20 | `node --version` | https://nodejs.org |
-| FFmpeg + ffprobe on PATH | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
+| FFmpeg + ffprobe on PATH (4.4, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | (AI testing) Claude Desktop | — | https://claude.ai/download |
 
 Everything else (whisper.cpp + model, YuNet model, Remotion's headless Chrome)
@@ -213,8 +213,8 @@ npx tsx packages/core/scripts/smoke-bleep.ts
 npx tsx packages/core/scripts/smoke-voice.ts
 # Live pitch / robot preview (the voice AudioWorklet): the worklet DSP in Node —
 # pitch ±12/+4 st on a 440 Hz tone (dominant 880/220/554 Hz, level, length),
-# robot == FFmpeg 4.x afftfilt sample for sample after the latency (FFmpeg 5+
-# changed afftfilt: reported, not compared), pitch vs rubberband spectra on a
+# robot == the export's filter after the latency: sample for sample on FFmpeg
+# 4.4/5.0, within −55 dB on 5.1+ (rebuilt maths), pitch vs rubberband spectra on a
 # voice-like signal — then the REAL audiograph.ts chain in your headless
 # Chromium (OfflineAudioContext at 48 kHz) from a file:// page and an http://
 # page: +12 st → ≈ 880 Hz with the duration unchanged, robot buzz at 187.5 Hz,
@@ -222,6 +222,20 @@ npx tsx packages/core/scripts/smoke-voice.ts
 # carries the worklet source. Needs FFmpeg, core + renderer built, and
 # playwright-core + a Chromium (as parity-gl; SYNTHCUT_SKIP_BROWSER=1 skips).
 npx tsx packages/core/scripts/smoke-voicefx.ts
+
+# FFmpeg version compatibility (self-contained; run it against every build you
+# ship — see "FFmpeg versions" below): version parsing and the startup warning,
+# `-filters` parsing (2 flag columns from 8.0), a 140 KiB filtergraph through a
+# file with -filter_complex_script / -/filter_complex (9.0 has only the second,
+# 4.4 only the first) and the fallback between them, alpha-mode retagging (8.1+),
+# afftdn latency + strength (rewritten in 5.0), heavy noise reduction (anlmdn
+# crashes 9.0), the robot against a model of 4.4's afftfilt (rewritten in 5.1)
+# plus an impulse that checks which afftfilt this build has, vibrato's primed
+# delay line, vibrance's pinned luma weights (8.0 swapped the defaults), a
+# stereo export mix after a mono first clip, the last frame of clips with
+# an alpha-keeping effect (4.4 – 6.1 dropped it), and keyed speed-ramped clips
+# (footage and matte cutout) against the ramp model.
+npx tsx packages/core/scripts/smoke-ffcompat.ts
 
 # Time effects: freeze_frame (ripples the timeline + linked audio; ripple 'all'
 # moves other tracks and markers, 'none' overwrites), chunked frame-exact
@@ -432,6 +446,70 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only mediapool  # just the <video> 
 - Per-viewer switch: `localStorage["synthcut.preview.gl"] = "off"` in the
   app's devtools forces the CSS fallback preview (to compare).
 
+### FFmpeg versions
+
+SynthCut supports FFmpeg **4.4, 7.1, 8.0, 8.1 and 9.0**
+(`TESTED_FFMPEG_VERSIONS` in `packages/core/src/ffmpeg/version.ts`). The core
+logs a warning at startup for any other version, and
+`apps/desktop/scripts/prepare-bundle.ts` refuses to stage one unless
+`AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG=1` is set (`smoke-bundle-ffmpeg.ts` checks
+that gate; with `AIVE_BUNDLE_SMOKE_BUILDS=<dir>` holding
+`<dir>/{6.1,7.1,8.1}/bin/` static builds it also runs it on them).
+
+Every smoke and `parity-gl.mts` use `AIVE_FFMPEG` / `AIVE_FFPROBE`, so you can
+run any of them against another build. Static Linux builds come from the
+BtbN/FFmpeg-Builds GitHub releases (`ffmpeg-n<version>-…-linux64-gpl-<version>.tar.xz`
+with `checksums.sha256`):
+
+```bash
+export AIVE_FFMPEG=/opt/ffmpeg-9.0/bin/ffmpeg AIVE_FFPROBE=/opt/ffmpeg-9.0/bin/ffprobe
+npx tsx packages/core/scripts/smoke-ffcompat.ts      # the version-specific checks, ~1 min
+npx tsx packages/core/scripts/smoke-voice.ts         # and any other smoke, the same way
+```
+
+Differences between the versions, and what the core does about them:
+
+| Difference | Versions | What the core does |
+|---|---|---|
+| `-filter_complex_script` removed (deprecated from 7.0) | 9.0 | A filtergraph over 16 KiB goes to a file with `-/filter_complex` from 7.0 and `-filter_complex_script` before. If the option is unknown, the core retries once with the other option. |
+| `ffmpeg -filters` prints 2 flag columns, not 3 | 8.0+ | The parser accepts both. Before the fix, rubberband was never found, so pitch effects used the lower-quality fallback. |
+| Alpha modes (straight or premultiplied) are negotiated per link | 8.1+ | The executor retags frames around `premultiply` / `unpremultiply` with `setparams`. Without this, FFmpeg undid them: an `add` blend at 60 % opacity came out at 100 %, and trails, glow and rgbsplit darkened translucent pixels. |
+| afftdn was rewritten: 25 ms output delay, a different noise-floor scale, noise tracking that barely works | 5.0+ | Each pass is trimmed by its delay, and the noise floor offset is recalibrated with tracking off. Noise reduction and enhance_voice match 4.4 within about 1.5 dB on smoke-voice's speech. |
+| afftfilt was rewritten: sqrt-Hann on input and output, win_size − hop latency. The robot came out quieter, duller, 8–32 ms late, and lost isolated transients. | 5.1+ | The robot runs afftfilt with `win_func=rect`, and its expression rebuilds 4.4's Hann spectrum from the neighbouring bins. The latency is padded and trimmed off, the 3 pre-roll frames are gated, and the input is padded to a whole hop (4.4 rounds its output up to one, so a robot after *normalize* keeps its tail). It matches 4.4 within −65 dB at 0.0 dB level, and the live preview matches it too. |
+| `anlmdn` crashes on any input | 9.0 | Probed once at run time. *Reduce noise* with *Extra pass* skips the non-local-means stage. |
+| `acrossfade` returns a cut-short or empty stream at random when its inputs are short | 7.x | Speed-ramp chunks and transitions are joined by fading the pieces and mixing them at their sample positions. |
+| `vibrance` defaults: red and blue luma weights swapped | 8.0+ | The weights from 4.4 (which the preview shader uses) are passed explicitly. |
+| A `scale` in `-filter_complex` without `flags` is bilinear in 4.4 and bicubic from 5.0 | 5.0+ | The motion-graphics scale names `flags=bilinear`. |
+| The export mix took the first clip's channel layout up to 5.x (a mono first clip made the export mono), and is stereo from 6.1 | all | The mix is pinned to stereo. |
+| A two-input filter (`blend`, `alphamerge`) ends its stream with no end time, so the speed step's `fps` dropped the clip's last frame (two at 0.5x): a black frame at each cut after a clip with a key, colour grade, sharpen, denoise, grain, glow or another alpha-keeping effect, and at the end of the export | 4.4 – 6.1 | Such a clip gets two transparent padding frames before its effects (a speed ramp: copies of its last frame), where the stream's end is still exact, and is cut to its own length. A clip whose video ends before its length keeps that end. Every version gives the same frames. |
+| `vibrato` reads its delay line before it writes it (leftover memory: clicks, ±inf) | 4.4 – 9.0 | *Underwater* primes the delay line with 10 ms of silence and trims it off. |
+| libvidstab's default camera path ("opt") is now an L1 optimizer that ignores zoom "none" | static builds from mid-2026, any FFmpeg version | Stabilize passes `optalgo=gauss`, which gives the same output as the old default. |
+
+Known differences that remain:
+- swscale's RGB ↔ YUV conversions differ by 1–2 levels between 4.4 and 5.0+.
+  7.1, 8.x and 9.0 give identical output.
+- `parity-gl.mts` with 7.1: one case (`stack: colorkey → blur → vignette`)
+  shows a max of 3.5 against the exact threshold of 3. 8.0, 8.1 and 9.0
+  pass every case.
+- Decoded alpha (ProRes 4444, PNG, FFV1 yuva420p, VP9 alpha) composites
+  identically on 4.4, 8.0, 8.1 and 9.0.
+
+Full offline matrix (every `smoke*.ts`, plus composite, savename, web shell,
+MCP, parity and the ramps baseline), 2026-10-12:
+
+| FFmpeg build | Before the version fixes | After |
+|---|---|---|
+| 4.4.2 (Ubuntu 22.04) | 38/38 | 39/39 |
+| 7.1.5 (BtbN, 2026-07-31) | voice, ramps (incl. the ramps baseline) and parity (the one case above) failed | 38/39: parity, the one case above |
+| 8.0.1 (BtbN, 2026-02-28) | voice and parity (vibrance) failed | 39/39 |
+| 8.1.3 (BtbN, 2026-10-12) | voice, masks, lut-stab and parity failed | 39/39 |
+| 9.0.2 (BtbN, 2026-10-12) | 34/38: masks, voice, lut-stab, parity | 39/39 |
+
+On 9.0, the download-dependent smokes motion, matte, reframe, captions and
+animtext also pass (captions needs `jfk.wav`, animtext a clip argument). The
+"before" runs for 7.1, 8.0 and 8.1 covered the suites that failed on 9.0, and
+smoke-ramps.
+
 What to expect:
 - The **first** captions run downloads whisper.cpp + the `base.en` model (~150 MB);
   the first reframe run downloads the YuNet model; the first `smoke-media` run
@@ -476,7 +554,7 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Transition | Add a crossfade between the two clips | Overlap shown |
 | Text | Add a title / lower-third | Overlay listed on the clip |
 | Library search | Switch the search between **Words** and **Visuals**; search the library | Matching clips/moments returned |
-| Voice effects | On a clip with speech set **Voice effect** to Chipmunk, Deep voice, Custom pitch or Robot, then play | The live preview plays it (marked **Approx.**; a little delay on that clip only); **Render exact** plays the export. Opened over plain `http://` from another machine (no AudioWorklet) they show **Render exact** and play dry |
+| Voice effects | On a clip with speech set **Voice effect** to Chipmunk, Deep voice, Custom pitch or Robot, then play | The live preview plays it (a little delay on that clip only; the pitch voices are marked **Approx.**, Robot is not); **Render exact** plays the export. Opened over plain `http://` from another machine (no AudioWorklet) they show **Render exact** and play dry |
 | Remove unused media | Reverse a clip, then delete it; click the library's trash button (or right-click the library) | The strip lists the unused bake; **Remove … from library** drops it (Undo brings it back); ticking the box also removes unused imported files. **Project → Storage…** shows bakes only the library holds |
 | Captions | Run **Generate Captions** on a clip with speech | Cues appear after transcription |
 | Motion graphic | Use **+ Title card** | A graphic overlay is added after its render |

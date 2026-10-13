@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { EditorEngine } from "./engine.js";
 import { EditorServer } from "./server.js";
-import { checkBinaries } from "./ffmpeg/executor.js";
+import { checkBinaries, ffmpegVersion } from "./ffmpeg/executor.js";
+import { untestedFfmpegWarning } from "./ffmpeg/version.js";
 import { pruneDataDir } from "./gc.js";
 
 /**
@@ -19,6 +20,8 @@ async function main(): Promise<void> {
   try {
     const bins = await checkBinaries();
     console.error(`[aive-core] ${bins.ffmpeg}`);
+    const warning = untestedFfmpegWarning(await ffmpegVersion());
+    if (warning) console.error(`[aive-core] ${warning}`);
   } catch {
     console.error(
       "[aive-core] WARNING: ffmpeg/ffprobe not found on PATH. Install FFmpeg or set AIVE_FFMPEG / AIVE_FFPROBE.",

@@ -24,6 +24,8 @@
 //   npx tsx apps/desktop/scripts/parity-gl.mts --only 420     # the real-export table only
 //   npx tsx apps/desktop/scripts/parity-gl.mts --only temporal,mediapool   # trails / warm-up / LUT cache; the <video> pool
 //
+// The shaders model FFmpeg 4.4; AIVE_FFMPEG runs the export side on another
+// build (docs/TESTING.md lists the known per-version differences).
 // Needs FFmpeg on PATH, core built (npm run build), and playwright-core +
 // a Chromium: PLAYWRIGHT_CORE=<dir of playwright-core> and
 // PLAYWRIGHT_CHROMIUM=<chrome binary> override the search (npx caches,
@@ -36,6 +38,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildRenderCommand, EXPORT_PROFILE } from "../../../packages/core/src/ffmpeg/graph.js";
+import { FFMPEG_BIN, adaptFfmpegArgs } from "../../../packages/core/src/ffmpeg/executor.js";
 import { EFFECTS, effectGL, type GLFidelity } from "@aive/core/effects";
 import type { LayerLook } from "../src/gl/plan";
 
@@ -148,7 +151,7 @@ function pattern(w: number, h: number, shift = 0): Buffer {
 }
 
 async function writePng(path: string, rgba: Buffer, w: number, h: number): Promise<void> {
-  await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${w}x${h}`, "-i", "-", "-frames:v", "1", path], { input: rgba });
+  await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${w}x${h}`, "-i", "-", "-frames:v", "1", path], { input: rgba });
 }
 
 /**
@@ -159,7 +162,7 @@ async function writePng(path: string, rgba: Buffer, w: number, h: number): Promi
 async function through420(rgba: Uint8Array): Promise<Uint8Array> {
   const graph = `color=c=black:s=${W}x${H}:r=${FPS}:d=1,format=rgba[b];[0:v]format=rgba,setpts=PTS-STARTPTS[c];` +
     "[b][c]overlay=0:0:eof_action=pass[o];[o]format=yuv420p[v]";
-  const { stdout } = await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`,
+  const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`,
     "-framerate", String(FPS), "-i", "-", "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
   { input: Buffer.from(rgba), encoding: "buffer" });
   return new Uint8Array(Buffer.from(stdout as unknown as Uint8Array).subarray(0, W * H * 4));
@@ -199,8 +202,9 @@ async function ffmpegRef(look: LayerLook, input: { png: string; w: number; h: nu
   const chain = clipChain.slice(0, -label.length) + ",format=rgba[parity]";
   const inArgs = isSeq ? ["-framerate", String(FPS), "-start_number", "1", "-i", input.seq] : cmd.args.slice(1, at);
   const frames = isSeq ? input.frames : 1;
-  const { stdout } = await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", ...inArgs, "-filter_complex", chain, "-map", "[parity]",
-    "-frames:v", String(frames), "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { cwd: dir, encoding: "buffer" });
+  // adaptFfmpegArgs: the graph as the app's executor hands it to this FFmpeg (8.1+ alpha modes).
+  const { stdout } = await execa(FFMPEG_BIN, await adaptFfmpegArgs(["-hide_banner", "-loglevel", "error", ...inArgs, "-filter_complex", chain, "-map", "[parity]",
+    "-frames:v", String(frames), "-f", "rawvideo", "-pix_fmt", "rgba", "-"]), { cwd: dir, encoding: "buffer" });
   const buf = Buffer.from(stdout as unknown as Uint8Array);
   return buf.subarray(buf.length - W * H * 4);
 }
@@ -515,9 +519,9 @@ async function main() {
   const sel420 = cases420().filter((c) => !ONLY || ONLY.has("420") || ONLY.has(c.type) || ONLY.has(c.name));
   if (sel420.length) {
     const src420 = join(dir, "src420.mkv");
-    await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", String(FPS), "-i", join(dir, "full.png"),
+    await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", String(FPS), "-i", join(dir, "full.png"),
       "-t", "1.2", "-pix_fmt", "yuv420p", "-c:v", "ffv1", src420]);
-    const dec = await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", src420, "-filter_complex", "[0:v]format=rgba[o]", "-map", "[o]",
+    const dec = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-i", src420, "-filter_complex", "[0:v]format=rgba[o]", "-map", "[o]",
       "-frames:v", "1", "-f", "rawvideo", "-"], { encoding: "buffer" });
     const decoded = Buffer.from(dec.stdout as unknown as Uint8Array).subarray(0, W * H * 4);
     const exportFrame = async (look: LayerLook, adjust: boolean): Promise<Uint8Array> => {
@@ -527,8 +531,8 @@ async function main() {
         : [{ ...base, effects: { ...look } }];
       const cmd = buildRenderCommand(clips as never, { width: W, height: H, fps: FPS }, join(dir, "unused.mp4"), EXPORT_PROFILE, undefined, undefined, { videoOnly: true });
       const at = cmd.args.indexOf("-filter_complex");
-      const { stdout } = await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", ...cmd.args.slice(1, at), "-filter_complex", cmd.args[at + 1],
-        "-map", "[outv]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { cwd: dir, encoding: "buffer" });
+      const { stdout } = await execa(FFMPEG_BIN, await adaptFfmpegArgs(["-hide_banner", "-loglevel", "error", ...cmd.args.slice(1, at), "-filter_complex", cmd.args[at + 1],
+        "-map", "[outv]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]), { cwd: dir, encoding: "buffer" });
       return new Uint8Array(Buffer.from(stdout as unknown as Uint8Array).subarray(0, W * H * 4));
     };
     const glOf = (look: LayerLook, input: Uint8Array = decoded) =>

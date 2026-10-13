@@ -85,7 +85,34 @@ export interface AudioFfmpegContext {
   loudness?: Readonly<Record<string, number>>;
   /** Measuring: the effect id whose loudness stage emits {@link LOUDNESS_PROBE} (see audioMeasureSteps). */
   measure?: string;
+  /** How the rendering FFmpeg's filters behave where versions differ (audio/fx.ts probes it). */
+  caps?: AudioFilterCaps;
 }
+
+/**
+ * Audio-filter behaviour of the FFmpeg build that renders, where releases
+ * differ (audio/fx.ts resolveAudioFx fills it in; all unset = FFmpeg 4.4).
+ */
+export interface AudioFilterCaps {
+  /**
+   * afftdn is the FFmpeg ≥ 5 rewrite: its output is {@link AFFTDN_V2_DELAY}
+   * samples late, its noise floor sits on another scale and its noise
+   * tracking barely reduces anything (see denoiseSteps).
+   */
+  afftdnV2?: boolean;
+  /** afftfilt is the FFmpeg ≥ 5.1 rewrite (hasAfftfiltV2): the robot rebuilds 4.4's maths (robotSteps). */
+  afftfiltV2?: boolean;
+  /** anlmdn crashes this FFmpeg (9.0): heavy noise reduction skips that pass. */
+  noAnlmdn?: boolean;
+}
+
+/**
+ * Output delay of FFmpeg ≥ 5's afftdn at {@link AUDIO_FX_RATE}, in samples: its
+ * window is 3 hops of rate/80 and the output lags the input by two hops
+ * (af_afftdn.c), 25 ms. FFmpeg 4.4's afftdn had none (it dropped those samples
+ * from the end instead).
+ */
+export const AFFTDN_V2_DELAY = 2 * Math.floor(AUDIO_FX_RATE / 80);
 
 /** Placeholder step where a measured effect's loudness stage begins (never reaches FFmpeg). */
 export const LOUDNESS_PROBE = "@loudness";
@@ -237,6 +264,100 @@ const PITCH_APPROX = "a simpler pitch shifter than the export's rubberband (tran
 /** Robot window sizes (samples at 48 kHz) per tone 0 low · 1 mid · 2 high. */
 const robotWin = (e: AudioEffectInput): number => [2048, 1024, 512][Math.round(audioParamValue(e, "tone"))] ?? 1024;
 
+const robotTapCache = new Map<number, Array<[number, number]>>();
+/**
+ * DFT taps h_0..h_2 of FFmpeg's float symmetric-Hann LUT (window_func.h), divided
+ * by W, as [re, im] (h_{−m} = conj h_m). A rectangular-window spectrum convolved
+ * with them is the Hann-windowed one (robotV2Real); 5 taps leave a −65 dB floor.
+ */
+export function robotTaps(W: number): Array<[number, number]> {
+  let t = robotTapCache.get(W);
+  if (!t) {
+    t = [0, 1, 2].map((m) => {
+      let re = 0;
+      let im = 0;
+      for (let n = 0; n < W; n++) {
+        const w = Math.fround(0.5 * (1 - Math.cos((2 * Math.PI * n) / (W - 1))));
+        re += w * Math.cos((2 * Math.PI * m * n) / W);
+        im -= w * Math.sin((2 * Math.PI * m * n) / W);
+      }
+      return [re / W, im / W] as [number, number];
+    });
+    robotTapCache.set(W, t);
+  }
+  return t;
+}
+const tap = (x: number): string => x.toPrecision(12);
+
+/**
+ * afftfilt real= for FFmpeg ≥ 5.1 with win_func=rect: |Σ_m h_m X_{b−m}| = 4.4's
+ * |FFT(hann·x)|_b, with the 3 frames that start before the stream gated off
+ * (`pts` is the newest hop's). real()/imag() read the unmodified spectrum. Bins
+ * 2..nb−2 read each neighbour once into st/ld registers; only the 4 edge bins
+ * take the Hermitian-mirrored reads (X_{−j} = conj X_j, X_{nb+j} = conj X_{nb−j}),
+ * and av_expr's if() evaluates only the branch it takes. Never contains `|`
+ * (afftfilt splits per-channel expressions on it).
+ */
+function robotV2Real(W: number): string {
+  const [[h0], [h1r, h1i], [h2r, h2i]] = robotTaps(W);
+  const fast =
+    "st(0,real(b-1,ch));st(1,real(b+1,ch));st(2,imag(b-1,ch));st(3,imag(b+1,ch));" +
+    "st(4,real(b-2,ch));st(5,real(b+2,ch));st(6,imag(b-2,ch));st(7,imag(b+2,ch));" +
+    `hypot(${tap(h0)}*re+${tap(h1r)}*(ld(0)+ld(1))+${tap(h1i)}*(ld(3)-ld(2))+${tap(h2r)}*(ld(4)+ld(5))+${tap(h2i)}*(ld(7)-ld(6)),` +
+    `${tap(h0)}*im+${tap(h1r)}*(ld(2)+ld(3))+${tap(h1i)}*(ld(0)-ld(1))+${tap(h2r)}*(ld(6)+ld(7))+${tap(h2i)}*(ld(4)-ld(5)))`;
+  const X = (m: number) => {
+    const j = `(b-(${m}))`;
+    const k = `(nb-abs(nb-abs${j}))`;
+    return { re: `real(${k},ch)`, im: `(1-2*(lt(${j},0)+gt(${j},nb)))*imag(${k},ch)` };
+  };
+  const taps: Array<[number, number, number]> = [[-2, h2r, -h2i], [-1, h1r, -h1i], [0, h0, 0], [1, h1r, h1i], [2, h2r, h2i]];
+  const re = taps.map(([m, hr, hi]) => `${tap(hr)}*${X(m).re}-(${tap(hi)})*${X(m).im}`).join("+");
+  const im = taps.map(([m, hr, hi]) => `${tap(hr)}*${X(m).im}+(${tap(hi)})*${X(m).re}`).join("+");
+  return `if(between(b,2,nb-2),${fast},hypot(${re},${im}))*gte(pts,${(3 * W) / 4})`;
+}
+
+/**
+ * The robot at window W (overlap 0.75, hop W/4): every bin keeps its magnitude
+ * and loses its phase — FFmpeg 4.4's afftfilt sound, which the live worklet
+ * plays too. FFmpeg ≥ 5.1 (caps.afftfiltV2) rewrote afftfilt: sqrt-Hann
+ * analysis AND synthesis windows (the synthesis window is 0 exactly where the
+ * buzz pulse sits: quieter, duller, isolated transients gone), W − hop samples
+ * late, the last 0.75·W samples never flushed. There it runs with
+ * win_func=rect (a constant window: 4.4's per-frame scale) and rebuilds 4.4's
+ * Hann spectrum in the expression (robotV2Real); the input is padded by the
+ * latency D = 3·hop and D samples are trimmed off the front. 4.4 rounds its
+ * output up to a whole hop, so the input's last frame is padded to one first
+ * (an input that is not hop-aligned, like after normalize, keeps that tail). asettb/asetpts=N
+ * give the pts gate sample timestamps whatever the caller's (the loudness
+ * measurement runs after `-ss`). Matches 4.4 within −65 dB at 0.0 dB level.
+ */
+function robotSteps(W: number, caps: AudioFilterCaps = {}): string[] {
+  if (!caps.afftfiltV2) return [`afftfilt=real='hypot(re,im)':imag='0':win_size=${W}:overlap=0.75`];
+  const D = (3 * W) / 4;
+  return [
+    `asetnsamples=n=${W / 4}:p=1`, "asettb=1/sr", "asetpts=N", `apad=pad_len=${D}`,
+    `afftfilt=win_func=rect:overlap=0.75:win_size=${W}:real='${robotV2Real(W)}':imag='0'`,
+    `atrim=start_sample=${D}`, "asetpts=PTS-STARTPTS",
+  ];
+}
+
+/**
+ * Silence fed through vibrato first and cut from its output (samples at
+ * {@link AUDIO_FX_RATE}): ≥ its 5 ms delay line (af_vibrato.c, rate·0.005).
+ */
+const VIBRATO_PRIME = 480;
+
+/**
+ * vibrato at `f` Hz, depth `d`. FFmpeg (4.4 – 9.0) allocates vibrato's delay
+ * line without clearing it and reads it before writing, so the first 5 ms of
+ * output were leftover heap memory — random clicks, up to ±inf (smoke-voice
+ * caught a peak of +40 dBFS). Priming the line with silence and trimming that
+ * part off leaves exactly the output of a cleared line, at the same timing.
+ */
+function vibratoSteps(f: number, d: number): string[] {
+  return [`adelay=delays=${VIBRATO_PRIME}S:all=1`, `vibrato=f=${f}:d=${num(d)}`, `atrim=start_sample=${VIBRATO_PRIME}`, "asetpts=PTS-STARTPTS"];
+}
+
 /**
  * aecho taps (delays ms, decays) with energy-normalised output: in_gain 1,
  * out_gain = 1/√(1+Σdecay²), so adding echo doesn't make the clip clip.
@@ -305,19 +426,29 @@ export const DEFAULT_NOISE_FLOOR = -60;
  * 12..36 dB. nf only reaches −20 dB, so a louder floor is attenuated into
  * range first and restored after. `heavy` adds a second spectral pass on the
  * residue plus a non-local-means pass (anlmdn) for non-stationary hiss.
+ *
+ * FFmpeg ≥ 5 (caps.afftdnV2) rewrote afftdn: its noise tracking (tn) reduces a
+ * steady floor by only ~3 dB whatever nf says, so the measured floor is used
+ * as is (no tn) with nf `v2Offset` + 10·amount dB above it — 17 here (5 dB
+ * lower than 4.4's +22: on smoke-voice's speech that matches 4.4's reduction
+ * within ~1.5 dB at every amount) — and each pass is trimmed by its
+ * {@link AFFTDN_V2_DELAY} so the sound stays in sync.
  */
-function denoiseSteps(floorDb: number, amount: number, heavy: boolean): string[] {
+function denoiseSteps(floorDb: number, amount: number, heavy: boolean, caps: AudioFilterCaps = {}, v2Offset = 17): string[] {
   if (amount <= 0) return [];
-  let nf = floorDb + 22 + 10 * amount;
+  const v2 = !!caps.afftdnV2;
+  let nf = floorDb + (v2 ? v2Offset : 22) + 10 * amount;
   const nr = 12 + 24 * amount;
   const pre = nf > -20 ? -20 - nf : 0; // dB, ≤ 0
   nf = clampN(nf + pre, -80, -20);
+  const afftdn = (floor: number) =>
+    v2 ? [`afftdn=nr=${num(nr)}:nf=${num(floor)}`, `atrim=start_sample=${AFFTDN_V2_DELAY}`, "asetpts=PTS-STARTPTS"] : [`afftdn=nr=${num(nr)}:nf=${num(floor)}:tn=1`];
   const out: string[] = [];
   if (pre < 0) out.push(`volume=${num(pre)}dB`);
-  out.push(`afftdn=nr=${num(nr)}:nf=${num(nf)}:tn=1`);
+  out.push(...afftdn(nf));
   if (heavy) {
-    out.push(`afftdn=nr=${num(nr)}:nf=${num(clampN(nf - 12, -80, -20))}:tn=1`);
-    out.push(`anlmdn=s=${num(clampN(2 * dbToGain(floorDb + pre - 12), 0.00001, 10))}:p=0.002:r=0.006:m=11`);
+    out.push(...afftdn(clampN(nf - 12, -80, -20)));
+    if (!caps.noAnlmdn) out.push(`anlmdn=s=${num(clampN(2 * dbToGain(floorDb + pre - 12), 0.00001, 10))}:p=0.002:r=0.006:m=11`);
   }
   if (pre < 0) out.push(`volume=${num(-pre)}dB`);
   return out;
@@ -384,7 +515,10 @@ function enhanceSteps(e: AudioEffectInput, ctx: AudioFfmpegContext): string[] {
   const denoise = audioParamValue(e, "denoise") >= 0.5;
   const normalize = audioParamValue(e, "normalize") >= 0.5;
   const out: string[] = [...pass2("highpass", 75)];
-  if (denoise && s > 0) out.push(...denoiseSteps(audioParamValue(e, "floor"), 0.35 + 0.55 * s, false));
+  // FFmpeg ≥ 5: nf only +6 dB over the floor (see denoiseSteps). Behind the rumble cut
+  // and in front of the leveller, +17 cleaned the gaps ~8 dB more than 4.4 and left the
+  // quiet phrases quieter (loud vs quiet evened 2 dB less); +6 matches 4.4's result.
+  if (denoise && s > 0) out.push(...denoiseSteps(audioParamValue(e, "floor"), 0.35 + 0.55 * s, false, ctx.caps, 6));
   if (s > 0) out.push(deessStep(0.2 + 0.4 * s));
   out.push(peq(200, 0.8, 1.5 * s), peq(4500, 1, 3 * s));
   if (normalize && s > 0) out.push(levellerStep(1 + 4 * s));
@@ -427,10 +561,10 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     label: "Reduce noise",
     category: "Cleanup",
     description:
-      "Spectral noise reduction for steady hiss/hum/fan/room noise (FFmpeg afftdn, noise tracking on). amount 0..1 = how hard; " +
-      "floor = the clip's noise level in dBFS, MEASURED from its quietest moments when omitted (lower it if speech turns watery); heavy 1 adds a second pass for very noisy audio.",
+      "Spectral noise reduction for steady hiss/hum/fan/room noise (FFmpeg afftdn, tuned to the clip's noise floor). amount 0..1 = how hard; " +
+      "floor = the clip's noise level in dBFS, MEASURED from its quietest moments when omitted (lower it if speech turns watery); heavy 1 adds a second spectral pass plus a non-local-means pass for very noisy audio (FFmpeg 9.0 has a broken non-local-means filter, so there heavy is the second pass only).",
     params: [P("amount", "Amount", 0, 1, 0.05, 0.5), P("floor", "Noise floor (measured)", -90, -20, 1, DEFAULT_NOISE_FLOOR, " dBFS"), SWITCH("heavy", "Extra pass", 0)],
-    ffmpeg: (e) => denoiseSteps(audioParamValue(e, "floor"), audioParamValue(e, "amount"), audioParamValue(e, "heavy") >= 0.5),
+    ffmpeg: (e, ctx) => denoiseSteps(audioParamValue(e, "floor"), audioParamValue(e, "amount"), audioParamValue(e, "heavy") >= 0.5, ctx.caps),
     preview: "export-only",
   },
   highpass: {
@@ -636,17 +770,12 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     category: "Voice changer",
     description: "Monotone metallic robot voice (phase-vocoder robotisation). tone 0 low · 1 mid · 2 high buzz.",
     params: [P("tone", "Tone", 0, 2, 1, 1)],
-    ffmpeg: (e) => {
-      // Zeroing every bin's phase each hop re-synthesises the voice as a buzz at
-      // rate/hop (≈ 94 / 188 / 375 Hz) that keeps the words' spectral shape.
-      return [`afftfilt=real='hypot(re,im)':imag='0':win_size=${robotWin(e)}:overlap=0.75`];
-    },
-    // The same afftfilt maths in the worklet: sample-exact against FFmpeg 4.4
-    // (newer FFmpeg also windows afftfilt's output, so its robot is quieter).
-    preview: {
-      webaudio: (e) => [{ kind: "robot", win: robotWin(e) }],
-      approx: "the live robot follows the export's FFmpeg 4 filter; FFmpeg 7 and later render it quieter and softer",
-    },
+    // Zeroing every bin's phase each hop re-synthesises the voice as a buzz at
+    // rate/hop (≈ 94 / 188 / 375 Hz) that keeps the words' spectral shape.
+    ffmpeg: (e, ctx) => robotSteps(robotWin(e), ctx.caps),
+    // The same afftfilt maths in the worklet: sample-exact against FFmpeg 4.4/5.0,
+    // and against 5.1+ through robotSteps' rebuild (within −65 dB).
+    preview: { webaudio: (e) => [{ kind: "robot", win: robotWin(e) }] },
   },
   echo: {
     label: "Echo",
@@ -716,7 +845,7 @@ const DEFS: { [K in AudioEffectType]: Omit<AudioEffectDef, "type"> } = {
     ffmpeg: (e) => {
       const w = audioParamValue(e, "wobble");
       const out = [...pass2("lowpass", audioParamValue(e, "muffle")), "volume=1.4"];
-      if (w > 0) out.push(`vibrato=f=1.6:d=${num(w)}`);
+      if (w > 0) out.push(...vibratoSteps(1.6, w));
       return out;
     },
     preview: {

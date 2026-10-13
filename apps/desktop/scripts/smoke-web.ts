@@ -57,7 +57,7 @@ async function main() {
   mkdirSync(join(mediaDir, "sub"), { recursive: true });
   writeFileSync(join(mediaDir, ".hidden"), "x");
   const clip = join(mediaDir, "clip.mp4");
-  const ff = spawnSync("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt", "yuv420p", clip]);
+  const ff = spawnSync(process.env.AIVE_FFMPEG || "ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt", "yuv420p", clip]);
   if (ff.status !== 0) {
     console.error("ffmpeg could not generate the test clip — is FFmpeg on PATH?");
     process.exit(1);

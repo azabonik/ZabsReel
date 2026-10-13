@@ -236,7 +236,8 @@ There is **no packaged installer for macOS or Linux yet** — the current releas
 # 1. Prerequisites
 #    • Node.js >= 20        (https://nodejs.org  — or `brew install node`)
 #    • Git
-#    • FFmpeg + ffprobe on your PATH:
+#    • FFmpeg + ffprobe on your PATH, a tested version (4.4, 7.1, 8.0, 8.1 or 9.0 —
+#      see "Supported FFmpeg versions" below):
 #         macOS:  brew install ffmpeg
 #         Linux:  sudo apt install ffmpeg          # Debian / Ubuntu
 
@@ -259,7 +260,8 @@ Unlike the packaged Windows build (which bundles FFmpeg, Whisper, etc.), a sourc
 
 ```bash
 # 1. Stage the bundled binaries/models into apps/desktop/build/resources/aive
-node apps/desktop/scripts/prepare-bundle.ts      # needs ffmpeg/ffprobe on PATH
+#    (FFmpeg: the ffmpeg/ffprobe on PATH, or AIVE_FFMPEG / AIVE_FFPROBE — a tested version)
+node apps/desktop/scripts/prepare-bundle.ts
 
 # 2. Build the renderer + the NSIS installer  (output: apps/desktop/build/dist)
 npm run build
@@ -268,7 +270,9 @@ npm run dist --workspace synthcut-desktop
 
 The bundled binaries are reused from the engine's own `~/.aive` cache when present, so the slow downloads happen at most once. The packaged app points the engine at the bundled copies via env overrides (`AIVE_FFMPEG`, `AIVE_WHISPER_BIN`, …) — the same variables you can set by hand for a source checkout.
 
-> **Heads-up on size:** the staged bundle is ~430 MB (a static FFmpeg build is ~280 MB of it, the `base.en` model ~150 MB). Drop a leaner FFmpeg (e.g. a *shared* build) into `apps/desktop/build/resources/aive/ffmpeg/` to shrink it.
+The staging script **pins FFmpeg**: it stops unless `ffmpeg -version` reports a tested release (see [Supported FFmpeg versions](#supported-ffmpeg-versions)) and `ffprobe` comes from the same build, and it records the version and the sha256 of the staged `ffmpeg` / `ffprobe` in `bundle-manifest.json`. To ship another build anyway, set `AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG=1` (the manifest then marks it untested).
+
+> **Heads-up on size:** the staged bundle is ~430 MB (a static FFmpeg build is ~280 MB of it, the `base.en` model ~150 MB). A leaner static build of a tested version shrinks it; stage it with `AIVE_FFMPEG` / `AIVE_FFPROBE` instead of copying files into `apps/desktop/build/resources/aive/ffmpeg/` by hand, so it is checked and hashed.
 
 The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run `npx tsx apps/desktop/scripts/make-icon.ts` to render `icon.ico`, `icon.png` and the README logo (needs `rsvg-convert` from librsvg).
 
@@ -276,6 +280,21 @@ The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run 
 
 - **Packaged app:** none — everything needed is bundled (first run is offline).
 - **From source:** Node.js ≥ 20, plus FFmpeg + ffprobe on `PATH`.
+
+### Supported FFmpeg versions
+
+SynthCut runs FFmpeg as a separate program, so the version matters. The full test suite runs against these releases:
+
+| FFmpeg | Status | Notes |
+|---|---|---|
+| 4.4 | tested | The version on Ubuntu 22.04. The WebGL preview models its filters. |
+| 7.1 | tested | |
+| 8.0 | tested | |
+| 8.1 | tested | |
+| 9.0 | tested | Its `anlmdn` filter crashes, so *Reduce noise* with *Extra pass* runs the second spectral pass only. |
+| 5.x, 6.x, git builds | not tested | Expected to work; the core prints a warning at startup. |
+
+The core adapts to the differences it knows about (for example, `-filter_complex_script` no longer exists in 9.0, from 8.1 FFmpeg tracks premultiplied alpha, and the noise reduction filter changed in 5.0), so the same project exports the same picture on each tested version within a level or two of rounding, and the audio effects are tuned to match 4.4 within about 2 dB. When the core starts with a version outside this list, it logs a warning. To use a specific build, set `AIVE_FFMPEG` and `AIVE_FFPROBE` to its binaries. `docs/TESTING.md` has the per-version test results and how to run the tests against another build.
 
 ## Troubleshooting
 

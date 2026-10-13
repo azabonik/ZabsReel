@@ -24,8 +24,10 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 8: effect stacks are pinned to RGBA (graph.ts EFFECTS_RGBA_PIN): blur / lens / detail no longer run on 4:2:0 chroma.
  * 9: speed ramps render on anchored frame slots (exact footprint, pad + frame cut); xfade gets one cloned frame before FFmpeg 7.
  * 10: lens zooms to fill by default (no uncovered corners); chromakey pads its edge so the key no longer depends on the CPU count.
+ * 11: clips whose effects end in a two-input filter keep their last frame on FFmpeg 4.4 - 6.1 (one end guard with ramps and cutouts).
+ * 12: that guard pads before the effects (a clip whose video ends early keeps its length); a ramp holds its last frame to its footprint.
  */
-const CACHE_VERSION = 10;
+const CACHE_VERSION = 12;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this
@@ -129,9 +131,12 @@ export function segmentKey(
     // Segments are VIDEO-only: audio effects can't change a pixel, so they stay
     // out of the key (an audio-effect edit re-renders only the audio pass).
     // Clips without them hash exactly as before — no CACHE_VERSION bump.
-    effects: c.effects && (c.effects.audioFilters || c.effects.pitchFallback || c.effects.loudness)
-      ? { ...c.effects, audioFilters: undefined, pitchFallback: undefined, loudness: undefined }
-      : c.effects,
+    // (A clip whose only effect is the FFmpeg 7.x audioCaps flag hashes as one without effects.)
+    effects: c.effects && Object.keys(c.effects).every((k) => k === "audioCaps")
+      ? undefined
+      : c.effects && (c.effects.audioFilters || c.effects.pitchFallback || c.effects.loudness || c.effects.audioCaps)
+        ? { ...c.effects, audioFilters: undefined, pitchFallback: undefined, loudness: undefined, audioCaps: undefined }
+        : c.effects,
     startSec: Number((c.startSec - seg.start).toFixed(6)),
     mtime: mtimes[c.path] ?? -1,
     graphicMtimes: (c.graphics ?? []).map((g) => mtimes[g.path] ?? -1),

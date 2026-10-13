@@ -7,9 +7,9 @@
  *     - pitch +12 / -12 / +4 st on a 440 Hz tone: dominant 880 / 220 / 554 Hz,
  *       level within 2 dB, length unchanged; 0 st builds no node (as the export);
  *     - robot (tone 0/1/2 = win 2048/1024/512) == the export's own filter
- *       (FFmpeg afftfilt) sample for sample, after the documented latency
- *       (fft size − 128), when FFmpeg is 4.x; FFmpeg 5+ changed afftfilt's
- *       windowing, so there it only reports the level difference;
+ *       (FFmpeg afftfilt), after the documented latency (fft size − 128):
+ *       sample for sample on FFmpeg 4.4/5.0, within −55 dB on 5.1+ (afftfilt
+ *       was rewritten; the export rebuilds 4.4's maths, audio.ts robotSteps);
  *     - pitch vs the export's rubberband on a harmonic voice-like signal:
  *       long-term log spectra correlate (> 0.97).
  *  2. Headless Chromium (playwright-core): the REAL renderer code
@@ -25,10 +25,11 @@
  *  3. The built renderer (apps/desktop/dist/renderer) carries the worklet
  *     source intact (if built).
  *
- * Needs FFmpeg on PATH and, for part 2, playwright-core + a Chromium:
- * PLAYWRIGHT_CORE=<dir of playwright-core> and PLAYWRIGHT_CHROMIUM=<chrome
- * binary> override the search (npx caches, ~/.cache/ms-playwright), as for
- * apps/desktop/scripts/parity-gl.mts. SYNTHCUT_SKIP_BROWSER=1 skips part 2.
+ * Needs FFmpeg (AIVE_FFMPEG, else the one on PATH) and, for part 2,
+ * playwright-core + a Chromium: PLAYWRIGHT_CORE=<dir of playwright-core> and
+ * PLAYWRIGHT_CHROMIUM=<chrome binary> override the search (npx caches,
+ * ~/.cache/ms-playwright), as for apps/desktop/scripts/parity-gl.mts.
+ * SYNTHCUT_SKIP_BROWSER=1 skips part 2.
  *
  * Run: npx tsx packages/core/scripts/smoke-voicefx.ts
  */
@@ -41,6 +42,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { audioEffectFilterSteps, audioPreviewPlan } from "../src/effects/audio.js";
 import { VOICE_WORKLET_SOURCE, voiceWorkletLatency } from "../src/effects/voiceworklet.js";
+import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
+import { hasAfftfiltV2, parseFfmpegVersion } from "../src/ffmpeg/version.js";
 
 const RATE = 48000;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -117,7 +120,7 @@ function ffmpegF32(input: Float32Array, af: string, dir: string): Float32Array {
   const src = join(dir, "in.f32");
   const dst = join(dir, "out.f32");
   writeFileSync(src, Buffer.from(input.buffer, input.byteOffset, input.byteLength));
-  execFileSync("ffmpeg", [
+  execFileSync(FFMPEG_BIN, [
     "-hide_banner", "-loglevel", "error", "-y", "-f", "f32le", "-ar", String(RATE), "-ac", "1", "-i", src,
     "-af", af, "-f", "f32le", "-ar", String(RATE), "-ac", "1", dst,
   ]);
@@ -125,14 +128,8 @@ function ffmpegF32(input: Float32Array, af: string, dir: string): Float32Array {
   return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.length));
 }
 
-function ffmpegMajor(): number {
-  const v = execFileSync("ffmpeg", ["-version"], { encoding: "utf8" }).split("\n")[0] ?? "";
-  const m = /version n?(\d+)\./.exec(v);
-  return m ? Number(m[1]) : 0;
-}
-
 function hasFilter(name: string): boolean {
-  return new RegExp(`\\s${name}\\s`).test(execFileSync("ffmpeg", ["-hide_banner", "-filters"], { encoding: "utf8" }));
+  return new RegExp(`\\s${name}\\s`).test(execFileSync(FFMPEG_BIN, ["-hide_banner", "-filters"], { encoding: "utf8" }));
 }
 
 /** Correlation of log long-term spectra (0–~2.3 kHz) of two signals. */
@@ -188,7 +185,10 @@ function nodeChecks(dir: string): void {
   check(audioPreviewPlan([{ type: "pitch", params: { semitones: 0 } }]).nodes.length === 0 &&
     audioEffectFilterSteps([{ type: "pitch", params: { semitones: 0 } }]).length === 0, "pitch 0 st is a no-op in the preview, like the export");
 
-  const major = ffmpegMajor();
+  const ff = parseFfmpegVersion(execFileSync(FFMPEG_BIN, ["-version"], { encoding: "utf8" }));
+  // The caps a render resolves for a robot on this FFmpeg (audio/fx.ts audioFilterCaps).
+  const v2 = hasAfftfiltV2(ff);
+  const caps = v2 ? { afftfiltV2: true } : {};
   const voice = new Float32Array(RATE * 3);
   let ph = 0;
   for (let i = 0; i < voice.length; i++) {
@@ -199,31 +199,36 @@ function nodeChecks(dir: string): void {
     voice[i] = 0.2 * s;
   }
   for (const toneParam of [0, 1, 2]) {
-    const [step] = audioEffectFilterSteps([{ type: "robot", params: { tone: toneParam } }]);
+    const steps = audioEffectFilterSteps([{ type: "robot", params: { tone: toneParam } }], { caps });
     const plan = audioPreviewPlan([{ type: "robot", params: { tone: toneParam } }]);
     const win = plan.nodes[0]?.kind === "robot" ? plan.nodes[0].win : 0;
-    check(!!step && step.includes(`win_size=${win}`), `robot tone ${toneParam}: preview window ${win} == the export's (${step})`);
-    const ff = ffmpegF32(voice, step!, dir);
+    const winOpt = /win_size=\d+/.exec(steps.join())?.[0];
+    check(winOpt === `win_size=${win}`, `robot tone ${toneParam}: preview window ${win} == the export's (${winOpt}, ${steps.length} step${steps.length > 1 ? "s" : ""})`);
+    const out = ffmpegF32(voice, steps.join(","), dir);
     const mine = runNode({ kind: "robot", win }, voice);
     const L = voiceWorkletLatency(win);
     let num = 0;
     let d1 = 0;
     let d2 = 0;
+    let e2 = 0;
     let err = 0;
-    for (let i = 2 * win; i < Math.min(ff.length, mine.length - L) - 2 * win; i++) {
-      const a = ff[i]!;
+    for (let i = 2 * win; i < Math.min(out.length, mine.length - L) - 2 * win; i++) {
+      const a = out[i]!;
       const b = mine[i + L]!;
       num += a * b;
       d1 += a * a;
       d2 += b * b;
+      e2 += (a - b) * (a - b);
       err = Math.max(err, Math.abs(a - b));
     }
     const corr = num / Math.sqrt(d1 * d2);
-    if (major > 0 && major < 5) {
-      check(err < 1e-4 && corr > 0.99999, `robot tone ${toneParam}: == FFmpeg ${major} afftfilt sample for sample after ${L} samples (max err ${err.toExponential(2)})`);
+    const residual = 10 * Math.log10(e2 / d1);
+    if (!v2) {
+      check(err < 1e-4 && corr > 0.99999, `robot tone ${toneParam}: == FFmpeg ${ff.label} afftfilt sample for sample after ${L} samples (max err ${err.toExponential(2)})`);
     } else {
-      console.log(`  note FFmpeg ${major}: afftfilt windows its output too — robot tone ${toneParam} preview vs export ${db(Math.sqrt(d2 / d1)).toFixed(1)} dB, corr ${corr.toFixed(3)} (exact on FFmpeg 4.x)`);
-      check(d2 > 0 && d1 > 0, `robot tone ${toneParam}: both preview and export are audible`);
+      // 5.1+'s afftfilt is rebuilt to 4.4's maths (win_func=rect + a 5-tap spectral Hann): equal up to a −65 dB floor.
+      check(residual <= -55 && err <= 1e-3 && corr >= 0.99999,
+        `robot tone ${toneParam}: FFmpeg ${ff.label} (afftfilt v2, rebuilt with win_func=rect) == worklet within ${residual.toFixed(1)} dB after ${L} samples (≤ −55; max err ${err.toExponential(2)}, corr ${corr.toFixed(7)})`);
     }
   }
   if (hasFilter("rubberband")) {

@@ -7,12 +7,14 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { execa } from "execa";
-import { FFMPEG_BIN } from "../ffmpeg/executor.js";
+import { FFMPEG_BIN, anlmdnWorks, ffmpegVersion } from "../ffmpeg/executor.js";
+import { hasAfftdnV2, hasAfftfiltV2 } from "../ffmpeg/version.js";
 import { newId } from "../ids.js";
 import {
-  AUDIO_EFFECT_CATEGORIES, AUDIO_FX_RATE, audioEffectByType, audioMeasureSteps, hasLoudnessStage, isAudioEffectEnabled,
+  AUDIO_EFFECT_CATEGORIES, AUDIO_FX_RATE, audioEffectByType, audioMeasureSteps, audioParamValue, hasLoudnessStage, isAudioEffectEnabled,
 } from "../effects/audio.js";
 import { muteGainExpr, type SourceMute } from "./mutes.js";
+import type { AudioFilterCaps } from "../effects/audio.js";
 import type { AudioEffect, Clip, ResolvedEffects } from "../types.js";
 
 /** Pitch-shifting types (rubberband, or the asetrate+atempo fallback). */
@@ -20,22 +22,52 @@ const PITCH_TYPES = new Set(["pitch", "chipmunk", "deep"]);
 
 let filtersPromise: Promise<Set<string>> | null = null;
 
+/**
+ * Filter names in `ffmpeg -filters` output. Lines look like
+ * " TSC afftdn            A->A       Denoise audio samples using FFT." — three
+ * flag columns up to FFmpeg 7.x, two (" TS afftdn …") from 8.0, where the
+ * command-support column was dropped.
+ */
+export function parseFilterList(stdout: string): Set<string> {
+  const names = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = /^\s*[A-Z.|]{2,3}\s+(\S+)\s+\S+->\S+/.exec(line);
+    if (m) names.add(m[1]);
+  }
+  return names;
+}
+
 /** The filter names this ffmpeg build ships (`ffmpeg -filters`), probed once per process. */
 export function detectFilters(): Promise<Set<string>> {
   if (!filtersPromise) {
     filtersPromise = execa(FFMPEG_BIN, ["-hide_banner", "-filters"], { reject: true })
-      .then((r) => {
-        const names = new Set<string>();
-        // Lines look like " TSC afftdn            A->A       Denoise audio samples using FFT."
-        for (const line of r.stdout.split(/\r?\n/)) {
-          const m = /^\s*[A-Z.|]{3}\s+(\S+)\s+\S+->\S+/.exec(line);
-          if (m) names.add(m[1]);
-        }
-        return names;
-      })
+      .then((r) => parseFilterList(r.stdout))
       .catch(() => new Set<string>());
   }
   return filtersPromise;
+}
+
+/** Types whose FFmpeg chain runs afftdn (noise_reduction; enhance_voice with denoise on). */
+const DENOISE_TYPES = new Set(["noise_reduction", "enhance_voice"]);
+
+/**
+ * The {@link AudioFilterCaps} of this FFmpeg that matter for `filters`, or
+ * undefined when none do (FFmpeg 4.4, or neither a denoiser nor a robot): the
+ * rewritten afftdn (FFmpeg ≥ 5) for a denoiser, the rewritten afftfilt
+ * (FFmpeg ≥ 5.1) for a robot and, only when a heavy noise reduction is in the
+ * stack, whether anlmdn runs at all (it crashes FFmpeg 9.0).
+ */
+export async function audioFilterCaps(filters: readonly AudioEffect[]): Promise<AudioFilterCaps | undefined> {
+  const on = filters.filter((f) => isAudioEffectEnabled(f));
+  const denoise = on.some((f) => DENOISE_TYPES.has(f.type));
+  const robot = on.some((f) => f.type === "robot");
+  if (!denoise && !robot) return undefined;
+  const v = await ffmpegVersion().catch(() => null);
+  const caps: AudioFilterCaps = {};
+  if (denoise && hasAfftdnV2(v)) caps.afftdnV2 = true;
+  if (robot && hasAfftfiltV2(v)) caps.afftfiltV2 = true;
+  if (on.some((f) => f.type === "noise_reduction" && audioParamValue(f, "heavy") >= 0.5) && !(await anlmdnWorks())) caps.noAnlmdn = true;
+  return Object.keys(caps).length ? caps : undefined;
 }
 
 /** The stretch of source audio a clip's effects run on (for render-time measurements). */
@@ -61,17 +93,19 @@ export async function resolveAudioFx(
   filters: AudioEffect[] | undefined,
   src?: AudioFxSource,
   signal?: AbortSignal,
-): Promise<Pick<ResolvedEffects, "audioFilters" | "pitchFallback" | "loudness">> {
+): Promise<Pick<ResolvedEffects, "audioFilters" | "pitchFallback" | "loudness" | "audioCaps">> {
   if (!filters?.length) return {};
   const pitches = filters.some((f) => isAudioEffectEnabled(f) && PITCH_TYPES.has(f.type));
   const pitchFallback = pitches && (process.env.AIVE_NO_RUBBERBAND === "1" || !(await detectFilters()).has("rubberband"));
-  const out: Pick<ResolvedEffects, "audioFilters" | "pitchFallback" | "loudness"> = { audioFilters: filters };
+  const caps = await audioFilterCaps(filters);
+  const out: Pick<ResolvedEffects, "audioFilters" | "pitchFallback" | "loudness" | "audioCaps"> = { audioFilters: filters };
   if (pitchFallback) out.pitchFallback = true;
+  if (caps) out.audioCaps = caps;
   if (!src) return out;
   const loudness: Record<string, number> = {};
   for (const f of filters) {
     if (!hasLoudnessStage(f)) continue;
-    const steps = audioMeasureSteps(filters, f.id, { pitchFallback, loudness });
+    const steps = audioMeasureSteps(filters, f.id, { pitchFallback, loudness, caps });
     if (!steps) continue;
     const L = await measureLoudness(src, steps, signal);
     if (L !== null) loudness[f.id] = L;
