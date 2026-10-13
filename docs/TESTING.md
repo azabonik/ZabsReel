@@ -166,6 +166,18 @@ npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto", chromakey output identical for any FFmpeg thread count; self-synthesizes
 npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount, lens zoom to fill (no transparent pixel for 30 k1/k2 settings), every effect has a WebGL2 preview; self-synthesizes
 
+# Source colour + the export's colour encoding (ffmpeg/colorspace.ts; self-synthesizes
+# H.264 colour-patch clips, ~15 s): the reading rules (tagged as tagged, untagged HD
+# BT.709 / SD BT.601, full range honoured; Chromium's own rules as measured), probeAsset's
+# colour description (and a JPEG file probing as a still), exports of untagged / BT.709 /
+# BT.601 / SD-on-HD / full-range sources and RGB / JPEG stills tagged BT.709 limited and
+# within 4 levels of the true colours, a 1:1 clip (plain, or with effects) exporting its own 4:2:0 planes
+# and odd-offset / odd-size crops cutting the decoded picture exactly, an old project
+# without colour info (probed again), preview render + get_frame, freeze-frame still,
+# thumbnail and key-colour detection, preview proxies with complete tags (and the
+# automatic proxy for a file whose incomplete tags Chromium ignores)
+npx tsx packages/core/scripts/smoke-colorspace.ts
+
 # Blend modes + shape masks (lossless exports; self-synthesizes PNG stills and an
 # FFV1 yuva420p cutout): every blend mode vs the W3C formula on the decoded
 # inputs (prints the max deviation per mode), normal byte-identical (framemd5),
@@ -205,7 +217,9 @@ npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
 # frame (those differences are printed). Plus odd-size 24 fps footage on a 30 fps
 # project, generate_proxy alpha (reuses the baked preview, rebuilds a missing one),
 # thumbnails / key colour / scenes, refusals,
-# segment keys, storage GC, the AIVE_RVM_INLINE=1 fallback and cancel. ~3 min.
+# segment keys, storage GC, the AIVE_RVM_INLINE=1 fallback and cancel; and cutouts of
+# BT.601-tagged HD, BT.709-tagged SD and full-range footage show the clip's own colours
+# (export, thumbnail, freeze, reverse) with a completely tagged preview proxy. ~4 min.
 npx tsx packages/core/scripts/smoke-cutout.ts
 # Auto-bleep: matcher, synthesized SFX, bleeps that follow their clip (move, trim,
 # split, speed, audio slip), set/add/remove_bleep, undo — all checked on exported
@@ -382,14 +396,27 @@ with a lossless RGBA tap instead of the final 4:2:0 encode), then prints
 max / mean / p99 of the per-channel difference (alpha, and colour × alpha).
 
 A second table runs the REAL export on 4:2:0 footage: a yuv420p clip through
-the whole graph (clip chain, the yuv420p overlays, `format=yuv420p`), decoded
-back to RGB, against the preview of the same decoded frame sent through the
-same final 4:2:0 steps — so it catches an effect that FFmpeg ran on
-subsampled chroma (FFmpeg picks a filter's pixel format from the filters
-after it; graph.ts pins RGBA after every effect stack so that never
-happens). It covers the effects whose filters take any pixel format (blur,
-detail, lens, grayscale, invert, pixelate …), stacks, adjustment layers and
-the grain's statistics as the export shows them.
+the whole graph (its explicit input scale, the RGBA composite, the BT.709
+4:2:0 output step), decoded back to RGB, against the preview of the same
+frame (as the input scale reads it) sent through the same final steps — so
+it catches an effect that FFmpeg ran on subsampled chroma (FFmpeg picks a
+filter's pixel format from the filters after it; graph.ts pins RGBA after
+every effect stack so that never happens). It covers the effects whose
+filters take any pixel format (blur, detail, lens, grayscale, invert,
+pixelate …), stacks, adjustment layers (they filter the full-chroma RGBA
+composite, as the preview does), out-of-gamut eq results (clipped in RGB
+before 4:2:0, with or without effects), the grain's statistics as the export
+shows them, and a plain clip with no effect at all (exact: one explicit
+conversion; at 1:1 it keeps the 4:2:0 chroma samples, as a clip with effects
+does unless it carries a key or a zoom — colorspace.ts keepsChromaSamples).
+
+A third table checks SOURCE COLOUR: H.264 colour-patch files (untagged HD and
+SD, BT.709 / BT.601 tagged, full range, incomplete tags) as the preview shows
+them — Chromium's `<video>` decode through the GL pipeline with the layer's
+source-colour correction — against the export's reading (exact where
+Chromium reads the file as the export does; the interim GL correction for
+incomplete tags must improve on Chromium's own reading), plus each file's
+preview proxy as generate_proxy writes it (complete tags: exact, uncorrected).
 
 A third section checks the temporal effects' clock and GPU memory: trails
 decay per SOURCE frame like the export's lagfun (2× speed — reading which
@@ -415,12 +442,13 @@ The whole run happens with
 in RGBA32UI targets, so it needs nothing beyond WebGL2.
 
 ```powershell
-npx tsx apps/desktop/scripts/parity-gl.mts                 # both parity tables (~2 min)
+npx tsx apps/desktop/scripts/parity-gl.mts                 # all three parity tables (~2 min)
 npx tsx apps/desktop/scripts/parity-gl.mts --bench         # + ms/frame: GL (full, half, quarter resolution) vs the old CSS path, 2 layers at 1280×720
 npx tsx apps/desktop/scripts/parity-gl.mts --only blur,glow --dump   # some effects; keep the PNGs (ffmpeg / gl / diff×16)
 npx tsx apps/desktop/scripts/parity-gl.mts --only 420      # just the real-export (4:2:0) table
 npx tsx apps/desktop/scripts/parity-gl.mts --only temporal # just the temporal clock / GPU memory section
 npx tsx apps/desktop/scripts/parity-gl.mts --only mediapool  # just the <video> pool section
+npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-colour table
 ```
 
 - Needs FFmpeg on PATH, `npm run build` (the page imports core's dist), and

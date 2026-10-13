@@ -1,4 +1,5 @@
 import { runFfmpegStdoutBuffer } from "../ffmpeg/executor.js";
+import { inputColorOpts, SWS_CONVERT, type SourceColor } from "../ffmpeg/colorspace.js";
 import type { CropRect } from "../types.js";
 
 /**
@@ -29,7 +30,7 @@ export interface KeyColorDetection {
 }
 
 /** One frame of `path` at `t` (seconds), optionally cropped, as a GRID×GRID rgb24 buffer. */
-async function grabGrid(path: string, t: number, crop?: CropRect): Promise<Buffer> {
+async function grabGrid(path: string, t: number, crop?: CropRect, color?: SourceColor): Promise<Buffer> {
   const vf: string[] = [];
   if (crop && crop.width > 0 && crop.height > 0) {
     vf.push(`crop=${Math.round(crop.width)}:${Math.round(crop.height)}:${Math.round(crop.x)}:${Math.round(crop.y)}`);
@@ -38,6 +39,8 @@ async function grabGrid(path: string, t: number, crop?: CropRect): Promise<Buffe
   // combined resize+convert in one swscale pass skips the limited→full range
   // expansion on untagged YUV (flat 0x808080 would read back as 0x7E7E7E and
   // no longer match what the key sees on export).
+  // `color`: read the YUV as the export does (colorspace.ts), so the key matches what it keys.
+  if (color) vf.push(`scale=flags=${SWS_CONVERT}${inputColorOpts(color)}`);
   vf.push("format=rgba", `scale=${GRID}:${GRID}:flags=area`);
   return runFfmpegStdoutBuffer([
     "-hide_banner",
@@ -139,7 +142,7 @@ export function analyzeBorder(frames: Buffer[], w: number, h: number, ring = RIN
  * Detect the key (background) colour of `path` from frames at `times`
  * (seconds), after an optional source crop — the region the key will see.
  */
-export async function detectKeyColor(path: string, times: number[], crop?: CropRect): Promise<KeyColorDetection> {
-  const frames = await Promise.all(times.map((t) => grabGrid(path, t, crop).catch(() => Buffer.alloc(0))));
+export async function detectKeyColor(path: string, times: number[], crop?: CropRect, color?: SourceColor): Promise<KeyColorDetection> {
+  const frames = await Promise.all(times.map((t) => grabGrid(path, t, crop, color).catch(() => Buffer.alloc(0))));
   return analyzeBorder(frames, GRID, GRID);
 }

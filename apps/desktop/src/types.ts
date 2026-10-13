@@ -3,6 +3,7 @@
 import type { Keyframes, Transform } from "./keyframes";
 import type { BlendMode, ClipMask } from "@aive/core/compositing";
 import { clipFootprintFrames, type SpeedRamp } from "@aive/core/speed";
+import type { ProbedColor } from "@aive/core/colorspace";
 
 export type { BlendMode, ClipMask, MaskShape } from "@aive/core/compositing";
 export type { RampAudio, RampPreset, SpeedRamp, SpeedRampPoint } from "@aive/core/speed";
@@ -41,8 +42,12 @@ export interface MediaAsset {
   isImage?: boolean;
   videoCodec?: string;
   audioCodec?: string;
+  /** The video stream's probed colour description (core ffmpeg/colorspace.ts). */
+  color?: ProbedColor;
   addedAt: number;
   proxyPath?: string;
+  /** The preview proxy's probed colour description (core ffmpeg/colorspace.ts). */
+  proxyColor?: ProbedColor;
   /** Browser-playable preview proxy (alpha .webm) for motion-graphic overlays. */
   previewPath?: string;
   folderId?: string;
@@ -58,6 +63,8 @@ export interface MediaAsset {
   builtinSfx?: BleepSound;
   /** Set on an asset baked by reverse_clip: the original span it reverses. */
   reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
+  /** Set on a matte-backed remove_background cutout: its colour source (core types.ts). */
+  cutout?: { colorPath: string; colorStart: number; colorAssetId?: string; colorTags?: ProbedColor; colorCodec?: string };
 }
 
 export interface ColorAdjust {

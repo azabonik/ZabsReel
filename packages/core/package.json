@@ -26,6 +26,10 @@
       "types": "./dist/speed.d.ts",
       "default": "./dist/speed.js"
     },
+    "./colorspace": {
+      "types": "./dist/ffmpeg/colorspace.d.ts",
+      "default": "./dist/ffmpeg/colorspace.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

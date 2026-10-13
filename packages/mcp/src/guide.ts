@@ -270,6 +270,13 @@ with FFmpeg.
   reading fps from the canvas in timeline_summary.
 - Layering is by video trackIndex (higher = on top). For B-roll over A-roll, add
   a video track and place the cutaway there; you no longer have to cut inline.
+- Colour is read the way players read it: each source by its colour tags
+  (untagged HD as BT.709, SD as BT.601, full range honoured), and every export
+  and preview render is written BT.709 limited range with complete tags
+  (get_frame reads that render) — so a clip looks the same in the live preview,
+  the export and other players. A file whose colour tags are incomplete gets a
+  correctly tagged preview proxy on import. HDR (BT.2020 PQ/HLG) is not
+  tone-mapped.
 
 ## Always
 - Confirm the user's intent and the target platform/aspect ratio when unclear.

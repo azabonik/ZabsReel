@@ -29,7 +29,7 @@ import {
   drawCount, glRenderer, historyGap, loseContextForTest, lutCacheForTest, lutProblem, lutStatus, onGLChange, provideLut, runLayer, setFileUrl,
   type LayerJob,
 } from "../src/gl/runtime";
-import { cachedPlan, planLayer, passCount, type LayerLook } from "../src/gl/plan";
+import { cachedPlan, planLayer, passCount, withSourceFix, type LayerLook, type SourceFix } from "../src/gl/plan";
 import { cancelWarmups, setWarmup, warmIfNeeded, warmupForTest } from "../src/gl/warmup";
 import { parseCube } from "../src/gl/color";
 import { MediaPool } from "../src/mediapool";
@@ -443,6 +443,30 @@ const api = {
       bigRight: centre(big, right, "big"),
       bigLeftAgain: centre(big, left, "big"),
     };
+  },
+  /**
+   * A <video> file's frame at `t` as the preview shows it: Chromium's decode,
+   * through the GL pipeline with the source-colour correction `fix` (or none),
+   * at its own size. Straight RGBA, base64.
+   */
+  async video(a: { url: string; t: number; fix: SourceFix | null; layerId: string }): Promise<string | null> {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.src = a.url;
+    await new Promise<void>((res, rej) => {
+      v.onloadeddata = () => res();
+      v.onerror = () => rej(new Error(`cannot play ${a.url}`));
+    });
+    v.currentTime = a.t;
+    await new Promise<void>((res) => { v.onseeked = () => res(); });
+    await new Promise<void>((res) => { v.requestVideoFrameCallback(() => res()); setTimeout(res, 500); });
+    const W = v.videoWidth;
+    const H = v.videoHeight;
+    const out = runLayer({
+      source: v, srcW: W, srcH: H, dynamic: true, crop: { x: 0, y: 0, w: W, h: H }, w: W, h: H, pic: { x: 0, y: 0, w: W, h: H },
+      steps: a.fix ? withSourceFix(undefined, a.fix) : [], k: 1, cw: W, ch: H, frame: 0, layerId: a.layerId,
+    }, true);
+    return out ? bytesToB64(out) : null;
   },
   /** Lose the context, try a run (must fail → the preview's CSS fallback), restore, run again. */
   async contextLoss(a: RunArgs): Promise<{ whileLost: boolean; after: string | null }> {

@@ -18,6 +18,7 @@
 import type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
 import type { BlendMode, ClipMask } from "./effects/compositing.js";
 import { clipFootprintFrames, type SpeedRamp, type SpeedRampPoint } from "./speed.js";
+import type { ProbedColor, SourceColor } from "./ffmpeg/colorspace.js";
 export type { RampAudio, RampPreset, SpeedRamp, SpeedRampPoint } from "./speed.js";
 
 export type { EaseKind, Keyframe, KeyframeProperty, Keyframes, Transform } from "./keyframes.js";
@@ -52,6 +53,13 @@ export interface MediaAsset {
   isImage?: boolean;
   videoCodec?: string;
   audioCodec?: string;
+  /**
+   * The video stream's colour description as probed (matrix, range,
+   * primaries, transfer, coded height): how its YUV is read (ffmpeg/
+   * colorspace.ts). Absent on assets probed before it existed — the engine
+   * probes those again when it renders.
+   */
+  color?: ProbedColor;
   /** Epoch ms when the asset was added to the project. */
   addedAt: number;
   /**
@@ -59,6 +67,12 @@ export interface MediaAsset {
    * uses it when present; EXPORT always uses the full-res original (`path`).
    */
   proxyPath?: string;
+  /**
+   * The preview proxy's own probed colour description (generate_proxy tags it
+   * with the export's reading of the source): how the preview's decoder reads
+   * the proxy (ffmpeg/colorspace.ts previewColorFix).
+   */
+  proxyColor?: ProbedColor;
   /**
    * Why the background proxy transcode failed (if it did) — recorded instead of
    * being swallowed, so clients can explain slow scrubbing and retry via
@@ -113,8 +127,12 @@ export interface MediaAsset {
    * `colorAssetId` is the library asset the colour was read from, so the
    * library clean-up keeps that asset while the cutout is used (library.ts);
    * cutouts made before it existed are matched by `colorPath` instead.
+   * `colorTags` / `colorCodec`: the colour source's probed colour description
+   * and codec — how its YUV is read (the cutout's own `color` describes only
+   * the gray matte). Cutouts made before they were recorded get them probed
+   * again from `colorPath`.
    */
-  cutout?: { colorPath: string; colorStart: number; colorAssetId?: string };
+  cutout?: { colorPath: string; colorStart: number; colorAssetId?: string; colorTags?: ProbedColor; colorCodec?: string };
   /**
    * Set when the user imported a file from SynthCut's own baked/ folder: it is
    * user media, so the library clean-up never treats it as an engine bake.
@@ -715,6 +733,10 @@ export interface ResolvedRenderClip {
   sourceSpan: number;
   /** True for a still image source — looped to fill the clip instead of seeked. */
   isImage?: boolean;
+  /** How to read the source's YUV (matrix + range, ffmpeg/colorspace.ts); absent = FFmpeg's default. */
+  colorIn?: SourceColor;
+  /** The decoded picture's size (display orientation): a picture already at the fitted size is only converted, not resampled. */
+  size?: { w: number; h: number };
   /** Output (timeline) duration of the clip in seconds (after speed). */
   outDuration: number;
   hasAudio: boolean;
@@ -742,7 +764,7 @@ export interface ResolvedRenderClip {
    * A matte-backed remove_background cutout: `path` is the matte (+ audio) and
    * the colour comes from `colorPath` (MediaAsset.cutout), merged at the input.
    */
-  cutout?: { colorPath: string; colorStart: number; fps: number; width: number; height: number };
+  cutout?: { colorPath: string; colorStart: number; fps: number; width: number; height: number; range: "tv" | "pc" };
 }
 
 /** A keyframe with its time resolved to clip-local SECONDS (for FFmpeg `T` expressions). */

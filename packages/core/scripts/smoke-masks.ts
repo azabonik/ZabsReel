@@ -327,14 +327,21 @@ async function masks(dir: string) {
   // Ellipse (circle on the square picture): radius 0.25 × 360 = 90 px.
   let r = (await dispatch(engine, "set_clip_mask", { clipId: overId, shape: "ellipse" })) as { mask: { w: number; h: number } };
   check(Math.abs(r.mask.w - 0.5) < 1e-6 && Math.abs(r.mask.h - 0.5) < 1e-6, "a new ellipse defaults to a centred circle half the short side", JSON.stringify(r.mask));
-  let f = await shot("ellipse");
+  const ellipseFile = await exportAt(engine, dir, "ellipse");
+  let f = await frame(ellipseFile, t);
   expect(f, C[0], C[1], RED, "ellipse: centre shows V2");
   expect(f, C[0] + 70, C[1], RED, "ellipse: inside the radius");
   expect(f, C[0] + 110, C[1], BLUE, "ellipse: outside shows V1");
   expect(f, C[0] + 75, C[1] + 75, BLUE, "ellipse: the picture's corner is outside the circle");
-  // The edge is anti-aliased: along the 45° diagonal some pixel is partly covered.
-  const diag = [60, 61, 62, 63, 64, 65, 66, 67].map((o) => px(f, C[0] + o, C[1] + o, 0)[0]);
-  check(diag.some((v) => v > 30 && v < 225), `ellipse: the edge is anti-aliased (red along the diagonal: ${diag.join(",")})`);
+  // The edge is anti-aliased: along the 45° diagonal some pixel is partly covered. Read in
+  // the luma, which the 4:2:0 export keeps per pixel (a pixel's decoded red also carries its
+  // 2×2 block's averaged colour, so it says more about the chroma filter than the mask).
+  const luma = await ff(["-ss", t.toFixed(4), "-i", ellipseFile, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]);
+  const yIn = luma[C[1] * W + C[0]], yOut = luma[C[1] * W + C[0] + 110];
+  const yLo = Math.min(yIn, yOut), ySpan = Math.abs(yIn - yOut);
+  const diag = [60, 61, 62, 63, 64, 65, 66, 67].map((o) => luma[(C[1] + o) * W + C[0] + o]);
+  check(ySpan > 10 && diag.some((v) => v > yLo + ySpan * 0.1 && v < yLo + ySpan * 0.9),
+    `ellipse: the edge is anti-aliased (luma along the diagonal: ${diag.join(",")}; red inside ${yIn}, blue outside ${yOut})`);
 
   await dispatch(engine, "set_clip_mask", { clipId: overId, invert: true });
   f = await shot("ellipse-inv");

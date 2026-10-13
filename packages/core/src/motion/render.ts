@@ -1,9 +1,11 @@
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { bundle } from "@remotion/bundler";
 import { ensureBrowser, selectComposition, renderMedia } from "@remotion/renderer";
+import { colorTagArgs, FFMPEG_DEFAULT_CODING, h264RetagBsf, tagFramesStep } from "../ffmpeg/colorspace.js";
+import { runFfmpeg } from "../ffmpeg/executor.js";
 
 /**
  * Headless motion-graphics renderer (Remotion).
@@ -155,6 +157,8 @@ export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
       ...(alpha
         ? ({ codec: "prores", proResProfile: "4444", pixelFormat: "yuva444p10le", imageFormat: "png" } as const)
         : ({ codec: "h264", pixelFormat: "yuv420p" } as const)),
+      // Pinned: BT.601, untagged (tagGraphicColor / graphicPreviewProxy tag the result as that).
+      colorSpace: "default",
       outputLocation: opts.outPath,
       inputProps,
       onProgress: opts.onProgress ? ({ progress }) => opts.onProgress!(progress) : undefined,
@@ -164,4 +168,31 @@ export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
     // Remotion manages; the scaffold is ours).
     await rm(opts.workDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Tag a standalone graphic's H.264 as Remotion codes it — BT.601, limited
+ * range, untagged — in complete tags (lossless remux, in place), so the export
+ * and the preview's decoder both read it as coded: untagged HD would be read
+ * as BT.709 (ffmpeg/colorspace.ts).
+ */
+export async function tagGraphicColor(mp4: string, signal?: AbortSignal): Promise<void> {
+  const tagged = `${mp4}.tagged.mp4`;
+  await runFfmpeg(["-hide_banner", "-y", "-i", mp4, "-map", "0", "-c", "copy", "-bsf:v", h264RetagBsf(FFMPEG_DEFAULT_CODING), "-movflags", "+faststart", tagged], { signal });
+  await rename(tagged, mp4);
+}
+
+/**
+ * The VP8/alpha .webm preview proxy of an overlay graphic's ProRes 4444 .mov
+ * (which Chromium can't decode). The .mov is Remotion's BT.601 (the export
+ * reads it so); complete tags make the preview's decoder read the proxy alike
+ * (untagged HD: BT.709, up to 40 levels off).
+ */
+export async function graphicPreviewProxy(mov: string, webm: string): Promise<void> {
+  await runFfmpeg([
+    "-hide_banner", "-y", "-i", mov, "-vf", tagFramesStep(FFMPEG_DEFAULT_CODING),
+    "-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0",
+    "-b:v", "3M", "-deadline", "realtime", "-cpu-used", "5", "-an",
+    ...colorTagArgs(FFMPEG_DEFAULT_CODING), webm,
+  ]);
 }

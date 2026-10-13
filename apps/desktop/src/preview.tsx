@@ -31,7 +31,7 @@ import { AudioRouter } from "./audiograph";
 import { isKeyBypassed, onKeyBypassChange } from "./glkey";
 import { vignetteGradient, vignetteLayer } from "./vignette2d";
 import { glReady, glSoftware, lutProblem, onGLChange, runLayer, setFileUrl } from "./gl/runtime";
-import { cachedPlan, lookHasKernel, type LayerLook } from "./gl/plan";
+import { cachedPlan, lookHasKernel, withSourceFix, type LayerLook } from "./gl/plan";
 import { noteLayerScale } from "./gl/scale";
 import type { LayerJob } from "./gl/runtime";
 import { cancelWarmups, setWarmup, warmIfNeeded, type WarmSource } from "./gl/warmup";
@@ -173,7 +173,7 @@ function lookThroughGL(
   el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, g: GLDraw,
   iw: number, ih: number, sx: number, sy: number, sw: number, sh: number,
 ): { src: CanvasImageSource; r: [number, number, number, number]; dst: [number, number, number, number] } | null {
-  if (!d.look || !glReady()) return null;
+  if ((!d.look && !d.sourceFix) || !glReady()) return null;
   const fitB = Math.min(W / sw, H / sh); // buffer px per source px
   const s = Math.abs(d.transform.scale) || 1;
   let q = Math.min(8, 2 ** Math.ceil(Math.log2(Math.max(1 / 8, s))));
@@ -186,7 +186,9 @@ function lookThroughGL(
   const PH = exact ? g.ch : Math.max(1, Math.round(H * q));
   const k = PW / g.cw;
   noteLayerScale(g.layerId, k);
-  const steps = cachedPlan(d.look, { k, w: PW, h: PH, cw: g.cw, ch: g.ch }, { skipKeys: g.skipKeys });
+  const look = d.look ? cachedPlan(d.look, { k, w: PW, h: PH, cw: g.cw, ch: g.ch }, { skipKeys: g.skipKeys }) : undefined;
+  // A file Chromium decodes with another matrix / range than the export is corrected first.
+  const steps = d.sourceFix ? withSourceFix(look, d.sourceFix) : look ?? [];
   if (!steps.length) return null;
   // The export's fit (scale … force_original_aspect_ratio=decrease, pad centred), in canvas px.
   const fw = Math.min(g.cw, Math.round((g.ch * sw) / sh));

@@ -32,11 +32,17 @@
  *  7. AIVE_RVM_INLINE=1 runs the same pipeline on the calling thread and writes
  *     an identical matte; cancel_job stops a run promptly, its worker thread
  *     and ffmpeg children are gone within 2 s, and it leaves no files.
+ *  8. A cutout shows its colour source's colours, read as the clip without its
+ *     background removal reads them (the gray matte's own description — full
+ *     range on FFmpeg 7+, untagged before — said nothing about them): tagged
+ *     BT.601 HD, tagged BT.709 SD, full range JPEG and tagged BT.709 full
+ *     range sources, in the export, the thumbnail, a freeze frame and a
+ *     reverse bake (kept patches equal, removed ones black).
  *
  * Run: npx tsx packages/core/scripts/smoke-cutout.ts
  */
 import { execa } from "execa";
-import { mkdtempSync, existsSync, readdirSync, statSync, utimesSync, rmSync, copyFileSync, renameSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync, statSync, utimesSync, rmSync, copyFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EditorEngine } from "../src/engine.js";
@@ -44,6 +50,7 @@ import { dispatch } from "../src/rpc.js";
 import { runFfmpeg, FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
 import { referencedManagedPaths } from "../src/storage.js";
 import { segmentKey } from "../src/ffmpeg/segments.js";
+import { previewColorFix } from "../src/ffmpeg/colorspace.js";
 import type { MediaAsset, ResolvedRenderClip } from "../src/types.js";
 import workerThreads from "node:worker_threads";
 import { syncBuiltinESMExports } from "node:module";
@@ -444,7 +451,7 @@ async function main(): Promise<void> {
   {
     const rc: ResolvedRenderClip = {
       path: cut.path, trackIndex: 2, showVideo: true, startSec: 0, sourceIn: 0, sourceSpan: DUR, outDuration: DUR, hasAudio: true, muted: false,
-      cutout: { colorPath: src, colorStart: 0, fps: FPS, width: W, height: H },
+      cutout: { colorPath: src, colorStart: 0, fps: FPS, width: W, height: H, range: "tv" },
     };
     const canvas = { width: W, height: H, fps: FPS };
     const prof = { crf: 23, preset: "veryfast" } as never;
@@ -612,6 +619,92 @@ async function main(): Promise<void> {
     await new Promise((res) => setTimeout(res, 300));
     const after = readdirSync(bakedDir).filter((f) => f.includes(cl.id)).length;
     check(after === before, "no partial matte or proxy left behind");
+  }
+
+  // ---- 8. a cutout's colour is its colour source's -------------------------------------------
+  console.log("8. a cutout shows the clip's own colours (tagged BT.601 HD, BT.709 SD, full range): export, thumbnail, freeze, reverse...");
+  {
+    // Bright, distinctive patches the stub matte keeps (luma ≥ 175: alpha 255) and three dark ones it removes (alpha 0).
+    const PAT: [number, number, number][] = [
+      [255, 255, 0], [0, 255, 255], [224, 172, 105], [255, 200, 0], [120, 255, 200], [255, 180, 200], [180, 220, 255], [200, 255, 100],
+      [0, 0, 0], [40, 20, 10], [255, 255, 255], [150, 255, 255], [255, 210, 255], [255, 230, 120], [10, 30, 60], [235, 235, 235],
+    ];
+    const kept = PAT.map(([r, g, b]) => stubAlpha(r, g, b) === 255);
+    const removed = PAT.map(([r, g, b]) => stubAlpha(r, g, b) === 0);
+    /** Patch-centre colours (6×6 averages) of a W×H rgb24 frame. */
+    const centres = (rgb: Buffer) =>
+      PAT.map((_, i) => {
+        const cx = Math.floor((((i % 8) + 0.5) * W) / 8), cy = Math.floor(((Math.floor(i / 8) + 0.5) * H) / 2);
+        const acc = [0, 0, 0];
+        for (let y = cy - 3; y < cy + 3; y++) for (let x = cx - 3; x < cx + 3; x++) for (let c = 0; c < 3; c++) acc[c] += rgb[(y * W + x) * 3 + c];
+        return acc.map((v) => v / 36);
+      });
+    const AS_EXPORTED = "scale=in_color_matrix=bt709:in_range=tv:flags=bilinear+accurate_rnd+full_chroma_int"; // OUTPUT_COLOR
+    const worst = (a: number[][], b: number[][], which: boolean[]) =>
+      Math.round(Math.max(0, ...a.flatMap((p, i) => (which[i] ? p.map((v, c) => Math.abs(v - b[i][c])) : []))) * 10) / 10;
+    const pat = join(dir, "colpat.rgb");
+    const rgb = (w: number, h: number) => {
+      const b = Buffer.alloc(w * h * 3);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) b.set(PAT[Math.floor((y * 2) / h) * 8 + Math.floor((x * 8) / w)], (y * w + x) * 3);
+      return b;
+    };
+    const ALL = (m: string, p: string, t: string) => ["-colorspace", m, "-color_primaries", p, "-color_trc", t];
+    const rows: { name: string; w: number; h: number; matrix: string; range: "tv" | "pc"; tags: string[]; mjpeg?: boolean }[] = [
+      { name: "BT.601-tagged HD", w: 1280, h: 720, matrix: "bt601", range: "tv", tags: [...ALL("smpte170m", "smpte170m", "smpte170m"), "-color_range", "tv"] },
+      { name: "BT.709-tagged SD", w: W, h: H, matrix: "bt709", range: "tv", tags: [...ALL("bt709", "bt709", "bt709"), "-color_range", "tv"] },
+      { name: "full range JPEG (MJPEG yuvj420p)", w: W, h: H, matrix: "bt601", range: "pc", tags: [], mjpeg: true },
+      { name: "full range, BT.709-tagged", w: W, h: H, matrix: "bt709", range: "pc", tags: [...ALL("bt709", "bt709", "bt709"), "-color_range", "pc"] },
+    ];
+    for (const [k, row] of rows.entries()) {
+      writeFileSync(pat, rgb(row.w, row.h));
+      const png = join(dir, `colpat${k}.png`);
+      await ff(["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", `${row.w}x${row.h}`, "-i", pat, "-frames:v", "1", png]);
+      const file = join(dir, `colsrc${k}.${row.mjpeg ? "mkv" : "mp4"}`);
+      const pix = row.range === "pc" ? "yuvj420p" : "yuv420p";
+      const v = (opt: string) => (row.tags.includes(opt) ? row.tags[row.tags.indexOf(opt) + 1] : "unknown");
+      await ff([
+        "-loop", "1", "-framerate", String(FPS), "-i", png, "-t", "1",
+        "-vf", `scale=out_color_matrix=${row.matrix}:out_range=${row.range}:flags=lanczos+accurate_rnd+full_chroma_int,format=${pix},` +
+          `setparams=colorspace=${v("-colorspace")}:color_primaries=${v("-color_primaries")}:color_trc=${v("-color_trc")}:range=${row.mjpeg ? "pc" : v("-color_range")}`,
+        ...(row.mjpeg ? ["-c:v", "mjpeg", "-q:v", "2"] : ["-c:v", "libx264", "-crf", "4"]), "-pix_fmt", pix, ...row.tags, file,
+      ]);
+      const e = new EditorEngine(join(dir, `col${k}`));
+      e.setProjectSettings({ width: W, height: H, fps: FPS, name: `col${k}` });
+      const a = await e.importVideo(file);
+      const clip = e.addClip(a.id, { startFrame: 0 });
+      const exp = async (tag: string) => {
+        const out = join(dir, `col${k}-${tag}.mp4`);
+        await e.exportVideo(out, LOSSLESS);
+        return (await frames(out, "rgb24", undefined, AS_EXPORTED)).map(centres);
+      };
+      const thumb = async (assetId: string) => centres((await frames(await e.generateThumbnail(assetId, 0.5), "rgb24"))[0]);
+      const plain = (await exp("plain"))[10];
+      const plainThumb = await thumb(a.id);
+      const truth = worst(plain, PAT, PAT.map(() => true));
+      const cutAsset = (await e.removeBackground(clip.id, { stubMatte: true })).asset;
+      // The preview plays the cutout's VP8+alpha proxy: coded and tagged (completely) as its colour is read.
+      const pt = cutAsset.proxyColor;
+      const space = row.matrix === "bt709" ? "bt709" : "smpte170m";
+      check(pt?.space === space && pt.primaries === space && pt.transfer === space && pt.range === "tv" && previewColorFix(cutAsset, true) === null,
+        `${row.name}: the cutout's preview proxy is tagged ${space}/tv, complete (${pt?.space}/${pt?.primaries}/${pt?.transfer}/${pt?.range}), so the preview shows it uncorrected`);
+      const results: [string, number[][][], number][] = [["export", await exp("cut"), 4]];
+      results.push(["thumbnail", [await thumb(cutAsset.id)], 8]);
+      await dispatch(e, "freeze_frame", { clipId: clip.id, atSeconds: 0.5, durationSeconds: 0.3 });
+      results.push(["freeze frame", await exp("freeze"), 4]);
+      e.undo();
+      await dispatch(e, "reverse_clip", { clipId: clip.id });
+      results.push(["reverse bake", await exp("reverse"), 4]);
+      const detail: string[] = [];
+      let ok = truth <= 4;
+      for (const [what, got, tol] of results) {
+        const ref = what === "thumbnail" ? plainThumb : plain;
+        const off = Math.max(...got.map((f) => worst(f, ref, kept)));
+        const bg = Math.max(...got.map((f) => Math.max(...f.flatMap((p, i) => (removed[i] ? p : [])))));
+        ok &&= got.length > 0 && off <= tol && bg <= 4;
+        detail.push(`${what} ${off}${bg > 4 ? ` (removed patches not black: ${bg.toFixed(1)})` : ""}`);
+      }
+      check(ok, `${row.name}: the cutout's kept patches = the clip without background removal (max level difference: ${detail.join(", ")}; clip vs true colours ${truth})`);
+    }
   }
 
   console.log(`\n   sizes for this synthetic ${W}x${H} clip: matte ${statSync(cut.path).size} B vs old colour+alpha cutout ${statSync(legacy).size} B (${(statSync(legacy).size / statSync(cut.path).size).toFixed(1)}x)`);

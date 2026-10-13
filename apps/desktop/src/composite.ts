@@ -22,7 +22,8 @@ import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
 import { effectiveTransform, effectiveValue, sampleTrack, type EffectiveTransform } from "./keyframes";
 import { previewScaleFor } from "@aive/core/effects";
 import { keyPlan, type KeyPlan } from "./keying";
-import type { LayerLook } from "./gl/plan";
+import type { LayerLook, SourceFix } from "./gl/plan";
+import { previewColorFix } from "@aive/core/colorspace";
 import { runBlendModes, sanitizeMask, type BlendMode, type ClipMask } from "@aive/core/compositing";
 import { audioFxField } from "./audiofx";
 import type { AudioPreviewPlan } from "@aive/core/audio-effects";
@@ -120,6 +121,12 @@ export interface ActiveClip {
     blend?: BlendMode;
     /** Shape mask in the clip's own picture space (maskdraw.ts draws it). */
     mask?: ClipMask;
+    /**
+     * Present when Chromium reads the playing file's YUV with another matrix
+     * or range than the export (a partial colour description): the WebGL2
+     * correction to the export's colours (gl/plan.ts withSourceFix).
+     */
+    sourceFix?: SourceFix;
   };
   /**
    * Present when this clip should be HEARD (asset has audio + track not muted).
@@ -164,6 +171,20 @@ function vignetteField(filters: Parameters<typeof vignetteAngles>[0]): { vignett
 /** `{ look }` when the clip has a colour grade, LUT or effects, else nothing (the GL path has nothing to do). */
 function lookField(fx: Project["tracks"][number]["clips"][number]["effects"]): { look?: LayerLook } {
   return fx && (fx.color || fx.grade || fx.lut || fx.filters?.length) ? { look: fx } : {};
+}
+
+/** This Chromium's major version (how it reads untagged VP9 changed in 149), or undefined outside Chromium. */
+const CHROME_MAJOR = Number(/Chrome\/(\d+)/.exec(typeof navigator === "undefined" ? "" : navigator.userAgent)?.[1]) || undefined;
+const fixes = new WeakMap<MediaAsset, { orig: SourceFix | null; proxy: SourceFix | null }>();
+/** `{ sourceFix }` when Chromium reads the file the clip plays (original or proxy) unlike the export, else nothing. Cached per asset object. */
+function sourceFixField(asset: MediaAsset, path: string | undefined): { sourceFix?: SourceFix } {
+  let f = fixes.get(asset);
+  if (!f) {
+    f = { orig: previewColorFix(asset, false, CHROME_MAJOR), proxy: asset.proxyPath ? previewColorFix(asset, true) : null };
+    fixes.set(asset, f);
+  }
+  const fix = path !== undefined && path === asset.proxyPath ? f.proxy : f.orig;
+  return fix ? { sourceFix: fix } : {};
 }
 
 /** `{ mask }` for a valid stored mask, else nothing. */
@@ -364,6 +385,7 @@ export function activeLayersAt(
               ...vignetteField(seg.clip.effects?.filters),
               ...blendField(blendOf?.get(seg.clip.id)),
               ...maskField(seg.clip.effects?.mask),
+              ...sourceFixField(asset!, seg.path),
             }
           : undefined,
         // A ramp with audio "mute" plays its picture silently (as the export).

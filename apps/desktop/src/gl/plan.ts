@@ -16,7 +16,7 @@ import {
 } from "@aive/core/effects";
 import type { ColorAdjust, ColorGrade, VisualEffect } from "../types";
 import {
-  GLSL_COLORBALANCE, GLSL_EQ, GLSL_HUE, GLSL_LUT3D, GLSL_TABLE_RGB,
+  GLSL_COLORBALANCE, GLSL_EQ, GLSL_HUE, GLSL_LUT3D, GLSL_SRCFIX, GLSL_TABLE_RGB,
   balanceParams, curvesTables, eqTables, hueParams,
 } from "./color";
 
@@ -203,4 +203,33 @@ export function cachedPlan(look: LayerLook | undefined, g: GLUniformContext, opt
   const steps = planLayer(look, g, opts);
   cache.set(look, { k: g.k, w: g.w, h: g.h, cw: g.cw, ch: g.ch, skip, steps });
   return steps;
+}
+
+/** A source-colour correction: rows [m0, m1, m2, offset] (@aive/core/colorspace previewColorFix). */
+export type SourceFix = readonly (readonly number[])[];
+
+const NO_STEPS: PlannedStep[] = [];
+const fixed = new WeakMap<readonly PlannedStep[], WeakMap<SourceFix, PlannedStep[]>>();
+/**
+ * `steps` with the source-colour correction in front — the file's picture as
+ * the export reads it, before the look — cached on both (stable objects), so
+ * steady playback builds nothing per frame. `steps` may be empty (no look).
+ */
+export function withSourceFix(steps: readonly PlannedStep[] | undefined, fix: SourceFix): PlannedStep[] {
+  const base = steps ?? NO_STEPS;
+  let byFix = fixed.get(base);
+  if (!byFix) {
+    byFix = new WeakMap();
+    fixed.set(base, byFix);
+  }
+  let out = byFix.get(fix);
+  if (!out) {
+    const step: PlannedStep = {
+      kind: "srcfix", id: "src:fix", fidelity: "close",
+      passes: [{ frag: GLSL_SRCFIX, point: true, domain: "rgb", uniforms: { u_srcfix_r: fix[0], u_srcfix_g: fix[1], u_srcfix_b: fix[2] } }],
+    };
+    out = [step, ...base];
+    byFix.set(fix, out);
+  }
+  return out;
 }

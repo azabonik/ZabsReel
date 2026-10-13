@@ -57,6 +57,8 @@ import { methods } from "../src/rpc.js";
 import { FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, longFilterGraphIndex } from "../src/ffmpeg/executor.js";
 import { buildRenderCommand, EXPORT_PROFILE, PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
 import { segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
+import { OUTPUT_COLOR_ARGS, OUTPUT_YUV_STEP } from "../src/ffmpeg/colorspace.js";
+import { segmentKey } from "../src/ffmpeg/segments.js";
 import { expandBleeps } from "../src/audio/bleeps.js";
 import {
   RAMP_PRESETS,
@@ -369,19 +371,39 @@ async function constantUntouched(dir: string, engine: EditorEngine, codedId: str
     let same = 0;
     for (const s of sets) {
       for (const opts of [{}, { videoOnly: true, window: { start: 0.5, end: 1.5 } }, { audioOnly: true }]) {
-        const a = buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts);
-        const b = old.buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts);
-        // The one intended change since the ref: the audio mix is pinned to stereo
+        const a = colourAgnostic(buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts));
+        const ref0 = old.buildRenderCommand(s, canvas, "/tmp/o.mp4", EXPORT_PROFILE, undefined, undefined, opts);
+        // The one intended audio change since the ref: the mix is pinned to stereo
         // (FFmpeg 4.4/5.x took the first clip's channel layout, 6.1+ stereo).
-        b.args = b.args.map((x) => x.replace(/(amix=inputs=\d+:duration=longest:normalize=0)\[amixraw\]/, "$1,aformat=channel_layouts=stereo[amixraw]"));
+        ref0.args = ref0.args.map((x) => x.replace(/(amix=inputs=\d+:duration=longest:normalize=0)\[amixraw\]/, "$1,aformat=channel_layouts=stereo[amixraw]"));
+        const b = colourAgnostic(ref0);
         if (JSON.stringify(a) === JSON.stringify(b)) same++;
         else console.error("    differs:", JSON.stringify(opts), "\n     new:", a.args.join(" ").slice(0, 400), "\n     old:", b.args.join(" ").slice(0, 400));
       }
     }
-    check(same === sets.length * 3, `constant speed: ffmpeg commands identical to ${ref}'s graph builder (${same}/${sets.length * 3})`);
+    check(same === sets.length * 3, `constant speed: ffmpeg commands identical to ${ref}'s graph builder, colour handling aside (${same}/${sets.length * 3})`);
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/**
+ * A render command with its colour handling put in one canonical form, so the
+ * baseline check compares timing / speed / audio only: the explicit input
+ * scale (ffmpeg/colorspace.ts) vs the older format=rgba + lanczos scale, the
+ * RGBA composite's overlay format, the BT.709 output step and its encoder tags.
+ */
+function colourAgnostic(cmd: { args: string[]; totalDuration: number }): { args: string[]; totalDuration: number } {
+  const tags = OUTPUT_COLOR_ARGS.join("\u0000");
+  const args = cmd.args.join("\u0000").split(tags).join("").split("\u0000").filter((x) => x !== "").map((a) =>
+    a
+      .replace(/format=rgba,scale=(\d+):(\d+):force_original_aspect_ratio=decrease:flags=[a-z_+]+/g, "FIT($1x$2)")
+      .replace(/scale=(\d+):(\d+):force_original_aspect_ratio=decrease:flags=[a-z_+]+(:in_color_matrix=\w+:in_range=\w+)?,format=rgba/g, "FIT($1x$2)")
+      .replace(/(:exact=1)/g, "")
+      .replace(/:format=(rgb|auto)(?=[:,\[])/g, "")
+      .split(OUTPUT_YUV_STEP).join("format=yuv420p"),
+  );
+  return { args, totalDuration: cmd.totalDuration };
 }
 
 // ---- main --------------------------------------------------------------------

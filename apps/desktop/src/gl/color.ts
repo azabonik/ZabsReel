@@ -110,6 +110,22 @@ vec4 op_lut3d(vec4 c, ivec2 p, int dom) {
 }
 `;
 
+/**
+ * The source-colour correction (first op of a layer whose file Chromium reads
+ * with another matrix or range than the export: @aive/core/colorspace
+ * previewColorFix): an affine RGB → RGB map in 8-bit levels, one row per
+ * channel ([m0, m1, m2, offset]), rounded and clamped like a pass write.
+ */
+export const GLSL_SRCFIX = `
+uniform vec4 u_srcfix_r;
+uniform vec4 u_srcfix_g;
+uniform vec4 u_srcfix_b;
+vec4 op_srcfix(vec4 c, ivec2 p, int dom) {
+  vec3 o = vec3(dot(u_srcfix_r.xyz, c.rgb), dot(u_srcfix_g.xyz, c.rgb), dot(u_srcfix_b.xyz, c.rgb)) + vec3(u_srcfix_r.w, u_srcfix_g.w, u_srcfix_b.w);
+  return vec4(clamp(floor(o + 0.5), 0.0, 255.0), c.a);
+}
+`;
+
 // ---- parameter math -------------------------------------------------------------
 
 const clampN = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));

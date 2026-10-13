@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import { runFfprobe } from "./executor.js";
 import { newId } from "../ids.js";
 import type { MediaAsset } from "../types.js";
+import type { ProbedColor } from "./colorspace.js";
 
 interface FfprobeStream {
   codec_type?: string;
@@ -13,6 +14,10 @@ interface FfprobeStream {
   duration?: string;
   side_data_list?: { side_data_type?: string; rotation?: number }[];
   tags?: { rotate?: string };
+  color_space?: string;
+  color_range?: string;
+  color_primaries?: string;
+  color_transfer?: string;
 }
 
 interface FfprobeFormat {
@@ -49,6 +54,20 @@ function streamRotation(video: FfprobeStream): number {
   const raw = sd?.rotation ?? Number(video.tags?.rotate ?? 0);
   if (!Number.isFinite(raw)) return 0;
   return ((Math.round(raw) % 360) + 360) % 360;
+}
+
+/** The stream's colour description (values ffprobe knows) + its coded height, for colorspace.ts. */
+export function probedColor(video: FfprobeStream): ProbedColor {
+  const keep = (v: string | undefined) => (v && v !== "unknown" ? v : undefined);
+  const c: ProbedColor = {
+    space: keep(video.color_space),
+    range: keep(video.color_range),
+    primaries: keep(video.color_primaries),
+    transfer: keep(video.color_transfer),
+    codedHeight: video.height,
+  };
+  for (const k of Object.keys(c) as (keyof ProbedColor)[]) if (c[k] === undefined) delete c[k];
+  return c;
 }
 
 /**
@@ -88,8 +107,11 @@ export async function probeAsset(path: string): Promise<MediaAsset> {
   // A still image (png/jpg/webp/…) has a video stream but no real duration. Treat
   // it as a looping source with a sensible default length so it can be placed on
   // the timeline and trimmed/extended like any clip (the graph loops the frame).
+  // FFmpeg's image2 demuxer (a .jpg/.bmp/.tif file) reports one frame's duration
+  // (0.04 s) where png_pipe & co report none: a single-image container is a still either way.
+  const stillContainer = /(^|,)(image2|[a-z0-9]+_pipe)(,|$)/.test(data.format?.format_name ?? "");
   const isImage = Boolean(video && !audio) && IMAGE_CODECS.has(video!.codec_name ?? "") &&
-    (!Number.isFinite(duration) || duration <= 0);
+    (!Number.isFinite(duration) || duration <= 0 || stillContainer);
   if (isImage) duration = DEFAULT_IMAGE_DURATION;
 
   if (!Number.isFinite(duration) || duration <= 0) {
@@ -118,6 +140,7 @@ export async function probeAsset(path: string): Promise<MediaAsset> {
     isImage: isImage || undefined,
     videoCodec: video?.codec_name,
     audioCodec: audio?.codec_name,
+    ...(video ? { color: probedColor(video) } : {}),
     addedAt: Date.now(),
   };
 }

@@ -38,6 +38,11 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildRenderCommand, EXPORT_PROFILE } from "../../../packages/core/src/ffmpeg/graph.js";
+import {
+  colorTagArgs, inputColorOpts, keepCodingOpts, OUTPUT_YUV_STEP, previewColorFix, keepsChromaSamples, resolveSourceColor, SWS_CONVERT, SWS_PLAIN, tagFramesStep, type SourceColor,
+} from "../../../packages/core/src/ffmpeg/colorspace.js";
+import { probeAsset } from "../../../packages/core/src/ffmpeg/ffprobe.js";
+import { alphaProxyArgs } from "../../../packages/core/src/ffmpeg/cutout.js";
 import { FFMPEG_BIN, adaptFfmpegArgs } from "../../../packages/core/src/ffmpeg/executor.js";
 import { EFFECTS, effectGL, type GLFidelity } from "@aive/core/effects";
 import type { LayerLook } from "../src/gl/plan";
@@ -156,12 +161,12 @@ async function writePng(path: string, rgba: Buffer, w: number, h: number): Promi
 
 /**
  * A W×H RGBA frame through the export's last steps — overlaid onto the black
- * base (the overlay's yuv420p, with FFmpeg's default conversions), then
- * format=yuv420p — and back to RGBA: what the export shows of that frame.
+ * base (graph.ts composites in RGBA), then its BT.709 4:2:0 output step — and
+ * back to RGBA: what the export shows of that frame.
  */
 async function through420(rgba: Uint8Array): Promise<Uint8Array> {
   const graph = `color=c=black:s=${W}x${H}:r=${FPS}:d=1,format=rgba[b];[0:v]format=rgba,setpts=PTS-STARTPTS[c];` +
-    "[b][c]overlay=0:0:eof_action=pass[o];[o]format=yuv420p[v]";
+    `[b][c]overlay=0:0:eof_action=pass:format=rgb[o];[o]${OUTPUT_YUV_STEP}[v]`;
   const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`,
     "-framerate", String(FPS), "-i", "-", "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
   { input: Buffer.from(rgba), encoding: "buffer" });
@@ -390,6 +395,15 @@ function cases420(): (Case & { adjust?: boolean })[] {
     { name: "420: eq → blur 8", type: "color", fidelity: "exact", look: { color: { contrast: 1.2 }, filters: [fx("blur", { amount: 8 }) as never] } },
     E("420: adjustment layer: blur 8", "blur", { amount: 8 }, { adjust: true }),
     E("420: adjustment layer: detail 1", "detail", { amount: 1 }, { adjust: true }),
+    // Out-of-gamut eq results clip in RGB before the 4:2:0 output, on a plain clip
+    // (no effect stack), on a clip with effects, and on an adjustment layer alike.
+    { name: "420: eq extreme (contrast 2.5, saturation 3), no effects", type: "color", fidelity: "exact", look: { color: { contrast: 2.5, saturation: 3 } } },
+    { name: "420: eq extreme (brightness 0.5, saturation 3), no effects", type: "color", fidelity: "exact", look: { color: { brightness: 0.5, saturation: 3 } } },
+    { name: "420: eq extreme → sepia (with effects)", type: "color", fidelity: "exact", look: { color: { contrast: 2.5, saturation: 3 }, filters: [fx("sepia") as never] } },
+    { name: "420: adjustment layer: eq extreme", type: "color", fidelity: "exact", look: { color: { contrast: 2.5, saturation: 3 } }, adjust: true },
+    // The adjustment filters the full-chroma RGBA composite, as the preview does (a 4:2:0
+    // composite halved the colour detail a saturation boost then worked on).
+    { name: "420: adjustment layer: eq saturation 2", type: "color", fidelity: "exact", look: { color: { saturation: 2 } }, adjust: true },
   ];
 }
 
@@ -432,6 +446,7 @@ async function main() {
   page.on("console", (m) => { if (m.type() === "warning" || m.type() === "error") console.log(`  [page] ${m.text()}`); });
   await page.goto(pathToFileURL(join(dir, "index.html")).href);
   const renderer = await page.evaluate(() => (window as unknown as { parity: { renderer: () => string | null } }).parity.renderer());
+  const chromeMajor = Number(browser.version().split(".")[0]) || undefined;
   console.log(`WebGL2 renderer: ${renderer ?? "UNAVAILABLE"}\nChromium ${browser.version()}, FFmpeg chain from graph.ts, ${W}×${H}, work dir ${dir}\n`);
   if (!renderer) throw new Error("WebGL2 unavailable in this Chromium (the pipeline needs nothing else)");
   // Every run below happens with EXT_color_buffer_float hidden (parity-page.ts):
@@ -521,11 +536,21 @@ async function main() {
     const src420 = join(dir, "src420.mkv");
     await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", String(FPS), "-i", join(dir, "full.png"),
       "-t", "1.2", "-pix_fmt", "yuv420p", "-c:v", "ffv1", src420]);
-    const dec = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-i", src420, "-filter_complex", "[0:v]format=rgba[o]", "-map", "[o]",
-      "-frames:v", "1", "-f", "rawvideo", "-"], { encoding: "buffer" });
-    const decoded = Buffer.from(dec.stdout as unknown as Uint8Array).subarray(0, W * H * 4);
+    // The clip as the export's input scale reads it (untagged SD: BT.601, limited): what the effects get.
+    const color420: SourceColor = { matrix: "bt601", range: "tv" };
+    const readAs = async (flags: string) => {
+      const dec = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-i", src420, "-filter_complex",
+        `[0:v]scale=flags=${flags}${inputColorOpts(color420)},format=rgba[o]`, "-map", "[o]", "-frames:v", "1", "-f", "rawvideo", "-"], { encoding: "buffer" });
+      return Buffer.from(dec.stdout as unknown as Uint8Array).subarray(0, W * H * 4);
+    };
+    // The export reads a clip at its own size with its chroma samples kept (SWS_PLAIN), or
+    // interpolated (SWS_CONVERT) under a key or a zoom (colorspace.ts keepsChromaSamples):
+    // each case's preview gets the same read, so the table measures the effect math alone.
+    const decoded = await readAs(SWS_CONVERT);
+    const decodedPlain = await readAs(SWS_PLAIN);
+    const readFor = (look: LayerLook, adjust: boolean) => (adjust || keepsChromaSamples(look as never) ? decodedPlain : decoded);
     const exportFrame = async (look: LayerLook, adjust: boolean): Promise<Uint8Array> => {
-      const base = { path: src420, trackIndex: 0, showVideo: true, startSec: 0, sourceIn: 0, sourceSpan: 1, isImage: false, outDuration: 1, hasAudio: false, muted: false };
+      const base = { path: src420, trackIndex: 0, showVideo: true, startSec: 0, sourceIn: 0, sourceSpan: 1, isImage: false, outDuration: 1, hasAudio: false, muted: false, colorIn: color420, size: { w: W, h: H } };
       const clips = adjust
         ? [base, { ...base, path: "", adjustment: true, trackIndex: 1, effects: { ...look } }]
         : [{ ...base, effects: { ...look } }];
@@ -538,18 +563,21 @@ async function main() {
     const glOf = (look: LayerLook, input: Uint8Array = decoded) =>
       glRun({ rgba: Buffer.from(input).toString("base64"), srcW: W, srcH: H, cw: W, ch: H, look, frame: 0, layerId: `r420-${serial++}`, luts: { "parity.cube": cube } });
     const floorRef = await exportFrame({}, false);
-    const floorGl = await glOf({});
+    const floorGl = await glOf({}, decodedPlain);
     const floor = compare(floorRef, await through420(floorGl));
-    const rows420: string[] = [`| 420: no effect | — | ${floor.max} | ${floor.mean} | ${floor.p99} | reported (the plain clip's 4:2:0 conversion differs slightly) |`];
+    // A plain clip (no effects): one explicit scale that keeps its chroma samples, RGBA composite.
+    const floorOk = floor.max <= 1 && floor.mean <= 0.05;
+    if (!floorOk) failures++;
+    const rows420: string[] = [`| 420: no effect (plain clip: one explicit conversion, chroma kept) | exact | ${floor.max} | ${floor.mean} | ${floor.p99} | ${floorOk ? "ok" : `FAIL · worst ${floor.maxAt}`} |`];
     for (const c of sel420) {
       const fidelity: GLFidelity = c.fidelity ?? effectGL(c.type)?.fidelity ?? "approx";
       let ref: Uint8Array;
       let gl: Uint8Array;
       try {
         ref = await exportFrame(c.look, !!c.adjust);
-        // An adjustment layer filters the export's composite, which is yuv420p
-        // (every overlay is): the preview gets that composite as its input here.
-        gl = await glOf(c.look, c.adjust ? floorRef : decoded);
+        // An adjustment layer filters the export's composite, which is RGBA (graph.ts
+        // RGB_OVERLAY) — here the opaque clip itself, as the preview's composite holds it.
+        gl = await glOf(c.look, readFor(c.look, !!c.adjust));
       } catch (err) {
         failures++;
         rows420.push(`| ${c.name} | ${fidelity} | — | — | — | ERROR: ${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 120)} |`);
@@ -574,6 +602,152 @@ async function main() {
     console.log("\nThe real export on 4:2:0 footage (full graph → yuv420p → RGB) vs the preview of the decoded frame (through the same 4:2:0 output):");
     console.log("| case | fidelity | max | mean | p99 | result |\n|---|---|---|---|---|---|");
     console.log(rows420.join("\n"));
+  }
+
+  // SOURCE COLOUR: how the preview's decoder reads H.264 (and untagged VP9)
+  // files — Chromium's <video>, through the GL pipeline with the layer's
+  // source-colour correction (colorspace.ts previewColorFix) — vs how the
+  // export's input scale reads them (resolveSourceColor: tagged as tagged,
+  // untagged HD BT.709 / SD BT.601, untagged VP9 BT.601, full range honoured),
+  // and that reading vs the true colours (each file is coded as the export
+  // should read it). Flat patches, centres averaged.
+  // Plus each file's preview proxy as generate_proxy writes it, and the
+  // VP8+alpha proxy of a cutout of it (complete tags: Chromium must read both
+  // as the export reads the original, uncorrected).
+  if (!ONLY || ONLY.has("colour")) {
+    const PATCH: [number, number, number][] = [
+      [255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0],
+      [191, 0, 0], [0, 191, 0], [0, 0, 191], [0, 191, 191], [191, 0, 191], [191, 191, 0], [191, 191, 191], [128, 128, 128],
+      [224, 172, 105], [141, 85, 36], [100, 150, 220], [60, 120, 40], [255, 128, 0], [128, 0, 200], [0, 128, 128], [255, 105, 180],
+      [40, 20, 10], [10, 30, 60], [16, 16, 16], [32, 32, 32], [64, 64, 64], [200, 40, 30], [192, 192, 192], [235, 235, 235],
+    ];
+    const patches = (w: number, h: number): Buffer => {
+      const b = Buffer.alloc(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const c = PATCH[Math.floor((y * 4) / h) * 8 + Math.floor((x * 8) / w)];
+        b.set([...c, 255], (y * w + x) * 4);
+      }
+      return b;
+    };
+    const centres = (rgba: Uint8Array, w: number, h: number): number[][] => {
+      const out: number[][] = [];
+      for (let row = 0; row < 4; row++) for (let col = 0; col < 8; col++) {
+        const cx = Math.floor(((col + 0.5) * w) / 8), cy = Math.floor(((row + 0.5) * h) / 4);
+        const acc = [0, 0, 0];
+        for (let y = cy - 3; y < cy + 3; y++) for (let x = cx - 3; x < cx + 3; x++) for (let c = 0; c < 3; c++) acc[c] += rgba[(y * w + x) * 4 + c];
+        out.push(acc.map((v) => v / 36));
+      }
+      return out;
+    };
+    const diff = (a: number[][], b: number[][]) => {
+      let max = 0, sum = 0, at = "";
+      a.forEach((p, i) => p.forEach((v, c) => {
+        const d = Math.abs(v - b[i][c]);
+        sum += d;
+        if (d > max) { max = d; at = `patch ${i} (${PATCH[i]}) ch${c}: ${p.map((x) => x.toFixed(0))} vs ${b[i].map((x) => x.toFixed(0))}`; }
+      }));
+      return { max: Math.round(max * 10) / 10, mean: Math.round((sum / (a.length * 3)) * 100) / 100, at };
+    };
+    // name, size, how the YUV is coded (matrix / range), the tags written (H.264 unless `vp9`).
+    const tagsOf = (m: string, p: string, t: string) => ["-colorspace", m, "-color_primaries", p, "-color_trc", t];
+    const fixtures: { name: string; w: number; h: number; matrix: "bt709" | "bt601"; range: "tv" | "pc"; tags: string[]; vp9?: boolean }[] = [
+      { name: "untagged HD (720p)", w: 1280, h: 720, matrix: "bt709", range: "tv", tags: [] },
+      { name: "untagged SD", w: 640, h: 360, matrix: "bt601", range: "tv", tags: [] },
+      { name: "untagged HD VP9 (BT.601 at any size)", w: 1280, h: 720, matrix: "bt601", range: "tv", tags: [], vp9: true },
+      { name: "BT.709 tagged SD", w: 640, h: 360, matrix: "bt709", range: "tv", tags: [...tagsOf("bt709", "bt709", "bt709"), "-color_range", "tv"] },
+      { name: "BT.601 tagged HD", w: 1280, h: 720, matrix: "bt601", range: "tv", tags: [...tagsOf("smpte170m", "smpte170m", "smpte170m"), "-color_range", "tv"] },
+      { name: "full range, BT.709 tagged", w: 1280, h: 720, matrix: "bt709", range: "pc", tags: [...tagsOf("bt709", "bt709", "bt709"), "-color_range", "pc"] },
+      { name: "full range, no matrix (JPEG)", w: 1280, h: 720, matrix: "bt601", range: "pc", tags: ["-color_range", "pc"] },
+      { name: "partial tags: matrix BT.601 only, HD", w: 1280, h: 720, matrix: "bt601", range: "tv", tags: ["-colorspace", "smpte170m"] },
+      { name: "partial tags: BT.601 + full range, HD", w: 1280, h: 720, matrix: "bt601", range: "pc", tags: ["-colorspace", "bt470bg", "-color_range", "pc"] },
+    ];
+    const fileUrl = (f: string) => pathToFileURL(join(dir, f)).href;
+    const readExport = async (file: string, c: SourceColor, w: number, h: number) => {
+      const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-i", join(dir, file), "-vf",
+        `select=eq(n\\,15),scale=flags=${SWS_CONVERT}${inputColorOpts(c)},format=rgba`, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { encoding: "buffer" });
+      return new Uint8Array(Buffer.from(stdout as unknown as Uint8Array).subarray(0, w * h * 4));
+    };
+    const readChromium = async (file: string, fix: unknown, w: number, h: number) => {
+      const b64 = await page.evaluate((a) => (window as unknown as { parity: { video: (a: unknown) => Promise<string | null> } }).parity.video(a),
+        { url: fileUrl(file), t: 0.5 + 0.001, fix, layerId: `src-${serial++}` });
+      if (!b64) throw new Error(`GL video run failed for ${file}`);
+      return new Uint8Array(Buffer.from(b64, "base64")).subarray(0, w * h * 4);
+    };
+    const rowsC: string[] = [];
+    for (const [i, f] of fixtures.entries()) {
+      const png = join(dir, `patches${i}.png`);
+      await writePng(png, patches(f.w, f.h), f.w, f.h);
+      const file = `src${i}.${f.vp9 ? "webm" : "mp4"}`;
+      const pixFmt = f.range === "pc" ? "yuvj420p" : "yuv420p";
+      await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", String(FPS), "-i", png, "-t", "1",
+        // setparams: the file carries exactly f.tags on any FFmpeg (7+ encoders tag from the frames).
+        "-vf", `scale=out_color_matrix=${f.matrix}:out_range=${f.range}:flags=${SWS_CONVERT},format=${pixFmt},` +
+          `setparams=${(["-colorspace:colorspace", "-color_primaries:color_primaries", "-color_trc:color_trc", "-color_range:range"])
+            .map((o) => { const [opt, key] = o.split(":"); return `${key}=${f.tags.includes(opt) ? f.tags[f.tags.indexOf(opt) + 1] : "unknown"}`; }).join(":")}`,
+        ...(f.vp9 ? ["-c:v", "libvpx-vp9", "-lossless", "1", "-deadline", "realtime", "-cpu-used", "8"] : ["-c:v", "libx264", "-crf", "2"]),
+        "-pix_fmt", pixFmt, ...f.tags, join(dir, file)]);
+      const asset = await probeAsset(join(dir, file));
+      const target = resolveSourceColor(asset.color, asset.height, asset.videoCodec);
+      const fix = previewColorFix(asset, false, chromeMajor);
+      try {
+        const ref = centres(await readExport(file, target, f.w, f.h), f.w, f.h);
+        const got = centres(await readChromium(file, fix, f.w, f.h), f.w, f.h);
+        const d = diff(ref, got);
+        // The export reads the file as it was coded (the true colours, within the coding's rounding).
+        const truth = diff(PATCH, ref);
+        // Chromium reads every untagged or completely tagged file as the export does (as
+        // decoded, exact). A file whose incomplete tags it ignores gets the GL correction —
+        // only an interim one: Chromium's own 8-bit decode has already clipped what fell
+        // outside its wrong reading (saturated colours; full range's ends), so the import
+        // makes such a file a proxy with complete tags (the proxy rows: exact).
+        let ok = d.max <= 3;
+        let raw = "";
+        if (fix) {
+          const r = diff(ref, centres(await readChromium(file, null, f.w, f.h), f.w, f.h));
+          raw = ` (uncorrected: max ${r.max} mean ${r.mean})`;
+          ok = d.mean < r.mean;
+        }
+        const tok = truth.max <= 3;
+        if (!ok || !tok) failures++;
+        rowsC.push(`| ${f.name} | export ${target.matrix}/${target.range} (true colours: max ${truth.max}) | ${fix ? "GL-corrected (interim)" : "as decoded"} | ${d.max} | ${d.mean}${raw} | ` +
+          `${!ok ? `FAIL · ${d.at}` : !tok ? `FAIL · export reading: ${truth.at}` : "ok"} |`);
+        // The preview proxy, as generate_proxy writes it.
+        const proxy = `proxy${i}.mp4`;
+        const pw2 = 640;
+        const ph2 = Math.round((f.h * pw2) / f.w / 2) * 2;
+        await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-i", join(dir, file), "-vf", `scale=${pw2}:-2${keepCodingOpts(target)},${tagFramesStep({ matrix: target.matrix, range: "tv" })}`,
+          "-c:v", "libx264", "-crf", "4", "-pix_fmt", "yuv420p", ...colorTagArgs({ matrix: target.matrix, range: "tv" }), join(dir, proxy)]);
+        const pc = (await probeAsset(join(dir, proxy))).color;
+        const pfix = previewColorFix({ ...asset, proxyColor: pc }, true);
+        const pgot = centres(await readChromium(proxy, pfix, pw2, ph2), pw2, ph2);
+        const pd = diff(ref, pgot);
+        const pok = !pfix && pd.max <= 4;
+        if (!pok) failures++;
+        rowsC.push(`| ${f.name}: its 640-wide proxy | ${pc?.space ?? "?"}/${pc?.range ?? "?"} tags | ${pfix ? "corrected" : "as decoded"} | ${pd.max} | ${pd.mean} | ${pok ? "ok" : `FAIL · ${pd.at}`} |`);
+        // The VP8+alpha proxy of a cutout of this file, as remove_background and generate_proxy write
+        // it (cutout.ts alphaProxyArgs, here with an opaque matte): read as the export reads the
+        // original too, uncorrected (untagged, the 640×360 copy fell under the SD guess).
+        const matte = join(dir, `matte${i}.mkv`);
+        await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `nullsrc=s=${f.w}x${f.h}:r=${FPS}:d=1,format=gray,geq=lum=255`,
+          "-c:v", "ffv1", "-pix_fmt", "gray", matte]);
+        const cproxy = `cutproxy${i}.webm`;
+        const merge = { colorPath: join(dir, file), colorStart: 0, fps: FPS, width: f.w, height: f.h, range: target.range };
+        await execa(FFMPEG_BIN, alphaProxyArgs({ path: matte, width: f.w, height: f.h, duration: 1, hasAudio: false, color: target, merge }, join(dir, cproxy), pw2));
+        const cpc = (await probeAsset(join(dir, cproxy))).color;
+        const cutAsset = { width: f.w, height: f.h, videoCodec: "ffv1", cutout: { colorTags: asset.color, colorCodec: asset.videoCodec }, proxyColor: cpc };
+        const cfix = previewColorFix(cutAsset, true);
+        const cd = diff(ref, centres(await readChromium(cproxy, cfix, pw2, ph2), pw2, ph2));
+        const cok = !cfix && cd.max <= 4;
+        if (!cok) failures++;
+        rowsC.push(`| ${f.name}: its cutout's VP8+alpha proxy | ${cpc?.space ?? "?"}/${cpc?.range ?? "?"} tags | ${cfix ? "corrected" : "as decoded"} | ${cd.max} | ${cd.mean} | ${cok ? "ok" : `FAIL · ${cd.at}`} |`);
+      } catch (err) {
+        failures++;
+        rowsC.push(`| ${f.name} | — | — | — | — | ERROR: ${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 120)} |`);
+      }
+    }
+    console.log("\nSource colour: Chromium's decode in the preview (GL, with its correction) vs the export's reading, patch centres:");
+    console.log("| file | export reads | preview | max | mean | result |\n|---|---|---|---|---|---|");
+    console.log(rowsC.join("\n"));
   }
 
   // Context loss: the pipeline must refuse to run while lost (the preview then
@@ -841,7 +1015,7 @@ async function main() {
   // n - 1), and playback of a clip with sound settles after a seek or two instead of seeking
   // again while the element starts (seek thrash: a frozen picture).
   if (!ONLY || ONLY.has("mediapool")) {
-    await execa("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=1280x720:r=30:d=6",
+    await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=1280x720:r=30:d=6",
       "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-vf", "geq=lum='16+mod(N,36)*6':cb=128:cr=128",
       "-c:v", "libx264", "-preset", "veryfast", "-g", "150", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-movflags", "+faststart",
       "-y", join(dir, "counter.mp4")]);

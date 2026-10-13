@@ -17,6 +17,7 @@ import { alphaSafe, effectFilterSteps } from "../effects/registry.js";
 import { blendModeDef, type BlendMode } from "../effects/compositing.js";
 import { AUDIO_FX_RATE, audioEffectFilterSteps } from "../effects/audio.js";
 import { rampAudioChunks, rampSetptsExpr } from "../speed.js";
+import { clipReadSteps, inputColorOpts, keepsChromaSamples, OUTPUT_COLOR_ARGS, OUTPUT_YUV_STEP, SWS_OUTPUT, SWS_RESIZE, type SourceColor } from "./colorspace.js";
 import { cutoutColorInputArgs, cutoutMergeFilter } from "./cutout.js";
 
 export interface RenderProfile {
@@ -292,6 +293,14 @@ function safeCurve(pts: string): string {
   return clean;
 }
 
+/**
+ * eq's working format, pinned: 4:4:4 YUV (what FFmpeg 4.4 negotiates from RGBA
+ * anyway), so an out-of-gamut result is clipped back to RGB at full chroma, before
+ * the 4:2:0 output — as the preview computes it (gl/color.ts GLSL_EQ) — on any
+ * FFmpeg version's negotiation.
+ */
+const EQ_FORMAT = "format=yuv444p";
+
 /** FFmpeg `eq` for the basic colour grade. Wrap with alphaSafe(): eq drops alpha (probed on FFmpeg 4.4; colorbalance/hue/curves/lut3d/colortemperature keep it). */
 function eqStep(c: { brightness?: number; contrast?: number; saturation?: number; gamma?: number }): string {
   return `eq=brightness=${c.brightness ?? 0}:contrast=${c.contrast ?? 1}:saturation=${c.saturation ?? 1}:gamma=${c.gamma ?? 1}`;
@@ -354,14 +363,23 @@ function effectSteps(filters: VisualEffect[], W: number, H: number, tag = "fx"):
 
 /**
  * Follows (and, on an adjustment layer, precedes) an effect stack. FFmpeg
- * picks a filter's pixel format from the filters AFTER it, and the composite's
- * overlays run in yuv420p: without the pin, a filter that takes any format
- * (gblur, cas, lenscorrection, hue, negate) ran on 4:2:0 chroma — a blur
- * spread colour twice as wide as its sigma — or not, depending on the next
- * filter. Pinned, every effect sees full-resolution colour, as the live
- * preview (apps/desktop/src/gl/) computes it.
+ * picks a filter's pixel format from the filters AFTER it: without the pin, a
+ * filter that takes any format (gblur, cas, lenscorrection, hue, negate) could
+ * run on 4:2:0 chroma — a blur spread colour twice as wide as its sigma — or
+ * not, depending on the next filter. Pinned, every effect sees full-resolution
+ * colour, as the live preview (apps/desktop/src/gl/) computes it.
  */
 const EFFECTS_RGBA_PIN = "format=rgba";
+
+/**
+ * Every overlay of a render composites in packed RGBA (`format=rgb`). Clip
+ * streams are RGBA from their input scale on, so the composite converts
+ * nothing — an adjustment layer filters full-chroma RGB as the preview does,
+ * and the picture meets 4:2:0 once, in the final OUTPUT_YUV_STEP. (FFmpeg's
+ * default yuv420 overlay converted every layer to yuva420p in a bilinear
+ * auto-scaler, the base and the composite too.)
+ */
+const RGB_OVERLAY = "format=rgb";
 
 /**
  * Multiply a still grayscale mask (input `maskInput`, a W×H PNG from
@@ -419,7 +437,7 @@ function emitBlendComposite(
   filterParts.push(`[${tag}bg][${tag}lg]${op}:shortest=1:${enable}[${tag}x]`);
   filterParts.push(`[${tag}a]alphaextract${coverage}[${tag}al]`);
   filterParts.push(`[${tag}x][${tag}al]alphamerge[${tag}l]`);
-  filterParts.push(`[${tag}m][${tag}l]overlay=0:0:eof_action=pass:${enable}[${out}]`);
+  filterParts.push(`[${tag}m][${tag}l]overlay=0:0:eof_action=pass:${RGB_OVERLAY}:${enable}[${out}]`);
 }
 
 /** A run's non-normal blend mode (a run is one stream, so its FIRST clip's mode). */
@@ -501,7 +519,7 @@ function emitBlendDecorations(
       filterParts.push(`${prep.join(",")}[${gl}]`);
       const out = `${tag}o${k}_${j}`;
       filterParts.push(
-        `${cur}[${gl}]overlay=0:0:eof_action=pass:enable='between(t,${w.start.toFixed(4)},${w.end.toFixed(4)})'[${out}]`,
+        `${cur}[${gl}]overlay=0:0:eof_action=pass:${RGB_OVERLAY}:enable='between(t,${w.start.toFixed(4)},${w.end.toFixed(4)})'[${out}]`,
       );
       cur = `[${out}]`;
     });
@@ -537,21 +555,22 @@ function emitClipVideoParts(
   const outDur = clip.outDuration;
   const steps: string[] = [];
 
-  if (fx.crop) {
-    steps.push(`crop=${Math.round(fx.crop.width)}:${Math.round(fx.crop.height)}:${Math.round(fx.crop.x)}:${Math.round(fx.crop.y)}`);
-  }
-  steps.push("format=rgba");
-  // Lanczos is the highest-quality scaler for both up- and down-scaling real
-  // footage to the canvas (sharper edges than the default bicubic, no real cost);
-  // accurate_rnd + full_chroma_int keep color crisp through the resize.
-  steps.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd+full_chroma_int`);
+  // The source crop, then ONE explicit scale reads the source's YUV (its matrix
+  // and range as players read them) and fits it to the canvas, straight into
+  // RGBA with accurate rounding — for every clip with or without effects
+  // (colorspace.ts clipReadSteps; before, FFmpeg's fast auto-scaler did it).
+  // Lanczos when it resizes; at 1:1 each 4:2:0 chroma sample is repeated for
+  // the output step to average back, unless a key or a zoom needs it
+  // interpolated (keepsChromaSamples).
+  steps.push(...clipReadSteps(fx.crop, clip.size, clip.colorIn, keepsChromaSamples(fx), W, H));
   steps.push(`pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`);
   steps.push("setsar=1");
 
   if (fx.color) {
     const c = fx.color;
     // eq has no alpha-capable pixel format (it would turn transparent letterbox bars opaque).
-    steps.push(...alphaSafe([eqStep(c)], `ceq${inputIdx}`));
+    // EQ_FORMAT: it works on full-chroma YUV and leaves clipped RGB, whatever FFmpeg negotiates.
+    steps.push(...alphaSafe([EQ_FORMAT, eqStep(c)], `ceq${inputIdx}`));
   }
 
   // Richer secondary grade (wheels / white balance / hue / curves) after the
@@ -625,7 +644,7 @@ function emitClipVideoParts(
     filterParts.push(`color=c=black@0.0:s=${W}x${H}:r=${fps}:d=${outDur.toFixed(6)},format=rgba[${base}]`);
     const tail = ["format=rgba", ...textSteps].join(",");
     filterParts.push(
-      `[${base}][${fit}]overlay=x='${plan.xExpr}':y='${plan.yExpr}':shortest=1:format=auto:eof_action=pass,${tail}[${outLabel}]`,
+      `[${base}][${fit}]overlay=x='${plan.xExpr}':y='${plan.yExpr}':shortest=1:${RGB_OVERLAY}:eof_action=pass,${tail}[${outLabel}]`,
     );
     return;
   }
@@ -990,6 +1009,8 @@ export function exportCodecArgs(
     if (settings?.videoBitrate) args.push("-b:v", settings.videoBitrate);
     else args.push("-crf", String(crf), ...(vcodec === "vp9" ? ["-b:v", "0"] : []));
   }
+  // BT.709 limited range, tagged (colorspace.ts): players read every export alike, whatever its size.
+  args.push(...OUTPUT_COLOR_ARGS);
   args.push("-pix_fmt", "yuv420p", "-c:a", alib, "-b:a", settings?.audioBitrate ?? profile.audioBitrate);
   // faststart only helps the mp4/mov atom layout; webm doesn't use it.
   if (!isWebm) args.push("-movflags", "+faststart");
@@ -1184,7 +1205,7 @@ export function buildRenderCommand(
           const isLast = k === graphicsForClip.length - 1;
           const out = isLast ? `v${i}` : `vov${i}_${k}`;
           const enable = `enable='between(t,${start.toFixed(3)},${end >= 1e9 ? "1e9" : end.toFixed(3)})'`;
-          filterParts.push(`${cur}[${gl}]overlay=0:0:eof_action=pass:${enable}[${out}]`);
+          filterParts.push(`${cur}[${gl}]overlay=0:0:eof_action=pass:${RGB_OVERLAY}:${enable}[${out}]`);
           cur = `[${out}]`;
         });
       }
@@ -1295,14 +1316,14 @@ export function buildRenderCommand(
       const steps: string[] = [];
       if (fx.color) {
         const cc = fx.color;
-        steps.push(...alphaSafe([eqStep(cc)], `aeq${adjustOps.length}`));
+        steps.push(...alphaSafe([EQ_FORMAT, eqStep(cc)], `aeq${adjustOps.length}`));
       }
       if (fx.grade) steps.push(...colorGradeSteps(fx.grade));
       if (fx.lut) steps.push(`lut3d=${fx.lut}`);
       const fxSteps = fx.filters?.length ? effectSteps(fx.filters, W, H, `a${adjustOps.length}`) : [];
       if (fxSteps.length) {
-        // The stack below is yuv420p: start from RGBA too, as a clip's chain does (EFFECTS_RGBA_PIN).
-        // An alphaSafe colour step already opens with it.
+        // The stack below is RGBA already (RGB_OVERLAY); the pin keeps the effects on it, as a
+        // clip's chain does (EFFECTS_RGBA_PIN). An alphaSafe colour step already opens with it.
         if (!steps[0]?.startsWith(`${EFFECTS_RGBA_PIN},`)) steps.unshift(EFFECTS_RGBA_PIN);
         steps.push(...fxSteps, EFFECTS_RGBA_PIN);
       }
@@ -1348,7 +1369,7 @@ export function buildRenderCommand(
         if (seg.blend) {
           emitBlendComposite(filterParts, vcur, s, seg.blend, enable, `bl${i}`, out);
         } else {
-          filterParts.push(`${vcur}${s}overlay=0:0:eof_action=pass:${enable}[${out}]`);
+          filterParts.push(`${vcur}${s}overlay=0:0:eof_action=pass:${RGB_OVERLAY}:${enable}[${out}]`);
         }
         vcur = `[${out}]`;
         if (seg.decor) vcur = emitBlendDecorations(filterParts, vcur, seg.decor, W, H, fps, total, `dc${i}`);
@@ -1367,10 +1388,10 @@ export function buildRenderCommand(
       // mask, so the overlay below lets the untouched stack show elsewhere.
       const masked = maskInput !== undefined ? [maskMultiplyStep(maskInput, `amk${k}`)] : [];
       filterParts.push(`[adjs${k}]${[...steps, ...masked].join(",")}[adjf${k}]`);
-      filterParts.push(`[adjb${k}][adjf${k}]overlay=0:0:eof_action=pass:enable='between(t,${S},${E})'[adjo${k}]`);
+      filterParts.push(`[adjb${k}][adjf${k}]overlay=0:0:eof_action=pass:${RGB_OVERLAY}:enable='between(t,${S},${E})'[adjo${k}]`);
       vcur = `[adjo${k}]`;
     });
-    filterParts.push(`${vcur}trim=0:${total.toFixed(6)},format=yuv420p[outv]`);
+    filterParts.push(`${vcur}trim=0:${total.toFixed(6)},${OUTPUT_YUV_STEP}[outv]`);
   }
 
   // ---- audio: assemble each run, delay to its start, mix --------------------
@@ -1515,13 +1536,28 @@ export function buildRenderCommand(
   return { args, totalDuration: total };
 }
 
-/** Build an ffmpeg command that extracts a single thumbnail frame from a source. */
+/**
+ * Build an ffmpeg command that extracts a single thumbnail frame from a source.
+ * `color`: read its YUV as the export does and write the JPEG's own BT.601
+ * full range (what every image viewer reads), so thumbnails keep the clip's colours.
+ * `overBlack`: the picture has alpha (a merged cutout) — its transparent parts come out black.
+ */
 export function buildThumbnailCommand(
   sourcePath: string,
   atSeconds: number,
   outputPath: string,
   width = 320,
+  color?: SourceColor,
+  overBlack = false,
 ): string[] {
+  // Alpha applied in RGB: premultiply takes YUV only as yuva444p, and FFmpeg 4.4's converter
+  // to it squeezed a full-range picture into limited range (20 levels washed out).
+  const black = overBlack ? "gbrap,premultiply=inplace=1,format=" : "";
+  // Through RGB: the source read as the export reads it, then JPEG's own BT.601 full range
+  // (swscale 4.4 skips the limited → full expansion on a direct yuv → yuvj step with explicit ranges).
+  const conv = color
+    ? `:flags=${SWS_RESIZE}${inputColorOpts(color)},format=${black}rgb24,scale=out_color_matrix=bt601:out_range=pc:flags=${SWS_OUTPUT},format=yuvj420p`
+    : overBlack ? ",format=gbrap,premultiply=inplace=1" : "";
   return [
     "-hide_banner",
     "-ss",
@@ -1531,7 +1567,7 @@ export function buildThumbnailCommand(
     "-frames:v",
     "1",
     "-vf",
-    `scale=${width}:-2:force_original_aspect_ratio=decrease`,
+    `scale=${width}:-2:force_original_aspect_ratio=decrease${conv}`,
     "-q:v",
     "3",
     "-y",

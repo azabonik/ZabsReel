@@ -11,6 +11,9 @@ import { StorageJanitor } from "./storage.js";
 import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
+  colorTagArgs, keepCodingOpts, previewColorFix, PROXY_LONG_EDGE, resolveSourceColor, tagFramesStep, type ProbedColor, type SourceColor,
+} from "./ffmpeg/colorspace.js";
+import {
   detectSilence,
   detectScenes,
   firstFrameAt,
@@ -43,8 +46,8 @@ import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { bakeReversed, bakeSmoothSlow, grabFrame, probeFrameClock, probeVideoFormat } from "./ffmpeg/timefx.js";
-import { cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
-import { renderGraphic } from "./motion/render.js";
+import { alphaProxyArgs, cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
+import { graphicPreviewProxy, renderGraphic, tagGraphicColor } from "./motion/render.js";
 import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
 import { BLEEP_DEFAULT_SOUND, BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
@@ -128,8 +131,6 @@ function clamp(n: number, lo: number, hi: number): number {
 
 /** Sources whose long edge exceeds this auto-get a preview proxy (4K and up). */
 const PROXY_TRIGGER_LONG_EDGE = 1920;
-/** Proxy long-edge resolution (720p-class) — small enough to scrub smoothly. */
-const PROXY_LONG_EDGE = 1280;
 
 /**
  * Sensible default text styling for when the AI/user doesn't specify it: a crisp,
@@ -253,6 +254,12 @@ async function needsXfadeEofPad(): Promise<boolean> {
 }
 /** How many source frames around a constant-speed split cutPoint searches for halves that add up. */
 const CUT_SEARCH_FRAMES = 16;
+
+/** A file's probed colour description and video codec (EditorEngine.probeColor). */
+interface ColorProbe {
+  color: ProbedColor;
+  videoCodec?: string;
+}
 
 /** One cut of a ripple delete, on one or more tracks (EditorEngine.planRippleCuts). */
 interface RippleCut {
@@ -501,6 +508,8 @@ export class EditorEngine extends EventEmitter {
    * and extracted again on load. Live assets carry a `transcriptIndexed` marker.
    */
   private assetCaches = new Map<string, { transcript?: AssetTranscript; visualSig?: VisualSignature }>();
+  /** Colour descriptions (and codecs) probed again for assets imported before probeAsset recorded them (by path; outside the undo history). */
+  private colorProbes = new Map<string, Promise<ColorProbe | undefined>>();
   /** Housekeeping for baked/ + proxies/: trash unused files, restore them on load (see storage.ts). */
   readonly storage: StorageJanitor;
   /** Files the last load()/importOtio() moved back out of the storage trash. */
@@ -628,11 +637,12 @@ export class EditorEngine extends EventEmitter {
   }
 
   /** How to merge a matte-backed cutout's colour back in (undefined for every other asset). */
-  private cutoutMerge(asset: MediaAsset): CutoutMerge | undefined {
+  private async cutoutMerge(asset: MediaAsset): Promise<CutoutMerge | undefined> {
     if (!asset.cutout) return undefined;
     // Only what the merge reads: the asset id must not reach render-cache keys.
     const { colorPath, colorStart } = asset.cutout;
-    return { colorPath, colorStart, fps: asset.fps || this.project.fps, width: asset.width, height: asset.height };
+    const { range } = await this.sourceColor(asset);
+    return { colorPath, colorStart, fps: asset.fps || this.project.fps, width: asset.width, height: asset.height, range };
   }
 
   /**
@@ -882,16 +892,24 @@ export class EditorEngine extends EventEmitter {
     // Large/4K sources: build a low-res preview proxy in the BACKGROUND so import
     // returns immediately and scrubbing stays smooth. Export still uses the
     // original. Fire-and-forget, but failures are RECORDED on the asset
-    // (proxyError) so the state shows why scrubbing stayed slow.
-    if (asset.hasVideo && Math.max(asset.width, asset.height) > PROXY_TRIGGER_LONG_EDGE) {
-      void this.generateProxy(asset.id).catch((err) => {
-        this.mutate(() => {
-          const a = this.project.assets.find((x) => x.id === asset.id);
-          if (a) a.proxyError = err instanceof Error ? err.message : String(err);
-        });
-      });
+    // (proxyError) so the state shows why scrubbing stayed slow. Also a file
+    // whose incomplete colour tags Chromium ignores (colorspace.ts): its proxy
+    // carries complete ones, so the preview shows the export's colours exactly
+    // (until then a WebGL2 correction approximates them).
+    if (asset.hasVideo && (Math.max(asset.width, asset.height) > PROXY_TRIGGER_LONG_EDGE || (!asset.isImage && previewColorFix(asset, false)))) {
+      this.proxyInBackground(asset.id);
     }
     return asset;
+  }
+
+  /** Start generateProxy without waiting for it; a failure is recorded on the asset (proxyError). */
+  private proxyInBackground(assetId: string): void {
+    void this.generateProxy(assetId).catch((err) => {
+      this.mutate(() => {
+        const a = this.project.assets.find((x) => x.id === assetId);
+        if (a) a.proxyError = err instanceof Error ? err.message : String(err);
+      });
+    });
   }
 
   /**
@@ -913,17 +931,23 @@ export class EditorEngine extends EventEmitter {
         // exists instead of encoding a second copy here and leaving the first behind.
         const own = asset.proxyPath?.endsWith(".webm") && (await fileExists(asset.proxyPath)) ? asset.proxyPath : undefined;
         const out = own ?? join(dir, `${safeFileStem(assetId)}.webm`);
+        let proxyColor: ProbedColor | undefined;
         if (!(await fileExists(out))) {
           try {
-            await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
+            proxyColor = await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
           } catch (err) {
             await rm(out, { force: true });
             throw err;
           }
+        } else {
+          // A reused preview says how the preview's decoder reads it (one baked before it was tagged too).
+          proxyColor = await probeAsset(out).then((p) => p.color, () => undefined);
         }
         return this.mutate(() => {
           const a = this.getAsset(assetId);
           a.proxyPath = out;
+          if (proxyColor) a.proxyColor = proxyColor;
+          else delete a.proxyColor;
           delete a.proxyError;
           return a;
         });
@@ -931,18 +955,26 @@ export class EditorEngine extends EventEmitter {
       const out = join(dir, `${safeFileStem(assetId)}.mp4`);
       if (!(await fileExists(out))) {
         // Scale the long edge down to `longEdge`, keep aspect, even dims; fast preset.
+        // The YUV keeps the matrix the export reads the source with (limited range) and
+        // says so in complete tags, so the preview's decoder reads the proxy as the
+        // export reads the original — a small copy of untagged HD isn't guessed as SD.
+        const c = await this.sourceColor(asset);
+        const conv = `${keepCodingOpts(c)},${tagFramesStep({ matrix: c.matrix, range: "tv" })}`;
         const scale = asset.width >= asset.height
-          ? `scale=${longEdge}:-2`
-          : `scale=-2:${longEdge}`;
-        const args = ["-hide_banner", "-i", asset.path, "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p"];
+          ? `scale=${longEdge}:-2${conv}`
+          : `scale=-2:${longEdge}${conv}`;
+        const args = ["-hide_banner", "-i", asset.path, "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", ...colorTagArgs({ matrix: c.matrix, range: "tv" })];
         if (asset.hasAudio) args.push("-c:a", "aac", "-b:a", "128k");
         else args.push("-an");
         args.push("-movflags", "+faststart", "-y", out);
         await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
       }
+      const proxyColor = await probeAsset(out).then((p) => p.color, () => undefined);
       return this.mutate(() => {
         const a = this.getAsset(assetId);
         a.proxyPath = out;
+        if (proxyColor) a.proxyColor = proxyColor;
+        else delete a.proxyColor;
         delete a.proxyError;
         return a;
       });
@@ -952,13 +984,10 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Encode a browser-playable VP8+alpha .webm preview of an asset with
-   * transparency — WITH audio, since preview sound comes from the same element.
-   * A matte-backed cutout is merged with its colour on the way. Chromium can't
-   * decode FFV1, so cutouts and other alpha video always preview from this.
-   * Constrained quality (CRF 12, at most 2 Mb/s for the colour) measured ~40%
-   * smaller than the fixed 3 Mb/s used before at about the same speed (colour
-   * ~46 dB, alpha ~51 dB PSNR). VP9 was ~60% smaller but encoded ~5x slower,
-   * which would add half the matting time again to every remove_background.
+   * transparency (ffmpeg/cutout.ts alphaProxyArgs). A matte-backed cutout is
+   * merged with its colour on the way. Chromium can't decode FFV1, so cutouts
+   * and other alpha video always preview from this. Returns the proxy's
+   * probed colour description (MediaAsset.proxyColor).
    */
   private async encodeAlphaProxy(
     asset: MediaAsset,
@@ -966,23 +995,11 @@ export class EditorEngine extends EventEmitter {
     longEdge: number,
     signal?: AbortSignal,
     onProgress?: (fraction: number) => void,
-  ): Promise<void> {
-    const merge = this.cutoutMerge(asset);
-    const args = ["-hide_banner", "-y", "-i", asset.path];
-    const scale =
-      Math.max(asset.width, asset.height) > longEdge ? (asset.width >= asset.height ? `scale=${longEdge}:-2` : `scale=-2:${longEdge}`) : "";
-    if (merge) {
-      args.push(...cutoutColorInputArgs(merge, 0, asset.duration));
-      args.push("-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", merge)};[m]${scale ? `${scale},` : ""}format=yuva420p[v]`, "-map", "[v]");
-      if (asset.hasAudio) args.push("-map", "0:a:0");
-    } else if (scale) {
-      args.push("-vf", scale);
-    }
-    args.push("-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", "-crf", "12", "-b:v", "2M", "-deadline", "realtime", "-cpu-used", "5");
-    if (asset.hasAudio) args.push("-c:a", "libopus", "-b:a", "128k", "-ar", "48000");
-    else args.push("-an");
-    args.push("-progress", "pipe:1", "-nostats", outPath);
+  ): Promise<ProbedColor | undefined> {
+    const src = { path: asset.path, width: asset.width, height: asset.height, duration: asset.duration, hasAudio: asset.hasAudio };
+    const args = alphaProxyArgs({ ...src, color: await this.sourceColor(asset), merge: await this.cutoutMerge(asset) }, outPath, longEdge);
     await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
+    return probeAsset(outPath).then((p) => p.color, () => undefined);
   }
 
   removeAsset(assetId: string): void {
@@ -2333,7 +2350,7 @@ export class EditorEngine extends EventEmitter {
       ? [0]
       : [clip.sourceInFrame, (clip.sourceInFrame + clip.sourceOutFrame) / 2].map((f) => Math.min(last, framesToSeconds(f, fps)));
     const pic = this.pictureSource(asset);
-    return detectKeyColor(pic.path, times.map((t) => t + pic.offset), clip.effects?.crop);
+    return detectKeyColor(pic.path, times.map((t) => t + pic.offset), clip.effects?.crop, asset.hasVideo ? await this.sourceColor(asset) : undefined);
   }
 
   /**
@@ -3667,6 +3684,71 @@ export class EditorEngine extends EventEmitter {
   }
 
   /**
+   * How the export reads an asset's YUV (ffmpeg/colorspace.ts: as players do).
+   * An asset probed before its colour description was recorded is probed
+   * again, once per path; a file that can't be probed falls back to the
+   * untagged rule.
+   */
+  private async sourceColor(asset: MediaAsset): Promise<SourceColor> {
+    const c = asset.cutout;
+    if (!c) return resolveSourceColor(asset.color ?? (await this.probeColor(asset.path))?.color, asset.height, asset.videoCodec);
+    // A matte-backed cutout's picture is its colour source's YUV (its own file is a gray matte).
+    const src = c.colorTags ? { color: c.colorTags, videoCodec: c.colorCodec } : await this.probeColor(c.colorPath);
+    return resolveSourceColor(src?.color, src?.color?.codedHeight ?? asset.height, src?.videoCodec);
+  }
+
+  /** A file's colour description and video codec, probed once per path (undefined when it can't be probed). */
+  private probeColor(path: string): Promise<ColorProbe | undefined> {
+    let p = this.colorProbes.get(path);
+    if (!p) {
+      p = probeAsset(path).then((a) => (a.color ? { color: a.color, videoCodec: a.videoCodec } : undefined), () => undefined);
+      this.colorProbes.set(path, p);
+    }
+    return p;
+  }
+
+  /** What a cutout records of its colour source (MediaAsset.cutout colorTags / colorCodec). */
+  private async cutoutColorRecord(source: MediaAsset): Promise<{ colorTags?: ProbedColor; colorCodec?: string }> {
+    const color = source.color ?? (await this.probeColor(source.path))?.color;
+    return { ...(color ? { colorTags: color } : {}), ...(source.videoCodec ? { colorCodec: source.videoCodec } : {}) };
+  }
+
+  /**
+   * The assets of a project saved before probeAsset recorded colour
+   * descriptions: probe each file again in the background and write its
+   * colour onto the asset — in the undo history's copies too — so the
+   * preview's correction (previewColorFix) reads it as the export does. Not
+   * an undo step, and a saved project stays saved (as pruneLibraryBakes). A
+   * file whose incomplete tags Chromium ignores then gets its completely
+   * tagged proxy, as on import.
+   */
+  private async probeUnrecordedColors(): Promise<void> {
+    // A matte-backed cutout records its COLOUR SOURCE's description (its own file is the gray matte).
+    const unrecorded = (a: MediaAsset) => (a.cutout ? !a.cutout.colorTags : !a.color);
+    const todo = this.project.assets.filter((a) => a.hasVideo && !a.isImage && !a.missing && unrecorded(a));
+    // One at a time: a big old project would otherwise start an ffprobe per asset at once.
+    for (const { id, path, cutout } of todo) {
+      const probed = await this.probeColor(cutout ? cutout.colorPath : path);
+      if (!probed) continue;
+      // By id and path: the project may have been edited, undone or replaced meanwhile.
+      let now: MediaAsset | undefined;
+      for (const project of [this.project, ...this.undoStack, ...this.redoStack]) {
+        const i = project.assets.findIndex((a) => a.id === id && a.path === path && unrecorded(a) && a.cutout?.colorPath === cutout?.colorPath);
+        if (i < 0) continue;
+        // A new object: the preview caches its correction per asset object.
+        const a = project.assets[i];
+        project.assets[i] = a.cutout
+          ? { ...a, cutout: { ...a.cutout, colorTags: probed.color, ...(probed.videoCodec ? { colorCodec: probed.videoCodec } : {}) } }
+          : { ...a, color: probed.color };
+        if (project === this.project) now = project.assets[i];
+      }
+      if (!now) continue;
+      this.emit("change", this.project);
+      if (!now.proxyPath && previewColorFix(now, false)) this.proxyInBackground(id);
+    }
+  }
+
+  /**
    * Resolve the timeline into render-ready clips (in seconds, absolute on the
    * timeline) AND stage any files the filtergraph needs by bare name (LUTs,
    * overlay text files, fonts). Renders run with cwd = that directory.
@@ -3898,6 +3980,7 @@ export class EditorEngine extends EventEmitter {
         sourceSpan: f2s(clip.sourceOutFrame - clip.sourceInFrame),
         outDuration: framesToSeconds(clipDurationFrames(clip, this.project.fps), fps),
         isImage: asset.isImage,
+        ...(asset.hasVideo ? { colorIn: await this.sourceColor(asset), size: { w: asset.width, h: asset.height } } : {}),
         hasAudio: asset.hasAudio,
         muted: !!track.muted,
         trackVolume: track.volume,
@@ -3908,7 +3991,7 @@ export class EditorEngine extends EventEmitter {
         overlays,
         graphics,
         audioOffset: clip.audioOffsetFrames ? f2s(clip.audioOffsetFrames) : undefined,
-        ...(asset.cutout ? { cutout: this.cutoutMerge(asset) } : {}),
+        ...(asset.cutout ? { cutout: await this.cutoutMerge(asset) } : {}),
       });
 
       // Bleep SFX: expanded from the clip's own bleeps every render, so they sit
@@ -4667,17 +4750,21 @@ export class EditorEngine extends EventEmitter {
     await mkdir(dir, { recursive: true });
     const outPath = join(dir, `${safeFileStem(assetId)}.jpg`);
     const time = Math.min(Math.max(0, atSeconds), Math.max(0, asset.duration - 0.1));
-    const merge = this.cutoutMerge(asset);
+    const color = asset.hasVideo ? await this.sourceColor(asset) : undefined;
+    const merge = await this.cutoutMerge(asset);
     if (merge) {
-      // A cutout's thumbnail: the person over black, as an alpha cutout's frame always showed.
+      // A cutout's thumbnail: the person over black, as an alpha cutout's frame always showed,
+      // read and written as every other thumbnail (buildThumbnailCommand's scale chain).
+      const thumb = buildThumbnailCommand(asset.path, time, outPath, 320, color, true);
+      const vf = thumb[thumb.indexOf("-vf") + 1];
       await runFfmpeg([
         "-hide_banner", "-ss", time.toFixed(3), "-i", asset.path, ...cutoutColorInputArgs(merge, time),
-        "-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", merge)};[m]premultiply=inplace=1,scale=320:-2:force_original_aspect_ratio=decrease,format=yuv420p[v]`,
+        "-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", merge)};[m]${vf}${color ? "" : ",format=yuv420p"}[v]`,
         "-map", "[v]", "-frames:v", "1", "-q:v", "3", "-y", outPath,
       ]);
       return outPath;
     }
-    await runFfmpeg(buildThumbnailCommand(asset.path, time, outPath));
+    await runFfmpeg(buildThumbnailCommand(asset.path, time, outPath, undefined, color));
     return outPath;
   }
 
@@ -4763,6 +4850,7 @@ export class EditorEngine extends EventEmitter {
     const trfName = `${stem}.trf`;
     const outName = `${stem}.mp4`;
     const outPath = join(dir, outName);
+    const color = await this.sourceColor(asset);
 
     const pass2: string[] = [
       "-hide_banner",
@@ -4773,7 +4861,10 @@ export class EditorEngine extends EventEmitter {
       "-i",
       asset.path,
       "-vf",
-      `vidstabtransform=input=${trfName}:${transform},unsharp=5:5:0.8:3:3:0.4`,
+      // The source's coding kept and tagged, as reframe does: an untagged HD bake would be
+      // read as BT.709 by size, unlike a source read as BT.601 (colorspace.ts).
+      `vidstabtransform=input=${trfName}:${transform},unsharp=5:5:0.8:3:3:0.4,` +
+        `scale=iw:ih${keepCodingOpts(color)},format=yuv420p,${tagFramesStep({ matrix: color.matrix, range: "tv" })}`,
       "-c:v",
       "libx264",
       "-preset",
@@ -4782,6 +4873,7 @@ export class EditorEngine extends EventEmitter {
       "18",
       "-pix_fmt",
       "yuv420p",
+      ...colorTagArgs({ matrix: color.matrix, range: "tv" }),
     ];
     if (asset.hasAudio) pass2.push("-c:a", "aac", "-b:a", "192k");
     else pass2.push("-an");
@@ -4900,11 +4992,12 @@ export class EditorEngine extends EventEmitter {
     const outName = `${safeFileStem(clipId)}-reframe.mp4`;
     const outPath = join(dir, outName);
     await writeFile(join(dir, cmdName), cropPlanToSendcmd(keys), "utf8");
+    const color = await this.sourceColor(asset);
 
     const vf =
       `sendcmd=f=${cmdName},` +
       `crop=${cropW}:${cropH}:${keys[0].x}:${keys[0].y},` +
-      `scale=${outW}:${outH},setsar=1,format=yuv420p`;
+      `scale=${outW}:${outH}${keepCodingOpts(color)},setsar=1,format=yuv420p,${tagFramesStep({ matrix: color.matrix, range: "tv" })}`;
 
     const bake: string[] = [
       "-hide_banner",
@@ -4924,6 +5017,9 @@ export class EditorEngine extends EventEmitter {
       "18",
       "-pix_fmt",
       "yuv420p",
+      // The source's coding, tagged: a portrait clip reframed to landscape can drop under
+      // 720 lines, where an untagged copy would be read as BT.601 (colorspace.ts).
+      ...colorTagArgs({ matrix: color.matrix, range: "tv" }),
     ];
     if (asset.hasAudio) bake.push("-c:a", "aac", "-b:a", "192k");
     else bake.push("-an");
@@ -5032,14 +5128,17 @@ export class EditorEngine extends EventEmitter {
       });
       baked = await probeAsset(outPath);
       baked.name = `${asset.name} (background removed)`;
-      // Only the matte is stored; the colour stays the original footage (merged at render time).
-      baked.cutout = { colorPath: asset.path, colorStart, colorAssetId: asset.id };
+      // Only the matte is stored; the colour stays the original footage (merged at render time),
+      // read with ITS colour description: the matte's own (gray; full range on FFmpeg 7+) says nothing.
+      delete baked.color;
+      baked.cutout = { colorPath: asset.path, colorStart, colorAssetId: asset.id, ...(await this.cutoutColorRecord(asset)) };
 
       // Chromium can't decode FFV1, so the live preview plays a VP8/alpha .webm
       // proxy of the merged cutout. EXPORT merges the lossless matte with the original.
       try {
-        await this.encodeAlphaProxy(baked, proxyPath, PROXY_LONG_EDGE, signal, (f) => onProgress(0.95 + f * 0.05));
+        const proxyColor = await this.encodeAlphaProxy(baked, proxyPath, PROXY_LONG_EDGE, signal, (f) => onProgress(0.95 + f * 0.05));
         baked.proxyPath = proxyPath;
+        if (proxyColor) baked.proxyColor = proxyColor;
       } catch (err) {
         if (signal.aborted) throw err;
         // Best-effort: export is unaffected; record why preview can't show it.
@@ -5151,7 +5250,7 @@ export class EditorEngine extends EventEmitter {
     const pngPath = join(dir, `${safeFileStem(targetId)}-freeze-${Date.now().toString(36)}-${newId("f").slice(-4)}.png`);
     let still: MediaAsset;
     try {
-      await grabFrame(asset.path, srcSec, pngPath, undefined, this.cutoutMerge(asset));
+      await grabFrame(asset.path, srcSec, pngPath, undefined, await this.sourceColor(asset), await this.cutoutMerge(asset));
       still = await probeAsset(pngPath);
       still.name = `${asset.name} (freeze ${framesToSeconds(srcFrame, fps).toFixed(2)}s)`;
       still.duration = Math.max(still.duration, durationSeconds);
@@ -5487,7 +5586,7 @@ export class EditorEngine extends EventEmitter {
         const stem = `${safeFileStem(m.clipId)}-rev-${Date.now().toString(36)}`;
         // A remove_background cutout carries alpha: keep it (FFV1 yuva420p in Matroska) instead of flattening to opaque H.264.
         // A matte-backed cutout's file is only its matte: the bake merges the original colour back in.
-        const cutout = video ? this.cutoutMerge(asset) : undefined;
+        const cutout = video ? await this.cutoutMerge(asset) : undefined;
         const fmt = cutout ? { width: asset.width, height: asset.height, pixFmt: "yuva420p", hasAlpha: true } : video ? await probeVideoFormat(asset.path) : undefined;
         const alpha = fmt?.hasAlpha === true;
         const outPath = join(dir, `${stem}${video ? (alpha ? ".mkv" : ".mp4") : ".m4a"}`);
@@ -5495,6 +5594,7 @@ export class EditorEngine extends EventEmitter {
         await bakeReversed({
           alpha,
           format: fmt,
+          color: await this.sourceColor(asset),
           cutout,
           input: asset.path,
           hasVideo: video,
@@ -5603,13 +5703,14 @@ export class EditorEngine extends EventEmitter {
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
-    const cutout = this.cutoutMerge(asset); // a matte-backed cutout: merge its colour back in
+    const cutout = await this.cutoutMerge(asset); // a matte-backed cutout: merge its colour back in
     const alpha = !!cutout || (await probeVideoFormat(asset.path))?.hasAlpha === true; // keep a cutout's transparency
     const outPath = join(dir, `${safeFileStem(clipId)}-slowmo-${Date.now().toString(36)}.${alpha ? "mkv" : "mp4"}`);
     let baked: MediaAsset;
     try {
       await bakeSmoothSlow({
         alpha,
+        color: await this.sourceColor(asset),
         cutout,
         input: asset.path,
         hasAudio: asset.hasAudio,
@@ -5737,6 +5838,8 @@ export class EditorEngine extends EventEmitter {
     });
 
     if (signal.aborted) throw new Error("Motion-graphic render canceled");
+    // Remotion's BT.601 says so in complete tags (motion/render.ts).
+    if (asNewClip) await tagGraphicColor(outPath, signal);
     const baked = await probeAsset(outPath);
     baked.name = `Motion graphic (${width}x${height})`;
 
@@ -5747,11 +5850,7 @@ export class EditorEngine extends EventEmitter {
     if (!asNewClip) {
       const webmPath = join(bakedDir, `${id}-graphic.webm`);
       try {
-        await runFfmpeg([
-          "-hide_banner", "-y", "-i", outPath,
-          "-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0",
-          "-b:v", "3M", "-deadline", "realtime", "-cpu-used", "5", "-an", webmPath,
-        ]);
+        await graphicPreviewProxy(outPath, webmPath);
         baked.previewPath = webmPath;
       } catch {
         // Preview proxy is best-effort: if VP8/alpha isn't available the graphic
@@ -6003,6 +6102,7 @@ export class EditorEngine extends EventEmitter {
     this.emit("change", this.project);
     await this.storage.remember(path);
     this.storage.schedule();
+    void this.probeUnrecordedColors();
     return this.project;
   }
 

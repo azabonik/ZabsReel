@@ -2,7 +2,9 @@
  * Phase 9 smoke: export presets actually change the encoded container/codec.
  * Exports the same tiny timeline three ways — default mp4/h264, an explicit
  * h265, and the web (webm/vp9) preset — and probes each output to confirm the
- * codec/container really changed. Real FFmpeg.
+ * codec/container really changed, and that each encoder wrote all four BT.709
+ * limited-range colour tags (colorspace.ts OUTPUT_COLOR_ARGS: at this 144-line
+ * canvas an untagged export would be read as BT.601). Real FFmpeg.
  *
  * Run: npx tsx packages/core/scripts/smoke-export.ts <clipA>
  */
@@ -30,6 +32,10 @@ async function main() {
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
   };
+  const tagged709 = (name: string, p: Awaited<ReturnType<typeof probeAsset>>) => {
+    const c = p.color;
+    check(c?.space === "bt709" && c.primaries === "bt709" && c.transfer === "bt709" && c.range === "tv", `${name} tagged BT.709 / limited, all four (${JSON.stringify(c)})`);
+  };
 
   const a = (await call<{ asset: { id: string } }>("import_video", { path: clipA })).asset;
   await call("set_project_settings", { width: 256, height: 144, fps: 24 });
@@ -41,6 +47,7 @@ async function main() {
   const p1 = await probeAsset(out1);
   console.log(`   ${p1.videoCodec}`);
   check(/h264|avc/i.test(p1.videoCodec ?? ""), "default is H.264");
+  tagged709("H.264", p1);
 
   console.log("2. explicit H.265 (mp4 / hevc)...");
   const out2 = join(dataDir, "hevc.mp4");
@@ -48,6 +55,7 @@ async function main() {
   const p2 = await probeAsset(out2);
   console.log(`   ${p2.videoCodec}`);
   check(/hevc|h265/i.test(p2.videoCodec ?? ""), "H.265 export is HEVC");
+  tagged709("HEVC", p2);
 
   console.log("3. web preset (webm / vp9 / opus)...");
   const out3 = join(dataDir, "web.webm");
@@ -55,6 +63,7 @@ async function main() {
   const p3 = await probeAsset(out3);
   console.log(`   ${p3.videoCodec} / ${p3.audioCodec}`);
   check(/vp9/i.test(p3.videoCodec ?? ""), "web preset is VP9");
+  tagged709("VP9", p3);
 
   console.log(failures === 0 ? "\nEXPORT SMOKE TEST PASSED" : `\nEXPORT SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);

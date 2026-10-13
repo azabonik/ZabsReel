@@ -46,10 +46,15 @@ async function synth(args: string[]): Promise<void> {
   await execa(FFMPEG_BIN, ["-hide_banner", "-y", ...args], { reject: true });
 }
 
-/** A solid-colour clip with optional drawbox shapes, as H.264 yuv420p. */
+/**
+ * A solid-colour clip with optional drawbox shapes, as H.264 yuv420p. lavfi's color /
+ * drawbox code RGB with BT.601: tagged so (complete), the file reads as drawn at any
+ * size — untagged HD is read as BT.709, as players read it (ffmpeg/colorspace.ts).
+ */
 async function solid(out: string, color: string, w: number, h: number, seconds: number, boxes: string[] = []) {
   const vf = boxes.length ? ["-vf", boxes.join(",")] : [];
-  await synth(["-f", "lavfi", "-i", `color=c=${color}:s=${w}x${h}:r=${FPS}:d=${seconds}`, ...vf, "-pix_fmt", "yuv420p", out]);
+  await synth(["-f", "lavfi", "-i", `color=c=${color}:s=${w}x${h}:r=${FPS}:d=${seconds}`, ...vf, "-pix_fmt", "yuv420p",
+    "-colorspace", "smpte170m", "-color_primaries", "smpte170m", "-color_trc", "smpte170m", "-color_range", "tv", out]);
 }
 const box = (x: number, y: number, w: number, h: number, c: string) => `drawbox=x=${x}:y=${y}:w=${w}:h=${h}:c=${c}:t=fill`;
 

@@ -1065,9 +1065,10 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
     const cmd = buildRenderCommand([base, adj] as never, { width: 320, height: 180, fps: 30 }, "/tmp/x.mp4", EXPORT_PROFILE, undefined, undefined, { videoOnly: true });
     return cmd.args[cmd.args.indexOf("-filter_complex") + 1];
   })();
-  check("export: an adjustment layer's look starts from RGBA and its effects end in it (the stack below is yuv420p)",
-    // (color_grade's eq is alphaSafe, which already opens with format=rgba: no second pin.)
-    /\[adjs0\]format=rgba,split\[aeq0a\]\[aeq0b\];\[aeq0a\]eq=[^\[]+\[aeq0v\];.*alphamerge,format=rgba,cas=strength=0\.500000,format=rgba\[adjf0\]/.test(adjFc) &&
+  check("export: an adjustment layer's look starts from RGBA and its effects end in it (the RGBA composite below)",
+    // (color_grade's eq is alphaSafe, which already opens with format=rgba: no second pin;
+    // eq itself works on pinned 4:4:4 YUV, clipped back to RGBA before the effects.)
+    /\[adjs0\]format=rgba,split\[aeq0a\]\[aeq0b\];\[aeq0a\]format=yuv444p,eq=[^\[]+\[aeq0v\];.*alphamerge,format=rgba,cas=strength=0\.500000,format=rgba\[adjf0\]/.test(adjFc) &&
       !adjFc.includes("format=rgba,format=rgba"), adjFc.slice(adjFc.indexOf("[adjs0]"), adjFc.indexOf("[adjf0]") + 7));
   check("eq: graph.ts emits eq for any `color`, so does the plan (even neutral)", g.includes("eq=brightness=0:contrast=1.2:saturation=0.8:gamma=1") &&
     planLayer({ color: {} }, g1).map((s) => s.kind).join() === "eq");
@@ -1141,6 +1142,26 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: draw.look is the clip's effects object", at0.find((c) => c.clipId === "L1")?.draw?.look === fxA);
   check("plan: adjust.look is the adjustment's effects object", at0.find((c) => c.clipId === "ADJL")?.adjust?.look === fxAdj);
   check("plan: a clip without a look has no draw.look (drawn directly, no GL)", activeLayersAt(lp, la, 1.5).clips.find((c) => c.clipId === "L2")?.draw?.look === undefined);
+
+  // Source colour: a file whose incomplete colour tags Chromium ignores carries the GL
+  // correction to the export's reading; untagged / completely tagged files and a
+  // completely tagged proxy of the partial one carry none.
+  const colorAsset = (id: string, color: MediaAsset["color"], extra: Partial<MediaAsset> = {}) => asset(id, { width: 1280, height: 720, color, ...extra });
+  const cA = [
+    colorAsset("cUntagged", { codedHeight: 720 }),
+    colorAsset("cTagged", { space: "bt709", primaries: "bt709", transfer: "bt709", range: "tv", codedHeight: 720 }),
+    colorAsset("cPartial", { space: "smpte170m", range: "tv", codedHeight: 720 }),
+    colorAsset("cProxied", { space: "smpte170m", range: "tv", codedHeight: 720 }, {
+      proxyPath: "/p/cProxied.mp4", proxyColor: { space: "smpte170m", primaries: "smpte170m", transfer: "smpte170m", range: "tv", codedHeight: 720 },
+    }),
+  ];
+  const cp: Project = { ...project, assets: cA, tracks: cA.map((a, i) => track("video", i, [clip(`C${i}`, a.id, 0, 30)])), music: undefined };
+  const cDraw = (id: string) => activeLayersAt(cp, new Map(cA.map((a) => [a.id, a])), 0.1).clips.find((c) => c.clipId === id)?.draw;
+  check("plan: untagged / completely tagged sources need no source-colour correction", !cDraw("C0")?.sourceFix && !cDraw("C1")?.sourceFix);
+  const fix = cDraw("C2")?.sourceFix;
+  check("plan: a partially tagged source gets the correction (Chromium reads BT.709, the export BT.601)", !!fix && fix.length === 3);
+  check("plan: the correction is cached per asset (the same object every frame)", cDraw("C2")?.sourceFix === fix);
+  check("plan: its completely tagged proxy needs none", !cDraw("C3")?.sourceFix);
 }
 
 // --- live playback of a curve-speed clip: MediaPool.sync (follow) and resumeNear on a fake <video> ---

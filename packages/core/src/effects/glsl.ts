@@ -674,10 +674,11 @@ vec4 op_hold(vec4 c, ivec2 p, int dom) {
  * LFG table with random per-line shifts; the preview draws the same
  * distribution from a hash, so the grain matches in strength and character,
  * not pixel for pixel. The export then ends in 4:2:0, which averages the
- * grain's COLOUR over each 2×2 block while its luma stays per pixel; the
- * preview does the same to its noise (the block's mean noise plus this
- * pixel's own BT.601 luma deviation), so the grain is as strong and as
- * colourful as in the render.
+ * grain's COLOUR over each 2×2 block (ffmpeg/colorspace.ts SWS_OUTPUT: a box
+ * average) while its luma stays per pixel; the preview does the same to its
+ * noise (the block's mean noise plus this pixel's own luma deviation, with
+ * the BT.709 weights the export's output step codes), so the grain is as
+ * strong and as colourful as in the render.
  */
 export const GLSL_NOISE = `
 uniform int u_noise_strength;
@@ -694,7 +695,7 @@ vec4 op_noise(vec4 c, ivec2 p, int dom) {
   vec3 mean = (n00 + n10 + n01 + n11) * 0.25;
   ivec2 o = p - b;
   vec3 own = o.y == 0 ? (o.x == 0 ? n00 : n10) : (o.x == 0 ? n01 : n11);
-  vec3 n = mean + dot(own - mean, vec3(0.299, 0.587, 0.114));
+  vec3 n = mean + dot(own - mean, vec3(0.2126, 0.7152, 0.0722));
   return vec4(clamp(floor(c.rgb + n + 0.5), 0.0, 255.0), c.a);
 }
 `;
