@@ -6,6 +6,8 @@
  *   npx @azabonik/synthcut add --client claude --scope project
  *   npx @azabonik/synthcut add --client codex  --scope global --force
  *   ("skill" and "install" are accepted aliases for "add")
+ *   npx @azabonik/synthcut migrate         find and remove what Relo's SynthCut left
+ *                                          ("ai-video-editor" server, "video-editor-pro" skill)
  *
  * The skill itself is one markdown file (skill/SKILL.md in this package).
  * What differs per AI client is WHERE it lives and what wrapper it needs;
@@ -17,6 +19,7 @@ import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
+import { findLegacy, removeLegacy, LEGACY_SERVER, LEGACY_SKILL } from "./legacy.mjs";
 
 const SKILL_NAME = "synthcut-editor";
 const MARK_START = `<!-- synthcut:${SKILL_NAME}:start -->`;
@@ -52,6 +55,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--force" || a === "-f") args.force = true;
+    else if (a === "--yes" || a === "-y") args.yes = true;
+    else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--client") args.client = argv[++i];
     else if (a === "--scope") args.scope = argv[++i];
@@ -158,6 +163,7 @@ const HELP = `synthcut — install the SynthCut synthcut-editor AI skill
 
 Usage:
   synthcut [add] [--client <name>] [--scope <project|global>] [--dir <path>] [--force]
+  synthcut migrate [--dir <path>] [--yes | --dry-run]
 
 Options:
   --client   ${Object.keys(CLIENTS).join(" | ")}
@@ -166,12 +172,66 @@ Options:
   --force    overwrite an existing skill/rule file
   -h, --help show this help
 
+migrate lists what Relo's SynthCut left behind: the MCP server "${LEGACY_SERVER}" in
+AI client configs (only when it runs SynthCut's MCP server) and the old skill
+"${LEGACY_SKILL}". It removes them only after you confirm (or with --yes), and
+copies every file it changes to ~/.synthcut/backups first. --dry-run only lists.
+
 Run with no flags for interactive prompts.`;
+
+function printLegacy({ found, skipped }) {
+  if (found.length) {
+    console.log(`Found ${found.length} entr${found.length === 1 ? "y" : "ies"} from Relo's SynthCut:`);
+    found.forEach((f, i) => {
+      console.log(`  ${i + 1}. ${f.client}: ${f.what}\n     ${f.file}`);
+      if (f.hasSynthcut === false) console.log(`     (this file has no "synthcut" entry yet: copy one from Connect AI in the app)`);
+    });
+  }
+  if (skipped.length) {
+    console.log(`Left alone:`);
+    for (const s of skipped) console.log(`  - ${s.client}: ${s.reason}\n    ${s.file}`);
+  }
+}
+
+async function migrate(args, projectDir) {
+  const home = homedir();
+  const scan = findLegacy({ home, projectDir });
+  if (!scan.found.length) {
+    console.log(`No entries from Relo's SynthCut ("${LEGACY_SERVER}", "${LEGACY_SKILL}") found.`);
+    printLegacy(scan);
+    return;
+  }
+  printLegacy(scan);
+  if (args.dryRun) return;
+  if (!args.yes) {
+    if (!process.stdin.isTTY) {
+      console.log("\nNothing changed. Re-run with --yes to remove them.");
+      return;
+    }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = (await rl.question(`\nRemove ${scan.found.length === 1 ? "it" : "them"}? [y/N] `)).trim().toLowerCase();
+    rl.close();
+    if (answer !== "y" && answer !== "yes") {
+      console.log("Nothing changed.");
+      return;
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupDir = join(home, ".synthcut", "backups", `legacy-${stamp}`);
+  const results = removeLegacy(scan.found, { backupDir });
+  for (const r of results) {
+    console.log(`${r.ok ? "✔ removed" : "✖ not removed"}: ${r.finding.client}: ${r.finding.what}${r.note ? ` (${r.note})` : ""}\n  ${r.finding.file}`);
+  }
+  if (existsSync(backupDir)) console.log(`\nBackups of the changed files: ${backupDir}`);
+  console.log("Restart those AI clients to pick up the change.");
+  if (results.some((r) => !r.ok)) process.exitCode = 1;
+}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return console.log(HELP);
   const cmd = args._[0] ?? "add";
+  if (cmd === "migrate") return migrate(args, resolve(args.dir ?? process.cwd()));
   if (!["add", "skill", "install"].includes(cmd)) {
     console.error(`Unknown command "${cmd}".\n\n${HELP}`);
     process.exitCode = 1;
@@ -193,6 +253,13 @@ async function main() {
   if (written) {
     console.log(`\n✔ Installed ${SKILL_NAME} for ${CLIENTS[client]} (${scope}):\n  ${written}`);
     console.log("Restart/reload your AI client to pick it up.");
+  }
+  const legacy = findLegacy({ home: homedir(), projectDir }).found;
+  if (legacy.length) {
+    console.log(
+      `\nFound ${legacy.length} entr${legacy.length === 1 ? "y" : "ies"} from Relo's SynthCut ("${LEGACY_SERVER}" / "${LEGACY_SKILL}").` +
+        `\nTo review and remove ${legacy.length === 1 ? "it" : "them"}, run: npx @azabonik/synthcut migrate${args.dir ? ` --dir "${projectDir}"` : ""}`,
+    );
   }
 }
 

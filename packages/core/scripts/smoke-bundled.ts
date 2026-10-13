@@ -10,17 +10,19 @@
  * guarantee a packaged installer must deliver. It also loads the bundled YuNet
  * ONNX to confirm it's a valid model file.
  *
- * Prereq: run the staging script first so build/resources/aive exists:
- *   node apps/desktop/scripts/prepare-bundle.ts
+ * It first runs the staging script (node apps/desktop/scripts/prepare-bundle.ts,
+ * which needs `npm run build`), so build/resources/aive is current; re-running it
+ * is cheap because already-staged files are kept.
  *
  * Run (paths are ABSOLUTE as required by importVideo):
  *   npx tsx packages/core/scripts/smoke-bundled.ts [speech.wav]
- *   speech.wav defaults to scratch/jfk.wav.
+ *   speech.wav defaults to the checked-in public-domain fixtures/jfk.wav.
  */
 import { join, isAbsolute, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..");
@@ -37,6 +39,12 @@ function need(p: string, what: string): string {
   }
   return p;
 }
+
+const staged = spawnSync(process.execPath, [join(repoRoot, "apps", "desktop", "scripts", "prepare-bundle.ts")], {
+  cwd: repoRoot,
+  stdio: "inherit",
+});
+if (staged.status !== 0) throw new Error(`prepare-bundle.ts failed (exit ${staged.status ?? staged.signal})`);
 
 // Wire the engine to the bundled artifacts BEFORE importing engine code, so the
 // modules pick these up. (The engine reads these env vars at call time, so order
@@ -61,13 +69,10 @@ async function main() {
   console.log(`   ffmpeg:  ${ver.ffmpeg}`);
   console.log(`   ffprobe: ${ver.ffprobe}`);
 
-  const speechArg = process.argv[2] ?? join(repoRoot, "scratch", "jfk.wav");
+  const speechArg = process.argv[2] ?? join(here, "fixtures", "jfk.wav");
   const speech = isAbsolute(speechArg) ? speechArg : resolve(process.cwd(), speechArg);
   if (!existsSync(speech)) {
-    throw new Error(
-      `Speech file not found: ${speech}\n` +
-        `  curl -L -o scratch/jfk.wav https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav`,
-    );
+    throw new Error(`Speech file not found: ${speech}\nPass a spoken-word WAV.`);
   }
 
   const dataDir = mkdtempSync(join(tmpdir(), "aive-bundled-"));

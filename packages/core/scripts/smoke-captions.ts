@@ -6,8 +6,7 @@
  * caption cues correctly, and that clearing removes them.
  *
  * Run: npx tsx packages/core/scripts/smoke-captions.ts [speech.wav]
- *   speech.wav defaults to scratch/jfk.wav (download it from
- *   https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav).
+ *   speech.wav defaults to the checked-in public-domain fixtures/jfk.wav.
  *
  * whisper.cpp + the ggml model are auto-downloaded on first run (cached under
  * ~/.aive/whisper); set AIVE_WHISPER_DIR / AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL
@@ -16,19 +15,18 @@
 import { EditorEngine } from "../src/engine.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
-import { join, isAbsolute, resolve } from "node:path";
+import { join, isAbsolute, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { mkdtempSync, existsSync } from "node:fs";
 
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "jfk.wav");
+
 async function main() {
-  const speechArg = process.argv[2] ?? "scratch/jfk.wav";
+  const speechArg = process.argv[2] ?? FIXTURE;
   const speech = isAbsolute(speechArg) ? speechArg : resolve(process.cwd(), speechArg);
   if (!existsSync(speech)) {
-    throw new Error(
-      `Speech file not found: ${speech}\n` +
-        `Pass a spoken-word WAV, or download the sample:\n` +
-        `  curl -L -o scratch/jfk.wav https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav`,
-    );
+    throw new Error(`Speech file not found: ${speech}\nPass a spoken-word WAV.`);
   }
 
   const dataDir = mkdtempSync(join(tmpdir(), "aive-captions-"));

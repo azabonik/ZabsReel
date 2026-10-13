@@ -44,6 +44,7 @@ test_media/
 *.wav
 *.mp3
 !docs/**/*.mp4
+!packages/core/scripts/fixtures/jfk.wav
 
 # ---------------------------------------------------------------------------
 # Downloaded model / binary artifacts (fetched at runtime, never committed)

@@ -6,20 +6,29 @@
  * Remotion graphic is attempted opportunistically (skipped if bundling is slow/
  * unavailable; it's already covered by smoke-motion).
  *
- * Run: npx tsx packages/core/scripts/smoke-animtext.ts <clipA>
+ * Run: npx tsx packages/core/scripts/smoke-animtext.ts [clipA]
+ *   Without clipA it synthesizes a 4 s 1280x720 test clip with a tone.
  */
 import { methods } from "../src/rpc.js";
 import { EditorEngine } from "../src/engine.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
+import { runFfmpeg } from "../src/ffmpeg/executor.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 
 async function main() {
-  const [, , clipA] = process.argv;
-  if (!clipA) throw new Error("usage: smoke-animtext.ts <clipA>");
-
   const dataDir = mkdtempSync(join(tmpdir(), "aive-animtext-"));
+  let clipA = process.argv[2];
+  if (!clipA) {
+    clipA = join(dataDir, "src.mp4");
+    await runFfmpeg([
+      "-hide_banner", "-y",
+      "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=4",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", clipA,
+    ]);
+  }
   const engine = new EditorEngine(dataDir);
   const call = async <T = unknown>(name: keyof typeof methods, params: Record<string, unknown> = {}): Promise<T> => {
     const m = methods[name];

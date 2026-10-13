@@ -20,7 +20,7 @@ const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { ensureCore } = require("../electron/core-launcher.cjs");
+const { ensureCore, browserBlocksPort } = require("../electron/core-launcher.cjs");
 
 const RENDERER_DIR = path.join(__dirname, "..", "dist", "renderer");
 const DEFAULT_PORT = 4790;
@@ -65,6 +65,10 @@ function parseArgs(argv) {
   }
   if (!Number.isInteger(opts.port) || opts.port < 0 || opts.port > 65535) {
     console.error("[aive-web] --port must be an integer between 0 and 65535");
+    process.exit(2);
+  }
+  if (browserBlocksPort(opts.port)) {
+    console.error(`[aive-web] browsers refuse to open pages on port ${opts.port} (ERR_UNSAFE_PORT). Pick another --port.`);
     process.exit(2);
   }
   return opts;
@@ -360,6 +364,14 @@ async function main() {
     process.exit(1);
   }
   console.error(`[aive-web] ${core.owned ? "started" : "attached to existing"} core on port ${core.port}`);
+  if (browserBlocksPort(core.port)) {
+    console.error(
+      `[aive-web] the editor core is on port ${core.port}, which browsers refuse to connect to (ERR_UNSAFE_PORT). ` +
+        "Set AIVE_PORT to another port (the default is 4791) and start it again.",
+    );
+    if (core.owned && core.child) core.child.kill();
+    process.exit(1);
+  }
 
   const web = createWebServer(core);
   let port;

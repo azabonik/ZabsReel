@@ -3,13 +3,16 @@
 // security guards hold (Host check, token on /api, no path traversal, no
 // framing), the picker's directory listing is right, a path from that listing
 // imports and streams through the core, and stopping the shell stops the core
-// it started. Needs the project built (`npm run build`) and FFmpeg on PATH.
+// it started. A port that browsers refuse (ERR_UNSAFE_PORT, e.g. 5060), for the
+// shell or for the core, stops the shell with a clear message (and stops the
+// core it started). Needs the project built (`npm run build`) and FFmpeg on PATH.
 //
 // Run:  npx tsx apps/desktop/scripts/smoke-web.ts
 
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -151,6 +154,26 @@ async function main() {
       if (!coreGone) await new Promise((r) => setTimeout(r, 200));
     }
     check("core it started is stopped too", coreGone);
+
+    console.log("7. ports browsers refuse (ERR_UNSAFE_PORT)");
+    const blocked = spawnSync(process.execPath, [serverPath, "--port", "5060", "--no-open"], {
+      env: { ...process.env, AIVE_DATA_DIR: join(root, "data-blocked"), AIVE_PORT: "0" }, encoding: "utf8", timeout: 20000,
+    });
+    check("--port 5060 is refused with a clear message", blocked.status === 2 && /ERR_UNSAFE_PORT/.test(blocked.stderr), `exit ${blocked.status}: ${blocked.stderr}`);
+    // A free port from Chromium's list for the core (5061, 6566, … could be taken on this machine).
+    const free = (p: number) => new Promise<boolean>((r) => { const srv = net.createServer().once("error", () => r(false)).listen(p, "127.0.0.1", () => srv.close(() => r(true))); });
+    let corePortBlocked = 0;
+    for (const p of [10080, 6566, 6697, 6669, 5061]) if (await free(p)) { corePortBlocked = p; break; }
+    const blockedCore = spawnSync(process.execPath, [serverPath, "--port", "0", "--no-open"], {
+      env: { ...process.env, AIVE_DATA_DIR: join(root, "data-blocked-core"), AIVE_PORT: String(corePortBlocked) }, encoding: "utf8", timeout: 30000,
+    });
+    check(`a core on port ${corePortBlocked} stops the shell with a clear message`, blockedCore.status === 1 && /ERR_UNSAFE_PORT/.test(blockedCore.stderr), `exit ${blockedCore.status}: ${blockedCore.stderr}`);
+    let blockedCoreGone = false;
+    for (let i = 0; i < 25 && !blockedCoreGone; i++) {
+      blockedCoreGone = await request(corePortBlocked, "/health").then(() => false, () => true);
+      if (!blockedCoreGone) await new Promise((r) => setTimeout(r, 200));
+    }
+    check("…and stops the core it started", blockedCoreGone);
   } finally {
     if (shell.exitCode === null) shell.kill("SIGKILL");
     rmSync(root, { recursive: true, force: true });

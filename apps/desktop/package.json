@@ -28,7 +28,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^42.4.1",
+    "electron": "^42.11.12",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.3",
     "vite": "^6.0.7"
@@ -44,7 +44,7 @@
       }
     ],
     "copyright": "Copyright © 2026 Relo and SynthCut contributors",
-    "electronVersion": "42.4.1",
+    "electronVersion": "42.11.12",
     "npmRebuild": false,
     "asar": false,
     "directories": {

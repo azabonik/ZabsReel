@@ -8,8 +8,10 @@
 // Written in CommonJS so it runs directly under Electron with no build step.
 const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
 const path = require("node:path");
-const { ensureCore } = require("./core-launcher.cjs");
+const fs = require("node:fs");
+const { ensureCore, browserBlocksPort } = require("./core-launcher.cjs");
 const { applyBundledAssetEnv } = require("./bundled-assets.cjs");
+const { finalSavePath: decideSavePath, closeGuard } = require("./save-rules.cjs");
 
 // Branding: the display name (taskbar / jump-list / dialogs) and a stable Windows
 // AppUserModelID so the taskbar shows OUR name + icon instead of "Electron" and
@@ -32,8 +34,18 @@ let coreToken = null;
 let mainWin = null;
 let projectUnsaved = false;
 let projectHasPath = false;
-let forceQuit = false;       // user chose to close anyway → allow the close
-let pendingSaveQuit = false; // waiting for the renderer to finish saving, then quit
+// forceQuit: user chose to close anyway → allow the close.
+// pendingSaveQuit: waiting for the renderer to finish saving, then quit.
+// Changed only through guardStep (rules in save-rules.cjs closeGuard).
+let guard = { pendingSaveQuit: false, forceQuit: false };
+
+/** Apply a close-guard event and carry out its effect. */
+function guardStep(event) {
+  const { state, effect } = closeGuard(guard, event);
+  guard = state;
+  if (effect === "close") { if (mainWin) mainWin.close(); }
+  else if (effect) sendMenu(effect);
+}
 
 // No native OS menu bar — the app uses ONE custom title bar (Clipchamp-style).
 // New/Open/Save live in the in-app Project menu; editing shortcuts (Ctrl+S/Z/Y)
@@ -83,7 +95,7 @@ function setupAutoUpdate() {
       detail: "Restart to install it — the update installs on next launch if you choose Later.",
     });
     if (choice === 0) {
-      forceQuit = true;
+      guard = { ...guard, forceQuit: true };
       autoUpdater.quitAndInstall();
     }
   });
@@ -95,9 +107,14 @@ function setupAutoUpdate() {
     console.error("[aive] update check failed:", err && err.message ? err.message : err));
 }
 
+/** Send a Project-menu action ("save", "save-as", …) to the renderer (preload: onMenu). */
+function sendMenu(action) {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("menu", action);
+}
+
 /** Intercept window close to confirm unsaved changes (main-process dialog). */
 function onWindowClose(e) {
-  if (forceQuit || !projectUnsaved) return; // clean (or already confirmed) → allow
+  if (guard.forceQuit || !projectUnsaved) return; // clean (or already confirmed) → allow
   e.preventDefault();
   const choice = dialog.showMessageBoxSync(mainWin, {
     type: "warning",
@@ -109,11 +126,10 @@ function onWindowClose(e) {
     message: "Save changes before closing?",
     detail: "Your project has unsaved edits.",
   });
-  if (choice === 2) return; // Cancel — stay open
-  if (choice === 1) { forceQuit = true; mainWin.close(); return; } // Don't Save
   // Save → ask the renderer to save; we quit once it reports the project clean.
-  pendingSaveQuit = true;
-  sendMenu(projectHasPath ? "save" : "save-as");
+  // Don't Save → close. Cancel → stay open. Each choice drops an earlier Save
+  // request that never completed.
+  guardStep({ type: "close-dialog", choice: ["save", "dont-save", "cancel"][choice] || "cancel", hasPath: projectHasPath });
 }
 
 function createWindow(port, token) {
@@ -169,12 +185,12 @@ ipcMain.on("project:state", (_e, state) => {
   projectUnsaved = !!(state && state.dirty);
   projectHasPath = !!(state && state.hasPath);
   // A save we requested before quitting just completed → proceed to close.
-  if (pendingSaveQuit && !projectUnsaved) {
-    pendingSaveQuit = false;
-    forceQuit = true;
-    if (mainWin) mainWin.close();
-  }
+  guardStep({ type: "project-state", dirty: projectUnsaved });
 });
+
+// The renderer could not write the project: a Save chosen in the close dialog
+// failed, so the next save (the autosave included) must not close the window.
+ipcMain.on("project:save-failed", () => guardStep({ type: "save-failed" }));
 
 ipcMain.handle("dialog:openFiles", async () => {
   const result = await dialog.showOpenDialog({
@@ -188,6 +204,20 @@ ipcMain.handle("dialog:openFiles", async () => {
   return result.canceled ? [] : result.filePaths;
 });
 
+// Extension rule and the second overwrite question: save-rules.cjs. Returns the
+// path to write, or null to cancel.
+function finalSavePath(filePath, filters) {
+  return decideSavePath(filePath, filters, fs.existsSync, (final) => dialog.showMessageBoxSync(mainWin, {
+    type: "warning",
+    buttons: ["Replace", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: "Replace file?",
+    message: `"${path.basename(final)}" already exists. Replace it?`,
+  }) === 0);
+}
+
 ipcMain.handle("dialog:saveFile", async (_e, ext) => {
   // Same containers as the web picker (platform.ts exportFilters); the chosen
   // preset's container is listed first so it is the default.
@@ -197,12 +227,13 @@ ipcMain.handle("dialog:saveFile", async (_e, ext) => {
     { name: "QuickTime Movie", extensions: ["mov"] },
   ];
   const want = formats.find((f) => f.extensions[0] === ext) || formats[0];
+  const filters = [want, ...formats.filter((f) => f !== want)];
   const result = await dialog.showSaveDialog({
     title: "Export video",
     defaultPath: `export.${want.extensions[0]}`,
-    filters: [want, ...formats.filter((f) => f !== want)],
+    filters,
   });
-  return result.canceled ? null : result.filePath;
+  return result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
 });
 
 ipcMain.handle("dialog:openProject", async () => {
@@ -219,12 +250,16 @@ ipcMain.handle("dialog:openProject", async () => {
 
 ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
   const base = (defaultName && String(defaultName)) || "Untitled";
+  const filters = [{ name: "SynthCut Project", extensions: ["aive"] }];
   const result = await dialog.showSaveDialog({
     title: "Save project as",
     defaultPath: `${base.replace(/\.aive$/i, "")}.aive`,
-    filters: [{ name: "SynthCut Project", extensions: ["aive"] }],
+    filters,
   });
-  return result.canceled ? null : result.filePath;
+  const chosen = result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
+  // Cancelled during "Save before closing?": stay open, and don't close on a later save.
+  if (!chosen) guardStep({ type: "save-as-cancelled" });
+  return chosen;
 });
 
 // Build a ready-to-paste MCP client config for THIS install, so the user never
@@ -266,14 +301,26 @@ app.whenReady().then(async () => {
     coreOwned = result.owned;
     coreChild = result.child;
     console.error(`[aive] ${coreOwned ? "started" : "attached to existing"} core on port ${corePort}`);
+    if (browserBlocksPort(corePort)) {
+      throw Object.assign(
+        new Error(
+          `The editor core is on port ${corePort}, which Electron and browsers refuse to connect to ` +
+            `(ERR_UNSAFE_PORT), so this window could not reach it. Set AIVE_PORT to another port ` +
+            `(the default is 4791) and start the core again.`,
+        ),
+        { blockedPort: true },
+      );
+    }
     buildMenu();
     createWindow(corePort, coreToken);
     setupAutoUpdate();
   } catch (err) {
     dialog.showErrorBox(
       "Could not start the editor core",
-      `${err && err.message ? err.message : err}\n\n` +
-        'Make sure the project is built (run "npm run build" at the repo root) and that FFmpeg is installed.',
+      `${err && err.message ? err.message : err}` +
+        (err && err.blockedPort
+          ? ""
+          : '\n\nMake sure the project is built (run "npm run build" at the repo root) and that FFmpeg is installed.'),
     );
     app.quit();
   }

@@ -25,7 +25,7 @@ any MCP-compatible AI client drives real, local FFmpeg edits, fully offline.
 > This is a modified fork of [SynthCut by Relo](https://github.com/Relo-video/SynthCut), licensed under GPL-3.0-or-later. Changes in this fork date from October 2026. It is not affiliated with or endorsed by Relo.
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/1b8949fb-0489-4592-87f1-affd069d266e" poster="https://github.com/user-attachments/assets/4de5bf0e-3654-451f-b35f-10ce6e3bce59" controls muted loop width="100%"></video>
+  <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" alt="SynthCut demo: import three clips, place them on the timeline, split one and ripple-delete a piece, add a vignette, scrub the preview, open the export presets" width="100%" /></a>
 </div>
 
 ---
@@ -197,7 +197,7 @@ All of them, in the JSON case, look like:
 
 Fully restart your client after editing its config (Claude Code needs no restart — `claude mcp list` confirms it's registered). For a from-source build, see [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) and [`claude_desktop_config.example.json`](claude_desktop_config.example.json) for a worked example.
 
-If you used Relo's SynthCut before, your client may still have its entry, named `ai-video-editor`. Remove it, so that the client does not start the other editor's server as well.
+If you used Relo's SynthCut before, your client may still have its entry, named `ai-video-editor`, and its `video-editor-pro` skill. Run `npx @azabonik/synthcut migrate` (from a checkout: `node packages/skill-installer/bin/synthcut.mjs migrate`) in your project folder: it lists those entries, removes them only after you confirm, and backs up every file it changes to `~/.synthcut/backups/`. It leaves an `ai-video-editor` entry alone if that entry runs another program. Otherwise the client also starts the other editor's server.
 
 ## Build from source
 
@@ -289,7 +289,7 @@ The desktop UI talks to the `core` backend (`127.0.0.1:4791` by default) over a 
 2. **Check whether the core is actually running.** Open `~/.synthcut/data/server.json` — it contains `{ port, pid, startedAt, token }`. If that `pid` isn't a live process, the core died; relaunching will spawn a new one.
 3. **Kill a wedged core.** If the `pid` is alive but not responding (e.g. `/health` times out), kill that process, then relaunch the app to spawn a fresh core.
 4. **Delete a stale `server.json`.** If it points at a dead core, remove `~/.synthcut/data/server.json` and relaunch for a clean respawn.
-5. **Port 4791 already in use by something else.** The core will fail to bind and exit before reporting "ready". Free the port, or set the `AIVE_PORT` environment variable to run the core on a different port.
+5. **Port 4791 already in use by something else.** The core will fail to bind and exit before reporting "ready". Free the port, or set the `AIVE_PORT` environment variable to run the core on a different port. Avoid the ports that Chromium-based browsers and Electron refuse to connect to (for example 5060, 5061, 6000 or 10080): the app and the web shell stop with a message that says so.
 6. **Check the logs.** The core has no log file — it writes to stdout/stderr only. Running from source (`npm start`), these appear in the terminal (look for `[aive-core] listening on …`, `{"event":"ready"}`, or `[aive-core] fatal:`). In the packaged app, a failed core startup shows an error dialog ("Could not start the editor core").
 
 This most commonly happens when a **second core process** (e.g. one spawned by an MCP client) starts up and rotates the auth token while the desktop window is still open with the old one — every reconnect attempt then gets rejected. Closing and reopening the app picks up the live token again.

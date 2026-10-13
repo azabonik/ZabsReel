@@ -34,6 +34,35 @@ Shared files (`AGENTS.md`/`GEMINI.md`) get a marked `<!-- synthcut:… -->` sect
 that re-running the installer updates in place; standalone files need `--force`
 to overwrite.
 
+## Removing what Relo's SynthCut left behind
+
+```bash
+npx @azabonik/synthcut migrate              # list, then ask before removing
+npx @azabonik/synthcut migrate --dry-run    # only list
+npx @azabonik/synthcut migrate --yes        # remove without asking
+```
+
+`migrate` looks in your home folder and in the project folder (`--dir`, default:
+the current folder) for:
+
+- the MCP server entry `ai-video-editor` in Claude Desktop, Claude Code
+  (`~/.claude.json`, `.mcp.json`), Cursor, Windsurf, Gemini CLI, Cline,
+  VS Code (`servers`) and Codex (`~/.codex/config.toml`) configs. An entry is
+  removed only when its name is exactly `ai-video-editor` and it runs SynthCut's
+  MCP server (`…/packages/mcp/dist/index.js` or `…/@aive/mcp/dist/index.js`);
+  an entry with that name that runs another program is left alone;
+- the old skill `video-editor-pro`, at the paths `@relo-video/synthcut` used:
+  `.claude/skills/video-editor-pro/SKILL.md`, `.cursor/rules/synthcut-video-editor-pro.mdc`,
+  `.windsurf/rules/synthcut-video-editor-pro.md`, and the
+  `<!-- synthcut:video-editor-pro:… -->` sections in `AGENTS.md` / `GEMINI.md`.
+
+It copies every file it changes or deletes to `~/.synthcut/backups/legacy-<time>/`
+(with a `manifest.json` of the original paths) first, changes nothing else in
+those files, and only reports files it can't parse (for example JSON with
+comments). Claude Code's `~/.claude.json` entries go through
+`claude mcp remove` when the `claude` command is installed. `add` prints a
+one-line hint when it finds such entries.
+
 The canonical skill lives at [`skill/SKILL.md`](skill/SKILL.md). To use it while
 developing in this repo, run
 `node packages/skill-installer/bin/synthcut.mjs add --client claude --scope project --force`

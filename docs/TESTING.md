@@ -57,11 +57,9 @@ ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 -f lavfi -i sine=fr
 ffmpeg -f lavfi -i "sine=frequency=220:duration=20" -y scratch/music.wav
 ```
 
-For **caption** testing you need real speech. Grab the standard sample:
-
-```powershell
-curl -L -o scratch/jfk.wav https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav
-```
+For **caption** testing the smokes use real speech from the checked-in,
+public-domain `packages/core/scripts/fixtures/jfk.wav` (the whisper.cpp
+sample); pass another spoken-word WAV to `smoke-captions.ts` to try your own.
 
 The auto-reframe and J/L-cut smokes synthesize / download their own media, so
 you don't need to prepare anything for those.
@@ -82,9 +80,17 @@ npx tsx apps/desktop/scripts/smoke-composite.ts                        # composi
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
-# import + stream through the core, and stopping the core it started (needs the build)
+# import + stream through the core, stopping the core it started, and a clear
+# refusal of a port that browsers block (ERR_UNSAFE_PORT, e.g. 5060) for the
+# shell or the core (needs the build)
 npx tsx apps/desktop/scripts/smoke-web.ts
-npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches)
+npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); S/Delete after a split; path bar vs a late listing
+
+# Skill installer: `synthcut migrate` finds and removes only what Relo's SynthCut
+# left (MCP server "ai-video-editor" that runs SynthCut's MCP server, skill
+# "video-editor-pro"), keeps formatting, backs files up, asks first; temp HOME
+# dirs, never the real one
+npx tsx packages/core/scripts/smoke-legacy-migrate.ts
 
 # Security: session-token auth (HTTP/WS) + /file allowlist (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
@@ -156,13 +162,13 @@ npx tsx packages/core/scripts/smoke-masks.ts
 
 # Text overlays + native keyframe-animated text
 npx tsx packages/core/scripts/smoke-text.ts        scratch/a.mp4 scratch/b.mp4
-npx tsx packages/core/scripts/smoke-animtext.ts    scratch/a.mp4
+npx tsx packages/core/scripts/smoke-animtext.ts                        # synthesizes its clip; or pass one
 
 # Audio: background music + ducking
 npx tsx packages/core/scripts/smoke-music.ts       scratch/a.mp4 scratch/b.mp4 scratch/music.wav
 
 # Captions (Whisper), subject-aware auto-reframe (YuNet), J/L cuts
-npx tsx packages/core/scripts/smoke-captions.ts    scratch/jfk.wav
+npx tsx packages/core/scripts/smoke-captions.ts                        # fixtures/jfk.wav; or pass a speech WAV
 npx tsx packages/core/scripts/smoke-reframe.ts
 npx tsx packages/core/scripts/smoke-jlcut.ts
 
@@ -249,6 +255,41 @@ npx tsx packages/core/scripts/smoke-proxy.ts                           # self-sy
 # Remotion motion graphics
 npx tsx packages/core/scripts/smoke-motion.ts
 ```
+
+### The desktop app in Electron (run by hand)
+
+`smoke-electron.mts` launches the real Electron app (`apps/desktop`) with
+Playwright's `_electron` and drives it: a relative and an absolute
+`AIVE_DATA_DIR` (the launcher gives the core an absolute path), import with the
+native dialog stubbed, Add to timeline, Play (the preview's decoder pool seeks
+only a few times and has a frame to draw on most animation frames: no seek
+thrash, no black preview while playing), split then Delete with no piece picked
+(no stale clip id),
+the Project menu and **Storage…**, the native save dialogs (the same extension
+rule as the web picker in `src/savename.ts`, a second overwrite question when
+an extension was added, the preset's container listed first), exports (no
+extension typed → `.mp4`; `.webm` typed with an MP4 preset → VP9 WebM), and the
+unsaved-changes close guard (Save → Save As cancelled keeps the window open;
+Save → saved, then quit; the core it started exits). It fails on renderer
+console errors. The app runs with its own profile (`--user-data-dir` in the
+test folder), so your SynthCut profile and its recent projects are left alone.
+
+```bash
+node node_modules/electron/install.js        # once, if node_modules/electron/dist is missing
+xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+# a packed build instead of the source tree:
+(cd apps/desktop && npx electron-builder --dir --linux)
+SYNTHCUT_APP=$PWD/apps/desktop/build/dist/linux-unpacked/synthcut-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+```
+
+- Needs `npm run build`, FFmpeg on PATH, a display (`xvfb-run` gives one
+  without opening a window) and playwright-core (found like `parity-gl.mts`
+  does; `PLAYWRIGHT_CORE=<dir>` overrides).
+- The core gets a free port unless `AIVE_PORT` is set. Chromium, and so
+  Electron and every Chromium-based browser, refuses some ports
+  (`ERR_UNSAFE_PORT`: 5060, 5061, 6000, 6665–6669, 10080 and others): the app
+  and the web shell now stop with a clear message instead of an "Offline"
+  window when the core is on one.
 
 ### Live preview vs export parity (WebGL2, run by hand)
 
@@ -457,7 +498,7 @@ This verifies the Windows installer ships a self-contained, offline app.
 
 ```powershell
 node apps/desktop/scripts/prepare-bundle.ts        # stage bundled binaries/models (~430 MB)
-npx tsx packages/core/scripts/smoke-bundled.ts     # verify the staged bundle renders OFFLINE
+npx tsx packages/core/scripts/smoke-bundled.ts     # re-runs the staging (cheap), then verifies the bundle renders OFFLINE
 npm run build
 npm run dist --workspace synthcut-desktop          # -> apps/desktop/build/dist/SynthCut-<version>.exe
 ```

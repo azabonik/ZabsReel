@@ -15,6 +15,22 @@ const path = require("node:path");
 
 const require_ = createRequire(__filename);
 
+// Ports that Chromium, and so Electron and Chrome/Edge, refuses to connect to
+// (net::ERR_UNSAFE_PORT; the full list measured with Chromium 14x over 1-65535).
+// A core on one of them still serves MCP clients, but an editor window can't
+// reach it and just shows "Offline".
+const BROWSER_BLOCKED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103,
+  104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513,
+  514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720,
+  1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
+]);
+
+/** True when browsers and Electron refuse connections to this port. */
+function browserBlocksPort(port) {
+  return BROWSER_BLOCKED_PORTS.has(Number(port));
+}
+
 function getDataDir() {
   return path.resolve(process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".synthcut", "data"));
 }
@@ -122,4 +138,4 @@ async function ensureCore(execPath) {
   return { port, token: token || "", owned: true, child };
 }
 
-module.exports = { ensureCore, startCore, getDataDir, coreCliPath, readServerInfo, healthCheck };
+module.exports = { ensureCore, startCore, getDataDir, coreCliPath, readServerInfo, healthCheck, browserBlocksPort };

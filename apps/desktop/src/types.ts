@@ -344,6 +344,7 @@ declare global {
       saveProjectAs: (defaultName: string) => Promise<string | null>;
       onMenu: (cb: (action: string) => void) => void;
       reportProjectState: (state: { dirty: boolean; hasPath: boolean }) => void;
+      reportSaveFailed?: () => void;
       getMcpConfig: () => Promise<{ available: boolean; packaged: boolean; mcpEntry: string | null; json: string }>;
     };
   }

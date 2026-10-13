@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { api, getSnapshot, subscribe, type FileFilter, type FsEntry, type FsListing, type PendingPick, type WebConfig } from "./platform";
 import { resolveSaveName } from "./savename";
+import { PathBarEdits } from "./pathbar";
 import { Alert, ArrowUp, File, Folder, X } from "./icons";
 
 /** Mounted once beside <App/>: renders the picker on demand and the expired-session notice. */
@@ -86,6 +87,8 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   const listRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const loadSeq = useRef(0);
+  /** Edits typed into the path bar: a listing that lands after one keeps the typed text. */
+  const [pathEdits] = useState(() => new PathBarEdits());
 
   const cancel = useCallback(() => request.resolve(null), [request]);
 
@@ -109,12 +112,13 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   /** Show `dir`. Resolves with the error (status + message) if it can't be listed. */
   const load = useCallback(async (dir: string): Promise<{ status?: number; message: string } | null> => {
     const seq = ++loadSeq.current;
+    const typed = pathEdits.mark();
     setLoading(true);
     try {
       const next = await api<FsListing>(`/api/fs/list?path=${encodeURIComponent(dir)}`);
       if (seq !== loadSeq.current) return null;
       setListing(next);
-      setPathInput(next.path);
+      if (pathEdits.listingMayReplace(typed)) setPathInput(next.path);
       setSelected([]);
       setAnchor(null);
       setCursor(0);
@@ -296,7 +300,7 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
           <input
             className="field-input picker-path"
             value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
+            onChange={(e) => { pathEdits.typed(); setPathInput(e.target.value); }}
             onKeyDown={onPathKey}
             spellCheck={false}
             aria-label="Folder path"

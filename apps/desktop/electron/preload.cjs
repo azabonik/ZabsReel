@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("aive", {
   onMenu: (cb) => ipcRenderer.on("menu", (_e, action) => cb(action)),
   /** Report unsaved/has-file state so the main process can guard quit. */
   reportProjectState: (state) => ipcRenderer.send("project:state", state),
+  /** A project save failed: a "Save before closing?" request must not quit on a later save. */
+  reportSaveFailed: () => ipcRenderer.send("project:save-failed"),
   /** Ready-to-paste MCP client config for this exact install (no repo path guessing). */
   getMcpConfig: () => ipcRenderer.invoke("mcp:config"),
 });

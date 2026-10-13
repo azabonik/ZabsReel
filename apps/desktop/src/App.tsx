@@ -16,6 +16,8 @@ import {
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
 import { platform } from "./platform";
+import { presetForPath, presetSwapNote } from "./savename";
+import { clipIsLive, splitFrameFor } from "./editkeys";
 import type { KeyDetection, KeyPatch } from "./keyfx";
 import { EffectStack, type EffectRequest } from "./effectstack";
 import { BlendSelect, MaskGroup, effectiveBlendModeOf, type MaskPatch } from "./maskpanel";
@@ -327,6 +329,12 @@ export function App({ api }: { api: CoreApi }) {
     const path = await platform.openProject();
     if (path) await openProjectPath(path);
   };
+  // Nothing was written: the next state is not a clean baseline, and Electron
+  // must not finish a "Save before closing?" on a later save.
+  const saveFailed = () => {
+    pendingBaseline.current = false;
+    window.aive?.reportSaveFailed?.();
+  };
   const saveProjectAs = async () => {
     setShowProjectMenu(false);
     const path = await platform.saveProjectAs(project?.name || "Untitled");
@@ -334,6 +342,7 @@ export function App({ api }: { api: CoreApi }) {
     pendingBaseline.current = true;
     const ok = await run("Saving project", () => api.rpc("save_project", { path }));
     if (ok !== null) pushRecent(path);
+    else saveFailed();
   };
   const saveProject = async () => {
     setShowProjectMenu(false);
@@ -341,6 +350,7 @@ export function App({ api }: { api: CoreApi }) {
     pendingBaseline.current = true;
     const ok = await run("Saving project", () => api.rpc("save_project", { path: projectPath }));
     if (ok !== null) pushRecent(projectPath);
+    else saveFailed();
   };
   saveRef.current = saveProject;
 
@@ -350,7 +360,7 @@ export function App({ api }: { api: CoreApi }) {
     if (!dirty || !projectPath || !connected) return;
     const t = setTimeout(() => {
       pendingBaseline.current = true;
-      api.rpc("save_project", { path: projectPath }).catch(() => {});
+      api.rpc("save_project", { path: projectPath }).catch(() => { pendingBaseline.current = false; });
     }, 4000);
     return () => clearTimeout(t);
   }, [dirty, projectPath, connected, api]);
@@ -425,15 +435,17 @@ export function App({ api }: { api: CoreApi }) {
     return run("Exporting", async () => {
       const out = await platform.pickSavePath(EXPORT_PRESETS.find((p) => p.id === preset)?.ext);
       if (!out) return;
+      const usePreset = presetForPath(EXPORT_PRESETS, preset, out);
       let r: { path: string; duration: number };
       try {
-        r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(preset ? { preset } : {}) });
+        r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(usePreset ? { preset: usePreset } : {}) });
       } finally {
         // Success, error and cancel all end here; don't rely on a progress event at 100%.
         setProgress(null);
       }
       setError(null);
-      alert(`Exported ${fmt(r.duration)} video to:\n${r.path}`);
+      const note = presetSwapNote(EXPORT_PRESETS, preset, usePreset, out);
+      alert(`Exported ${fmt(r.duration)} video to:\n${r.path}${note ? `\n\n${note}` : ""}`);
     });
   };
 
@@ -577,6 +589,11 @@ export function App({ api }: { api: CoreApi }) {
 
   const seek = useCallback((t: number) => playerRef.current?.seek(t), []);
 
+  // The project as of the latest render: the key handler below is re-subscribed
+  // in an effect, so for a moment after a split it still holds the old clips.
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
   // Keyboard transport + editor shortcuts. Transport keys use the stable
   // playerRef; editing keys (split/delete/undo) read live state, so the effect
   // re-subscribes when the selection or clip list changes.
@@ -591,17 +608,14 @@ export function App({ api }: { api: CoreApi }) {
       if (mod) return; // leave other Ctrl/Cmd combos to the OS/browser
       if ((e.key === "s" || e.key === "S") && selectedClip) {
         e.preventDefault();
-        const clip = clips.find((c) => c.id === selectedClip);
-        if (clip) {
-          const local = Math.round(store.get().playhead * fps) - clip.startFrame;
-          if (local > 0 && local < clipDurationFrames(clip, fps)) splitClipAt(selectedClip, local);
-        }
+        const local = splitFrameFor(projectRef.current, clips, selectedClip, Math.round(store.get().playhead * fps), fps);
+        if (local !== null) splitClipAt(selectedClip, local);
         return;
       }
       // With a bleep chip selected, Delete/Backspace removes ONLY that bleep.
       if ((e.key === "Delete" || e.key === "Backspace") && activeBleep) { e.preventDefault(); removeBleep(activeBleep.clipId, activeBleep.bleep.id); return; }
       if (e.key === "Escape" && activeBleep) { e.preventDefault(); setSelectedBleep(null); return; }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedClip) { e.preventDefault(); removeClip(selectedClip); return; }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedClip && clipIsLive(projectRef.current, selectedClip)) { e.preventDefault(); removeClip(selectedClip); return; }
       // ----- transport -----
       if (e.key === " ") { e.preventDefault(); playerRef.current?.toggle(); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); playerRef.current?.step(e.shiftKey ? -10 : -1); }
@@ -613,6 +627,15 @@ export function App({ api }: { api: CoreApi }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedClip, clips, fps, store, undo, redo, splitClipAt, removeClip, activeBleep, removeBleep]);
+
+  // A split replaces the clip with two new ones, and undo or the AI can remove
+  // it: drop a selection whose clip is gone, so Delete / S never send its id.
+  useEffect(() => {
+    if (selectedClip && project && !project.tracks.some((t) => t.clips.some((c) => c.id === selectedClip))) {
+      setSelectedClip(null);
+      setSelectedBleep(null);
+    }
+  }, [project, selectedClip]);
 
   // The inspector follows the selection on ANY track (base-track clips first),
   // so e.g. a detached-audio clip's bleeps can be edited too.
