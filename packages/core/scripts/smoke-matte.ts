@@ -3,16 +3,21 @@
  * Turns a portrait still into a ~3 s clip (slow zoom, so frames differ, plus a
  * tone so there is audio), puts it on V2 over a solid RED V1 clip, runs
  * removeBackground, and verifies:
- *   - the job completes; the baked asset is FFV1 with an alpha pix_fmt and the
- *     clip now points at it,
+ *   - the job completes in a WORKER THREAD while the core's event loop stays
+ *     free (timer lateness measured during the job; the same job forced onto
+ *     the main thread with AIVE_RVM_INLINE=1 is measured for comparison),
+ *   - only the person's MATTE is baked (FFV1 gray + the span's audio) and the
+ *     cutout asset records the original footage as its colour,
  *   - in the EXPORT a pixel inside the face is NOT red (and keeps its colour)
  *     while background pixels ARE red — the background was removed and V1
  *     shows through,
- *   - the .webm preview proxy exists with an alpha VP8 stream and audio,
+ *   - the .webm preview proxy exists with an alpha VP8 stream and audio, and
+ *     generate_proxy on the cutout keeps it transparent,
+ *   - storage GC counts the matte and the proxy as used,
  *   - undo restores the original asset,
  *   - the downscaled path (forced with a small processing cap) gives a
- *     full-resolution cutout that passes the same pixel checks,
- *   - cancel_job stops a run and leaves no partial files behind,
+ *     full-resolution matte that passes the same pixel checks,
+ *   - cancel_job stops a run promptly and leaves no partial files behind,
  *   - the remove_background RPC works in background mode and refuses a re-run.
  *
  * Run: npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
@@ -29,6 +34,7 @@ import { EditorEngine } from "../src/engine.js";
 import { dispatch } from "../src/rpc.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg, FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
+import { referencedManagedPaths } from "../src/storage.js";
 
 const W = 1280;
 const H = 720;
@@ -59,7 +65,10 @@ async function sample(file: string, t: number, x: number, y: number, size = 16):
   return [b[0], b[1], b[2]];
 }
 
+/** Background points: the red V1 shows through (tolerant of a faint matte residue). */
 const isRed = ([r, g, b]: RGB) => r > 140 && g < 110 && b < 110;
+/** The face: not the red V1 itself — strict, since a warm skin tone in a random portrait can pass the tolerant test. */
+const isPureRed = ([r, g, b]: RGB) => r > 200 && g < 60 && b < 60;
 const diff = (a: RGB, b: RGB) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
 
 async function streams(file: string): Promise<{ codec_type: string; codec_name: string; pix_fmt?: string; tags?: Record<string, string> }[]> {
@@ -81,13 +90,32 @@ async function verifyExport(engine: EditorEngine, dir: string, name: string, fac
   const t = DUR / 2;
   const face = await sample(out, t, FACE.x, FACE.y);
   console.log(`   face rgb(${face.join(",")}) vs source rgb(${faceRef.join(",")})`);
-  check(!isRed(face), "a pixel inside the face is NOT red (the person was kept)");
+  check(!isPureRed(face), "a pixel inside the face is NOT the red background (the person was kept)");
   check(diff(face, faceRef) < 60, "the face keeps its original colour (opaque, no tint or fringe)");
   for (const p of BG_POINTS) {
     const px = await sample(out, t, p.x, p.y);
     console.log(`   ${p.name}: rgb(${px.join(",")})`);
     check(isRed(px), `${p.name} IS red (background removed, V1 shows through)`);
   }
+}
+
+/** Lateness of a 10 ms timer: how long the event loop was busy (an RPC would have waited as long). */
+function lagMeter(): { stop: () => { p50: number; p99: number; max: number } } {
+  const late: number[] = [];
+  let expect = performance.now() + 10;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    late.push(Math.max(0, now - expect));
+    expect = now + 10;
+  }, 10);
+  return {
+    stop: () => {
+      clearInterval(timer);
+      const s = [...late].sort((a, b) => a - b);
+      const q = (p: number) => s[Math.min(s.length - 1, Math.floor(p * s.length))] ?? 0;
+      return { p50: q(0.5), p99: q(0.99), max: s[s.length - 1] ?? 0 };
+    },
+  };
 }
 
 async function resolvePortrait(dir: string): Promise<string> {
@@ -156,19 +184,26 @@ async function main() {
   const spanFrames = clip.sourceOutFrame - clip.sourceInFrame;
   const faceRef = await sample(person, DUR / 2, FACE.x, FACE.y);
 
-  console.log("1. remove the background (native-resolution path)...");
+  console.log("1. remove the background (native-resolution path, inference in a worker thread)...");
+  const lag = lagMeter();
   const r = await engine.removeBackground(clip.id);
+  const lagWorker = lag.stop();
   console.log(
     `   ${r.frames} frames at ${r.procWidth}x${r.procHeight} in ${r.seconds.toFixed(1)}s ` +
       `(${(r.frames / r.seconds).toFixed(1)} fps, ${(r.seconds / DUR).toFixed(1)}× realtime); ` +
-      `FFV1 ${(statSync(r.asset.path).size / 1e6).toFixed(1)} MB`,
+      `matte ${(statSync(r.asset.path).size / 1e6).toFixed(2)} MB + preview ${(statSync(r.asset.proxyPath!).size / 1e6).toFixed(2)} MB`,
   );
   const job = engine.jobs.list().find((j) => j.type === "matte");
   check(job?.status === "done", `matte job completed (status ${job?.status})`);
+  check(r.runner === "worker", `inference ran in a worker thread (${r.runner})`);
+  console.log(`   event loop during the job: timer lateness p50 ${lagWorker.p50.toFixed(1)} ms, p99 ${lagWorker.p99.toFixed(1)} ms, max ${lagWorker.max.toFixed(1)} ms`);
+  // p99, not max: on a loaded machine the OS can still deschedule the main thread now and then.
+  check(lagWorker.p99 < 50, `the core's event loop stays free while RVM runs (p99 lateness ${lagWorker.p99.toFixed(1)} ms)`);
   const baked = await streams(r.asset.path);
   const bv = baked.find((s) => s.codec_type === "video");
-  check(bv?.codec_name === "ffv1" && !!bv.pix_fmt?.startsWith("yuva"), `baked cutout is FFV1 with alpha (${bv?.codec_name} ${bv?.pix_fmt})`);
-  check(baked.some((s) => s.codec_type === "audio"), "baked cutout keeps the source audio");
+  check(bv?.codec_name === "ffv1" && bv.pix_fmt === "gray", `only the matte is baked: FFV1 gray (${bv?.codec_name} ${bv?.pix_fmt})`);
+  check(baked.some((s) => s.codec_type === "audio"), "the matte file keeps the span's audio");
+  check(r.asset.cutout?.colorPath === person && r.asset.cutout.colorStart === 0, "the cutout's colour is the original footage", r.asset.cutout);
   check(!r.downscaled && r.width === W && r.height === H, "processed at native resolution");
   const after = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)!;
   check(after.assetId === r.asset.id, "the clip now points at the cutout");
@@ -191,13 +226,24 @@ async function main() {
   const undone = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)!;
   check(undone.assetId === aPerson.id, "clip points at the original asset again");
 
-  console.log("5. downscaled path (processing capped at 640px, alpha upscaled onto full-res colour)...");
+  console.log("5. downscaled path (processing capped at 640px, matte scaled up to the full-res colour)...");
   const r2 = await engine.removeBackground(clip.id, { maxLongEdge: 640 });
   console.log(`   ${r2.frames} frames at ${r2.procWidth}x${r2.procHeight} → ${r2.width}x${r2.height} in ${r2.seconds.toFixed(1)}s (${(r2.frames / r2.seconds).toFixed(1)} fps)`);
   check(r2.downscaled && r2.procWidth === 640 && r2.width === W && r2.height === H, "downscaled processing, full-resolution output");
   const b2 = (await streams(r2.asset.path)).find((s) => s.codec_type === "video");
-  check(b2?.codec_name === "ffv1" && !!b2.pix_fmt?.startsWith("yuva"), `downscaled cutout is FFV1 with alpha (${b2?.pix_fmt})`);
+  check(b2?.codec_name === "ffv1" && b2.pix_fmt === "gray", `downscaled matte is FFV1 gray (${b2?.pix_fmt})`);
   await verifyExport(engine, dir, "downscaled", faceRef);
+  engine.undo();
+
+  console.log("5b. the same job forced onto the main thread (AIVE_RVM_INLINE=1), for comparison...");
+  process.env.AIVE_RVM_INLINE = "1";
+  const lag2 = lagMeter();
+  const r3 = await engine.removeBackground(clip.id);
+  const lagInline = lag2.stop();
+  delete process.env.AIVE_RVM_INLINE;
+  check(r3.runner === "inline", `runner is inline (${r3.runner})`);
+  console.log(`   event loop with inference on the main thread: p50 ${lagInline.p50.toFixed(1)} ms, p99 ${lagInline.p99.toFixed(1)} ms, max ${lagInline.max.toFixed(1)} ms (worker: max ${lagWorker.max.toFixed(1)} ms)`);
+  check(lagInline.p99 > lagWorker.p99 * 2 && lagInline.max > lagWorker.max, "the worker thread is what keeps the event loop free");
   engine.undo();
 
   console.log("6. cancel_job stops a run and cleans up...");
@@ -206,9 +252,12 @@ async function main() {
   const filesBefore = cutouts();
   const { job: j3, promise } = engine.startRemoveBackgroundJob(clip.id);
   await new Promise((res) => setTimeout(res, 1500));
+  const tCancel = performance.now();
   engine.jobs.cancel(j3.id);
   const outcome = await promise.then(() => "resolved", (err: Error) => err.message);
+  const cancelMs = performance.now() - tCancel;
   check(outcome !== "resolved", `canceled run rejects (${outcome})`);
+  check(cancelMs < 2000, `cancel stops inference promptly (${cancelMs.toFixed(0)} ms)`);
   check(engine.jobs.get(j3.id)?.status === "canceled", "job status is canceled");
   check(JSON.stringify(cutouts()) === JSON.stringify(filesBefore), "no partial cutout files left behind");
   const untouched = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)!;
@@ -222,6 +271,17 @@ async function main() {
   check(viaRpc?.status === "done" && (viaRpc.result as { clipId?: string })?.clipId === clip.id, "the background job finished and reports the clip");
   const again = await dispatch(engine, "remove_background", { clipId: clip.id }).then(() => "resolved", (err: Error) => err.message);
   check(/already has its background removed/.test(again), "re-running on a cutout is refused with a teaching error");
+
+  console.log("8. generate_proxy keeps the cutout transparent; storage GC counts the matte and proxy as used...");
+  const cutAsset = engine.getProject().assets.find((a) => a.id === (viaRpc!.result as { assetId: string }).assetId)!;
+  const regen = (await dispatch(engine, "generate_proxy", { assetId: cutAsset.id })) as { asset: { proxyPath?: string } };
+  const rs = (await streams(regen.asset.proxyPath!)).find((s) => s.codec_type === "video");
+  check(
+    !!regen.asset.proxyPath?.endsWith(".webm") && rs?.codec_name === "vp8" && (rs.tags?.alpha_mode ?? rs.tags?.ALPHA_MODE) === "1",
+    `generate_proxy on the cutout keeps the preview transparent (${regen.asset.proxyPath?.split("/").pop()})`,
+  );
+  const refs = referencedManagedPaths(dir, [engine.getProject()]);
+  check(refs.has(cutAsset.path) && refs.has(regen.asset.proxyPath!), "storage GC counts the matte and the proxy as used");
 
   console.log("\nMATTE SMOKE TEST PASSED");
 }

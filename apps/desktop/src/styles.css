@@ -972,6 +972,7 @@ input[type="range"]:disabled { opacity: 0.45; }
 .prog-bar { flex: 1; height: 5px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
 .prog-fill { height: 100%; background: var(--accent); border-radius: 999px; transform-origin: left; transform: scaleX(var(--p, 0)); transition: transform 0.25s var(--ease); }
 .prog .pct { font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; color: var(--ink-2); }
+.prog .spacer { flex: 1; }
 
 .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--surface-3); border-top-color: currentColor; border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

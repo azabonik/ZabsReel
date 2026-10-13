@@ -1,13 +1,14 @@
 import { mkdir, access, rename, rm, stat } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { createHash } from "node:crypto";
-import { Readable, type Writable } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { execa } from "execa";
-import ort from "onnxruntime-node";
-import { FFMPEG_BIN, FfmpegError, ffmpegStderrDetail } from "../ffmpeg/executor.js";
+import { Worker } from "node:worker_threads";
+import { FfmpegError } from "../ffmpeg/executor.js";
+import { runMattePipeline, type PipelineOptions, type PipelineStats } from "./rvm-pipeline.js";
+import type { MainToWorker, WorkerToMain } from "./rvm-worker.js";
 
 /**
  * AI background removal for PEOPLE with Robust Video Matting (RVM, GPL-3.0 —
@@ -19,10 +20,13 @@ import { FFMPEG_BIN, FfmpegError, ffmpegStderrDetail } from "../ffmpeg/executor.
  * next frame's r1i..r4i, which is what keeps the matte temporally stable. So
  * frames go through strictly in order and the state starts from zeros per run.
  *
- * Pipeline: decoder ffmpeg → raw RGB frames on stdout → ORT per frame → the
- * encoder ffmpeg's stdin → FFV1 yuva420p .mkv (lossless, with alpha), with the
- * source audio remuxed. Runs fully locally; the model (~15 MB) is downloaded
- * once, verified (size + SHA-256) and cached with the other ONNX models.
+ * Pipeline (rvm-pipeline.ts, run in a worker thread by rvm-worker.ts):
+ * decoder ffmpeg → raw RGB frames → ORT per frame → the encoder ffmpeg's stdin
+ * → the person's MATTE as a lossless FFV1 gray .mkv, with the span's audio
+ * remuxed. The colour is not stored: the cutout asset points back at the
+ * original footage, and renders alphamerge the two (ffmpeg/cutout.ts). Runs
+ * fully locally; the model (~15 MB) is downloaded once, verified (size +
+ * SHA-256) and cached with the other ONNX models.
  */
 
 const MODEL_FILE = "rvm_mobilenetv3_fp32.onnx";
@@ -128,209 +132,6 @@ export async function ensureRvmModel(): Promise<string> {
   return path;
 }
 
-let sessionPromise: Promise<ort.InferenceSession> | null = null;
-
-/** The process-wide RVM session (created once; retried if creation failed). */
-function rvmSession(): Promise<ort.InferenceSession> {
-  if (!sessionPromise) {
-    const p = ensureRvmModel().then((path) => ort.InferenceSession.create(path));
-    sessionPromise = p;
-    p.catch(() => {
-      if (sessionPromise === p) sessionPromise = null;
-    });
-  }
-  return sessionPromise;
-}
-
-/** RVM's recommended downsample_ratio for a processed long edge. */
-function downsampleRatio(longEdge: number): number {
-  if (longEdge >= 1700) return 0.25;
-  if (longEdge >= 1100) return 0.375;
-  return 0.5;
-}
-
-/** Round down to an even size (yuv420 needs even dimensions); never upscales. */
-function evenFloor(n: number): number {
-  return Math.max(2, 2 * Math.floor(n / 2));
-}
-
-/**
- * Reassembles exact-size frames from a rawvideo byte stream (pipe chunks never
- * line up with frame boundaries) and keeps a short read-ahead queue, so the
- * decoder keeps working while a frame is in inference. The stream is paused
- * while the queue is full.
- */
-class FrameReader {
-  private readonly queue: Buffer[] = [];
-  private cur: Buffer;
-  private filled = 0;
-  private ended = false;
-  private error: Error | null = null;
-  private waiter: (() => void) | null = null;
-
-  constructor(
-    private readonly stream: Readable,
-    private readonly frameBytes: number,
-    private readonly maxQueued = 3,
-  ) {
-    this.cur = Buffer.allocUnsafe(frameBytes);
-    stream.on("data", (chunk: Buffer) => this.push(chunk));
-    stream.on("end", () => this.finish());
-    stream.on("close", () => this.finish());
-    stream.on("error", (err: Error) => {
-      this.error = err;
-      this.finish();
-    });
-  }
-
-  private push(chunk: Buffer): void {
-    let off = 0;
-    while (off < chunk.length) {
-      const n = Math.min(this.frameBytes - this.filled, chunk.length - off);
-      chunk.copy(this.cur, this.filled, off, off + n);
-      this.filled += n;
-      off += n;
-      if (this.filled === this.frameBytes) {
-        this.queue.push(this.cur);
-        this.cur = Buffer.allocUnsafe(this.frameBytes);
-        this.filled = 0;
-      }
-    }
-    if (this.queue.length >= this.maxQueued) this.stream.pause();
-    this.wake();
-  }
-
-  private finish(): void {
-    this.ended = true;
-    this.wake();
-  }
-
-  private wake(): void {
-    const w = this.waiter;
-    this.waiter = null;
-    w?.();
-  }
-
-  /** The next complete frame, or null at end of stream (a trailing partial frame is dropped). */
-  async next(): Promise<Buffer | null> {
-    for (;;) {
-      const frame = this.queue.shift();
-      if (frame) {
-        if (this.queue.length < this.maxQueued) this.stream.resume();
-        return frame;
-      }
-      if (this.error) throw this.error;
-      if (this.ended) return null;
-      await new Promise<void>((resolve) => {
-        this.waiter = resolve;
-      });
-    }
-  }
-}
-
-/** Resolve once `buf` is flushed to the pipe — this is the backpressure on the encoder. */
-function writeFrame(stdin: Writable, buf: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    stdin.write(buf, (err) => (err ? reject(err) : resolve()));
-  });
-}
-
-/** Errors that only mean "the other end of the pipe went away". */
-function isPipeError(err: unknown): boolean {
-  const code = (err as { code?: string } | null)?.code;
-  return code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END" || code === "ECONNRESET";
-}
-
-function ffmpegFailure(err: unknown, role: string, args: string[]): Error {
-  const e = err as { stderr?: unknown; shortMessage?: string; message?: string };
-  const stderr = typeof e.stderr === "string" ? e.stderr : "";
-  const detail = ffmpegStderrDetail(stderr);
-  return new FfmpegError(
-    `Background removal ${role} failed: ${detail || e.shortMessage || e.message || "unknown error"}`,
-    `${FFMPEG_BIN} ${args.join(" ")}`,
-    stderr,
-  );
-}
-
-/** Alpha-0 pixels at least one block (BLOCK = 1 << BLOCK_SHIFT px) from any visible pixel are flattened. */
-const BLOCK_SHIFT = 4;
-const BLOCK = 1 << BLOCK_SHIFT;
-const INV255 = 1 / 255;
-
-/** 0..255 byte from a float, clamped and rounded. */
-function toByte(v: number): number {
-  return v <= 0 ? 0 : v >= 255 ? 255 : (v + 0.5) | 0;
-}
-
-/**
- * Build one RGBA cutout frame. Opaque interior keeps the source pixels; toward
- * the edge (alpha < 1) it blends to RVM's foreground estimate `fgr`, which has
- * the old background colour removed from hair and edges. Fully transparent
- * blocks well away from the subject are flattened to black: invisible, but the
- * lossless FFV1 output then spends almost no bits on the removed background.
- * Runs once per frame on ~2 M pixels, so it writes each pixel as one 32-bit
- * word (little-endian → bytes R,G,B,A — every platform Node ships on).
- */
-function cutoutFrame(rgb: Buffer, fgr: Float32Array, pha: Float32Array, w: number, h: number): Buffer {
-  const n = w * h;
-  const out = Buffer.allocUnsafe(n * 4);
-  const px = new Uint32Array(out.buffer, out.byteOffset, n);
-  const bw = (w + BLOCK - 1) >> BLOCK_SHIFT;
-  const bh = (h + BLOCK - 1) >> BLOCK_SHIFT;
-  const visible = new Uint8Array(bw * bh);
-  for (let y = 0, i = 0; y < h; y++) {
-    const brow = (y >> BLOCK_SHIFT) * bw;
-    for (let x = 0; x < w; x++, i++) {
-      const a = pha[i];
-      const s = i * 3;
-      if (a >= 0.998) {
-        px[i] = rgb[s] | (rgb[s + 1] << 8) | (rgb[s + 2] << 16) | (255 << 24);
-        visible[brow + (x >> BLOCK_SHIFT)] = 1;
-        continue;
-      }
-      // Weight of the foreground estimate: 0 when opaque, 1 at alpha ≤ 0.9.
-      const k = a >= 0.9 ? (1 - a) * 10 : 1;
-      const alpha = toByte(a * 255);
-      px[i] =
-        toByte(rgb[s] + (fgr[i] * 255 - rgb[s]) * k) |
-        (toByte(rgb[s + 1] + (fgr[n + i] * 255 - rgb[s + 1]) * k) << 8) |
-        (toByte(rgb[s + 2] + (fgr[2 * n + i] * 255 - rgb[s + 2]) * k) << 16) |
-        (alpha << 24);
-      if (alpha !== 0) visible[brow + (x >> BLOCK_SHIFT)] = 1;
-    }
-  }
-  for (let by = 0; by < bh; by++) {
-    for (let bx = 0; bx < bw; bx++) {
-      let near = 0;
-      for (let dy = -1; dy <= 1 && !near; dy++) {
-        const yy = by + dy;
-        if (yy < 0 || yy >= bh) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = bx + dx;
-          if (xx >= 0 && xx < bw && visible[yy * bw + xx]) {
-            near = 1;
-            break;
-          }
-        }
-      }
-      if (near) continue;
-      const y1 = Math.min(h, (by + 1) * BLOCK);
-      const x0 = bx * BLOCK;
-      const x1 = Math.min(w, x0 + BLOCK);
-      for (let y = by * BLOCK; y < y1; y++) out.fill(0, (y * w + x0) * 4, (y * w + x1) * 4);
-    }
-  }
-  return out;
-}
-
-/** One gray (alpha-only) frame from RVM's `pha`, for the downscaled path. */
-function alphaFrame(pha: Float32Array): Buffer {
-  const out = Buffer.allocUnsafe(pha.length);
-  const px = new Uint8ClampedArray(out.buffer, out.byteOffset, out.length);
-  for (let i = 0; i < pha.length; i++) px[i] = pha[i] * 255;
-  return out;
-}
-
 export interface MatteOptions {
   /** Source media file. */
   input: string;
@@ -345,176 +146,155 @@ export interface MatteOptions {
   fps: number;
   /** Remux the source's first audio stream (same span) into the output. */
   withAudio: boolean;
-  /** Output path — an .mkv (FFV1 yuva420p + AAC). Deleted on error/cancel. */
+  /** Output path — an .mkv: the matte (FFV1 gray) + the span's audio (FLAC). Deleted on error/cancel. */
   outPath: string;
   signal: AbortSignal;
   /** 0..1 as frames are processed (frames done / expected frames). */
   onProgress?: (fraction: number) => void;
   /**
    * Internal: processing long-edge cap (default {@link RVM_MAX_LONG_EDGE}).
-   * Larger sources are matted at the capped size and only the alpha is scaled
-   * back up and merged with the full-resolution source. Tests lower it to
-   * exercise that path on small media.
+   * Larger sources are matted at the capped size and only the matte is scaled
+   * back up to the source size. Tests lower it to exercise that path on small
+   * media.
    */
   maxLongEdge?: number;
+  /**
+   * Internal (tests): a deterministic stand-in matte (a soft luma key of each
+   * frame) instead of RVM, so the whole pipeline runs without the model.
+   */
+  stubMatte?: boolean;
 }
 
-export interface MatteStats {
-  /** Frames matted and written. */
-  frames: number;
-  /** Output (baked) frame size. */
-  width: number;
-  height: number;
-  /** Size RVM ran at. */
-  procWidth: number;
-  procHeight: number;
-  /** True when the source exceeded the cap (alpha upscaled + merged with the full-res source). */
-  downscaled: boolean;
-  /** Wall-clock seconds for the whole matte + encode. */
-  seconds: number;
+export interface MatteStats extends PipelineStats {
+  /** Where inference ran: a worker thread (normal) or the calling thread (fallback / AIVE_RVM_INLINE=1). */
+  runner: "worker" | "inline";
+}
+
+/** How long a canceled worker gets to stop its ffmpeg children and clean up before it is terminated. */
+const CANCEL_GRACE_MS = 5000;
+
+/** The worker entry next to this module (.ts when running from source under tsx, .js from dist). */
+function workerUrl(): URL {
+  return new URL(import.meta.url.endsWith(".ts") ? "./rvm-worker.ts" : "./rvm-worker.js", import.meta.url);
+}
+
+function fromWorkerError(e: { name: string; message: string; command?: string; stderr?: string }): Error {
+  if (e.name === "FfmpegError") return new FfmpegError(e.message, e.command ?? "", e.stderr ?? "");
+  const err = new Error(e.message);
+  err.name = e.name;
+  return err;
+}
+
+function killAll(pids: number[]): void {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+type WorkerOutcome = { kind: "done"; stats: PipelineStats } | { kind: "unavailable"; reason: string };
+
+/**
+ * Run the pipeline in a worker thread. Resolves `unavailable` only when the
+ * worker failed before the model was loaded (no ORT in a worker on this
+ * platform), so the caller can fall back to the calling thread; every later
+ * failure rejects. Cancel asks the worker to stop (it kills its ffmpeg
+ * children and deletes the partial output); a worker that doesn't answer in
+ * time is terminated and its children killed here.
+ */
+function runInWorker(data: PipelineOptions, opts: MatteOptions): Promise<WorkerOutcome> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(workerUrl(), { workerData: data });
+    } catch (err) {
+      resolve({ kind: "unavailable", reason: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    let ready = false;
+    let settled = false;
+    let pids: number[] = [];
+    let graceTimer: NodeJS.Timeout | undefined;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      opts.signal.removeEventListener("abort", onAbort);
+      void worker.terminate().catch(() => {});
+      fn();
+    };
+    const onAbort = () => {
+      worker.postMessage({ type: "cancel" } satisfies MainToWorker);
+      graceTimer = setTimeout(() => {
+        killAll(pids);
+        void rm(data.outPath, { force: true }).catch(() => {});
+        finish(() => reject(new Error("Background removal canceled")));
+      }, CANCEL_GRACE_MS);
+    };
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
+    worker.on("message", (m: WorkerToMain) => {
+      if (m.type === "ready") ready = true;
+      else if (m.type === "pids") pids = m.pids;
+      else if (m.type === "progress") opts.onProgress?.(m.fraction);
+      else if (m.type === "done") finish(() => resolve({ kind: "done", stats: m.stats }));
+      else if (m.type === "error") {
+        const err = opts.signal.aborted ? new Error("Background removal canceled") : fromWorkerError(m.error);
+        if (!ready && !opts.signal.aborted && !(err instanceof FfmpegError)) finish(() => resolve({ kind: "unavailable", reason: err.message }));
+        else finish(() => reject(err));
+      }
+    });
+    worker.on("error", (err) => {
+      if (!ready && !opts.signal.aborted) finish(() => resolve({ kind: "unavailable", reason: err.message }));
+      else {
+        killAll(pids);
+        void rm(data.outPath, { force: true }).catch(() => {});
+        finish(() => reject(opts.signal.aborted ? new Error("Background removal canceled") : err));
+      }
+    });
+    worker.on("exit", (code) => {
+      if (settled) return;
+      killAll(pids);
+      void rm(data.outPath, { force: true }).catch(() => {});
+      if (!ready && !opts.signal.aborted) finish(() => resolve({ kind: "unavailable", reason: `worker exited with code ${code}` }));
+      else finish(() => reject(opts.signal.aborted ? new Error("Background removal canceled") : new Error(`Background removal worker stopped unexpectedly (exit code ${code})`)));
+    });
+  });
 }
 
 /**
- * Matte a span of a video with RVM and bake a transparent cutout to
- * `opts.outPath`. Streams frames through two ffmpeg processes (never holding
- * the clip in memory), honours encoder backpressure, and stops promptly on
- * `opts.signal` (both processes killed, partial output deleted).
- *
- * - Native path (source long edge ≤ cap, the common case): RGBA frames built
- *   from RVM's foreground + alpha are encoded directly.
- * - Downscaled path (source larger than the cap): only the alpha is written;
- *   the encoder scales it to the source size and alphamerges it with the
- *   full-resolution source (opened again with the same seek/span/fps), so
- *   colour stays full resolution.
+ * Matte a span of a video with RVM and bake the person's MATTE to
+ * `opts.outPath` (lossless FFV1 gray, one frame per frame of the span at the
+ * source size, plus the span's audio). Inference runs in a worker thread so
+ * the core stays responsive; it stops promptly on `opts.signal` (ffmpeg
+ * children killed, partial output deleted). Sources over the cap are matted
+ * at the capped size and the matte is scaled up to the source size.
  */
 export async function matteVideo(opts: MatteOptions): Promise<MatteStats> {
-  const t0 = Date.now();
-  const canceled = () => new Error("Background removal canceled");
-  const cap = opts.maxLongEdge ?? RVM_MAX_LONG_EDGE;
-  const longEdge = Math.max(opts.srcW, opts.srcH);
-  const downscaled = longEdge > cap;
-  const outW = evenFloor(opts.srcW);
-  const outH = evenFloor(opts.srcH);
-  const w = downscaled ? evenFloor(Math.round((opts.srcW * cap) / longEdge)) : outW;
-  const h = downscaled ? evenFloor(Math.round((opts.srcH * cap) / longEdge)) : outH;
-  const rate = String(Math.round(opts.fps * 1e6) / 1e6);
-  const ss = opts.sourceIn.toFixed(6);
-  const span = opts.span.toFixed(6);
-  const expected = Math.max(1, Math.round(opts.span * opts.fps));
-
-  const session = await rvmSession();
-  if (opts.signal.aborted) throw canceled();
-
-  // Decode at the asset's own fps to a fixed-size RGB stream. YCbCr→RGB here and
-  // RGB→YCbCr in the encoder both use BT.709, so opaque pixels round-trip to the
-  // source's own YUV values whatever its (often untagged) matrix was.
-  const decArgs = [
-    "-hide_banner", "-loglevel", "error", "-nostdin",
-    "-ss", ss, "-t", span, "-i", opts.input,
-    "-map", "0:v:0",
-    "-vf", `fps=${rate},scale=${w}:${h}:in_color_matrix=bt709,format=rgb24`,
-    "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
-  ];
-  const encArgs = ["-hide_banner", "-loglevel", "error"];
-  if (downscaled) {
-    encArgs.push(
-      "-f", "rawvideo", "-pix_fmt", "gray", "-s", `${w}x${h}`, "-r", rate, "-i", "pipe:0",
-      "-ss", ss, "-t", span, "-i", opts.input,
-      "-filter_complex",
-      // Same fps= as the decoder so frame N of the source pairs with alpha frame N.
-      `[1:v]fps=${rate},setpts=PTS-STARTPTS,scale=${outW}:${outH},format=yuva420p[base];` +
-        `[0:v]setpts=PTS-STARTPTS,scale=${outW}:${outH}:flags=bilinear,format=gray[alpha];` +
-        `[base][alpha]alphamerge[v]`,
-      "-map", "[v]",
-    );
-    if (opts.withAudio) encArgs.push("-map", "1:a:0");
-  } else {
-    encArgs.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${w}x${h}`, "-r", rate, "-i", "pipe:0");
-    if (opts.withAudio) encArgs.push("-ss", ss, "-t", span, "-i", opts.input);
-    encArgs.push("-map", "0:v:0");
-    if (opts.withAudio) encArgs.push("-map", "1:a:0");
-    encArgs.push("-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p");
+  const modelPath = opts.stubMatte ? "" : await ensureRvmModel();
+  if (opts.signal.aborted) throw new Error("Background removal canceled");
+  const data: PipelineOptions = {
+    input: opts.input,
+    sourceIn: opts.sourceIn,
+    span: opts.span,
+    srcW: opts.srcW,
+    srcH: opts.srcH,
+    fps: opts.fps,
+    withAudio: opts.withAudio,
+    outPath: opts.outPath,
+    maxLongEdge: opts.maxLongEdge ?? RVM_MAX_LONG_EDGE,
+    modelPath,
+    ...(opts.stubMatte ? { stubMatte: true } : {}),
+  };
+  if (process.env.AIVE_RVM_INLINE !== "1") {
+    const outcome = await runInWorker(data, opts);
+    if (outcome.kind === "done") return { ...outcome.stats, runner: "worker" };
+    process.stderr.write(`[matte] worker thread unavailable (${outcome.reason}); matting on the main thread\n`);
+    if (opts.signal.aborted) throw new Error("Background removal canceled");
   }
-  // FFV1 is lossless and keeps alpha; -g 1 makes every frame a keyframe so
-  // trimmed clips seek instantly in export/preview renders.
-  encArgs.push("-c:v", "ffv1", "-level", "3", "-slices", "16", "-g", "1", "-pix_fmt", "yuva420p");
-  if (opts.withAudio) encArgs.push("-c:a", "aac", "-b:a", "192k");
-  else encArgs.push("-an");
-  encArgs.push("-y", opts.outPath);
-
-  const decoder = execa(FFMPEG_BIN, decArgs, {
-    reject: true,
-    stdin: "ignore",
-    buffer: { stdout: false, stderr: true },
-    cancelSignal: opts.signal,
-  });
-  const encoder = execa(FFMPEG_BIN, encArgs, {
-    reject: true,
-    stdout: "ignore",
-    buffer: { stderr: true },
-    cancelSignal: opts.signal,
-  });
-  // Failures are inspected below once both have settled; never leave them unhandled.
-  decoder.catch(() => {});
-  encoder.catch(() => {});
-  const stdin = encoder.stdin!;
-  stdin.on("error", () => {}); // EPIPE surfaces via the write callback + the encoder's exit
-
-  const n = w * h;
-  const src = new Float32Array(3 * n);
-  const srcTensor = new ort.Tensor("float32", src, [1, 3, h, w]);
-  const ratio = new ort.Tensor("float32", new Float32Array([downsampleRatio(Math.max(w, h))]), [1]);
-  const zero = () => new ort.Tensor("float32", new Float32Array(1), [1, 1, 1, 1]);
-  let rec: Record<"r1i" | "r2i" | "r3i" | "r4i", ort.Tensor> = { r1i: zero(), r2i: zero(), r3i: zero(), r4i: zero() };
-
-  const reader = new FrameReader(decoder.stdout!, n * 3);
-  let frames = 0;
-  let pending: Promise<void> | null = null;
-  let failure: unknown = null;
-  try {
-    for (;;) {
-      if (opts.signal.aborted) break;
-      const rgb = await reader.next();
-      if (!rgb || opts.signal.aborted) break;
-      for (let i = 0, j = 0; i < n; i++, j += 3) {
-        src[i] = rgb[j] * INV255;
-        src[n + i] = rgb[j + 1] * INV255;
-        src[2 * n + i] = rgb[j + 2] * INV255;
-      }
-      const out = await session.run({ src: srcTensor, ...rec, downsample_ratio: ratio });
-      rec = { r1i: out.r1o, r2i: out.r2o, r3i: out.r3o, r4i: out.r4o };
-      const pha = out.pha.data as Float32Array;
-      const frame = downscaled ? alphaFrame(pha) : cutoutFrame(rgb, out.fgr.data as Float32Array, pha, w, h);
-      // Keep one write in flight: the encoder compresses frame N while RVM runs N+1.
-      if (pending) await pending;
-      pending = writeFrame(stdin, frame);
-      pending.catch(() => {});
-      frames++;
-      opts.onProgress?.(Math.min(0.99, frames / expected));
-    }
-    if (pending) await pending;
-  } catch (err) {
-    failure = err;
-  }
-
-  try {
-    if (failure || opts.signal.aborted) {
-      decoder.kill();
-      encoder.kill();
-    }
-    stdin.end();
-    const [dec, enc] = await Promise.allSettled([decoder, encoder]);
-    if (opts.signal.aborted) throw canceled();
-    if (failure && !isPipeError(failure)) throw failure;
-    if (enc.status === "rejected") throw ffmpegFailure(enc.reason, "encoder", encArgs);
-    if (dec.status === "rejected") throw ffmpegFailure(dec.reason, "decoder", decArgs);
-    if (failure) throw failure;
-    if (frames === 0) throw new Error("Background removal decoded no video frames from the clip's source span");
-  } catch (err) {
-    await rm(opts.outPath, { force: true });
-    throw err;
-  }
-
-  opts.onProgress?.(1);
-  return { frames, width: outW, height: outH, procWidth: w, procHeight: h, downscaled, seconds: (Date.now() - t0) / 1000 };
+  const stats = await runMattePipeline(data, opts.signal, { onProgress: opts.onProgress });
+  return { ...stats, runner: "inline" };
 }

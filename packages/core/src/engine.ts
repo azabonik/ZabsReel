@@ -12,6 +12,7 @@ import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
   detectSilence,
   detectScenes,
+  firstFrameAt,
   inspectFrameColor,
   type SilenceRange,
   type SceneCut,
@@ -40,6 +41,7 @@ import { embedImage, embedText, ensureClip, cosine } from "./media/clip.js";
 import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/reframe.js";
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { bakeReversed, bakeSmoothSlow, grabFrame, probeFrameClock, probeVideoFormat } from "./ffmpeg/timefx.js";
+import { cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
 import { renderGraphic } from "./motion/render.js";
 import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
@@ -624,6 +626,31 @@ export class EditorEngine extends EventEmitter {
     return this.getAsset(clip.assetId);
   }
 
+  /** How to merge a matte-backed cutout's colour back in (undefined for every other asset). */
+  private cutoutMerge(asset: MediaAsset): CutoutMerge | undefined {
+    if (!asset.cutout) return undefined;
+    // Only what the merge reads: the asset id must not reach render-cache keys.
+    const { colorPath, colorStart } = asset.cutout;
+    return { colorPath, colorStart, fps: asset.fps || this.project.fps, width: asset.width, height: asset.height };
+  }
+
+  /**
+   * Where an asset's PICTURE is read for analysis (key colour, visual index,
+   * scenes): a matte-backed cutout's `path` is only its matte, so read the
+   * original footage, `offset` seconds later.
+   */
+  private pictureSource(asset: MediaAsset): { path: string; offset: number } {
+    return asset.cutout ? { path: asset.cutout.colorPath, offset: asset.cutout.colorStart } : { path: asset.path, offset: 0 };
+  }
+
+  /** Teaching error for bakes that would throw a remove_background cutout's transparency away. */
+  private refuseCutout(asset: MediaAsset, clipId: string, what: string): void {
+    if (!asset.cutout) return;
+    throw new Error(
+      `Clip "${clipId}" is a remove_background cutout — ${what} bakes opaque video and would lose its transparency. Undo the background removal (or use the original clip), run ${what} on the original footage, then run remove_background again.`,
+    );
+  }
+
   /**
    * Security allowlist for the HTTP /file endpoint. A path is servable only if
    * it lives under the engine's data dir (previews/proxies/frames/baked/
@@ -875,6 +902,29 @@ export class EditorEngine extends EventEmitter {
     const { promise } = this.jobs.start("proxy", `Proxy ${asset.name}`, async (signal, onProgress) => {
       const dir = join(this.dataDir, "proxies");
       await mkdir(dir, { recursive: true });
+      // Video with transparency (a remove_background cutout, an alpha .mov) gets a VP8+alpha .webm:
+      // an H.264 proxy would show the cut-out background again in the preview.
+      const alpha = !!asset.cutout || (!asset.isImage && (await probeVideoFormat(asset.path))?.hasAlpha === true);
+      if (alpha) {
+        // A cutout's preview is baked next to its matte (baked/<clip>-cutout-*.webm): reuse it while it
+        // exists instead of encoding a second copy here and leaving the first behind.
+        const own = asset.proxyPath?.endsWith(".webm") && (await fileExists(asset.proxyPath)) ? asset.proxyPath : undefined;
+        const out = own ?? join(dir, `${assetId}.webm`);
+        if (!(await fileExists(out))) {
+          try {
+            await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
+          } catch (err) {
+            await rm(out, { force: true });
+            throw err;
+          }
+        }
+        return this.mutate(() => {
+          const a = this.getAsset(assetId);
+          a.proxyPath = out;
+          delete a.proxyError;
+          return a;
+        });
+      }
       const out = join(dir, `${assetId}.mp4`);
       if (!(await fileExists(out))) {
         // Scale the long edge down to `longEdge`, keep aspect, even dims; fast preset.
@@ -895,6 +945,41 @@ export class EditorEngine extends EventEmitter {
       });
     });
     return promise;
+  }
+
+  /**
+   * Encode a browser-playable VP8+alpha .webm preview of an asset with
+   * transparency — WITH audio, since preview sound comes from the same element.
+   * A matte-backed cutout is merged with its colour on the way. Chromium can't
+   * decode FFV1, so cutouts and other alpha video always preview from this.
+   * Constrained quality (CRF 12, at most 2 Mb/s for the colour) measured ~40%
+   * smaller than the fixed 3 Mb/s used before at about the same speed (colour
+   * ~46 dB, alpha ~51 dB PSNR). VP9 was ~60% smaller but encoded ~5x slower,
+   * which would add half the matting time again to every remove_background.
+   */
+  private async encodeAlphaProxy(
+    asset: MediaAsset,
+    outPath: string,
+    longEdge: number,
+    signal?: AbortSignal,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
+    const merge = this.cutoutMerge(asset);
+    const args = ["-hide_banner", "-y", "-i", asset.path];
+    const scale =
+      Math.max(asset.width, asset.height) > longEdge ? (asset.width >= asset.height ? `scale=${longEdge}:-2` : `scale=-2:${longEdge}`) : "";
+    if (merge) {
+      args.push(...cutoutColorInputArgs(merge, 0, asset.duration));
+      args.push("-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", merge)};[m]${scale ? `${scale},` : ""}format=yuva420p[v]`, "-map", "[v]");
+      if (asset.hasAudio) args.push("-map", "0:a:0");
+    } else if (scale) {
+      args.push("-vf", scale);
+    }
+    args.push("-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", "-crf", "12", "-b:v", "2M", "-deadline", "realtime", "-cpu-used", "5");
+    if (asset.hasAudio) args.push("-c:a", "libopus", "-b:a", "128k", "-ar", "48000");
+    else args.push("-an");
+    args.push("-progress", "pipe:1", "-nostats", outPath);
+    await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
   }
 
   removeAsset(assetId: string): void {
@@ -2241,7 +2326,8 @@ export class EditorEngine extends EventEmitter {
     const times = asset.isImage
       ? [0]
       : [clip.sourceInFrame, (clip.sourceInFrame + clip.sourceOutFrame) / 2].map((f) => Math.min(last, framesToSeconds(f, fps)));
-    return detectKeyColor(asset.path, times, clip.effects?.crop);
+    const pic = this.pictureSource(asset);
+    return detectKeyColor(pic.path, times.map((t) => t + pic.offset), clip.effects?.crop);
   }
 
   /**
@@ -3251,13 +3337,14 @@ export class EditorEngine extends EventEmitter {
     count: number,
   ): Promise<{ asset: MediaAsset; sampleCount: number; semantic: boolean }> {
     const asset = this.getAsset(assetId);
-    const sig = await buildSignature(asset.path, asset.duration, count);
+    const pic = this.pictureSource(asset);
+    const sig = await buildSignature(pic.path, asset.duration, count, pic.offset);
     // Try to bring up the CLIP model (downloads once); if usable, add semantic
     // embeddings to each sample so this asset is text- and image-searchable.
     const semantic = await ensureClip();
     if (semantic) {
       for (const sample of sig.samples) {
-        const embed = await embedImage(asset.path, sample.t);
+        const embed = await embedImage(pic.path, sample.t + pic.offset);
         if (embed) sample.embed = embed;
       }
     }
@@ -3325,10 +3412,11 @@ export class EditorEngine extends EventEmitter {
       throw new Error("searchVisual needs a text `query` or a reference clipId/assetId");
     }
     const refAsset = this.getAsset(refAssetId);
-    const refSample = await buildReferenceSample(refAsset.path, Math.min(refSrcSec, Math.max(0, refAsset.duration - 0.1)));
+    const refPic = this.pictureSource(refAsset);
+    const refSample = await buildReferenceSample(refPic.path, Math.min(refSrcSec, Math.max(0, refAsset.duration - 0.1)) + refPic.offset);
     const semantic = await ensureClip();
     if (semantic) {
-      const e = await embedImage(refAsset.path, refSample.t);
+      const e = await embedImage(refPic.path, refSample.t);
       if (e) refSample.embed = e;
     }
     const refSig: VisualSignature = { samples: [refSample], bins: refSample.hist.length / 3 };
@@ -3636,6 +3724,12 @@ export class EditorEngine extends EventEmitter {
       }
 
       const asset = this.getAsset(clip.assetId!);
+      // A matte-backed cutout reads its colour from the original footage: say so plainly when it's gone.
+      if (asset.cutout && !(await fileExists(asset.cutout.colorPath))) {
+        throw new Error(
+          `Clip "${clip.id}" is a remove_background cutout whose original footage is missing (${asset.cutout.colorPath}) — the cutout stores only the matte and takes its colour from that file. Put the file back at that path, or undo the background removal.`,
+        );
+      }
 
       let effects: ResolvedEffects | undefined;
       if (clip.effects || clip.keyframes) {
@@ -3804,6 +3898,7 @@ export class EditorEngine extends EventEmitter {
         overlays,
         graphics,
         audioOffset: clip.audioOffsetFrames ? f2s(clip.audioOffsetFrames) : undefined,
+        ...(asset.cutout ? { cutout: this.cutoutMerge(asset) } : {}),
       });
 
       // Bleep SFX: expanded from the clip's own bleeps every render, so they sit
@@ -4562,6 +4657,16 @@ export class EditorEngine extends EventEmitter {
     await mkdir(dir, { recursive: true });
     const outPath = join(dir, `${assetId}.jpg`);
     const time = Math.min(Math.max(0, atSeconds), Math.max(0, asset.duration - 0.1));
+    const merge = this.cutoutMerge(asset);
+    if (merge) {
+      // A cutout's thumbnail: the person over black, as an alpha cutout's frame always showed.
+      await runFfmpeg([
+        "-hide_banner", "-ss", time.toFixed(3), "-i", asset.path, ...cutoutColorInputArgs(merge, time),
+        "-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", merge)};[m]premultiply=inplace=1,scale=320:-2:force_original_aspect_ratio=decrease,format=yuv420p[v]`,
+        "-map", "[v]", "-frames:v", "1", "-q:v", "3", "-y", outPath,
+      ]);
+      return outPath;
+    }
     await runFfmpeg(buildThumbnailCommand(asset.path, time, outPath));
     return outPath;
   }
@@ -4620,6 +4725,7 @@ export class EditorEngine extends EventEmitter {
   async stabilizeClip(clipId: string, opts: StabilizeOptions = {}): Promise<Clip> {
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "stabilization");
+    this.refuseCutout(asset, clipId, "stabilize_clip");
     const { promise } = this.jobs.start("stabilize", `Stabilize ${asset.name}`, (signal, onProgress) =>
       this.stabilizeClipRun(clipId, opts, signal, onProgress),
     );
@@ -4726,6 +4832,7 @@ export class EditorEngine extends EventEmitter {
     if (!preAsset.hasVideo || preAsset.width <= 0 || preAsset.height <= 0) {
       throw new Error("Auto-reframe needs a clip with a decodable video stream");
     }
+    this.refuseCutout(preAsset, clipId, "auto_reframe");
     const { promise } = this.jobs.start("reframe", `Auto-reframe ${preAsset.name}`, (signal, onProgress) =>
       this.autoReframeRun(clipId, opts, signal, onProgress),
     );
@@ -4832,12 +4939,14 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * AI background removal for PEOPLE (Robust Video Matting, local). Mattes the
-   * clip's used span into a transparent cutout, bakes it (FFV1 + alpha) with a
-   * VP8/alpha .webm preview proxy, and re-points the clip at it — whatever is
-   * on the track below shows through. Blocks until done; undo restores the
-   * original. `maxLongEdge` is internal (tests force the downscaled path).
+   * clip's used span, bakes only the person's MATTE (lossless FFV1 gray + the
+   * span's audio) with a VP8/alpha .webm preview proxy, and re-points the clip
+   * at a cutout asset whose colour is the original footage (merged at render
+   * time) — whatever is on the track below shows through. Blocks until done;
+   * undo restores the original. `maxLongEdge` and `stubMatte` are internal
+   * (tests force the downscaled path / run without the model).
    */
-  async removeBackground(clipId: string, opts: { maxLongEdge?: number } = {}): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
+  async removeBackground(clipId: string, opts: { maxLongEdge?: number; stubMatte?: boolean } = {}): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
     return this.startRemoveBackgroundJob(clipId, opts).promise;
   }
 
@@ -4848,7 +4957,7 @@ export class EditorEngine extends EventEmitter {
    */
   startRemoveBackgroundJob(
     clipId: string,
-    opts: { maxLongEdge?: number } = {},
+    opts: { maxLongEdge?: number; stubMatte?: boolean } = {},
   ): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> } {
     const { clip: pre } = this.findClip(clipId);
     const preAsset = this.requireClipAsset(pre, "background removal");
@@ -4860,7 +4969,7 @@ export class EditorEngine extends EventEmitter {
         `Clip "${clipId}" is a still image — remove_background works on video clips. Turn the photo into a video first, or put it on a lower track as a background instead.`,
       );
     }
-    if (preAsset.name.endsWith(" (background removed)")) {
+    if (preAsset.cutout || preAsset.name.endsWith(" (background removed)")) {
       throw new Error(`Clip "${clipId}" already has its background removed. Undo first to re-run it on the original footage.`);
     }
     return this.jobs.start("matte", `Remove background ${preAsset.name}`, (signal, onProgress) =>
@@ -4870,7 +4979,7 @@ export class EditorEngine extends EventEmitter {
 
   private async removeBackgroundRun(
     clipId: string,
-    opts: { maxLongEdge?: number },
+    opts: { maxLongEdge?: number; stubMatte?: boolean },
     signal: AbortSignal,
     onProgress: (fraction: number) => void,
   ): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
@@ -4893,6 +5002,9 @@ export class EditorEngine extends EventEmitter {
     let baked: MediaAsset;
     let stats: MatteStats;
     try {
+      // The exact source time of the frame the matte starts on (≠ sourceInSec when the
+      // project's frame grid differs from the footage's): renders seek the colour from it.
+      const colorStart = await firstFrameAt(asset.path, sourceInSec);
       // Matting is ~95% of the work; the preview proxy is the rest.
       stats = await matteVideo({
         input: asset.path,
@@ -4906,26 +5018,17 @@ export class EditorEngine extends EventEmitter {
         signal,
         onProgress: (f) => onProgress(f * 0.95),
         maxLongEdge: opts.maxLongEdge,
+        stubMatte: opts.stubMatte,
       });
       baked = await probeAsset(outPath);
       baked.name = `${asset.name} (background removed)`;
+      // Only the matte is stored; the colour stays the original footage (merged at render time).
+      baked.cutout = { colorPath: asset.path, colorStart, colorAssetId: asset.id };
 
       // Chromium can't decode FFV1, so the live preview plays a VP8/alpha .webm
-      // proxy — WITH audio, since preview sound comes from the same element.
-      // EXPORT still composites the lossless .mkv.
-      const proxy = ["-hide_banner", "-y", "-i", outPath];
-      if (Math.max(baked.width, baked.height) > PROXY_LONG_EDGE) {
-        proxy.push("-vf", baked.width >= baked.height ? `scale=${PROXY_LONG_EDGE}:-2` : `scale=-2:${PROXY_LONG_EDGE}`);
-      }
-      proxy.push(
-        "-c:v", "libvpx", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0",
-        "-b:v", "3M", "-deadline", "realtime", "-cpu-used", "5",
-      );
-      if (baked.hasAudio) proxy.push("-c:a", "libopus", "-b:a", "128k", "-ar", "48000");
-      else proxy.push("-an");
-      proxy.push("-progress", "pipe:1", "-nostats", proxyPath);
+      // proxy of the merged cutout. EXPORT merges the lossless matte with the original.
       try {
-        await runFfmpeg(proxy, { signal, totalDuration: baked.duration, onProgress: (f) => onProgress(0.95 + f * 0.05) });
+        await this.encodeAlphaProxy(baked, proxyPath, PROXY_LONG_EDGE, signal, (f) => onProgress(0.95 + f * 0.05));
         baked.proxyPath = proxyPath;
       } catch (err) {
         if (signal.aborted) throw err;
@@ -5038,7 +5141,7 @@ export class EditorEngine extends EventEmitter {
     const pngPath = join(dir, `${targetId}-freeze-${Date.now().toString(36)}-${newId("f").slice(-4)}.png`);
     let still: MediaAsset;
     try {
-      await grabFrame(asset.path, srcSec, pngPath);
+      await grabFrame(asset.path, srcSec, pngPath, undefined, this.cutoutMerge(asset));
       still = await probeAsset(pngPath);
       still.name = `${asset.name} (freeze ${framesToSeconds(srcFrame, fps).toFixed(2)}s)`;
       still.duration = Math.max(still.duration, durationSeconds);
@@ -5373,13 +5476,16 @@ export class EditorEngine extends EventEmitter {
         if (!video && !withAudio) continue; // nothing to bake (a silent partner): left as it is
         const stem = `${m.clipId}-rev-${Date.now().toString(36)}`;
         // A remove_background cutout carries alpha: keep it (FFV1 yuva420p in Matroska) instead of flattening to opaque H.264.
-        const fmt = video ? await probeVideoFormat(asset.path) : undefined;
+        // A matte-backed cutout's file is only its matte: the bake merges the original colour back in.
+        const cutout = video ? this.cutoutMerge(asset) : undefined;
+        const fmt = cutout ? { width: asset.width, height: asset.height, pixFmt: "yuva420p", hasAlpha: true } : video ? await probeVideoFormat(asset.path) : undefined;
         const alpha = fmt?.hasAlpha === true;
         const outPath = join(dir, `${stem}${video ? (alpha ? ".mkv" : ".mp4") : ".m4a"}`);
         outPaths.push(outPath);
         await bakeReversed({
           alpha,
           format: fmt,
+          cutout,
           input: asset.path,
           hasVideo: video,
           reverseAudio: withAudio,
@@ -5487,12 +5593,14 @@ export class EditorEngine extends EventEmitter {
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
-    const alpha = (await probeVideoFormat(asset.path))?.hasAlpha === true; // keep a cutout's transparency
+    const cutout = this.cutoutMerge(asset); // a matte-backed cutout: merge its colour back in
+    const alpha = !!cutout || (await probeVideoFormat(asset.path))?.hasAlpha === true; // keep a cutout's transparency
     const outPath = join(dir, `${clipId}-slowmo-${Date.now().toString(36)}.${alpha ? "mkv" : "mp4"}`);
     let baked: MediaAsset;
     try {
       await bakeSmoothSlow({
         alpha,
+        cutout,
         input: asset.path,
         hasAudio: asset.hasAudio,
         projectFps: fps,
@@ -5790,7 +5898,8 @@ export class EditorEngine extends EventEmitter {
 
   async analyzeScenes(assetId: string, threshold?: number): Promise<SceneCut[]> {
     const asset = this.getAsset(assetId);
-    return detectScenes(asset.path, threshold);
+    const pic = this.pictureSource(asset);
+    return detectScenes(pic.path, threshold, asset.cutout ? { start: pic.offset, span: asset.duration } : undefined);
   }
 
   // ---- persistence -----------------------------------------------------------

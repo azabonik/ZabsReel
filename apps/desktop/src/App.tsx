@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
-import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, ProgressInfo, TextStyle, TranscriptHit, VisualHit } from "./types";
+import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, TextStyle, TranscriptHit, VisualHit } from "./types";
 import { clipDurationFrames } from "./types";
 import { SpeedPanel, type SpeedRampParams } from "./speedramp";
 import {
@@ -25,6 +25,8 @@ import type { BlendMode } from "@aive/core/compositing";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 import { StorageDialog } from "./storagedialog";
+import { StatusLine } from "./jobstatus";
+import { BusyAction } from "./jobstate";
 import { UnusedMediaStrip } from "./unusedmedia";
 
 function fmt(seconds: number): string {
@@ -81,7 +83,6 @@ const CAPTION_PRESETS: { id: string; label: string; style: Record<string, unknow
 export function App({ api }: { api: CoreApi }) {
   const [connected, setConnected] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
-  const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [exactSrc, setExactSrc] = useState<string | null>(null);
   const [selectedClip, setSelectedClip] = useState<string | null>(null);
   // A selected bleep chip (its clip is also the selected clip).
@@ -126,7 +127,6 @@ export function App({ api }: { api: CoreApi }) {
   useEffect(() => {
     api.onStatus(setConnected);
     api.onState((p, fp) => { setProject(p); setProjectPath(fp); });
-    api.onProgress((p) => setProgress(p.fraction >= 1 ? null : p));
   }, [api]);
 
   // Track unsaved changes: the first state after New/Open/Save is the clean
@@ -155,20 +155,26 @@ export function App({ api }: { api: CoreApi }) {
     lastRevision.current = project.revision;
   }, [project]);
 
+  // Knows when the user cancels (status bar) the job the current action waits on: its rejection is not an error.
+  const busyAction = useRef(new BusyAction()).current;
+  const onCancelBusy = useCallback(() => busyAction.cancel(), [busyAction]);
   const run = useCallback(
     async (label: string, fn: () => Promise<unknown>) => {
       setError(null);
       setBusy(label);
+      busyAction.start();
       try {
         return await fn();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        const msg = busyAction.errorFor(e);
+        if (msg !== null) setError(msg);
         return null;
       } finally {
         setBusy(null);
+        busyAction.end();
       }
     },
-    [],
+    [busyAction],
   );
 
   const fps = project?.fps ?? 30;
@@ -436,13 +442,7 @@ export function App({ api }: { api: CoreApi }) {
       const out = await platform.pickSavePath(EXPORT_PRESETS.find((p) => p.id === preset)?.ext);
       if (!out) return;
       const usePreset = presetForPath(EXPORT_PRESETS, preset, out);
-      let r: { path: string; duration: number };
-      try {
-        r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(usePreset ? { preset: usePreset } : {}) });
-      } finally {
-        // Success, error and cancel all end here; don't rely on a progress event at 100%.
-        setProgress(null);
-      }
+      const r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(usePreset ? { preset: usePreset } : {}) });
       setError(null);
       const note = presetSwapNote(EXPORT_PRESETS, preset, usePreset, out);
       alert(`Exported ${fmt(r.duration)} video to:\n${r.path}${note ? `\n\n${note}` : ""}`);
@@ -1141,17 +1141,7 @@ export function App({ api }: { api: CoreApi }) {
       />
 
       <footer className="statusbar">
-        {progress ? (
-          <div className="prog">
-            <span className="label"><span className="spinner" /> {progress.job === "export" ? "Exporting" : "Rendering"}…</span>
-            <div className="prog-bar"><div className="prog-fill" style={{ "--p": progress.fraction } as CSSProperties} /></div>
-            <span className="pct">{Math.round(progress.fraction * 100)}%</span>
-          </div>
-        ) : busy ? (
-          <span className="ready"><span className="spinner" /> {busy}…</span>
-        ) : (
-          <span className="ready">{connected ? "Ready — press Space to play · drive edits from your AI client or the controls above." : "Waiting for the editor core to connect…"}</span>
-        )}
+        <StatusLine api={api} connected={connected} busy={busy} onCancelBusy={onCancelBusy} />
       </footer>
     </div>
   );

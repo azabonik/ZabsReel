@@ -129,16 +129,17 @@ export function signatureSimilarity(a: VisualSignature, b: VisualSignature): num
 
 /**
  * Build a perceptual signature for an asset by sampling `count` evenly-spaced
- * keyframes across `duration` seconds.
+ * keyframes across `duration` seconds (read `offset` seconds later in `path`;
+ * sample times stay asset-relative).
  */
-export async function buildSignature(path: string, duration: number, count = 5): Promise<VisualSignature> {
+export async function buildSignature(path: string, duration: number, count = 5, offset = 0): Promise<VisualSignature> {
   const n = Math.max(1, Math.min(count, 12));
   const samples: VisualSample[] = [];
   for (let k = 0; k < n; k++) {
     // Sample at the midpoints of n equal segments (avoids the very first/last frame).
     const t = duration > 0 ? ((k + 0.5) / n) * duration : 0;
     try {
-      const buf = await grab9x8(path, t);
+      const buf = await grab9x8(path, t + offset);
       if (buf.length >= 9 * 8 * 3) {
         const fp = fingerprint(buf);
         samples.push({ t, dhash: fp.dhash, hist: fp.hist });

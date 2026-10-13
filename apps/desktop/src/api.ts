@@ -1,9 +1,9 @@
-import type { Project, ProgressInfo } from "./types";
+import type { JobInfo, Project } from "./types";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 /**
- * Client for the editor core. Holds a live WebSocket for state + progress
+ * Client for the editor core. Holds a live WebSocket for state + job
  * broadcasts and issues RPC commands over the same socket. Auto-reconnects so
  * the UI survives a core restart. The same RPC methods the AI uses are
  * available here, so manual UI edits and AI edits share one engine.
@@ -15,7 +15,7 @@ export class CoreApi {
   private reqId = 0;
   private readonly pending = new Map<number, Pending>();
   private stateCb?: (p: Project, filePath: string | null) => void;
-  private progressCb?: (i: ProgressInfo) => void;
+  private jobCb?: (j: JobInfo) => void;
   private statusCb?: (connected: boolean) => void;
   private closed = false;
   private attempts = 0;
@@ -42,8 +42,9 @@ export class CoreApi {
     this.stateCb = cb;
     if (this.lastState) cb(this.lastState.project, this.lastState.filePath);
   }
-  onProgress(cb: (i: ProgressInfo) => void): void {
-    this.progressCb = cb;
+  /** Every job change (start, progress, done, error, canceled); undefined unsubscribes. */
+  onJob(cb: ((j: JobInfo) => void) | undefined): void {
+    this.jobCb = cb;
   }
   onStatus(cb: (connected: boolean) => void): void {
     this.statusCb = cb;
@@ -106,8 +107,8 @@ export class CoreApi {
           this.lastState = { project: msg.project as Project, filePath: this.filePath };
           this.stateCb?.(msg.project as Project, this.filePath);
           break;
-        case "progress":
-          this.progressCb?.({ job: msg.job as ProgressInfo["job"], fraction: msg.fraction as number });
+        case "job":
+          this.jobCb?.(msg.job as JobInfo);
           break;
         case "rpc_result": {
           const p = this.pending.get(msg.id as number);

@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runFfmpeg, runFfprobe } from "./executor.js";
 import type { FrameClock } from "../speed.js";
+import { cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./cutout.js";
 
 /**
  * Time-effect bakes: chunked frame-exact REVERSE and SMOOTH SLOW MOTION
@@ -107,6 +108,8 @@ export interface ReverseBakeOptions {
   alpha?: boolean;
   /** Source size / pixel format, used to size chunks by a RAM budget. */
   format?: Pick<VideoFormat, "width" | "height" | "pixFmt">;
+  /** `input` is a matte-backed cutout's matte: merge it with this colour first (requires `alpha`). */
+  cutout?: CutoutMerge;
   /** Scratch directory (created, and always removed). */
   workDir: string;
   signal?: AbortSignal;
@@ -145,15 +148,19 @@ export async function bakeReversed(o: ReverseBakeOptions): Promise<{ frames: num
       if (o.hasVideo) {
         const ss = Math.max(0, (k0 + a - 0.5) / fps);
         const name = `v${i}.mkv`;
+        // Pad to EXACTLY n frames (clone the last one) before reversing: a stream shorter
+        // than the span would otherwise put its missing frames FIRST in the reversed
+        // file and shift every later frame against the mirrored audio.
+        const vf = `tpad=stop_mode=clone:stop=${n},trim=end_frame=${n},reverse,setpts=N/(${rate})/TB`;
         await runFfmpeg(
           [
             "-hide_banner", "-y",
             "-ss", ss.toFixed(6), "-t", (n / fps).toFixed(6), "-i", o.input,
+            ...(o.cutout
+              ? [...cutoutColorInputArgs(o.cutout, ss, n / fps), "-filter_complex", `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", o.cutout)};[m]${vf}[v]`, "-map", "[v]"]
+              : []),
             "-an", "-sn",
-            // Pad to EXACTLY n frames (clone the last one) before reversing: a stream shorter
-            // than the span would otherwise put its missing frames FIRST in the reversed
-            // file and shift every later frame against the mirrored audio.
-            "-vf", `tpad=stop_mode=clone:stop=${n},trim=end_frame=${n},reverse,setpts=N/(${rate})/TB`,
+            ...(o.cutout ? [] : ["-vf", vf]),
             "-r", rate,
             ...(o.alpha
               ? ["-c:v", "ffv1", "-pix_fmt", "yuva420p"]
@@ -264,6 +271,8 @@ export interface SmoothSlowOptions {
    * yuva420p in Matroska and always blends (minterpolate has no alpha support).
    */
   alpha?: boolean;
+  /** `input` is a matte-backed cutout's matte: merge it with this colour first (requires `alpha`). */
+  cutout?: CutoutMerge;
   signal?: AbortSignal;
   onProgress?: (fraction: number) => void;
 }
@@ -308,11 +317,12 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   const tail = `setpts=N/(${pfps})/TB,fps=${pfps},tpad=stop_mode=clone:stop=4`;
   const readSec = o.spanSec + (atEnd ? 0 : extraSec);
   const args = ["-hide_banner", "-y", "-ss", o.startSec.toFixed(6), "-t", readSec.toFixed(6), "-i", o.input];
+  if (o.cutout) args.push(...cutoutColorInputArgs(o.cutout, o.startSec, readSec));
   if (o.alpha) {
     // The interpolation filters drop the alpha plane: blend colour and alpha separately, then merge them back.
     args.push(
       "-filter_complex",
-      `[0:v]format=yuva420p,split[c0][a0];[c0]format=yuv420p,${interp}[c1];[a0]alphaextract,${interp}[a1];[c1][a1]alphamerge,${tail},format=yuva420p[v]`,
+      `${o.cutout ? `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", o.cutout)};[m]` : "[0:v]"}format=yuva420p,split[c0][a0];[c0]format=yuv420p,${interp}[c1];[a0]alphaextract,${interp}[a1];[c1][a1]alphamerge,${tail},format=yuva420p[v]`,
       "-map", "[v]", "-frames:v", String(o.outFrames), "-c:v", "ffv1", "-pix_fmt", "yuva420p",
     );
     if (o.hasAudio) args.push("-map", "0:a:0");
@@ -326,10 +336,14 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   await runFfmpeg(args, { signal: o.signal, totalDuration: outDur, onProgress: o.onProgress });
 }
 
-/** Grab one frame as a lossless PNG. */
-export async function grabFrame(input: string, atSec: number, outPath: string, signal?: AbortSignal): Promise<void> {
+/** Grab one frame as a lossless PNG (a matte-backed cutout's `input` is its matte: pass `cutout` to merge its colour). */
+export async function grabFrame(input: string, atSec: number, outPath: string, signal?: AbortSignal, cutout?: CutoutMerge): Promise<void> {
+  const ss = Math.max(0, atSec);
+  const merge = cutout
+    ? [...cutoutColorInputArgs(cutout, ss), "-filter_complex", cutoutMergeFilter("[1:v]", "[0:v]", "[v]", cutout), "-map", "[v]"]
+    : [];
   await runFfmpeg(
-    ["-hide_banner", "-y", "-ss", Math.max(0, atSec).toFixed(6), "-i", input, "-an", "-sn", "-frames:v", "1", "-c:v", "png", outPath],
+    ["-hide_banner", "-y", "-ss", ss.toFixed(6), "-i", input, ...merge, "-an", "-sn", "-frames:v", "1", "-c:v", "png", outPath],
     { signal },
   );
 }

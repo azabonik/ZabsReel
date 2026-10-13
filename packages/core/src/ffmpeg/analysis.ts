@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { runFfmpeg, runFfmpegCaptureStderr, runFfmpegStdoutBuffer } from "./executor.js";
+import { runFfmpeg, runFfmpegCaptureStderr, runFfmpegStdoutBuffer, runFfprobe } from "./executor.js";
 
 /**
  * Analysis helpers that give the AI "ears and eyes" so it can edit with intent
@@ -67,10 +67,12 @@ export interface SceneCut {
  * Useful for finding natural cut points in continuous footage.
  *
  * @param threshold  Scene-change sensitivity 0..1 (higher = fewer cuts).
+ * @param window     Only this span of `path` (times are then relative to its start).
  */
-export async function detectScenes(path: string, threshold = 0.4): Promise<SceneCut[]> {
+export async function detectScenes(path: string, threshold = 0.4, window?: { start: number; span: number }): Promise<SceneCut[]> {
   const stderr = await runFfmpegCaptureStderr([
     "-hide_banner",
+    ...(window ? ["-ss", window.start.toFixed(6), "-t", window.span.toFixed(6)] : []),
     "-i",
     path,
     "-filter:v",
@@ -202,4 +204,32 @@ export async function inspectFrameColor(
   ]);
 
   return { stats: { luma, saturation, hue, rgb, notes }, scopes: { histogram, waveform, vectorscope } };
+}
+
+/**
+ * Source seconds (counted like `-ss`, i.e. from the file's start time) of the
+ * first video frame at or after `sec` — the frame a `-ss sec` decode starts on.
+ * Falls back to `sec` when it can't be probed.
+ */
+export async function firstFrameAt(path: string, sec: number): Promise<number> {
+  try {
+    const fmt = JSON.parse(await runFfprobe(["-v", "error", "-show_entries", "format=start_time", "-of", "json", path])) as {
+      format?: { start_time?: string };
+    };
+    const start = Number(fmt.format?.start_time ?? 0) || 0;
+    const out = JSON.parse(
+      await runFfprobe([
+        "-v", "error", "-select_streams", "v:0",
+        "-read_intervals", `${(start + sec).toFixed(6)}%+2`,
+        "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path,
+      ]),
+    ) as { frames?: { best_effort_timestamp_time?: string }[] };
+    const times = (out.frames ?? [])
+      .map((f) => Number(f.best_effort_timestamp_time) - start)
+      .filter((t) => Number.isFinite(t) && t >= sec - 5e-6)
+      .sort((a, b) => a - b);
+    return times.length ? times[0] : sec;
+  } catch {
+    return sec;
+  }
 }

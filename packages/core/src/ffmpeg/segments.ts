@@ -85,6 +85,7 @@ export async function collectMtimes(clips: ResolvedRenderClip[]): Promise<Record
   const paths = new Set<string>();
   for (const c of clips) {
     paths.add(c.path);
+    if (c.cutout) paths.add(c.cutout.colorPath);
     for (const g of c.graphics ?? []) paths.add(g.path);
   }
   const out: Record<string, number> = {};
@@ -134,6 +135,8 @@ export function segmentKey(
     startSec: Number((c.startSec - seg.start).toFixed(6)),
     mtime: mtimes[c.path] ?? -1,
     graphicMtimes: (c.graphics ?? []).map((g) => mtimes[g.path] ?? -1),
+    // A matte-backed cutout's colour is a second file (only cutout clips carry the key).
+    ...(c.cutout ? { colorMtime: mtimes[c.cutout.colorPath] ?? -1 } : {}),
   }));
   const payload = JSON.stringify({
     v: CACHE_VERSION,

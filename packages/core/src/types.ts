@@ -104,6 +104,18 @@ export interface MediaAsset {
    */
   reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
   /**
+   * Set on a remove_background cutout: `path` holds only the person's MATTE
+   * (lossless FFV1 gray, one frame per frame of the cutout, plus the span's
+   * audio) and the colour is read from the ORIGINAL footage at `colorPath`,
+   * starting at source second `colorStart` (the frame matte frame 0 belongs
+   * to). Renders alphamerge the two (ffmpeg/cutout.ts). Older cutouts have no
+   * `cutout` record: their `path` is a colour+alpha FFV1 yuva420p file.
+   * `colorAssetId` is the library asset the colour was read from, so the
+   * library clean-up keeps that asset while the cutout is used (library.ts);
+   * cutouts made before it existed are matched by `colorPath` instead.
+   */
+  cutout?: { colorPath: string; colorStart: number; colorAssetId?: string };
+  /**
    * Set when the user imported a file from SynthCut's own baked/ folder: it is
    * user media, so the library clean-up never treats it as an engine bake.
    */
@@ -726,6 +738,11 @@ export interface ResolvedRenderClip {
    * or the video graph. `startSec` already includes the parent's audio slip.
    */
   sfx?: boolean;
+  /**
+   * A matte-backed remove_background cutout: `path` is the matte (+ audio) and
+   * the colour comes from `colorPath` (MediaAsset.cutout), merged at the input.
+   */
+  cutout?: { colorPath: string; colorStart: number; fps: number; width: number; height: number };
 }
 
 /** A keyframe with its time resolved to clip-local SECONDS (for FFmpeg `T` expressions). */

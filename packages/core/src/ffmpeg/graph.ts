@@ -17,6 +17,7 @@ import { alphaSafe, effectFilterSteps } from "../effects/registry.js";
 import { blendModeDef, type BlendMode } from "../effects/compositing.js";
 import { AUDIO_FX_RATE, audioEffectFilterSteps } from "../effects/audio.js";
 import { rampAudioChunks, rampSetptsExpr } from "../speed.js";
+import { cutoutColorInputArgs, cutoutMergeFilter } from "./cutout.js";
 
 export interface RenderProfile {
   /** x264 preset (speed/quality tradeoff). */
@@ -528,6 +529,8 @@ function emitClipVideoParts(
   outLabel: string,
   maskInput?: number,
   drawText = true,
+  /** The clip's picture when it is not `[inputIdx:v]` (a matte-backed cutout's merged colour + matte). */
+  srcLabel = `[${inputIdx}:v]`,
 ): void {
   const fx = clip.effects ?? {};
   const speed = fx.speed ?? 1;
@@ -568,12 +571,16 @@ function emitClipVideoParts(
   // Reset timestamps and apply speed in one go. A speed RAMP retimes with its
   // closed-form curve (speed.ts rampSetptsExpr: the frame slot of each source
   // frame); the fps filter then picks frames deterministically for both.
-  if (fx.speedRamp?.points.length) {
-    // A ramp's setpts emits the shared frame model's slots (speed.ts "Ramp frames"); its length is the
-    // model's footprint, not what the fps filter derives from the input's end: clone-pad, then cut to it.
-    steps.push(`setpts='${rampSetptsExpr(fx.speedRamp, clip.sourceIn, clip.sourceSpan, fps)}'`, `fps=${fps}`);
-    steps.push("tpad=stop_mode=clone:stop=2", `trim=end_frame=${Math.max(1, Math.round(outDur * fps))}`);
-  } else steps.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${fps}`);
+  const ramped = !!fx.speedRamp?.points.length;
+  if (ramped) steps.push(`setpts='${rampSetptsExpr(fx.speedRamp!, clip.sourceIn, clip.sourceSpan, fps)}'`, `fps=${fps}`);
+  else steps.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${fps}`);
+  // One end guard, then one cut to the clip's length. A ramp's setpts emits the shared frame model's slots
+  // (speed.ts "Ramp frames"): its length is the model's footprint, not what the fps filter derives from the
+  // input's end, so clone-pad first. A matte-backed cutout's merged picture already carries one held frame
+  // past its end (see the merge).
+  const cutoutMerged = !!clip.cutout && srcLabel !== `[${inputIdx}:v]`;
+  if (ramped) steps.push("tpad=stop_mode=clone:stop=2");
+  if (ramped || cutoutMerged) steps.push(`trim=end_frame=${Math.max(1, Math.round(outDur * fps))}`);
 
   // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
   // space, after color/effects/keys and BEFORE the transform, so it moves,
@@ -597,7 +604,7 @@ function emitClipVideoParts(
     steps.push(...plan.layerSteps);
     const fit = `tfit${inputIdx}`;
     const base = `tbase${inputIdx}`;
-    filterParts.push(`[${inputIdx}:v]${steps.join(",")}[${fit}]`);
+    filterParts.push(`${srcLabel}${steps.join(",")}[${fit}]`);
     filterParts.push(`color=c=black@0.0:s=${W}x${H}:r=${fps}:d=${outDur.toFixed(6)},format=rgba[${base}]`);
     const tail = ["format=rgba", ...textSteps].join(",");
     filterParts.push(
@@ -614,7 +621,7 @@ function emitClipVideoParts(
     if (g) steps.push(g);
   }
   steps.push(...textSteps);
-  filterParts.push(`[${inputIdx}:v]${steps.join(",")}[${outLabel}]`);
+  filterParts.push(`${srcLabel}${steps.join(",")}[${outLabel}]`);
 }
 
 /** Position expressions for an overlay, in terms of the canvas w/h and text size. */
@@ -1034,6 +1041,13 @@ export function buildRenderCommand(
     }
     inputIdxByClip.set(i, nextIndex++);
   });
+  // A matte-backed cutout's colour: the original footage, a second input merged with the matte below.
+  const colorIdxByClip = new Map<number, number>();
+  clips.forEach((clip, i) => {
+    if (!clip.cutout || !inputIdxByClip.has(i) || !videoRuns.some((r) => r.idxs.includes(i))) return;
+    inputArgs.push(...cutoutColorInputArgs(clip.cutout, clip.sourceIn, clip.sourceSpan));
+    colorIdxByClip.set(i, nextIndex++);
+  });
 
   // Motion-graphic overlay inputs: one alpha video per graphic, composited over
   // its owning clip within a window (absolute paths fine — referenced by index).
@@ -1073,7 +1087,14 @@ export function buildRenderCommand(
         inputArgs.push("-i", clip.effects.maskFile);
         maskInput = nextIndex++;
       }
-      emitClipVideoParts(filterParts, clip, inputIdx, W, H, fps, baseLabel, maskInput, !blended);
+      const colorIdx = colorIdxByClip.get(i);
+      if (colorIdx !== undefined) {
+        // FFmpeg 4.x ends a merged stream without an end time, so the fps step would drop its last
+        // frame: hold one clone after it (the clip chain trims back to the clip's own length).
+        filterParts.push(cutoutMergeFilter(`[${colorIdx}:v]`, `[${inputIdx}:v]`, `[cutm${i}]`, clip.cutout!));
+        filterParts.push(`[cutm${i}]tpad=stop=1:stop_mode=clone[cut${i}]`);
+      }
+      emitClipVideoParts(filterParts, clip, inputIdx, W, H, fps, baseLabel, maskInput, !blended, colorIdx !== undefined ? `[cut${i}]` : undefined);
 
       if (graphicsForClip.length) {
         let cur = `[${baseLabel}]`;

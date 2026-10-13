@@ -76,7 +76,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, stable effect-id keys, the lens zoom pass, the denoise tables, fixed-kernel flags, fidelity) and the colour maths vs graph.ts
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, stable effect-id keys, the lens zoom pass, the denoise tables, fixed-kernel flags, fidelity), the colour maths vs graph.ts, and the status line's job state (job events → progress text, Cancel → cancel_job, no error after a user cancel, cleared on done/failed)
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -178,8 +178,24 @@ npx tsx packages/core/scripts/smoke-reframe.ts
 npx tsx packages/core/scripts/smoke-jlcut.ts
 
 # AI background removal for people (RVM): cutout over a red V1, native + downscaled
-# paths, VP8/alpha preview proxy, undo, cancel (downloads a portrait + the 15 MB model)
-npx tsx packages/core/scripts/smoke-matte.ts
+# paths, matte-only bake (FFV1 gray + the span's audio), VP8/alpha preview proxy,
+# inference in a worker thread (event-loop lateness vs the same job forced onto the
+# main thread with AIVE_RVM_INLINE=1), generate_proxy keeps alpha, storage GC sees the
+# matte + proxy, undo, prompt cancel (downloads a portrait + the 15 MB model; pass a
+# local photo/clip with a person to skip the portrait download)
+npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
+# Matte-backed cutouts, offline (no model: remove_background's internal stub matte):
+# the matte-only bake in a worker, then the same 17 edits (trim, split, split +
+# dissolve, speed 0.5/1.5/2, ramp, reverse, freeze, smooth slow motion, luma key,
+# mask, transform, effects + fades, keyframes, blend mode) on the new cutout and on
+# colour+alpha FFV1 references, exported losslessly over red and over blue: bit-exact
+# against a reference with the source's timestamps, and against an old-style .mkv
+# cutout wherever its millisecond timestamps / AAC-delayed start don't decide the
+# frame (those differences are printed). Plus odd-size 24 fps footage on a 30 fps
+# project, generate_proxy alpha (reuses the baked preview, rebuilds a missing one),
+# thumbnails / key colour / scenes, refusals,
+# segment keys, storage GC, the AIVE_RVM_INLINE=1 fallback and cancel. ~3 min.
+npx tsx packages/core/scripts/smoke-cutout.ts
 # Auto-bleep: matcher, synthesized SFX, bleeps that follow their clip (move, trim,
 # split, speed, audio slip), set/add/remove_bleep, undo — all checked on exported
 # audio (self-contained: synthesizes its own media, injects a fake transcript).

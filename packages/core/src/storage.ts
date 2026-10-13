@@ -9,8 +9,9 @@ import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } 
 /**
  * Housekeeping for the files the engine BAKES into the data dir:
  *
- *   baked/    remove_background cutouts (lossless FFV1 .mkv, ~0.9 GB per minute
- *             of 1080p, plus a VP8 .webm preview), stabilize, auto-reframe,
+ *   baked/    remove_background mattes (lossless FFV1 gray .mkv, ~0.1 GB per
+ *             minute of 1080p, plus a VP8+alpha .webm preview; cutouts made
+ *             before mattes were colour+alpha, ~0.9 GB per minute), stabilize, auto-reframe,
  *             freeze_frame PNGs, reverse_clip, smooth_slow_motion, motion graphics
  *   proxies/  generate_proxy preview proxies
  *

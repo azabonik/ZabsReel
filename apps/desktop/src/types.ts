@@ -329,9 +329,16 @@ export function clipDurationFrames(clip: Clip, fps: number): number {
   return clipFootprintFrames(clip, fps);
 }
 
-export interface ProgressInfo {
-  job: "preview" | "export";
+/** A long-running core job (core jobs.ts): broadcast as `{type:"job"}` on every change and listed by list_jobs. */
+export interface JobInfo {
+  id: string;
+  type: string;
+  /** e.g. "Remove background clip.mp4". */
+  label: string;
+  status: "running" | "done" | "error" | "canceled";
+  /** 0..1; stays 0 for work that can't report progress. */
   fraction: number;
+  startedAt: number;
 }
 
 declare global {

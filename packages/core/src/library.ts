@@ -9,9 +9,12 @@ import { join, resolve, sep } from "node:path";
  *  - USED: an asset whose id appears as a whole string anywhere in the project
  *    outside the library itself — a clip's assetId, a motion-graphic overlay,
  *    the music bed, a bleep's sound — or in a used asset (a reversed bake's
- *    reversedFrom names its original, which reverse_clip needs to flip back).
- *    Field-agnostic on purpose, like the storage reference scan, so a new
- *    asset reference needs no change here.
+ *    reversedFrom names its original, which reverse_clip needs to flip back;
+ *    a remove_background cutout's colorAssetId names the footage its colour
+ *    is read from). Field-agnostic on purpose, like the storage reference
+ *    scan, so a new asset reference needs no change here. A cutout made
+ *    before colorAssetId existed names its colour by path only: the assets
+ *    at its colorPath are used too.
  *  - ENGINE BAKE: an asset whose file the engine wrote into <dataDir>/baked/
  *    (cutout, stabilize, reframe, freeze, reverse, smooth slow motion, motion
  *    graphic). A file the user imported from that folder is marked
@@ -27,6 +30,7 @@ export interface LibraryAsset {
   proxyPath?: string;
   builtinSfx?: string;
   userImported?: boolean;
+  cutout?: { colorPath?: string; colorAssetId?: string };
 }
 
 /** The project fields these rules read (structurally core's Project). */
@@ -84,13 +88,15 @@ export function usedAssetIds(project: LibraryProject): Set<string> {
       queue.push(id);
     }
   }
-  // A used asset can name another one (reversedFrom): that one is used too.
+  // A used asset can name another one (reversedFrom, cutout.colorAssetId): that one is used too.
   while (queue.length) {
     const a = byId.get(queue.pop()!)!;
     const inner = new Set<string>();
     collectStrings({ ...a, id: undefined }, inner);
-    for (const id of byId.keys()) {
-      if (!used.has(id) && inner.has(id)) {
+    const colorPath = typeof a.cutout?.colorPath === "string" ? normPath(a.cutout.colorPath) : undefined;
+    for (const [id, b] of byId) {
+      if (used.has(id)) continue;
+      if (inner.has(id) || (colorPath !== undefined && typeof b.path === "string" && normPath(b.path) === colorPath)) {
         used.add(id);
         queue.push(id);
       }

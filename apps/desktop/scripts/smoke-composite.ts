@@ -25,6 +25,9 @@
 // Live playback: MediaPool.sync steering a curve-speed clip (rate pull, the
 // re-seek throttle) and resumeNear on a fake <video>, the preview's
 // last-frame hold, and a refused slider commit reverting (revertIfRefused).
+// The status line's job state (jobstate.ts): api.ts's `job` events become
+// progress text and "(+N more)", Cancel sends cancel_job, a user-canceled
+// action shows no error, and the line clears when a job is done or fails.
 //
 // Imports `@aive/core/effects` through the package exports (core's dist/), so
 // build core first (`npm run build`, or `npx tsc -b packages/core`).
@@ -62,6 +65,9 @@ import { drawCount } from "../src/gl/runtime";
 import { PlaybackGovernor } from "../src/gl/governor";
 import { balanceParams, curveTable, curvesTables, eqTables, hueParams, parseCube, parseCurvePoints, safeCurve } from "../src/gl/color";
 import { buildRenderCommand, EXPORT_PROFILE } from "../../../packages/core/src/ffmpeg/graph";
+import { CoreApi } from "../src/api";
+import { applyJobEvent, BusyAction, cancelJob, newestFirst, statusView } from "../src/jobstate";
+import type { JobInfo } from "../src/types";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -1345,8 +1351,89 @@ async function voiceWorkletRouterChecks(): Promise<void> {
   delete g.AudioContext;
 }
 
-void voiceWorkletRouterChecks()
-  .catch((e) => { failures++; console.error("  FAIL voice worklet checks threw:", e); })
+// ---- The status line's job state (jobstate.ts, fed by api.ts's `job` events) ----------------
+async function jobStatusChecks(): Promise<void> {
+  console.log("\njob status line:");
+  const g = globalThis as unknown as Record<string, unknown>;
+  const realWs = g.WebSocket;
+  const sent: { type: string; id: number; method: string; params: Record<string, unknown> }[] = [];
+  class FakeWs {
+    static OPEN = 1;
+    static last: FakeWs;
+    readyState = 1;
+    onopen?: () => void;
+    onmessage?: (ev: { data: string }) => void;
+    onclose?: () => void;
+    onerror?: () => void;
+    constructor(readonly url: string) { FakeWs.last = this; }
+    send(data: string) { sent.push(JSON.parse(data)); }
+    close() {}
+  }
+  g.WebSocket = FakeWs;
+  try {
+    const api = new CoreApi(5099, "token");
+    let jobs: Record<string, JobInfo> = {};
+    api.onJob((j) => { jobs = applyJobEvent(jobs, j); });
+    api.connect();
+    const ws = FakeWs.last;
+    ws.onopen?.();
+    const emit = (job: JobInfo) => ws.onmessage?.({ data: JSON.stringify({ type: "job", job }) });
+    const job = (id: string, extra: Partial<JobInfo> = {}): JobInfo =>
+      ({ id, type: "matte", label: `Remove background ${id}.mp4`, status: "running", fraction: 0, startedAt: 1000, ...extra });
+
+    emit(job("j1", { fraction: 0.42 }));
+    let v = statusView(newestFirst(jobs), null, true);
+    check("a running job's `job` event shows its label and progress text",
+      v.kind === "job" && v.label === "Remove background j1.mp4" && v.pct === "42%" && v.more === "", JSON.stringify(v));
+    emit(job("j1", { fraction: 0 }));
+    v = statusView(newestFirst(jobs), null, true);
+    check("a job with no progress yet shows no percentage", v.kind === "job" && v.pct === null, JSON.stringify(v));
+    emit(job("j2", { type: "export", fraction: 0.5, startedAt: 2000 }));
+    v = statusView(newestFirst(jobs), null, true);
+    check("two running jobs: the newest is shown with (+1 more)",
+      v.kind === "job" && v.job.id === "j2" && v.label === "Exporting" && v.more === " (+1 more)" && v.pct === "50%", JSON.stringify(v));
+
+    // Cancel while a UI action waits on the job: the action is told, then cancel_job goes to the core.
+    const action = new BusyAction();
+    action.start();
+    let told = 0;
+    const canceled = cancelJob(api, job("j2"), "Exporting", () => { told++; action.cancel(); });
+    const req = sent.find((m) => m.method === "cancel_job");
+    check("Cancel sends cancel_job for that job", req?.type === "rpc" && req.params.jobId === "j2", JSON.stringify(sent));
+    check("Cancel tells the waiting UI action", told === 1);
+    ws.onmessage?.({ data: JSON.stringify({ type: "rpc_result", id: req?.id, ok: true, result: { canceled: true } }) });
+    await canceled;
+    check("a user-canceled action's rejection shows no error", action.errorFor(new Error("Export canceled")) === null);
+    action.end();
+    action.start();
+    check("a failed action that was not canceled shows its error", action.errorFor(new Error("disk full")) === "disk full");
+    action.end();
+    sent.length = 0;
+    void cancelJob(api, job("j1"), null, () => { told++; });
+    check("Cancel with no UI action waiting tells no one", told === 1 && sent[0]?.params.jobId === "j1", JSON.stringify(sent));
+
+    emit(job("j2", { type: "export", status: "canceled", startedAt: 2000 }));
+    v = statusView(newestFirst(jobs), null, true);
+    check("a canceled job leaves the line", v.kind === "job" && v.job.id === "j1" && v.more === "", JSON.stringify(v));
+    emit(job("j1", { status: "done", fraction: 1 }));
+    v = statusView(newestFirst(jobs), null, true);
+    check("the line clears when the last job is done", v.kind === "ready" && v.text.startsWith("Ready"), JSON.stringify(v));
+    emit(job("j3", { fraction: 0.1 }));
+    emit(job("j3", { status: "error" }));
+    v = statusView(newestFirst(jobs), "Removing background", true);
+    check("a failed job clears; the UI action in flight shows instead", v.kind === "busy" && v.text === "Removing background…", JSON.stringify(v));
+    const before = jobs;
+    emit(job("unknown", { status: "done" }));
+    check("an end event for a job never shown changes nothing", jobs === before);
+    check("not connected: the line says so", statusView([], null, false).kind === "ready" && /Waiting/.test((statusView([], null, false) as { text: string }).text));
+  } finally {
+    g.WebSocket = realWs;
+  }
+}
+
+void jobStatusChecks()
+  .then(() => voiceWorkletRouterChecks())
+  .catch((e) => { failures++; console.error("  FAIL voice worklet / job status checks threw:", e); })
   .then(sliderRevertChecks)
   .catch((e) => { failures++; console.error("  FAIL slider revert checks threw:", e); })
   .then(() => {
