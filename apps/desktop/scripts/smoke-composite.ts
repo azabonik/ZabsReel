@@ -47,7 +47,7 @@ import { clipFootprintFrames, clipTimeMap, rampFrameModel, sourceFrameShownAt } 
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/maskdraw";
 import {
-  EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, exactOnly, gblurParams, posterizeTable, previewFidelity,
+  EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, exactOnly, gblurParams, hqdn3dCoefs, lensFillScale, posterizeTable, previewFidelity,
   previewScaleFor, vignetteAngle, vignetteFactor,
 } from "@aive/core/effects";
 import type { AudioEffect, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
@@ -57,7 +57,7 @@ import { setVoiceWorkletState, voiceWorkletState } from "../src/workletstatus";
 import {
   AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewFidelity, audioPreviewPlan,
 } from "@aive/core/audio-effects";
-import { cachedPlan, planLayer, passCount, type PlannedStep } from "../src/gl/plan";
+import { cachedPlan, lookHasKernel, planLayer, passCount, type PlannedStep } from "../src/gl/plan";
 import { drawCount } from "../src/gl/runtime";
 import { PlaybackGovernor } from "../src/gl/governor";
 import { balanceParams, curveTable, curvesTables, eqTables, hueParams, parseCube, parseCurvePoints, safeCurve } from "../src/gl/color";
@@ -973,14 +973,57 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("vignette: amount 0 → no pass (the builder emits nothing)", planLayer({ filters: [f("vignette", { amount: 0 })] }, g1).length === 0);
   const tr = planLayer({ filters: [f("trails")] }, g1)[0];
   check("trails: a history step (float lagfun pass, then unpremultiply)", tr.history === true && tr.passes[0].history === true && tr.passes[0].float === true && tr.passes.length === 2);
+  // History / table keys use the effect's own id: a reorder or a bypass elsewhere in the stack keeps them.
+  const trA = f("trails", { id: "trail-1" });
+  const ckA = f("colorkey", { id: "key-1", enabled: false });
+  check("plan: a step's id is the effect's id (fx:<id>:<type>), the same after a reorder",
+    planLayer({ filters: [trA, ckA] }, g1)[0].id === "fx:trail-1:trails" && planLayer({ filters: [ckA, trA] }, g1)[0].id === "fx:trail-1:trails");
+  check("plan: a repeated effect id still gives distinct step ids",
+    new Set(planLayer({ filters: [f("invert", { id: "dup" }), f("invert", { id: "dup" })] }, g1).map((x) => x.id)).size === 2);
+  // …but the history remembers what fed it: an ENABLED effect moved ahead of trails changes histSig
+  // (the runtime starts the trail over), a bypassed one doesn't; settings before it change histParams only.
+  const ivA = f("invert", { id: "inv-1" });
+  const histOf = (look: Parameters<typeof planLayer>[0]) => planLayer(look, g1).find((x) => x.history)!;
+  check("plan: trails' histSig names the enabled steps before it, so moving invert ahead of it changes it",
+    histOf({ filters: [trA, ivA] }).histSig === "" && histOf({ filters: [ivA, trA] }).histSig === "fx:inv-1:invert," &&
+      histOf({ color: { brightness: 0.1 }, filters: [trA] }).histSig === "color:eq,", histOf({ filters: [ivA, trA] }).histSig);
+  check("plan: a bypassed effect moved ahead of trails leaves histSig alone",
+    histOf({ filters: [ckA, trA] }).histSig === histOf({ filters: [trA, ckA] }).histSig);
+  const histAt = (b: number, decay = 0.9) => histOf({ color: { brightness: b }, filters: [{ ...trA, amount: decay }, f("invert", { id: "after" })] });
+  check("plan: histParams follows the settings up to trails (colour, its own decay), not the effects after it",
+    histAt(0.1).histParams !== histAt(0.2).histParams && histAt(0.1).histParams !== histAt(0.1, 0.95).histParams && histAt(0.1).histSig === histAt(0.2).histSig &&
+      histOf({ filters: [trA, f("invert", { id: "after" })] }).histParams === histOf({ filters: [trA, f("invert", { id: "after", amount: 0.5 })] }).histParams);
+  // Lens: the zoom-to-fill pass only when the warp uncovers something.
+  const lensPasses = (extra: Partial<VisualEffect>) => planLayer({ filters: [f("lens", extra)] }, g1)[0].passes.length;
+  check("lens: barrel (default fill) = warp + zoom passes; fill 0 or a pincushion that covers the frame = the warp alone",
+    lensPasses({ amount: 0.3 }) === 2 && lensPasses({ amount: 0.3, params: { fill: 0 } }) === 1 && lensPasses({ amount: -0.4, params: { k2: 0.3 } }) === 1,
+    `${lensPasses({ amount: 0.3 })}/${lensPasses({ amount: 0.3, params: { fill: 0 } })}/${lensPasses({ amount: -0.4, params: { k2: 0.3 } })}`);
+  const zoom = planLayer({ filters: [f("lens", { amount: 0.3 })] }, g1)[0].passes[1].uniforms;
+  const zoomHalf = planLayer({ filters: [f("lens", { amount: 0.3 })] }, { ...g1, k: 0.5, w: 960, h: 540 })[0].passes[1].uniforms;
+  check("lens: the zoom is the export's (lensFillScale of the canvas), the same at any preview scale",
+    zoom.u_zoom === lensFillScale(0.3, 0, 1920, 1080) && zoomHalf.u_zoom === zoom.u_zoom && (zoom.u_zoom as number) < 256 &&
+      (zoomHalf.u_zoom_off as number[])[0] === 480 * (256 - (zoom.u_zoom as number)), JSON.stringify({ zoom, zoomHalf }));
+  // Denoise: hqdn3d's three passes (row recursion, column + temporal history, out) and its coefficient table.
+  const dn = planLayer({ filters: [f("denoise", { amount: 6 })] }, g1)[0];
+  check("denoise: a history step of 3 passes with a 128×128 coefficient table",
+    dn.history === true && dn.passes.length === 3 && dn.passes[1].history === true && dn.auxWidth === 128 && dn.aux?.length === 128 * 128 * 4);
+  const lt = hqdn3dCoefs(6);
+  const le = (o: number) => ((dn.aux![o + 1] << 8) | dn.aux![o]) << 16 >> 16;
+  check("denoise: the table holds hqdn3d's int16 coefficients (luma spatial at row 0, luma temporal at row 64)",
+    le(4096 * 4) === hqdn3dCoefs(6)[4096] && le(100 * 4) === lt[100] && le((8192 + 5000) * 4) === hqdn3dCoefs(9)[5000]);
+  // Fixed-size kernels (B7): the preview runs these layers at the export's resolution.
+  check("kernel: sharpen, detail, denoise, edges and chromakey are fixed-size kernels; blur and lens are not",
+    EFFECTS.filter((e) => effectGL(e.type)?.kernel).map((e) => e.type).join() === "sharpen,detail,denoise,edges,chromakey" &&
+      lookHasKernel({ filters: [f("blur"), f("sharpen")] }) && !lookHasKernel({ filters: [f("blur"), f("sharpen", { enabled: false })] }));
 
   // Fidelity flags (scripts/parity-gl.mts measures them against FFmpeg).
   const fid = (t: string) => effectGL(t)?.fidelity;
   check("fidelity: every effect declares one, with a note", EFFECTS.every((e) => !!effectGL(e.type)?.fidelity && !!effectGL(e.type)?.note));
-  check("fidelity: denoise approximate; grain, trails and chromakey close; the rest exact",
-    fid("denoise") === "approx" && ["grain", "trails", "chromakey"].every((t) => fid(t) === "close") &&
-      EFFECTS.filter((e) => !["denoise", "grain", "trails", "chromakey"].includes(e.type)).every((e) => fid(e.type) === "exact"));
-  check("badge: the inspector's '≈' set (approx with WebGL2) = denoise only", EFFECTS.filter((e) => previewFidelity(e.type) === "approx").map((e) => e.type).join() === "denoise");
+  check("fidelity: grain, trails and denoise close (randomness / history from where playback started); the rest exact",
+    ["grain", "trails", "denoise"].every((t) => fid(t) === "close") &&
+      EFFECTS.filter((e) => !["grain", "trails", "denoise"].includes(e.type)).every((e) => fid(e.type) === "exact"));
+  check("badge: no effect's live preview is approximate any more (the inspector's static '≈' set is empty)",
+    EFFECTS.filter((e) => previewFidelity(e.type) === "approx").length === 0);
 
   // Colour maths vs the strings graph.ts builds for the export.
   const grade = { temperature: 0.4, tint: -0.3, lift: { r: 0.1, b: -0.2 }, gamma: { g: 0.15 }, gain: { r: -0.05, b: 0.9 }, hue: -25.5, curve: "0/0 0.3/0.2 0.7/0.85 1/1", curveG: "0/0.05 1/0.95" };
@@ -1131,7 +1174,8 @@ console.log("\nlive playback of a curve-speed clip (MediaPool.sync follow / resu
     check("no follow (constant speed): the rate is the clip's (no steering), no seek under 0.08 s", s5.playbackRate === 2 && s5.seeks.length === 0, `${s5.playbackRate}`);
     const s6 = fake(10);
     sync(s6, 12, 20, { playing: false });
-    check("follow, paused transport: the rate is clamped (16), the element pauses and parks on srcTime", s6.playbackRate === 16 && s6.pauses === 1 && s6.seeks.join() === "12", `${s6.playbackRate} / ${s6.pauses} / ${s6.seeks}`);
+    // Parks 1 ms past srcTime: the paused branch's nudge, so a frame boundary shows the frame that starts there.
+    check("follow, paused transport: the rate is clamped (16), the element pauses and parks on srcTime (+1 ms nudge)", s6.playbackRate === 16 && s6.pauses === 1 && s6.seeks.length === 1 && near(Number(s6.seeks[0]), 12.001, 1e-9), `${s6.playbackRate} / ${s6.pauses} / ${s6.seeks}`);
 
     // Re-seek throttle: at most one follow seek per FOLLOW_SEEK_GAP_MS (400 ms), none while a seek is pending.
     const e = fake(5);

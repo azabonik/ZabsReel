@@ -76,6 +76,8 @@ export interface ActiveClip {
   srcTime: number;
   /** Playback rate = clip speed (a speed ramp's speed at `srcTime`, re-sampled every frame). */
   rate: number;
+  /** The source's frame rate (video clips): the WebGL preview's temporal effects step per source frame, as the export's do. */
+  srcFps?: number;
   /**
    * The clip plays a speed ramp: its rate changes continuously, so the decoder
    * follows it with a soft rate correction instead of only seeking (mediapool.ts).
@@ -346,6 +348,7 @@ export function activeLayersAt(
         isImage: asset?.isImage,
         srcTime,
         rate: rateAt(seg, srcTime),
+        ...(asset?.fps && !asset.isImage ? { srcFps: asset.fps } : {}),
         ...(seg.map ? { ramped: true } : {}),
         gain,
         draw: drawable

@@ -17,14 +17,17 @@
  * default", and every value is clamped to its range when the filter is built,
  * so old projects render exactly as before. (Vignette is the exception: the
  * old export ignored its amount, so loading a pre-v4 project drops it — see
- * migrateProject in engine.ts.)
+ * migrateProject in engine.ts. Lens is the other: `fill` defaults to on, so a
+ * lens saved before it existed now zooms just enough to hide the empty
+ * corners the old render left — the fix it was added for; fill 0 restores
+ * the transparent corners.)
  *
  * Adding an effect = one entry in EFFECT_TYPE_IDS + one in DEFS below.
  */
 
 import {
-  GLSL_BLUR_ANTI, GLSL_BLUR_CAUSAL, GLSL_CAS, GLSL_COLORHOLD, GLSL_DENOISE, GLSL_DESATURATE, GLSL_EDGE_DETECT,
-  GLSL_EDGE_GAUSS, GLSL_EXPOSURE, GLSL_KEY_CHROMA, GLSL_KEY_COLOR, GLSL_KEY_LUMA, GLSL_LAGFUN, GLSL_LAGOUT, GLSL_LENS,
+  GLSL_BLUR_ANTI, GLSL_BLUR_CAUSAL, GLSL_CAS, GLSL_COLORHOLD, GLSL_DESATURATE, GLSL_DN_H, GLSL_DN_OUT, GLSL_DN_VT, GLSL_EDGE_NMS, GLSL_EDGE_SOBEL,
+  GLSL_EDGE_GAUSS, GLSL_EXPOSURE, GLSL_KEY_CHROMA, GLSL_KEY_COLOR, GLSL_KEY_LUMA, GLSL_LAGFUN, GLSL_LAGOUT, GLSL_LENS, GLSL_LENS_ZOOM,
   GLSL_LUT256, GLSL_MIXER, GLSL_NEGATE, GLSL_NOISE, GLSL_PIXELATE, GLSL_RGBSHIFT, GLSL_SCREEN, GLSL_UNSHARP_H, GLSL_UNSHARP_V,
   GLSL_VIBRANCE, GLSL_VIGNETTE,
 } from "./glsl.js";
@@ -129,6 +132,8 @@ export interface EffectGLPass {
    */
   point?: true;
   uniforms?: (e: EffectInput, g: GLUniformContext) => GLUniforms;
+  /** False = this pass is left out for these params (the builder emits no matching filter). Default: in. */
+  active?: (e: EffectInput, g: GLUniformContext) => boolean;
 }
 
 /** An effect's WebGL2 preview: pure data (shader bodies + uniform builders). */
@@ -139,6 +144,15 @@ export interface EffectGL {
   passes: readonly EffectGLPass[];
   /** Keeps state across frames (a per-layer history texture). */
   history?: true;
+  /**
+   * A fixed-size pixel kernel (unsharp's 5×5, cas's 3×3, edgedetect, chromakey's
+   * 3×3, hqdn3d): it matches the export only when the preview processes the
+   * layer at the export's resolution (k = 1), so the preview does that for a
+   * plan with one, and the inspector marks it ≈ while it can't (scaled playback).
+   */
+  kernel?: true;
+  /** A data table (RGBA8, rows of `width` texels) bound to every sampler2D the passes declare. */
+  aux?: (e: EffectInput) => { data: Uint8Array; width: number };
   /** False = the builder emits nothing for these params (skip the effect). Default: active. */
   active?: (e: EffectInput, g: GLUniformContext) => boolean;
 }
@@ -318,7 +332,12 @@ function keyStep(f: EffectInput, label: string): string {
     key = `colorkey=${keyColorHex(f.color, "0x808080")}:${p("similarity")}:${p("blend")}`;
   } else {
     const color = keyColorHex(f.color, "0x00FF00");
-    key = `chromakey=${color}:${p("similarity")}:${p("blend")}`;
+    // chromakey averages a 3×3 chroma neighbourhood, but at the frame border its
+    // missing taps keep stale values that restart at every thread slice, so the
+    // first pixel of each slice depended on the CPU count. A 1-px edge-smeared
+    // border (cropped off again) gives every pixel 9 real taps: deterministic,
+    // clamp-to-edge at the border, same cost.
+    key = `format=yuva444p,pad=iw+2:ih+2:1:1,fillborders=1:1:1:1:smear,chromakey=${color}:${p("similarity")}:${p("blend")},crop=iw-2:ih-2:1:1`;
     const despill = paramValue(f, "despill");
     const screen = despill > 0 ? spillScreen(hexToRgb(color)) : null;
     if (screen) {
@@ -409,8 +428,119 @@ export function posterizeTable(e: EffectInput): number[] {
   return out;
 }
 
-/** hqdn3d's range exponent for a strength (vf_hqdn3d.c precalc_coefs). */
-const hqdnGamma = (strength: number) => Math.log(0.25) / Math.log(1 - Math.min(strength, 252) / 255 - 0.00001);
+const lensFillMemo = new Map<string, number>();
+
+/**
+ * Lens zoom-to-fill: the output scale S/256 (S = 1..256, 256 = no zoom) for
+ * lenscorrection k1/k2 on a W×H frame — the largest that keeps every pixel
+ * the zoom reads mapped inside the source, so no empty corner shows.
+ * lenscorrection sends an output offset o (from the centre) to o·m, m = 1 +
+ * k1·r² + k2·r⁴ (r = 1 at the corner): along a ray at fraction t of the way to
+ * the frame edge whose corner-normalised r² there is ρ, the source sits at
+ * t·m(t²ρ) of the way — inside when |m| ≤ 1, else when that is below 1 (less
+ * a 2-pixel margin for lenscorrection's rounding). The first t that fails,
+ * over every ray, less the zoom's own 1.5-pixel footprint, is the scale;
+ * rounded DOWN to 1/256 (perspective's sub-pixel unit, so the export and the
+ * preview zoom by the same exact amount). Computed from the export canvas in
+ * both, so a preview at another size zooms identically.
+ */
+export function lensFillScale(k1: number, k2: number, W: number, H: number): number {
+  const key = `${k1}|${k2}|${W}|${H}`;
+  const hit = lensFillMemo.get(key);
+  if (hit !== undefined) return hit;
+  const half = Math.min(W, H) / 2;
+  const mu = 2 / half;
+  const delta = 1.5 / half;
+  const rhoMin = Math.min(W, H) ** 2 / (W * W + H * H);
+  const N = 2048;
+  let T = 1 + delta;
+  for (let j = 0; j <= 32; j++) {
+    const rho = rhoMin + ((1 - rhoMin) * j) / 32;
+    for (let i = 1; i / N < T; i++) {
+      const t = i / N;
+      const r2 = t * t * rho;
+      const m = 1 + k1 * r2 + k2 * r2 * r2;
+      if (Math.abs(m) > 1 && Math.abs(t * m) > 1 - mu) {
+        T = t;
+        break;
+      }
+    }
+  }
+  const S = Math.max(1, Math.min(256, Math.floor(Math.min(1, T - delta) * 256)));
+  if (lensFillMemo.size > 256) lensFillMemo.clear();
+  lensFillMemo.set(key, S);
+  return S;
+}
+
+/** The lens effect's zoom (S/256, 256 = none) on a W×H canvas: none when fill is off or nothing is empty. */
+function lensZoom(e: EffectInput, W: number, H: number): number {
+  return paramValue(e, "fill") >= 0.5 ? lensFillScale(paramValue(e, "amount"), paramValue(e, "k2"), W, H) : 256;
+}
+
+/**
+ * The zoom as FFmpeg's perspective filter: the source rect [a, c] × [b, d]
+ * mapped onto the frame, centred on lenscorrection's own centre (int)(W/2),
+ * (int)(H/2). Its edges are multiples of 1/256 (written exactly), so
+ * perspective's per-pixel position lrint(256·(a + (c − a)·x/W)) is the exact
+ * integer x·S + cx·(256 − S) that the preview's GLSL_LENS_ZOOM computes.
+ */
+function lensZoomFilter(S: number, W: number, H: number): string {
+  const cx = Math.trunc(W / 2);
+  const cy = Math.trunc(H / 2);
+  const a = (cx * (256 - S)) / 256;
+  const b = (cy * (256 - S)) / 256;
+  const c = a + (S * W) / 256;
+  const d = b + (S * H) / 256;
+  const f = (v: number) => v.toFixed(8);
+  return `perspective=x0=${f(a)}:y0=${f(b)}:x1=${f(c)}:y1=${f(b)}:x2=${f(a)}:y2=${f(d)}:x3=${f(c)}:y3=${f(d)}:interpolation=linear`;
+}
+
+/** C's lrint (round half to even) on a double. */
+const lrint = (v: number): number => {
+  const f = Math.floor(v);
+  const d = v - f;
+  return d > 0.5 ? f + 1 : d < 0.5 ? f : f % 2 === 0 ? f : f + 1;
+};
+
+/**
+ * hqdn3d's 8-bit coefficient table for a strength (vf_hqdn3d.c precalc_coefs,
+ * LUT_BITS 4): entry d + 4096 for the bin d = (prev − cur) >> 4 of two 16-bit
+ * values, in doubles and lrint'ed like the C.
+ */
+export function hqdn3dCoefs(dist25: number): Int16Array {
+  const ct = new Int16Array(8192);
+  const gamma = Math.log(0.25) / Math.log(1 - Math.min(dist25, 252) / 255 - 0.00001);
+  for (let i = -4096; i < 4096; i++) {
+    const f = (i * 32 + 15) / 512; // the bin's midpoint
+    const simil = Math.max(0, 1 - Math.abs(f) / 255);
+    ct[4096 + i] = lrint(Math.pow(simil, gamma) * 256 * f);
+  }
+  return ct;
+}
+
+/**
+ * The denoise preview's coefficient texture (128×128 RGBA8): rows 0–63 the
+ * spatial tables, 64–127 the temporal ones; entry i at (i & 127, i >> 7); r/g =
+ * the luma table's int16, b/a = the chroma table's. Strengths as hqdn3d's init
+ * derives them from the one we pass (luma spatial; 0 = its default 4).
+ */
+function denoiseTables(e: EffectInput): Uint8Array {
+  const ls = opt(e, "amount") || 4;
+  const cs = (3 * ls) / 4;
+  const lt = (6 * ls) / 4;
+  const ct = (lt * cs) / ls;
+  const out = new Uint8Array(128 * 128 * 4);
+  [[hqdn3dCoefs(ls), hqdn3dCoefs(cs)], [hqdn3dCoefs(lt), hqdn3dCoefs(ct)]].forEach(([luma, chroma], t) => {
+    for (let i = 0; i < 8192; i++) {
+      const o = (t * 8192 + i) * 4;
+      out[o] = luma[i] & 255;
+      out[o + 1] = (luma[i] >> 8) & 255;
+      out[o + 2] = chroma[i] & 255;
+      out[o + 3] = (chroma[i] >> 8) & 255;
+    }
+  });
+  return out;
+}
 
 // ---- the registry -------------------------------------------------------------
 
@@ -443,7 +573,8 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     preview: {
       gl: {
         fidelity: "exact",
-        note: "unsharp's 5×5 luma kernel in its fixed-point math; the kernel is in preview pixels, so a scaled-down preview sharpens a wider area.",
+        note: "unsharp's 5×5 luma kernel in its fixed-point math, at the export's resolution (a 5×5 kernel at a scaled-down preview would sharpen a wider area: marked ≈ then).",
+        kernel: true,
         passes: [
           { frag: GLSL_UNSHARP_H, domain: "yuv", float: true },
           { frag: GLSL_UNSHARP_V, domain: "yuv", out: "rgb", uniforms: (e) => ({ u_amount: Math.trunc(optf(e, "amount") * 65536) }) },
@@ -460,7 +591,8 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     preview: {
       gl: {
         fidelity: "exact",
-        note: "cas's 3×3 contrast-adaptive math per channel; the 3×3 window is in preview pixels.",
+        note: "cas's 3×3 contrast-adaptive math per channel, at the export's resolution (marked ≈ while a scaled-down preview can't).",
+        kernel: true,
         passes: [{ frag: GLSL_CAS, domain: "any", uniforms: (e) => ({ u_strength: -f32(16 + f32(f32(f32(4.01) - 16) * optf(e, "amount"))) }) }],
       },
     },
@@ -473,15 +605,16 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     ffmpeg: (e, ctx) => alphaSafe([`hqdn3d=${num(paramValue(e, "amount"))}`], `dn${ctx.tag}`),
     preview: {
       gl: {
-        fidelity: "approx",
-        note: "Approximation: hqdn3d's edge-preserving weight as a small spatial filter; its recursive and temporal smoothing only show in the render.",
-        passes: [0, 1].map((axis): EffectGLPass => ({
-          frag: GLSL_DENOISE, domain: "yuv", ...(axis === 1 ? { out: "rgb" as const } : {}),
-          uniforms: (e) => {
-            const luma = opt(e, "amount") || 4; // hqdn3d=0 means its default 4
-            return { u_axis: axis, u_radius: Math.min(8, Math.max(2, Math.round(2 + luma / 3))), u_gamma: [hqdnGamma(luma), hqdnGamma((3 * luma) / 4)] };
-          },
-        })),
+        fidelity: "close",
+        note: "hqdn3d's own coefficient tables and fixed-point steps: its spatial recursion (restarted 12 pixels back per pixel, within a level or two of the full one) and its temporal smoothing against earlier source frames: playing, from where playback started; paused on a video clip, the 30 source frames before the playhead are re-run (decoded by the core), which the smoothing has settled within. On an adjustment layer, only from where playback started.",
+        history: true,
+        kernel: true,
+        aux: (e) => ({ data: denoiseTables(e), width: 128 }),
+        passes: [
+          { frag: GLSL_DN_H, domain: "yuv", float: true },
+          { frag: GLSL_DN_VT, domain: "yuv", float: true, history: true },
+          { frag: GLSL_DN_OUT, domain: "yuv", out: "rgb" },
+        ],
       },
     },
   },
@@ -548,8 +681,9 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     preview: {
       gl: {
         fidelity: "exact",
-        note: "edgedetect's Gaussian, Sobel, non-maximum suppression and its one-step double threshold; the fixed kernels are in preview pixels.",
-        passes: [{ frag: GLSL_EDGE_GAUSS, domain: "rgb" }, { frag: GLSL_EDGE_DETECT, domain: "rgb", out: "rgb" }],
+        note: "edgedetect's Gaussian, Sobel, non-maximum suppression and its one-step double threshold, at the export's resolution (marked ≈ while a scaled-down preview can't).",
+        kernel: true,
+        passes: [{ frag: GLSL_EDGE_GAUSS, domain: "rgb" }, { frag: GLSL_EDGE_SOBEL, domain: "rgb", float: true }, { frag: GLSL_EDGE_NMS, domain: "rgb", out: "rgb" }],
       },
     },
   },
@@ -613,8 +747,9 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     preview: {
       key: true,
       gl: {
-        fidelity: "close",
-        note: "chromakey's 3×3 chroma distance on BT.601 YUV and the despill math, the key alpha multiplying the clip's; FFmpeg's left-edge pixels at its thread-slice starts (they depend on the CPU count) can differ.",
+        fidelity: "exact",
+        note: "chromakey's 3×3 chroma distance on BT.601 YUV (edge pixels clamp, as the export's smeared border does) and the despill math, the key alpha multiplying the clip's.",
+        kernel: true,
         passes: [{
           frag: GLSL_KEY_CHROMA, domain: "rgb", out: "rgb",
           uniforms: (e) => {
@@ -866,21 +1001,48 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
   lens: {
     label: "Lens distortion",
     category: "Stylize",
-    description: "Barrel / pincushion warp around the centre (amount = k1 -1..1: positive = barrel / fisheye bulge with transparent corners, negative = pincushion; params.k2 adds a stronger edge term).",
-    params: [amountParam("Distortion", -1, 1, 0.05, 0.3), { key: "k2", label: "Edge curve (k2)", min: -1, max: 1, step: 0.05, default: 0 }],
-    // Unmapped pixels are transparent (lenscorrection's default fc black@0), so the track below shows at the corners.
-    ffmpeg: (e) => {
+    description:
+      "Barrel / pincushion warp around the centre (amount = k1 -1..1: positive = barrel / fisheye bulge, negative = pincushion; params.k2 adds a stronger edge term). " +
+      "params.fill 1 (default) zooms in just enough that no empty corner shows; 0 leaves the corners the warp uncovers transparent (the track below shows there).",
+    params: [
+      amountParam("Distortion", -1, 1, 0.05, 0.3),
+      { key: "k2", label: "Edge curve (k2)", min: -1, max: 1, step: 0.05, default: 0 },
+      { key: "fill", label: "Zoom to fill (1 on · 0 off)", min: 0, max: 1, step: 1, default: 1 },
+    ],
+    // Unmapped pixels are transparent (lenscorrection's default fc black@0); with fill on, a
+    // perspective zoom then crops them away (lensFillScale picks the smallest zoom that does).
+    ffmpeg: (e, ctx) => {
       const [k1, k2] = [paramValue(e, "amount"), paramValue(e, "k2")];
-      return k1 === 0 && k2 === 0 ? [] : [`lenscorrection=cx=0.5:cy=0.5:k1=${num(k1)}:k2=${num(k2)}:i=bilinear`];
+      if (k1 === 0 && k2 === 0) return [];
+      const S = lensZoom(e, ctx.W, ctx.H);
+      return [`lenscorrection=cx=0.5:cy=0.5:k1=${num(k1)}:k2=${num(k2)}:i=bilinear`, ...(S < 256 ? [lensZoomFilter(S, ctx.W, ctx.H)] : [])];
     },
     preview: {
       gl: {
         fidelity: "exact",
-        note: "lenscorrection's radial mapping and bilinear sampling; unmapped corners stay transparent.",
-        passes: [{
-          frag: GLSL_LENS, domain: "any",
-          uniforms: (e) => ({ u_k1: Math.trunc(opt(e, "amount") * 2 ** 24) / 2 ** 24, u_k2: Math.trunc(opt(e, "k2") * 2 ** 24) / 2 ** 24 }),
-        }],
+        note: "lenscorrection's radial mapping and bilinear sampling, then (zoom to fill) perspective's exact zoom and its fixed-point bilinear; with fill off the uncovered corners stay transparent.",
+        passes: [
+          {
+            frag: GLSL_LENS, domain: "any",
+            uniforms: (e, g) => {
+              // calc_correction's r2inv = (4 << 60) / (w² + h²) in int64, split into 32-bit halves.
+              const r2inv = (BigInt(4) << BigInt(60)) / BigInt(Math.round(g.w) ** 2 + Math.round(g.h) ** 2);
+              return {
+                u_r2inv: [Number(r2inv >> BigInt(32)), Number(r2inv & BigInt(0xffffffff))],
+                u_k1i: Math.trunc(opt(e, "amount") * 2 ** 24), u_k2i: Math.trunc(opt(e, "k2") * 2 ** 24),
+                u_lens_fill: paramValue(e, "fill") >= 0.5 ? 1 : 0,
+              };
+            },
+          },
+          {
+            frag: GLSL_LENS_ZOOM, domain: "any",
+            active: (e, g) => lensZoom(e, g.cw, g.ch) < 256,
+            uniforms: (e, g) => {
+              const S = lensZoom(e, g.cw, g.ch);
+              return { u_zoom: S, u_zoom_off: [Math.trunc(g.w / 2) * (256 - S), Math.trunc(g.h / 2) * (256 - S)] };
+            },
+          },
+        ],
         active: (e) => paramValue(e, "amount") !== 0 || paramValue(e, "k2") !== 0,
       },
     },
@@ -888,7 +1050,7 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
   trails: {
     label: "Trails",
     category: "Stylize",
-    description: "Ghosting / light trails: bright moving things leave a fading echo (amount = decay 0.8..0.99; higher = longer trail). Restarts at each clip's own start (on an adjustment layer it builds up from the start of the timeline, like the export).",
+    description: "Ghosting / light trails: bright moving things leave a fading echo (amount = decay 0.8..0.99 per source frame; higher = longer trail). Restarts at each clip's own start (on an adjustment layer it builds up from the start of the timeline, like the export).",
     params: [amountParam("Decay", 0.8, 0.99, 0.01, 0.9)],
     ffmpeg: (e, ctx) => {
       const lag = `lagfun=decay=${num(paramValue(e, "amount"))}`;
@@ -897,7 +1059,7 @@ const DEFS: { [K in EffectType]: Omit<EffectDef, "type"> } = {
     preview: {
       gl: {
         fidelity: "close",
-        note: "lagfun's premultiplied max-decay per frame; the preview's trail builds up from where playback started, the render's from the clip start.",
+        note: "lagfun's premultiplied max-decay per SOURCE frame, as the render runs it (before the clip's speed change: a held frame in slow motion doesn't decay, 2× decays twice per frame), kept when the preview resolution changes (an enabled effect moved ahead of it starts it over: its input changed). The render's trail builds up from the clip's first frame. Playing, the preview's builds from where playback started (above 1× speed it decays across the source frames it skips but can't add their light); paused on a video clip, the source frames before the playhead are re-run (decoded by the core: back to the clip's first frame, or as far as the trail can still show, at most 90) — after a seek, a jump, skipped frames or a change before it, the paused frame shows the render's trail. Decays above ~0.94 reach back further than 90 frames, so their oldest light is missing. On an adjustment layer, only from where playback started.",
         history: true,
         passes: [
           { frag: GLSL_LAGFUN, domain: "rgb", float: true, history: true, uniforms: (e) => ({ u_decay: optf(e, "amount") }) },

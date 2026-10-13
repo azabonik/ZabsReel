@@ -25,11 +25,14 @@
  *    effect's input (before its first pass), `fpx(q)` a FLOAT intermediate raw
  *    and `hpx(q)` the per-layer history texture. Reads clamp to the edge.
  *  - Domains and output modes are compile-time #defines (IN_DOM, ORIG_DOM,
- *    DOM, END_DOM, OUT_RGB, FLOAT_OUT, FINAL), so a program only runs the
- *    conversions it needs.
+ *    DOM, END_DOM, OUT_RGB, FLOAT_OUT, FINAL, IN_FLOAT, HISTORY), so a
+ *    program only runs the conversions it needs.
  *  - Every pass writes RGBA8 (the 8-bit requantisation between FFmpeg
  *    filters) unless it is a float pass, which writes raw floats; fused ops
- *    are clamped to 8 bits where that write would have been.
+ *    are clamped to 8 bits where that write would have been. Floats are
+ *    stored bit for bit in RGBA32UI targets (floatBitsToUint), which core
+ *    WebGL2 can render to without EXT_color_buffer_float; IN_FLOAT = 1 when
+ *    u_in is such a target, HISTORY = 1 for a pass that reads u_hist.
  *  - `u_k` = processing pixels per canvas (export) pixel, `u_canvas` = the
  *    canvas size in export pixels, `u_seed` = the timeline frame number.
  */
@@ -40,14 +43,25 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 precision highp sampler3D;
+precision highp usampler2D;
+#if IN_FLOAT == 1
+uniform usampler2D u_in;
+#else
 uniform sampler2D u_in;
+#endif
 uniform sampler2D u_orig;
-uniform sampler2D u_hist;
+#if HISTORY == 1
+uniform usampler2D u_hist;
+#endif
 uniform ivec2 u_size;
 uniform float u_k;
 uniform vec2 u_canvas;
 uniform float u_seed;
+#if FLOAT_OUT == 1
+out uvec4 o_color;
+#else
 out vec4 o_color;
+#endif
 ivec2 SZ;
 
 // swscale's RGB <-> BT.601 limited-range YUV for 8-bit RGBA <-> yuv444p, in its
@@ -78,10 +92,17 @@ vec4 conv(vec4 c, int from, int to) {
 }
 vec4 raw(sampler2D s, ivec2 q) { return texelFetch(s, clamp(q, ivec2(0), SZ - 1), 0); }
 vec4 lv(vec4 c) { return floor(c * 255.0 + 0.5); }
+#if IN_FLOAT == 1
+vec4 fpx(ivec2 q) { return uintBitsToFloat(texelFetch(u_in, clamp(q, ivec2(0), SZ - 1), 0)); }
+vec4 px(ivec2 q) { return conv(fpx(q), IN_DOM, DOM); }
+#else
 vec4 px(ivec2 q) { return conv(lv(raw(u_in, q)), IN_DOM, DOM); }
-vec4 pxo(ivec2 q) { return conv(lv(raw(u_orig, q)), ORIG_DOM, DOM); }
 vec4 fpx(ivec2 q) { return raw(u_in, q); }
-vec4 hpx(ivec2 q) { return raw(u_hist, q); }
+#endif
+vec4 pxo(ivec2 q) { return conv(lv(raw(u_orig, q)), ORIG_DOM, DOM); }
+#if HISTORY == 1
+vec4 hpx(ivec2 q) { return uintBitsToFloat(texelFetch(u_hist, clamp(q, ivec2(0), SZ - 1), 0)); }
+#endif
 // C's (int) conversion then av_clip_uint8.
 float tr8(float v) { return clamp(trunc(v), 0.0, 255.0); }
 vec3 tr8(vec3 v) { return clamp(trunc(v), 0.0, 255.0); }
@@ -119,7 +140,7 @@ void main() {
 #endif
   vec4 c = fx(p);
 #if FLOAT_OUT == 1
-  o_color = c;
+  o_color = floatBitsToUint(c);
 #else
   c = clamp(c, 0.0, 255.0);
 #if (OUT_RGB == 1 || FINAL != 0) && END_DOM == 1
@@ -265,33 +286,70 @@ vec4 fx(ivec2 p) {
 `;
 
 /**
- * hqdn3d approximation (spatial only): hqdn3d is a recursive, edge-
- * preserving low-pass whose step weight is (1 - |d|/255)^gamma with
- * gamma = ln 0.25 / ln(1 - strength/255). The preview runs the same range
- * weight as a separable 1-D bilateral (u_axis), luma and chroma with their
- * own strengths, on yuv444p values. The temporal half is not previewed.
+ * hqdn3d (vf_hqdn3d.c, 8-bit) on yuv444p, in its 16-bit fixed point: a value
+ * v is LOADed as (v << 8) + 127 and lowpass(prev, cur) = cur + coef[(prev −
+ * cur) >> 4], the coefficient tables built by precalc_coefs (registry
+ * hqdn3dCoefs, bound as u_dn_tab: 128×128 RGBA8, row block 0 spatial / 64
+ * temporal, int16 luma in r/g and chroma in b/a). Spatially it is a causal
+ * recursion along each row (H) and then down each column over H (V); a pass
+ * can't run a whole-row recursion per pixel, so each pixel restarts it
+ * DN_K pixels / rows back from the raw value — the weights fade within a few
+ * steps (DN_K = 12: within a level or two of the full recursion). Then the
+ * temporal step lowpasses V against the previous frame's state (the history;
+ * on a clip's first frame, the frame's own LOADed values), and the output is
+ * that state >> 8. Three passes: H (float), V + temporal (the history), out.
  */
-export const GLSL_DENOISE = `
-uniform int u_axis;
-uniform int u_radius;
-uniform vec2 u_gamma;
-vec4 fx(ivec2 p) {
-  ivec2 d = u_axis == 0 ? ivec2(1, 0) : ivec2(0, 1);
-  vec4 c = px(p);
-  vec3 acc = c.rgb;
-  vec3 wsum = vec3(1.0);
-  vec3 g = vec3(u_gamma.x, u_gamma.y, u_gamma.y);
-  for (int k = 1; k <= u_radius; k++) {
-    float s = pow(0.85, float(k));
-    vec3 l = px(p - d * k).rgb;
-    vec3 r = px(p + d * k).rgb;
-    vec3 wl = s * pow(max(vec3(0.0), 1.0 - abs(l - c.rgb) / 255.0), g);
-    vec3 wr = s * pow(max(vec3(0.0), 1.0 - abs(r - c.rgb) / 255.0), g);
-    acc += wl * l + wr * r;
-    wsum += wl + wr;
-  }
-  return vec4(floor(acc / wsum + 0.5), c.a);
+const GLSL_DN_COMMON = `
+uniform sampler2D u_dn_tab;
+const int DN_K = 12;
+int dn_coef(int t, int c, int d) {
+  int i = clamp(d, -4096, 4095) + 4096;
+  vec4 v = floor(texelFetch(u_dn_tab, ivec2(i & 127, (i >> 7) + 64 * t), 0) * 255.0 + 0.5);
+  int r = c == 0 ? int(v.x) + 256 * int(v.y) : int(v.z) + 256 * int(v.w);
+  return r >= 32768 ? r - 65536 : r;
 }
+// lowpass on Y (luma table) and U, V (chroma table); t 0 = spatial, 1 = temporal.
+ivec3 dn_lp(ivec3 prev, ivec3 cur, int t) {
+  ivec3 d = (prev - cur) >> 4;
+  return cur + ivec3(dn_coef(t, 0, d.x), dn_coef(t, 1, d.y), dn_coef(t, 1, d.z));
+}
+ivec3 dn_load(vec3 c) { return (ivec3(c) << 8) + 127; }
+`;
+
+/** hqdn3d pass 1: the row recursion H (16-bit values, float out). Row 0 starts with lowpass(LOAD(0), LOAD(0)), as FFmpeg's first line does. */
+export const GLSL_DN_H = `${GLSL_DN_COMMON}
+vec4 fx(ivec2 p) {
+  int x0 = max(0, p.x - DN_K);
+  ivec3 s = dn_load(px(ivec2(x0, p.y)).rgb);
+  if (x0 == 0 && p.y == 0) s = dn_lp(s, s, 0);
+  for (int k = 1; k <= DN_K; k++) {
+    int x = x0 + k;
+    if (x > p.x) break;
+    s = dn_lp(s, dn_load(px(ivec2(x, p.y)).rgb), 0);
+  }
+  return vec4(vec3(s), 0.0);
+}
+`;
+
+/** hqdn3d pass 2 (the history): the column recursion over H, then the temporal lowpass against the previous state (u_reset: the input's own LOADed values). */
+export const GLSL_DN_VT = `${GLSL_DN_COMMON}
+uniform int u_reset;
+vec4 fx(ivec2 p) {
+  int y0 = max(0, p.y - DN_K);
+  ivec3 v = ivec3(fpx(ivec2(p.x, y0)).rgb);
+  for (int k = 1; k <= DN_K; k++) {
+    int y = y0 + k;
+    if (y > p.y) break;
+    v = dn_lp(v, ivec3(fpx(ivec2(p.x, y)).rgb), 0);
+  }
+  ivec3 prev = u_reset == 1 ? dn_load(pxo(p).rgb) : ivec3(hpx(p).rgb);
+  return vec4(vec3(dn_lp(prev, v, 1)), 0.0);
+}
+`;
+
+/** hqdn3d pass 3: STORE (state >> 8), the step input's alpha (alphaSafe merges the original alpha back). */
+export const GLSL_DN_OUT = `
+vec4 fx(ivec2 p) { return vec4(vec3(ivec3(fpx(p).rgb) >> 8), pxo(p).a); }
 `;
 
 /** colorchannelmixer with a 3×3 matrix: each product lrint'ed (its LUTs), summed, clipped. Alpha kept. */
@@ -346,28 +404,25 @@ vec4 fx(ivec2 p) {
 `;
 
 /**
- * edgedetect pass 2 (mode=colormix, low 20, high 50): Sobel |gx|+|gy| and its
- * rounded direction on the blurred planes (frame border = 0), non-maximum
- * suppression along it (clipped to 255), then 4.4's double threshold — keep
- * a value > high, or (off the frame border) > low with an 8-neighbour > high,
- * one step, no recursion — and the mix (edge + input) >> 1. Everything is
- * local, so it is computed from a 7×7 window of the blurred planes.
+ * edgedetect pass 2 (float out): per plane of the blurred frame, the Sobel
+ * magnitude |gx| + |gy| and its rounded direction (0..3) packed as mag·4 +
+ * dir; off the frame's inner area (a 1-pixel border) mag 0 and dir 3, as
+ * vf_edgedetect.c leaves them.
  */
-export const GLSL_EDGE_DETECT = `
-ivec3 gb[49];
-ivec3 mags[25];
-ivec3 dirs[25];
-ivec3 G(int x, int y) { return gb[(y + 3) * 7 + x + 3]; }
+export const GLSL_EDGE_SOBEL = `
 bool inside(ivec2 q) { return q.x >= 1 && q.y >= 1 && q.x <= SZ.x - 2 && q.y <= SZ.y - 2; }
-void sobel(ivec2 p, int x, int y) {
-  int i = (y + 2) * 5 + x + 2;
-  if (!inside(p + ivec2(x, y))) { mags[i] = ivec3(0); dirs[i] = ivec3(3); return; }
-  ivec3 gx = -G(x - 1, y - 1) + G(x + 1, y - 1) - 2 * G(x - 1, y) + 2 * G(x + 1, y) - G(x - 1, y + 1) + G(x + 1, y + 1);
-  ivec3 gy = -G(x - 1, y - 1) + G(x - 1, y + 1) - 2 * G(x, y - 1) + 2 * G(x, y + 1) - G(x + 1, y - 1) + G(x + 1, y + 1);
-  mags[i] = abs(gx) + abs(gy);
-  ivec3 d;
-  for (int c = 0; c < 3; c++) {
-    int X = gx[c], Y = gy[c], r = 3;
+ivec3 G(ivec2 q) { return ivec3(px(q).rgb); }
+vec4 fx(ivec2 p) {
+  if (!inside(p)) return vec4(3.0, 3.0, 3.0, 0.0);
+  ivec3 a = G(p + ivec2(-1, -1)), b = G(p + ivec2(0, -1)), c = G(p + ivec2(1, -1));
+  ivec3 d = G(p + ivec2(-1, 0)), f = G(p + ivec2(1, 0));
+  ivec3 g = G(p + ivec2(-1, 1)), h = G(p + ivec2(0, 1)), i = G(p + ivec2(1, 1));
+  ivec3 gx = -a + c - 2 * d + 2 * f - g + i;
+  ivec3 gy = -a + g - 2 * b + 2 * h - c + i;
+  ivec3 mag = abs(gx) + abs(gy);
+  ivec3 dir;
+  for (int k = 0; k < 3; k++) {
+    int X = gx[k], Y = gy[k], r = 3;
     if (X != 0) {
       if (X < 0) { X = -X; Y = -Y; }
       Y *= 65536;
@@ -376,24 +431,36 @@ void sobel(ivec2 p, int x, int y) {
       else if (Y > -t1 && Y < t1) r = 2;
       else if (Y > t1 && Y < t3) r = 1;
     }
-    d[c] = r;
+    dir[k] = r;
   }
-  dirs[i] = d;
+  return vec4(vec3(mag * 4 + dir), 0.0);
 }
-ivec3 M(int x, int y) { return mags[(y + 2) * 5 + x + 2]; }
-// The suppressed magnitude at offset (x, y), |x|,|y| <= 1.
-ivec3 nms(ivec2 p, int x, int y) {
+`;
+
+/**
+ * edgedetect pass 3 (mode=colormix, low 20, high 50): non-maximum suppression
+ * along each pixel's direction (clipped to 255), then 4.4's double threshold
+ * — keep a value > high, or (off the frame border) > low with an 8-neighbour
+ * > high, one step, no recursion — and the mix (edge + input) >> 1, the input
+ * being the step's (before the Gaussian).
+ */
+export const GLSL_EDGE_NMS = `
+bool inside(ivec2 q) { return q.x >= 1 && q.y >= 1 && q.x <= SZ.x - 2 && q.y <= SZ.y - 2; }
+ivec3 MD(ivec2 q) { return ivec3(fpx(q).rgb); }
+// The suppressed magnitude at q.
+ivec3 nms(ivec2 q) {
   ivec3 o = ivec3(0);
-  if (!inside(p + ivec2(x, y))) return o;
-  ivec3 v = M(x, y);
-  ivec3 d = dirs[(y + 2) * 5 + x + 2];
+  if (!inside(q)) return o;
+  ivec3 md = MD(q);
+  ivec3 v = md >> 2;
+  ivec3 d = md & 3;
   for (int c = 0; c < 3; c++) {
     ivec2 a, b;
     if (d[c] == 0) { a = ivec2(-1, 1); b = ivec2(1, -1); }
     else if (d[c] == 1) { a = ivec2(-1, -1); b = ivec2(1, 1); }
     else if (d[c] == 2) { a = ivec2(-1, 0); b = ivec2(1, 0); }
     else { a = ivec2(0, -1); b = ivec2(0, 1); }
-    if (v[c] > M(x + a.x, y + a.y)[c] && v[c] > M(x + b.x, y + b.y)[c]) o[c] = min(v[c], 255);
+    if (v[c] > (MD(q + a)[c] >> 2) && v[c] > (MD(q + b)[c] >> 2)) o[c] = min(v[c], 255);
   }
   return o;
 }
@@ -401,17 +468,12 @@ vec4 fx(ivec2 p) {
   vec4 o = pxo(p);
   ivec3 edge = ivec3(0);
   if (inside(p)) {
-    for (int dy = -3; dy <= 3; dy++)
-      for (int dx = -3; dx <= 3; dx++)
-        gb[(dy + 3) * 7 + dx + 3] = ivec3(px(p + ivec2(dx, dy)).rgb);
-    for (int dy = -2; dy <= 2; dy++)
-      for (int dx = -2; dx <= 2; dx++) sobel(p, dx, dy);
-    ivec3 n0 = nms(p, 0, 0);
+    ivec3 n0 = nms(p);
     ivec3 strong = ivec3(0);
     for (int dy = -1; dy <= 1; dy++)
       for (int dx = -1; dx <= 1; dx++) {
         if (dx == 0 && dy == 0) continue;
-        strong = max(strong, ivec3(greaterThan(nms(p, dx, dy), ivec3(50))));
+        strong = max(strong, ivec3(greaterThan(nms(p + ivec2(dx, dy)), ivec3(50))));
       }
     for (int c = 0; c < 3; c++) {
       if (n0[c] > 50 || (n0[c] > 20 && strong[c] == 1)) edge[c] = n0[c];
@@ -494,9 +556,11 @@ vec4 op_ckey(vec4 c, ivec2 p, int dom) {
 /**
  * chromakey on yuva444p: diff = mean over the 3×3 neighbourhood of
  * sqrt((du² + dv²) / (255²·2)), pixel U/V from the RGB→YUV conversion, key
- * U/V from the filter's own full-range macro (u_key). Despill (u_spill.x =
- * amount, .y = 1 green / 2 blue) runs on the keyed copy, whose colour went
- * through yuva444p, and then supplies the colour (despill mix 0.5, expand 0).
+ * U/V from the filter's own full-range macro (u_key). The export gives the
+ * keyed frame a 1-px edge-smeared border first (registry keyStep), so border
+ * taps clamp to the edge, as px() reads do. Despill (u_spill.x = amount, .y =
+ * 1 green / 2 blue) runs on the keyed copy, whose colour went through
+ * yuva444p, and then supplies the colour (despill mix 0.5, expand 0).
  */
 export const GLSL_KEY_CHROMA = `
 uniform vec2 u_key;
@@ -505,27 +569,12 @@ uniform vec2 u_spill;
 float ramp(float diff) {
   return u_sb.y > 0.0001 ? trunc(clamp((diff - u_sb.x) / u_sb.y, 0.0, 1.0) * 255.0) : (diff > u_sb.x ? 255.0 : 0.0);
 }
-// The 3×3 neighbour (dx, dy) as vf_chromakey.c sees it at the frame border: its
-// u[]/v[] slots start at the key colour and an out-of-frame tap keeps the slot's
-// last value (top row: the key; bottom row: row h-2's last taps; left column:
-// the previous row's last pixel's taps; right column: the edge pixel). False =
-// the key itself (distance 0).
-bool tap(ivec2 p, int dx, int dy, out ivec2 q) {
-  q = p + ivec2(dx, dy);
-  if (q.y < 0) return false;
-  if (q.y > SZ.y - 1) { q = ivec2(dx < 0 ? SZ.x - 2 : SZ.x - 1, SZ.y - 1); return true; }
-  if (q.x < 0) { q = ivec2(SZ.x - 2, p.y + dy - 1); return p.y > 0 && q.y >= 0; }
-  if (q.x > SZ.x - 1) q.x = SZ.x - 1;
-  return true;
-}
 vec4 fx(ivec2 p) {
   vec4 c = px(p);
   float diff = 0.0;
   for (int dy = -1; dy <= 1; dy++)
     for (int dx = -1; dx <= 1; dx++) {
-      ivec2 q;
-      if (!tap(p, dx, dy, q)) continue;
-      vec2 d = rgb2yuv(px(q).rgb).yz - u_key;
+      vec2 d = rgb2yuv(px(p + ivec2(dx, dy)).rgb).yz - u_key;
       diff += sqrt(dot(d, d) / (255.0 * 255.0 * 2.0));
     }
   float k = ramp(diff / 9.0);
@@ -682,28 +731,98 @@ vec4 fx(ivec2 p) {
 `;
 
 /**
- * lenscorrection (i=bilinear, fc=black@0) on gbrap: centre (int)(w/2),
- * (int)(h/2); r² = off²·4/(w²+h²); the source is centre + round(off·(1 + k1·r²
- * + k2·r⁴)), blended bilinearly toward +1 by the rounding remainder (FFmpeg's
- * own half-pixel quirk); outside the frame → transparent. Every plane,
- * alpha included.
+ * lenscorrection (i=bilinear, fc=black@0) on gbrap, in its own fixed point
+ * (vf_lenscorrection.c calc_correction + the bilinear slice): centre (int)(w/2),
+ * (int)(h/2); r2 = (off²·r2inv + 2^31) >> 32 with r2inv = 2^62 / (w² + h²)
+ * (u_r2inv, hi/lo), r4 = (r2² + 2^27) >> 28, radius_mult = (r2·k1 + r4·k2 +
+ * 2^27 + 2^52) >> 28 with k = (int)(k·2^24) — int64 math, emulated here on
+ * 32-bit halves (a float version lands on the neighbouring source pixel now
+ * and then); the source is centre + ((rm·off + 2^23) >> 24), blended toward
+ * +1 by the low 24 bits (FFmpeg's own half-pixel quirk, mirrored for a
+ * negative offset); outside the frame → transparent. Every plane, alpha
+ * included. With zoom-to-fill (u_lens_fill = 1) the zoom pass after it only
+ * reads pixels that map inside the frame (registry lensFillScale keeps a
+ * margin); the rest are clamped instead of cleared, so a preview at a smaller
+ * processing size can't show a stray transparent corner pixel either.
  */
 export const GLSL_LENS = `
-uniform float u_k1;
-uniform float u_k2;
+uniform uvec2 u_r2inv;
+uniform int u_k1i;
+uniform int u_k2i;
+uniform int u_lens_fill;
+// 32×32 → 64-bit unsigned product (hi, lo) on 16-bit limbs.
+uvec2 lens_mul(uint a, uint b) {
+  uint a0 = a & 0xFFFFu, a1 = a >> 16, b0 = b & 0xFFFFu, b1 = b >> 16;
+  uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+  uint mid = p01 + p10;
+  uint midc = mid < p01 ? 1u : 0u;
+  uint lo = p00 + (mid << 16);
+  uint loc = lo < p00 ? 1u : 0u;
+  return uvec2(p11 + (mid >> 16) + (midc << 16) + loc, lo);
+}
+uvec2 lens_add(uvec2 a, uvec2 b) {
+  uint lo = a.y + b.y;
+  return uvec2(a.x + b.x + (lo < a.y ? 1u : 0u), lo);
+}
+// unsigned × signed → two's-complement 64-bit.
+uvec2 lens_smul(uint a, int k) {
+  uvec2 m = lens_mul(a, uint(abs(k)));
+  return k < 0 ? lens_add(uvec2(~m.x, ~m.y), uvec2(0u, 1u)) : m;
+}
+// (rm·o + 2^23): its >> 24 (x) and & (2^24 − 1) (y), for |o| <= 2048 and |rm| < 2^27.
+ivec2 lens_pos(int rm, int o) {
+  int a = (rm >> 12) * o;
+  int b = ((a & 4095) << 12) + (rm & 4095) * o + (1 << 23);
+  return ivec2((a >> 12) + (b >> 24), b & 0xFFFFFF);
+}
 vec4 fx(ivec2 p) {
   ivec2 ctr = SZ / 2;
-  vec2 off = vec2(p - ctr);
-  float r2 = dot(off, off) * 4.0 / (float(SZ.x) * float(SZ.x) + float(SZ.y) * float(SZ.y));
-  float m = 1.0 + u_k1 * r2 + u_k2 * r2 * r2;
-  vec2 v = m * off + 0.5;
-  ivec2 q = ctr + ivec2(floor(v));
-  if (q.x < 0 || q.y < 0 || q.x > SZ.x - 1 || q.y > SZ.y - 1) return DOM == 1 ? vec4(16.0, 128.0, 128.0, 0.0) : vec4(0.0);
-  vec2 f = fract(v);
-  ivec2 n = min(q + 1, SZ - 1);
-  vec4 s = (1.0 - f.x) * (1.0 - f.y) * px(q) + f.x * (1.0 - f.y) * px(ivec2(n.x, q.y))
-         + (1.0 - f.x) * f.y * px(ivec2(q.x, n.y)) + f.x * f.y * px(n);
+  ivec2 off = p - ctr;
+  uint off2 = uint(off.x * off.x + off.y * off.y);
+  uvec2 t = lens_mul(off2, u_r2inv.y);
+  uint tl = t.y + 0x80000000u;
+  uint r2 = t.x + off2 * u_r2inv.x + (tl < t.y ? 1u : 0u);
+  uvec2 q = lens_mul(r2, r2);
+  uint ql = q.y + (1u << 27);
+  uint r4 = (ql >> 28) | ((q.x + (ql < q.y ? 1u : 0u)) << 4);
+  uvec2 sum = lens_add(lens_add(lens_smul(r2, u_k1i), lens_smul(r4, u_k2i)), uvec2(1u << 20, 1u << 27));
+  int rm = int((sum.y >> 28) | (sum.x << 4));
+  ivec2 px_ = lens_pos(rm, off.x), py_ = lens_pos(rm, off.y);
+  ivec2 qq = ctr + ivec2(px_.x, py_.x);
+  // FFmpeg's fraction for a negative offset: max − ((rm·(−o) + 2^23) & max).
+  int du = off.x >= 0 ? px_.y : 0xFFFFFF - lens_pos(rm, -off.x).y;
+  int dv = off.y >= 0 ? py_.y : 0xFFFFFF - lens_pos(rm, -off.y).y;
+  if (qq.x < 0 || qq.y < 0 || qq.x > SZ.x - 1 || qq.y > SZ.y - 1) {
+    if (u_lens_fill == 0) return DOM == 1 ? vec4(16.0, 128.0, 128.0, 0.0) : vec4(0.0);
+    qq = clamp(qq, ivec2(0), SZ - 1);
+  }
+  ivec2 n = min(qq + 1, SZ - 1);
+  const float MX = 16777215.0 / 16777216.0;
+  float fu = float(du) / 16777216.0, fv = float(dv) / 16777216.0;
+  vec4 s = (MX - fu) * (MX - fv) * px(qq) + fu * (MX - fv) * px(ivec2(n.x, qq.y))
+         + (MX - fu) * fv * px(ivec2(qq.x, n.y)) + fu * fv * px(n);
   return floor(s + 0.5);
+}
+`;
+
+/**
+ * lens zoom-to-fill: perspective (linear, sense source) with an axis-aligned
+ * source rect centred on the lens centre, i.e. a zoom by 256/u_zoom. Its
+ * per-pixel source position in 1/256 px is u = x·S + ctr·(256 − S) — exact
+ * integers, the rect being chosen so (registry lensZoomFilter) — then
+ * resample_linear's Q8 bilinear with one rounding at the end, edges clamped.
+ * Every plane, alpha included.
+ */
+export const GLSL_LENS_ZOOM = `
+uniform int u_zoom;
+uniform ivec2 u_zoom_off;
+vec4 fx(ivec2 p) {
+  ivec2 u = p * u_zoom + u_zoom_off;
+  ivec2 i = u >> 8;
+  ivec2 f = u & 255;
+  ivec4 a = ivec4(px(i)), b = ivec4(px(i + ivec2(1, 0))), c = ivec4(px(i + ivec2(0, 1))), d = ivec4(px(i + ivec2(1, 1)));
+  ivec4 sum = (256 - f.y) * ((256 - f.x) * a + f.x * b) + f.y * ((256 - f.x) * c + f.x * d);
+  return vec4((sum + 32768) >> 16);
 }
 `;
 

@@ -76,7 +76,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, stable effect-id keys, the lens zoom pass, the denoise tables, fixed-kernel flags, fidelity) and the colour maths vs graph.ts
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -92,8 +92,13 @@ npx tsx apps/desktop/scripts/smoke-savename.ts                       # save pick
 # dirs, never the real one
 npx tsx packages/core/scripts/smoke-legacy-migrate.ts
 
-# Security: session-token auth (HTTP/WS) + /file allowlist (self-synthesizes media)
+# Security: session-token auth (HTTP/WS) + /file allowlist, HEAD /file and its ETag (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
+
+# Frame picking at exact frame boundaries: get_frame(n / fps) shows frame n; GET /frames
+# (the preview's trail / denoise warm-up) returns exactly the source frames asked for,
+# cropped and scaled, with the token, the /file allowlist and its number checks (self-synthesizes)
+npx tsx packages/core/scripts/smoke-frames.ts
 
 # Jobs: background export with progress, cancel_job (partial file deleted), crash-recovery surfacing
 npx tsx packages/core/scripts/smoke-jobs.ts
@@ -147,8 +152,8 @@ npx tsx packages/core/scripts/smoke-transitions.ts scratch/a.mp4 scratch/b.mp4  
 npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4   # + stabilize options on a synthesized shaky clip
 npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
-npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto"; self-synthesizes
-npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount, every effect has a WebGL2 preview; self-synthesizes
+npx tsx packages/core/scripts/smoke-key.ts                             # colorkey/chromakey+despill/lumakey, color "auto", chromakey output identical for any FFmpeg thread count; self-synthesizes
+npx tsx packages/core/scripts/smoke-registry.ts                        # effect registry: legacy filter strings, FFmpeg accepts every effect, validation, bypass, reorder, vignette amount, lens zoom to fill (no transparent pixel for 30 k1/k2 settings), every effect has a WebGL2 preview; self-synthesizes
 
 # Blend modes + shape masks (lossless exports; self-synthesizes PNG stills and an
 # FFV1 yuva420p cutout): every blend mode vs the W3C formula on the decoded
@@ -345,11 +350,36 @@ happens). It covers the effects whose filters take any pixel format (blur,
 detail, lens, grayscale, invert, pixelate …), stacks, adjustment layers and
 the grain's statistics as the export shows them.
 
+A third section checks the temporal effects' clock and GPU memory: trails
+decay per SOURCE frame like the export's lagfun (2× speed — reading which
+source frame the export shows from a marker pixel — and a held frame at 1/3
+speed), survive a reorder of the stack and a processing-size change, start
+over when an enabled effect moves ahead of them, and a paused frame whose
+history lacks earlier frames (a seek, that reorder) matches the export once
+the warm-up re-runs them (the real `gl/warmup.ts` against a mocked `/frames`:
+a scrub warms once where it stops, a failed or one-frame-short decode is not
+adopted or retried for the same frame and look, playback aborts a decode in
+flight, over the byte cap only the last frames are warmed, and warmed frames
+keep their timeline frame); 50 new eq / curves tables on one layer create no
+texture; a `.cube` rewritten in place (new ETag through a mocked `/file`)
+shows the new table, also when it changes while nothing draws (a paused
+preview), and 12 LUTs used in turn leave at most 8 cached; a rewrite that
+fails to parse is read once and reported stale, a LUT whose first read
+failed recovers once the file is fixed, and a table over the byte budget is
+refused before it is parsed. A fourth section drives the preview's decoder
+pool (`mediapool.ts`) on a counter clip with sound: paused at n / fps it
+shows frame n, and playback settles after a seek or two (no seek thrash).
+The whole run happens with
+`EXT_color_buffer_float` hidden: the pipeline keeps its float intermediates
+in RGBA32UI targets, so it needs nothing beyond WebGL2.
+
 ```powershell
 npx tsx apps/desktop/scripts/parity-gl.mts                 # both parity tables (~2 min)
 npx tsx apps/desktop/scripts/parity-gl.mts --bench         # + ms/frame: GL (full, half, quarter resolution) vs the old CSS path, 2 layers at 1280×720
 npx tsx apps/desktop/scripts/parity-gl.mts --only blur,glow --dump   # some effects; keep the PNGs (ffmpeg / gl / diff×16)
 npx tsx apps/desktop/scripts/parity-gl.mts --only 420      # just the real-export (4:2:0) table
+npx tsx apps/desktop/scripts/parity-gl.mts --only temporal # just the temporal clock / GPU memory section
+npx tsx apps/desktop/scripts/parity-gl.mts --only mediapool  # just the <video> pool section
 ```
 
 - Needs FFmpeg on PATH, `npm run build` (the page imports core's dist), and
@@ -360,10 +390,18 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only 420      # just the real-expor
   playwright-core>` and `PLAYWRIGHT_CHROMIUM=<chrome binary>`.
 - Headless Chromium runs WebGL2 on SwiftShader (software), which is exact but
   slow; `--bench` numbers on a real GPU are far lower.
+- Driving the app itself in headless Chromium (Playwright): a `fetch` body read
+  through `getReader()` is reported as `requestfailed net::ERR_ABORTED` even
+  when it is read to the end, so `/frames` entries (the paused trail / denoise
+  warm-up) in such a failure list are noise. On a heavily loaded machine one
+  animation frame can take seconds, and the playhead (wall-clock time) jumps
+  with it: judge playback there by seeks and `readyState`, not smoothness.
 - Pass thresholds follow each effect's `fidelity` in the registry: **exact** =
   max ≤ 3 levels and mean ≤ 1 (≤ 8 and ≤ 1 in the 4:2:0 table, for the
-  rounding at hard colour edges); **close** = p99 ≤ 8; **approx** (denoise)
-  is only reported. Film grain is random, so it compares the noise's mean and
+  rounding at hard colour edges); **close** = p99 ≤ 8 (grain, and trails and
+  denoise, whose history the preview builds from where playback started, and
+  re-runs from the clip's first frame when paused);
+  **approx** would only be reported (no effect is approximate now). Film grain is random, so it compares the noise's mean and
   standard deviation instead, as the export shows it (its 4:2:0 output
   averages the grain's colour over 2×2 pixels; the preview models that). It
   also checks that a lost WebGL context makes the pipeline step aside (the
@@ -413,7 +451,7 @@ The app opens with **Clip Library**, **Preview**, and **Timeline** panels, and a
 | Per-track controls | Mute / hide / lock a track; change its volume | Track header reflects it; preview/audio respond |
 | Per-clip effects | Use the per-clip controls: speed, volume, fades, color grade, crop | Controls reflect on the clip |
 | Transform / keyframes | Move/scale/rotate a clip; add ◆ keyframes to animate position or scale | Motion plays back in the preview |
-| Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen, Glow, Pixelate; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Every effect previews live (WebGL2) in stack order and matches **Render exact**; Denoise shows a soft **≈** (approximate preview); without WebGL2 only the CSS-proxy effects preview and the rest show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
+| Effect stack | **Add effect** (grouped by category) → e.g. Vignette, Blur, Sharpen, Glow, Pixelate; drag their sliders; use the eye (bypass), ↑/↓ (reorder) and × buttons | Every effect previews live (WebGL2) in stack order and matches **Render exact**; Lens distortion fills the frame (no empty corners; **Zoom to fill** 0 brings the transparent corners back); while playing on a software renderer, Sharpen / Detail / Edges / Chroma key / Denoise show a soft **≈** (processed below the export resolution) that goes away when paused; without WebGL2 only the CSS-proxy effects preview and the rest show **Render exact**; a bypassed effect is struck through and drops out of the preview and export |
 | Grade / LUT | **Color** grade (brightness, contrast, saturation, gamma); ask the AI for colour wheels / temperature / hue / curves (`apply_color`) and a `.cube` LUT (`apply_lut`) | All preview live and match **Render exact** (the LUT loads through the core's `/file` route) |
 | Stabilize | On a shaky clip set **Smoothing** and **Zoom**, then **Stabilize clip** | Busy label "Stabilizing…", then the clip points at a "(stabilized)" bake; undo restores it |
 | Keys | Put a gray-, green- or black-background clip on a track above another; **Add effect → Color / Chroma / Luma key** | Background turns transparent in the live preview (colour auto-detected); swatch, **Auto**, **Pick** (eyedropper) and the sliders update it in place; export matches |

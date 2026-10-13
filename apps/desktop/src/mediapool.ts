@@ -9,6 +9,8 @@ const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 /** playbackRate range browsers accept (Chromium: 1/16..16). */
 const MIN_RATE = 0.0625;
 const MAX_RATE = 16;
+/** Seconds a paused seek lands past srcTime, so a frame boundary shows the frame that starts there. */
+const PAUSED_SEEK_NUDGE = 0.001;
 /** Least time between two drift-correcting seeks of a curve-speed clip (see sync). */
 const FOLLOW_SEEK_GAP_MS = 400;
 /** How far (s) a paused element may be from where it should be and still just play on (see resumeNear). */
@@ -48,6 +50,8 @@ export class MediaPool {
   private readonly lru: string[] = [];
   /** clipIds acquired in the current frame (protected from eviction/pause). */
   private used = new Set<string>();
+  /** A playing element's last resync: where it landed, when (0 = it moves again) and the start lag learned (s). */
+  private readonly landing = new WeakMap<HTMLVideoElement, { at: number; since: number; lead: number }>();
   /** When each element last seeked to follow a speed curve (performance.now()). */
   private readonly lastFollowSeek = new WeakMap<HTMLVideoElement, number>();
 
@@ -121,17 +125,43 @@ export class MediaPool {
         }
         return;
       }
+      // A seek takes a while to play again (decoding from a keyframe, the
+      // audio output restarting: ~120 ms for a clip with sound in headless
+      // Chromium, more on Bluetooth). Judging the drift before it moves again
+      // would seek again and again and never show a frame (seek thrash), so a
+      // landing seek is left alone until the element moves (or 1 s passes),
+      // and the next one lands ahead by the start lag that one showed.
+      const now = performance.now();
+      const r = this.landing.get(el) ?? { at: NaN, since: 0, lead: 0 };
+      const seekAhead = () => {
+        r.at = o.srcTime + r.lead * rate;
+        r.since = now;
+        this.landing.set(el, r);
+        this.safeSeek(el, r.at);
+      };
       if (el.paused) {
-        this.safeSeek(el, o.srcTime);
+        seekAhead();
         void el.play().catch(() => {});
-      } else if (Math.abs(el.currentTime - o.srcTime) > 0.08) {
-        // Re-sync only on meaningful drift — constant reseeking would stutter.
-        this.safeSeek(el, o.srcTime);
+        return;
       }
+      if (r.since) {
+        const moved = !el.seeking && el.currentTime > r.at + 1e-3;
+        if (!moved && now - r.since < 1000) return;
+        if (moved) r.lead = Math.min(0.5, Math.max(0, r.lead + (o.srcTime - el.currentTime) / rate));
+        r.since = 0;
+      }
+      // Re-sync only on meaningful drift — constant reseeking would stutter.
+      if (Math.abs(el.currentTime - o.srcTime) > 0.08) seekAhead();
     } else {
       if (o.follow) el.playbackRate = Math.min(MAX_RATE, Math.max(MIN_RATE, rate));
       if (!el.paused) el.pause();
-      if (Math.abs(el.currentTime - o.srcTime) > 0.02) this.safeSeek(el, o.srcTime);
+      // Paused: show the frame the export shows at srcTime (the one whose
+      // interval holds it). Chromium seeks in whole microseconds, so a seek to
+      // exactly n/fps can land on frame n - 1; a 1 ms nudge keeps it on n. The
+      // tolerance is below a 120 fps frame, so a one-frame step always seeks.
+      const dur = el.duration;
+      const target = Math.min(o.srcTime + PAUSED_SEEK_NUDGE, Number.isFinite(dur) && dur > 0 ? dur : Infinity);
+      if (Math.abs(el.currentTime - target) > 0.003) this.safeSeek(el, target);
     }
   }
 

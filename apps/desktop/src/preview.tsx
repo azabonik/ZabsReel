@@ -30,8 +30,11 @@ import { MediaPool } from "./mediapool";
 import { AudioRouter } from "./audiograph";
 import { isKeyBypassed, onKeyBypassChange } from "./glkey";
 import { vignetteGradient, vignetteLayer } from "./vignette2d";
-import { glReady, glSoftware, onGLChange, runLayer, setFileUrl } from "./gl/runtime";
-import { cachedPlan, type LayerLook } from "./gl/plan";
+import { glReady, glSoftware, lutProblem, onGLChange, runLayer, setFileUrl } from "./gl/runtime";
+import { cachedPlan, lookHasKernel, type LayerLook } from "./gl/plan";
+import { noteLayerScale } from "./gl/scale";
+import type { LayerJob } from "./gl/runtime";
+import { cancelWarmups, setWarmup, warmIfNeeded, type WarmSource } from "./gl/warmup";
 import { PlaybackGovernor } from "./gl/governor";
 import { canvasBlendOp, type ClipMask } from "@aive/core/compositing";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas, stageMasked, type LayerXform } from "./maskdraw";
@@ -125,8 +128,13 @@ interface GLDraw {
   /** Project (export) canvas size. */
   cw: number;
   ch: number;
-  /** Timeline frame number (grain, trails). */
+  /** Timeline frame number (grain; the temporal clock of a still). */
   frame: number;
+  /** The source frame shown and source frames per timeline frame (a video clip): trails / denoise step per source frame. */
+  srcFrame?: number;
+  srcStep?: number;
+  /** Paused on a video clip: where its temporal effects' history can be rebuilt from (gl/warmup.ts). */
+  warm?: WarmSource;
   layerId: string;
   /** Leave the keys out (the eyedropper picks from the unkeyed frame). */
   skipKeys: boolean;
@@ -138,6 +146,15 @@ interface GLDraw {
   div: number;
 }
 
+/** A clip's first source frame (its in-point), where the export's trails / denoise history starts. */
+function firstSourceFrame(project: Project | null, clipId: string, srcFps: number): number {
+  for (const t of project?.tracks ?? []) {
+    const c = t.clips.find((x) => x.id === clipId);
+    if (c) return Math.max(0, Math.ceil((c.sourceInFrame / (project?.fps || 30)) * srcFps - 1e-3));
+  }
+  return 0;
+}
+
 /** Processing-size cap of the GL path (its targets are pooled by size). */
 const GL_MAX_EDGE = 4096;
 
@@ -145,9 +162,12 @@ const GL_MAX_EDGE = 4096;
  * Run the layer's look through the WebGL2 pipeline. It processes the layer's
  * whole canvas-space frame (the fitted picture plus transparent padding — what
  * the export's filters see) at the buffer size × a power-of-two bucket of the
- * zoom, never above the source's own resolution. Returns what to draw — the
- * frame (or, masked, the staged picture) and where it goes in the layer's
- * transformed space — or null to fall back to the CSS path.
+ * zoom, never above the source's own resolution — except a look with a
+ * fixed-size kernel (sharpen, detail, edges, chromakey, denoise), which runs at
+ * the export's resolution (k = 1) so its kernel covers what the export's does
+ * (scaled playback divides that too; the inspector then marks those effects ≈).
+ * Returns what to draw — the frame (or, masked, the staged picture) and where
+ * it goes in the layer's transformed space — or null to fall back to the CSS path.
  */
 function lookThroughGL(
   el: HTMLVideoElement | HTMLImageElement, d: NonNullable<ActiveClip["draw"]>, W: number, H: number, g: GLDraw,
@@ -158,22 +178,29 @@ function lookThroughGL(
   const s = Math.abs(d.transform.scale) || 1;
   let q = Math.min(8, 2 ** Math.ceil(Math.log2(Math.max(1 / 8, s))));
   q = Math.min(q, Math.max(1, 1 / fitB), GL_MAX_EDGE / Math.max(W, H));
+  const kernel = lookHasKernel(d.look);
+  if (kernel) q = Math.min(g.cw / W, GL_MAX_EDGE / Math.max(W, H));
   if (g.div > 1) q = Math.max(1 / 8, q / g.div);
-  const PW = Math.max(1, Math.round(W * q));
-  const PH = Math.max(1, Math.round(H * q));
+  const exact = kernel && g.div === 1 && g.cw <= GL_MAX_EDGE && g.ch <= GL_MAX_EDGE;
+  const PW = exact ? g.cw : Math.max(1, Math.round(W * q));
+  const PH = exact ? g.ch : Math.max(1, Math.round(H * q));
   const k = PW / g.cw;
+  noteLayerScale(g.layerId, k);
   const steps = cachedPlan(d.look, { k, w: PW, h: PH, cw: g.cw, ch: g.ch }, { skipKeys: g.skipKeys });
   if (!steps.length) return null;
   // The export's fit (scale … force_original_aspect_ratio=decrease, pad centred), in canvas px.
   const fw = Math.min(g.cw, Math.round((g.ch * sw) / sh));
   const fh = Math.min(g.ch, Math.round((g.cw * sh) / sw));
   const pic = { x: Math.trunc((g.cw - fw) / 2) * k, y: Math.trunc((g.ch - fh) / 2) * k, w: fw * k, h: fh * k };
-  const res = runLayer({
+  const job: LayerJob = {
     source: el, srcW: iw, srcH: ih, dynamic: el instanceof HTMLVideoElement,
     crop: { x: sx, y: sy, w: sw, h: sh }, w: PW, h: PH, pic, steps, k, cw: g.cw, ch: g.ch,
     frame: g.frame, layerId: g.layerId,
-  });
+    ...(g.srcFrame !== undefined ? { srcFrame: g.srcFrame, srcStep: g.srcStep } : {}),
+  };
+  const res = runLayer(job);
   if (!res) return null;
+  if (g.warm) warmIfNeeded(job, g.warm);
   if (d.mask) {
     // The mask lives in the picture: stage just the picture rect and mask it.
     const dw = pic.w / q;
@@ -278,6 +305,8 @@ interface FrameInfo {
   audioOnly: boolean;
   graded: boolean;
   drawCount: number;
+  /** A LUT on screen the WebGL preview leaves out ("off") or shows from an older read ("≈"), and why. */
+  lut?: { tag: string; why: string };
   /** The draggable mask-centre handle (percent of the stage), when the Mask group targets a visible layer. */
   maskHandle?: { clipId: string; x: number; y: number };
 }
@@ -391,7 +420,14 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     const frameNo = Math.round(phRef.current * (project?.fps ?? 30));
     // The GL path's per-layer context; keys are left out while the inspector's eyedropper picks from the clip.
     const div = playingRef.current ? governorRef.current.div : 1;
-    const glFor = (c: ActiveClip): GLDraw => ({ cw, ch, frame: frameNo, layerId: c.clipId, skipKeys: isKeyBypassed(c.clipId), div });
+    // Playing: trails / denoise build their history from the frames drawn; paused, a gap is re-run (gl/warmup.ts).
+    if (playingRef.current) cancelWarmups();
+    const glFor = (c: ActiveClip): GLDraw => ({
+      cw, ch, frame: frameNo, layerId: c.clipId, skipKeys: isKeyBypassed(c.clipId), div,
+      // A video's temporal effects step per SOURCE frame (the export runs them before the speed change).
+      ...(c.srcFps ? { srcFrame: Math.floor(c.srcTime * c.srcFps + 1e-3), srcStep: (Math.abs(c.rate) * c.srcFps) / (project?.fps ?? 30) } : {}),
+      ...(!playingRef.current && c.srcFps && c.path && c.rate > 0 ? { warm: { path: c.path, srcFps: c.srcFps, first: firstSourceFrame(project, c.clipId, c.srcFps) } } : {}),
+    });
     glRanRef.current = false;
     pool.beginFrame();
     // Draw a clip's active motion graphics full-frame over it (alpha .webm proxy,
@@ -417,10 +453,13 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       // export's split → filter → [mask] → overlay); its result is drawn over
       // the composite, so anything it makes transparent shows the original.
       if (look && glReady()) {
-        // A reduced resolution while playing, if the governor chose one (see GLDraw.div).
-        const PW = Math.max(1, Math.round(W / div));
-        const PH = Math.max(1, Math.round(H / div));
+        // A reduced resolution while playing, if the governor chose one (see GLDraw.div);
+        // a fixed-size kernel runs at the export's resolution (see lookThroughGL).
+        const exact = lookHasKernel(look) && div === 1 && cw <= GL_MAX_EDGE && ch <= GL_MAX_EDGE;
+        const PW = exact ? cw : Math.max(1, Math.round(W / div));
+        const PH = exact ? ch : Math.max(1, Math.round(H / div));
         const k = PW / cw;
+        noteLayerScale(layerId, k);
         const steps = cachedPlan(look, { k, w: PW, h: PH, cw, ch });
         if (!steps.length) return;
         const res = runLayer({
@@ -616,6 +655,16 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     }
     const top = drawClips[drawClips.length - 1];
     const audible = plan.clips.find((c) => c.audio);
+    let lut: FrameInfo["lut"];
+    for (const c of plan.clips) {
+      const path = (c.draw?.look ?? c.adjust?.look)?.lut;
+      const p = path && glReady() ? lutProblem(path) : null;
+      if (!p) continue;
+      lut = p.state === "error"
+        ? { tag: "LUT off", why: `The live preview leaves out the LUT ${path}: ${p.reason}. Render exact and the export apply it.` }
+        : { tag: "LUT ≈", why: `The live preview shows an earlier read of the LUT ${path}; the file's current content did not load: ${p.reason}. Render exact shows what the export does with it.` };
+      break;
+    }
     const info: FrameInfo = {
       textClips: drawClips
         .filter((c) => c.overlays.length > 0 || c.caption)
@@ -625,6 +674,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       graded: !!top && (top.draw!.colorFilter !== "none" || !!top.draw!.vignette),
       drawCount: drawClips.length,
       ...(maskHandle ? { maskHandle } : {}),
+      ...(lut ? { lut } : {}),
     };
     const sig = frameSig(info);
     if (sig !== sigRef.current) {
@@ -808,7 +858,20 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       scheduleRedraw();
     });
     setFileUrl((p) => api.fileUrl(p)); // repaints through the listener above
-    return off;
+    // A paused trail's warm-up decodes frames through the core's /frames route.
+    setWarmup((p, q) => {
+      const u = new URL(api.fileUrl(p));
+      u.pathname = "/frames";
+      for (const [k, v] of Object.entries(q)) u.searchParams.set(k, String(v));
+      return u.toString();
+    }, () => {
+      drawFnRef.current();
+      scheduleRedraw();
+    });
+    return () => {
+      off();
+      setWarmup(null, null);
+    };
   }, [api, scheduleRedraw]);
 
   // The eyedropper toggled a clip's key preview off/on — repaint.
@@ -939,6 +1002,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
             {frame.drawCount} layer{frame.drawCount === 1 ? "" : "s"}
           </span>
           {!playing && frame.graded && <span className="pv-badge-tag">graded</span>}
+          {frame.lut && <span className="pv-badge-tag" title={frame.lut.why}>{frame.lut.tag}</span>}
         </div>
       )}
     </div>

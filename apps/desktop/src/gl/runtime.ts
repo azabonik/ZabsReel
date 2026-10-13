@@ -6,6 +6,9 @@
 // plan's passes (plan.ts) with pooled RGBA8 / float ping-pong targets, and the
 // last pass writes premultiplied RGBA straight into the shared canvas for
 // preview.tsx to draw with the layer's mask / blend / transform / opacity.
+// Float intermediates (blur sums, temporal histories) are stored bit for bit
+// in RGBA32UI targets (floatBitsToUint), which core WebGL2 renders to without
+// EXT_color_buffer_float — so every pass, keys included, runs on any WebGL2.
 //
 // Passes are FUSED: a run of per-pixel ops (colour grade, exposure, keys,
 // vignette …) is compiled into the pass before it — the placement, or the
@@ -15,15 +18,19 @@
 // modes are compile-time #defines, so a program runs only the conversions it
 // needs (software GL executes both sides of a uniform-dependent branch).
 //
-// Needs WebGL2 + EXT_color_buffer_float (the blur's float intermediates);
-// without either, or while the context is lost, glReady() is false and the
-// preview falls back to its CSS / Canvas2D proxies. A lost context is rebuilt
-// lazily after `webglcontextrestored`; listeners (onGLChange) repaint.
+// Needs only WebGL2; without it, or while the context is lost, glReady() is
+// false and the preview falls back to its CSS / Canvas2D proxies. A lost
+// context is rebuilt lazily after `webglcontextrestored`; listeners
+// (onGLChange) repaint.
 //
 // Steady playback allocates no GPU resources per frame: programs are cached by
 // source, render targets pooled by size, plans cached by the look object
 // (plan.ts) and their fused groups cached on the plan, uniform values
-// precomputed in the plan.
+// precomputed in the plan. GPU memory is freed explicitly, never left to the
+// garbage collector: a step's table texture (eq / curves / denoise) is one
+// texture per layer and step, re-filled in place when a slider drag brings a
+// new table; LUTs are LRU-bounded; unused sources, histories, tables and
+// pooled targets are deleted after a while.
 
 import { GL_MAIN, GL_PRELUDE, GLSL_COPY } from "@aive/core/effects";
 import type { PlannedPass, PlannedStep } from "./plan";
@@ -111,6 +118,8 @@ interface Group {
   endDom: number;
   float: boolean;
   history: boolean;
+  /** u_in is a float (RGBA32UI) target: the group before wrote float or history. */
+  inFloat: boolean;
   place: boolean;
   /** Generated source per output mode (0 = texture, 1 = canvas, 2 = readback). */
   sources: (string | undefined)[];
@@ -119,9 +128,31 @@ interface Group {
 interface Hist {
   a: Target;
   b: Target;
+  /** The clock (source frame, or timeline frame) of the state in b. */
   frame: number;
   steps: number;
   reset: boolean;
+  lastRun: number;
+  /** The steps before it when it was built (PlannedStep.histSig): a reorder upstream starts it over. */
+  sig: string;
+  /** The look's settings it was built with (PlannedStep.histParams). */
+  params: string;
+  /**
+   * The first frame of the unbroken run that built the state in b: every
+   * frame from here to `frame` went in once, with these settings. The state
+   * is the export's when this reaches back to where the export's starts.
+   */
+  since: number;
+  /** b was computed from a frame the video element had not finished seeking to. */
+  dirty: boolean;
+}
+
+/** A step's table texture, one per layer and step (B10: re-filled in place, deleted when unused). */
+interface AuxTex {
+  tex: WebGLTexture;
+  data: Uint8Array;
+  w: number;
+  h: number;
   lastRun: number;
 }
 
@@ -131,6 +162,23 @@ interface LutEntry {
   tex?: WebGLTexture;
   /** Context generation the texture belongs to. */
   gen?: number;
+  /** The file's validator when it was read (the core's /file ETag: size + mtime), if the core sent one. */
+  etag?: string | null;
+  /**
+   * Set when the last read failed: that version's validator (null when the
+   * response had none). It is read again only once the file changes again
+   * (no validator: at most every lutRecheckMs).
+   */
+  failedEtag?: string | null;
+  /** Why the preview's table is not the file's: no table ("error"), or an older one kept ("ready"). */
+  problem?: string;
+  /** When the file was last checked for a change (ms), and whether a check is running. */
+  checked: number;
+  checking?: boolean;
+  /** Bytes the parsed table holds (the texture holds as many again). */
+  bytes: number;
+  /** runSerial of the last frame that used it (never evicted from under a frame). */
+  lastRun: number;
 }
 
 /** An uploaded source frame, kept per element so an unchanged frame is not uploaded again. */
@@ -151,8 +199,10 @@ interface State {
   progs: Map<string, Prog | null>;
   pool: Map<number, Target[]>;
   srcs: Map<unknown, SrcTex>;
-  aux: WeakMap<Uint8Array, WebGLTexture>;
+  aux: Map<string, AuxTex>;
   hist: Map<string, Hist>;
+  /** The history resampling program (a size change keeps the trail), compiled on first use. */
+  resample: { prog: WebGLProgram; src: WebGLUniformLocation | null; srcSize: WebGLUniformLocation | null; dstSize: WebGLUniformLocation | null } | null;
   readTarget: Target | null;
   /** Processing-size cap (≤ 4096). */
   maxTex: number;
@@ -164,7 +214,7 @@ interface State {
 let state: State | null = null;
 let canvasEl: HTMLCanvasElement | null = null;
 let ctxEl: WebGL2RenderingContext | null = null;
-/** Set once WebGL2 (or float render targets) is known to be missing here. */
+/** Set once WebGL2 is known to be missing here. */
 let unavailable = false;
 let lost = false;
 let generation = 0;
@@ -219,7 +269,6 @@ function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLSh
 }
 
 function setup(gl: WebGL2RenderingContext, canvas: HTMLCanvasElement): State | null {
-  if (!gl.getExtension("EXT_color_buffer_float")) return null;
   const vs = compile(gl, gl.VERTEX_SHADER, VERT);
   if (!vs) return null;
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -233,8 +282,9 @@ function setup(gl: WebGL2RenderingContext, canvas: HTMLCanvasElement): State | n
     progs: new Map(),
     pool: new Map(),
     srcs: new Map(),
-    aux: new WeakMap(),
+    aux: new Map(),
     hist: new Map(),
+    resample: null,
     readTarget: null,
     maxTex: Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE) as number),
     hwMaxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
@@ -279,7 +329,7 @@ function ensure(): State | null {
   return state;
 }
 
-/** True when the GL pipeline can run now (WebGL2 + float targets, context not lost, not opted out). */
+/** True when the GL pipeline can run now (WebGL2, context not lost, not opted out). */
 export function glReady(): boolean {
   return !optedOut() && !!ensure();
 }
@@ -315,9 +365,10 @@ function buildGroups(steps: readonly PlannedStep[]): Group[] {
   let dom = 0;
   let stepInDom = 0;
   const open = (host: Elem, inDom: number, origDom: number, place = false): Group => {
+    const prev = groups[groups.length - 1];
     const g: Group = {
       host, ops: [], inDom, origDom, endDom: host.outDom,
-      float: !!host.pass.float, history: !!host.pass.history, place, sources: [],
+      float: !!host.pass.float, history: !!host.pass.history, inFloat: !!prev && (prev.float || prev.history), place, sources: [],
     };
     groups.push(g);
     return g;
@@ -360,8 +411,10 @@ function groupSource(g: Group, final: number): string {
     `#define DOM ${g.host.dom}`,
     `#define END_DOM ${fused ? g.endDom : g.host.dom}`,
     `#define OUT_RGB ${!fused && g.host.pass.out === "rgb" ? 1 : 0}`,
-    `#define FLOAT_OUT ${g.float ? 1 : 0}`,
+    `#define FLOAT_OUT ${g.float || g.history ? 1 : 0}`,
     `#define FINAL ${final}`,
+    `#define IN_FLOAT ${g.inFloat ? 1 : 0}`,
+    `#define HISTORY ${g.history ? 1 : 0}`,
   ].join("\n");
   let body: string;
   if (!fused) {
@@ -457,7 +510,8 @@ function makeTarget(s: State, w: number, h: number, float: boolean): Target | nu
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, float ? gl.RGBA32F : gl.RGBA8, w, h);
+  // Floats live bit for bit in RGBA32UI (renderable in core WebGL2; RGBA32F would need EXT_color_buffer_float).
+  gl.texStorage2D(gl.TEXTURE_2D, 1, float ? gl.RGBA32UI : gl.RGBA8, w, h);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
@@ -503,53 +557,257 @@ function trimPool(s: State): void {
   usedSizes.clear();
 }
 
-function auxTexture(s: State, data: Uint8Array): WebGLTexture | null {
-  const hit = s.aux.get(data);
-  if (hit) return hit;
+/**
+ * The step's table as a texture. One texture per (layer, step) slot: a new
+ * table for the slot (a slider drag re-plans the look every frame) is written
+ * into the same texture, so no texture is left behind for the GC to free.
+ */
+function auxTexture(s: State, slot: string, data: Uint8Array, width: number): WebGLTexture | null {
   const { gl } = s;
-  const tex = gl.createTexture();
-  if (!tex) return null;
+  const w = width;
+  const h = Math.max(1, data.length / 4 / width);
+  let e = s.aux.get(slot);
+  if (e && e.data === data) {
+    e.lastRun = runSerial;
+    return e.tex;
+  }
+  if (e && (e.w !== w || e.h !== h)) {
+    gl.deleteTexture(e.tex);
+    s.aux.delete(slot);
+    e = undefined;
+  }
   gl.activeTexture(gl.TEXTURE0 + SCRATCH_UNIT);
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, data.length / 4, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-  s.aux.set(data, tex);
-  return tex;
+  if (!e) {
+    const tex = gl.createTexture();
+    if (!tex) return null;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    e = { tex, data, w, h, lastRun: runSerial };
+    s.aux.set(slot, e);
+  } else {
+    gl.bindTexture(gl.TEXTURE_2D, e.tex);
+  }
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  e.data = data;
+  e.lastRun = runSerial;
+  return e.tex;
+}
+
+function evictAux(s: State): void {
+  for (const [slot, e] of s.aux) {
+    if (runSerial - e.lastRun > 300) {
+      s.gl.deleteTexture(e.tex);
+      s.aux.delete(slot);
+    }
+  }
 }
 
 // ---- LUTs ------------------------------------------------------------------------------------
 
-/** The LUT's state; starts loading it (once) through the /file route. */
+/** LUTs kept (parsed + as a 3D texture), least recently used dropped first: at most this many … */
+const LUT_MAX = 8;
+/**
+ * … and this many bytes of tables (a 65³ LUT is 3.3 MB, as much again on the
+ * GPU). A single table above it is never loaded (the preview leaves the LUT
+ * out and says so; the export still applies it); the LUTs recent frames use
+ * are kept even when together they pass it.
+ */
+let lutMaxBytes = 64 << 20;
+/** How often a LUT in use is checked for a change on disk (a HEAD to the core's /file: its ETag). */
+let lutRecheckMs = 2000;
+
+const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+/** Delete a LUT's texture now (when it belongs to the live context; a lost context took it already). */
+function dropLutTexture(e: LutEntry): void {
+  if (e.tex && state && e.gen === state.gen) state.gl.deleteTexture(e.tex);
+  e.tex = undefined;
+  e.gen = undefined;
+}
+
+/** Keep the cache within LUT_MAX / lutMaxBytes, oldest first, sparing LUTs a recent run used. */
+function enforceLutBudget(): void {
+  let count = luts.size;
+  let bytes = 0;
+  for (const e of luts.values()) bytes += e.bytes;
+  for (const [path, e] of luts) {
+    if (count <= LUT_MAX && bytes <= lutMaxBytes) break;
+    if (e.state === "loading" || runSerial - e.lastRun < 16) continue;
+    dropLutTexture(e);
+    luts.delete(path);
+    count--;
+    bytes -= e.bytes;
+  }
+}
+
+function evictLuts(_s: State): void {
+  enforceLutBudget();
+}
+
+/** (Re)read the .cube; a reload keeps showing the old table until the new one parses. */
+function readLut(path: string, e: LutEntry): void {
+  if (!fileUrl) return;
+  e.checking = true;
+  let etag: string | null = null;
+  // Repaint when the outcome differs (a table read, or a new failure): not on every retry of the same one.
+  let changed = true;
+  fetch(fileUrl(path), { cache: "no-store" })
+    .then((r) => {
+      etag = r.headers.get("etag");
+      return r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`));
+    })
+    .then((text) => {
+      // The table's size before parsing it: one over the budget is never allocated.
+      const size = Number(/^LUT_3D_SIZE\s+(\d+)/m.exec(text)?.[1]);
+      if (size > 0 && size ** 3 * 12 > lutMaxBytes) {
+        const mb = (n: number) => (n >= 2 ** 20 ? `${Math.round(n / 2 ** 20)} MB` : `${Math.ceil(n / 1024)} kB`);
+        throw new Error(`its ${size}³ table needs ${mb(size ** 3 * 12)}, over the preview's ${mb(lutMaxBytes)} for LUTs`);
+      }
+      const cube = parseCube(text);
+      if (!cube) throw new Error("not a 3D .cube LUT lut3d can read");
+      if (luts.get(path) !== e) return; // evicted meanwhile
+      dropLutTexture(e);
+      e.cube = cube;
+      e.etag = etag;
+      e.failedEtag = undefined;
+      e.problem = undefined;
+      e.bytes = cube.data.byteLength;
+      e.state = "ready";
+      enforceLutBudget();
+    })
+    .catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Remember the version that failed: it is not fetched again until the file changes.
+      e.failedEtag = etag;
+      changed = e.state === "loading" || msg !== e.problem;
+      if (e.state !== "ready") e.state = "error";
+      if (changed) console.warn(`[gl] LUT preview ${e.state === "ready" ? "keeps the previous table" : "unavailable"} for ${path}:`, msg);
+      e.problem = msg;
+    })
+    .finally(() => {
+      e.checking = false;
+      e.checked = nowMs();
+      if (changed) notify();
+    });
+}
+
+/**
+ * A LUT in use: at most every lutRecheckMs, ask the core whether the file
+ * changed (HEAD → ETag = size + mtime) and re-read it if so — a .cube
+ * rewritten at the same path (a regraded LUT) shows without a restart. The
+ * version compared is the last one read, or the one that failed to read: a
+ * broken rewrite is read once, and a fixed one recovers (a LUT whose first
+ * read failed too). A failed read with no validator is retried on the throttle.
+ */
+function revalidateLut(path: string, e: LutEntry): void {
+  if (!fileUrl || e.state === "loading" || e.checking) return;
+  const failed = e.failedEtag !== undefined;
+  const seen = failed ? e.failedEtag : e.etag;
+  if (!seen && !failed) return; // read fine, but the core sent no validator to compare
+  const t = nowMs();
+  if (t - e.checked < lutRecheckMs) return;
+  e.checked = t;
+  if (!seen) {
+    readLut(path, e);
+    return;
+  }
+  e.checking = true;
+  fetch(fileUrl(path), { method: "HEAD", cache: "no-store" })
+    .then((r) => {
+      const tag = r.ok ? r.headers.get("etag") : null;
+      if (tag && tag !== seen && luts.get(path) === e) readLut(path, e);
+      else e.checking = false;
+    })
+    .catch(() => {
+      e.checking = false;
+    });
+}
+
+let lutTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * While a LUT is on screen (or left out of it after a failed read), re-check
+ * it on a timer too: a paused preview draws nothing, so a .cube rewritten then
+ * would otherwise show only at the next step or scrub. A change re-reads it,
+ * and the read's notify() repaints. The timer stops once no recent frame uses
+ * a LUT.
+ */
+function watchLuts(): void {
+  if (lutTimer || typeof setInterval === "undefined") return;
+  lutTimer = setInterval(() => {
+    let inUse = false;
+    for (const [path, e] of luts) {
+      if (e.state === "loading" || runSerial - e.lastRun >= 16) continue;
+      inUse = true;
+      if (typeof document === "undefined" || !document.hidden) revalidateLut(path, e);
+    }
+    if (!inUse && lutTimer) {
+      clearInterval(lutTimer);
+      lutTimer = null;
+    }
+  }, Math.max(250, lutRecheckMs));
+}
+
+/** The LUT's state; starts loading it through the /file route, and keeps an eye on the file while it is used. */
 export function lutStatus(path: string): LutEntry["state"] {
   let e = luts.get(path);
   if (!e) {
     // No resolver yet (the first frame can draw before the preview installs
     // it): report "loading" and try again next frame, nothing cached.
     if (!fileUrl) return "loading";
-    e = { state: "loading" };
+    e = { state: "loading", checked: 0, bytes: 0, lastRun: runSerial };
     luts.set(path, e);
-    const entry = e;
-    fetch(fileUrl(path))
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((text) => {
-        const cube = parseCube(text);
-        if (!cube) throw new Error("not a 3D .cube LUT lut3d can read");
-        entry.cube = cube;
-        entry.state = "ready";
-      })
-      .catch((err) => {
-        entry.state = "error";
-        console.warn(`[gl] LUT preview unavailable for ${path}:`, err instanceof Error ? err.message : err);
-      })
-      .finally(notify);
+    readLut(path, e);
+    return e.state;
   }
+  // Most recently used last (Map order = the LRU order).
+  luts.delete(path);
+  luts.set(path, e);
+  e.lastRun = runSerial;
+  revalidateLut(path, e);
+  watchLuts();
   return e.state;
+}
+
+/**
+ * Why the preview does not show this LUT as the file on disk has it, or null:
+ * left out (state "error"), or an older table kept because the file's newer
+ * content failed to read. The export reads the file itself.
+ */
+export function lutProblem(path: string): { state: "error" | "stale"; reason: string } | null {
+  const e = luts.get(path);
+  if (!e?.problem || e.state === "loading") return null;
+  return { state: e.state === "ready" ? "stale" : "error", reason: e.problem };
 }
 
 /** Register an already-parsed LUT (the parity page has no /file route). */
 export function provideLut(path: string, cube: CubeLut): void {
-  luts.set(path, { state: "ready", cube });
+  const old = luts.get(path);
+  if (old) dropLutTexture(old);
+  luts.set(path, { state: "ready", cube, checked: 0, bytes: cube.data.byteLength, lastRun: runSerial });
+  enforceLutBudget();
+}
+
+/** Test hook: the LUT cache (paths oldest first, bytes), the change-check interval and the table budget. */
+export function lutCacheForTest(recheckMs?: number, maxBytes?: number): { paths: string[]; bytes: number; textures: number } {
+  if (maxBytes !== undefined) lutMaxBytes = maxBytes;
+  if (recheckMs !== undefined && recheckMs !== lutRecheckMs) {
+    lutRecheckMs = recheckMs;
+    if (lutTimer) {
+      clearInterval(lutTimer);
+      lutTimer = null;
+      watchLuts();
+    }
+  }
+  let bytes = 0;
+  let textures = 0;
+  for (const e of luts.values()) {
+    bytes += e.bytes;
+    if (e.tex) textures++;
+  }
+  return { paths: [...luts.keys()], bytes, textures };
 }
 
 function lutTexture(s: State, path: string): { tex: WebGLTexture; cube: CubeLut } | null {
@@ -596,9 +854,18 @@ export interface LayerJob {
   /** Canvas (export) size. */
   cw: number;
   ch: number;
-  /** Timeline frame number (grain seed, trails history). */
+  /** Timeline frame number (grain seed; the history clock of a layer without a source clock). */
   frame: number;
-  /** Stable layer id for history textures. */
+  /**
+   * The source frame shown (a video clip): temporal effects (trails, denoise)
+   * advance per SOURCE frame, as the export's lagfun / hqdn3d run before the
+   * clip's speed change — a repeated frame (slow motion) is no step, a frame
+   * at 2× speed two. Absent (stills, adjustment layers): the timeline frame.
+   */
+  srcFrame?: number;
+  /** Source frames per timeline frame (|speed| × source fps / project fps), for the seek test; default 1. */
+  srcStep?: number;
+  /** Stable layer id for history and table textures. */
   layerId: string;
 }
 
@@ -613,39 +880,201 @@ export interface GLResult {
 
 const result: GLResult = { canvas: null as unknown as HTMLCanvasElement, x: 0, y: 0, w: 0, h: 0 };
 
-/** Frames a trail keeps accumulating across (a slow machine skips some); a bigger jump is a seek. */
+/** Timeline frames a history keeps accumulating across (a slow machine skips some); a bigger jump is a seek. */
 const MAX_FRAME_GAP = 15;
 
-function history(s: State, id: string, w: number, h: number, frame: number): Hist | null {
+const RESAMPLE_FS = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
+uniform usampler2D u_src;
+uniform ivec2 u_srcSize;
+uniform ivec2 u_dstSize;
+out uvec4 o_color;
+vec4 at(ivec2 q) { return uintBitsToFloat(texelFetch(u_src, clamp(q, ivec2(0), u_srcSize - 1), 0)); }
+void main() {
+  vec2 c = gl_FragCoord.xy * vec2(u_srcSize) / vec2(u_dstSize) - 0.5;
+  ivec2 i = ivec2(floor(c));
+  vec2 f = c - floor(c);
+  vec4 v = mix(mix(at(i), at(i + ivec2(1, 0)), f.x), mix(at(i + ivec2(0, 1)), at(i + ivec2(1, 1)), f.x), f.y);
+  o_color = floatBitsToUint(v);
+}`;
+
+/** Bilinear copy of a float (history) target into one of another size. */
+function resampleInto(s: State, from: Target, to: Target): boolean {
+  const { gl } = s;
+  if (!s.resample) {
+    const fs = compile(gl, gl.FRAGMENT_SHADER, RESAMPLE_FS);
+    const prog = fs ? gl.createProgram() : null;
+    if (!fs || !prog) return false;
+    gl.attachShader(prog, s.vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
+    s.resample = { prog, src: gl.getUniformLocation(prog, "u_src"), srcSize: gl.getUniformLocation(prog, "u_srcSize"), dstSize: gl.getUniformLocation(prog, "u_dstSize") };
+  }
+  const r = s.resample;
+  gl.useProgram(r.prog);
+  gl.uniform1i(r.src, 0);
+  gl.uniform2i(r.srcSize, from.w, from.h);
+  gl.uniform2i(r.dstSize, to.w, to.h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, to.fbo);
+  gl.viewport(0, 0, to.w, to.h);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, from.tex);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  return true;
+}
+
+function history(s: State, id: string, w: number, h: number, frame: number, maxGap: number, step: PlannedStep, settled: boolean): Hist | null {
+  const sig = step.histSig ?? "";
+  const params = step.histParams ?? "";
   let st = s.hist.get(id);
   if (st && (st.a.w !== w || st.a.h !== h)) {
+    // A new processing size (playback resolution, a zoom bucket): the state is
+    // resampled into it, so pausing or zooming doesn't wipe a trail.
+    const a = makeTarget(s, w, h, true);
+    const b = makeTarget(s, w, h, true);
+    const ok = !!a && !!b && resampleInto(s, st.a, a) && resampleInto(s, st.b, b);
     dropTarget(s, st.a);
     dropTarget(s, st.b);
-    s.hist.delete(id);
-    st = undefined;
+    if (ok) {
+      st.a = a!;
+      st.b = b!;
+    } else {
+      if (a) dropTarget(s, a);
+      if (b) dropTarget(s, b);
+      s.hist.delete(id);
+      st = undefined;
+    }
   }
   if (!st) {
     const a = makeTarget(s, w, h, true);
     const b = makeTarget(s, w, h, true);
     if (!a || !b) return null;
-    st = { a, b, frame, steps: 1, reset: true, lastRun: runSerial };
+    st = { a, b, frame, steps: 1, reset: true, lastRun: runSerial, sig, params, since: frame, dirty: !settled };
     s.hist.set(id, st);
     return st;
   }
   st.lastRun = runSerial;
-  if (frame === st.frame) return st; // the same frame again: recompute B from the same A
-  if (frame > st.frame && frame - st.frame <= MAX_FRAME_GAP) {
-    // Playing (or stepping) forward: last frame's result is the new history.
+  if (st.sig !== sig) {
+    // Other effects before it, or another order: the state was built from
+    // another input (trails after an invert that now comes after it) — start over.
+    st.sig = sig;
+    st.reset = true;
+    st.steps = 1;
+  } else if (frame === st.frame) {
+    // The same frame again: recompute B from the same A (new settings keep the
+    // trail on screen, but it is no longer what the export has).
+    if (st.params !== params) st.since = frame;
+    st.params = params;
+    st.dirty = !settled;
+    return st;
+  } else if (frame > st.frame && frame - st.frame <= maxGap) {
+    // Playing (or stepping) forward: last frame's result is the new history —
+    // still the export's only if no frame was skipped, every frame was the
+    // right one and the settings didn't change.
+    if (frame - st.frame > 1 || st.dirty || st.params !== params) st.since = frame;
     [st.a, st.b] = [st.b, st.a];
     st.steps = frame - st.frame;
     st.reset = false;
+    st.params = params;
+    st.frame = frame;
+    st.dirty = !settled;
+    return st;
   } else {
     // A seek, a jump back or a long gap: start over, like the export at a clip start.
     st.reset = true;
     st.steps = 1;
   }
+  st.params = params;
   st.frame = frame;
+  st.since = frame;
+  st.dirty = !settled;
   return st;
+}
+
+/** Source frames a paused warm-up re-runs at most (warmup.ts): 3 s at 30 fps. */
+export const WARM_MAX_FRAMES = 90;
+
+/**
+ * How far back a history step's state reaches: trails' lagfun keeps a frame
+ * until decay^n × 255 rounds away (59 frames at the default 0.9); hqdn3d's
+ * temporal smoothing settles well within 30.
+ */
+function warmWindow(step: PlannedStep): number {
+  if (step.kind === "trails") {
+    const d = step.passes[0]?.uniforms.u_decay;
+    const decay = typeof d === "number" ? d : 0.9;
+    if (decay > 0 && decay < 1) return Math.min(WARM_MAX_FRAMES, Math.ceil(Math.log(0.5 / 255) / Math.log(decay)));
+    return WARM_MAX_FRAMES;
+  }
+  return 30;
+}
+
+/**
+ * After a paused frame of a video layer: the source frame its temporal
+ * steps (trails, denoise) would have to be re-run from to show what the
+ * export does — whose histories run from the clip's first frame — or null
+ * when they already do (or the layer has none, or a seek is still landing).
+ * `first` = the clip's first source frame.
+ */
+export function historyGap(layerId: string, steps: readonly PlannedStep[], clock: number, first: number): number | null {
+  const s = state;
+  if (!s) return null;
+  let from: number | null = null;
+  for (const step of steps) {
+    if (!step.history) continue;
+    const need = Math.max(first, clock - warmWindow(step));
+    const h = s.hist.get(`${layerId}|${step.id}`);
+    if (h && h.frame === clock && h.dirty) return null; // the redraw after the seek decides
+    if (h && h.frame === clock && h.since <= need) continue;
+    from = from === null ? need : Math.min(from, need);
+  }
+  return from !== null && from < clock ? from : null;
+}
+
+/** Move one layer id's histories to another (a finished warm-up becomes the layer's own), replacing what was there. */
+export function adoptHistory(fromLayer: string, toLayer: string): void {
+  const s = state;
+  if (!s) return;
+  const pre = `${fromLayer}|`;
+  for (const [key, st] of [...s.hist]) {
+    if (!key.startsWith(pre)) continue;
+    s.hist.delete(key);
+    const dst = `${toLayer}|${key.slice(pre.length)}`;
+    const old = s.hist.get(dst);
+    if (old) {
+      dropTarget(s, old.a);
+      dropTarget(s, old.b);
+    }
+    st.lastRun = runSerial;
+    s.hist.set(dst, st);
+  }
+}
+
+/** Free a layer id's histories now (an abandoned warm-up). */
+export function dropHistory(layer: string): void {
+  const s = state;
+  if (!s) return;
+  const pre = `${layer}|`;
+  for (const [key, st] of [...s.hist]) {
+    if (!key.startsWith(pre)) continue;
+    dropTarget(s, st.a);
+    dropTarget(s, st.b);
+    s.hist.delete(key);
+  }
+}
+
+/** Test hook: a layer's history bookkeeping per step id. */
+export function historyForTest(layerId: string): Record<string, { frame: number; since: number; reset: boolean; dirty: boolean }> {
+  const out: Record<string, { frame: number; since: number; reset: boolean; dirty: boolean }> = {};
+  const pre = `${layerId}|`;
+  for (const [key, st] of state?.hist ?? []) {
+    if (key.startsWith(pre)) out[key.slice(pre.length)] = { frame: st.frame, since: st.since, reset: st.reset, dirty: st.dirty };
+  }
+  return out;
 }
 
 function evictHistory(s: State): void {
@@ -669,6 +1098,8 @@ function setUniform(gl: WebGL2RenderingContext, u: UniformInfo, v: number | read
     case gl.INT_VEC2: gl.uniform2iv(u.loc, arr!); break;
     case gl.INT_VEC3: gl.uniform3iv(u.loc, arr!); break;
     case gl.INT_VEC4: gl.uniform4iv(u.loc, arr!); break;
+    case gl.UNSIGNED_INT: gl.uniform1ui(u.loc, arr ? arr[0] : (v as number)); break;
+    case gl.UNSIGNED_INT_VEC2: gl.uniform2uiv(u.loc, arr!); break;
     default: break;
   }
 }
@@ -682,12 +1113,12 @@ function setPassUniforms(gl: WebGL2RenderingContext, p: Prog, e: Elem): void {
 }
 
 /** Bind the step's table textures to the units of the samplers its body declares. */
-function bindTables(s: State, p: Prog, e: Elem): void {
+function bindTables(s: State, p: Prog, e: Elem, layerId: string): void {
   const { gl } = s;
   const step = e.step;
   if (!step) return;
   if (e.tables2D.length && step.aux) {
-    const tex = auxTexture(s, step.aux);
+    const tex = auxTexture(s, `${layerId}|${step.id}`, step.aux, step.auxWidth ?? step.aux.length / 4);
     for (const name of e.tables2D) {
       const unit = p.units.get(name);
       if (unit === undefined) continue;
@@ -853,6 +1284,8 @@ export function runLayer(job: LayerJob, readback = false): GLResult | Uint8Array
     if (!src) return null;
     const srcTex = sourceTexture(s, src);
     if (!srcTex) return null;
+    // A video still seeking shows its previous frame: a history built on it is marked (Hist.dirty).
+    const settled = !(job.dynamic && (job.source as { seeking?: boolean }).seeking === true);
 
     // 2. The steps that can run now (a LUT still loading is left out for the moment) → fused draws.
     let runnable: readonly PlannedStep[] = job.steps;
@@ -914,7 +1347,9 @@ export function runLayer(job: LayerJob, readback = false): GLResult | Uint8Array
       let hist: Hist | null = null;
       let target: Target | null;
       if (g.history) {
-        hist = history(s, `${job.layerId}|${g.host.step!.id}`, W, H, job.frame);
+        const clock = job.srcFrame ?? job.frame;
+        const step = g.host.step!;
+        hist = history(s, `${job.layerId}|${step.id}`, W, H, clock, MAX_FRAME_GAP * Math.max(1, job.srcStep ?? 1), step, settled);
         if (!hist) return null;
         target = hist.b;
       } else if (isFinal) {
@@ -942,10 +1377,10 @@ export function runLayer(job: LayerJob, readback = false): GLResult | Uint8Array
         if (st) gl.uniform1f(st.loc, hist.steps);
       }
       setPassUniforms(gl, p, g.host);
-      bindTables(s, p, g.host);
+      bindTables(s, p, g.host, job.layerId);
       for (const o of g.ops) {
         setPassUniforms(gl, p, o);
-        bindTables(s, p, o);
+        bindTables(s, p, o, job.layerId);
       }
       bindIO(g.place ? srcTex : cur!.tex, orig ? orig.tex : null, hist ? hist.a.tex : null, target);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -963,7 +1398,7 @@ export function runLayer(job: LayerJob, readback = false): GLResult | Uint8Array
     if (!lastIsFinal) {
       const copy: Group = {
         host: elem(COPY_PASS, null, last.endDom, true, true), ops: [], inDom: last.endDom, origDom: last.endDom,
-        endDom: last.endDom, float: false, history: false, place: false, sources: [],
+        endDom: last.endDom, float: false, history: false, inFloat: true, place: false, sources: [],
       };
       const p = program(s, groupSource(copy, finalMode));
       if (!p) return null;
@@ -977,6 +1412,8 @@ export function runLayer(job: LayerJob, readback = false): GLResult | Uint8Array
       trimPool(s);
       evictHistory(s);
       evictSources(s);
+      evictAux(s);
+      evictLuts(s);
     }
     if (readback) {
       const bytes = new Uint8Array(W * H * 4);

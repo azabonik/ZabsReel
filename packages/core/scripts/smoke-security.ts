@@ -3,13 +3,14 @@
  *  - /rpc without the session token → 401; with it → ok.
  *  - /health without the token → liveness only (no ffmpeg banner / revision).
  *  - /file refuses arbitrary disk paths (403 even WITH a valid token) and
- *    serves only data-dir artifacts + imported asset files.
+ *    serves only data-dir artifacts + imported asset files; HEAD /file gives
+ *    an exposed ETag (size + mtime) that changes when a file is rewritten.
  *  - WebSocket upgrade without the token → connection refused.
  *
  * Run: npx tsx packages/core/scripts/smoke-security.ts
  * (No media arguments needed — synthesizes its own clip with ffmpeg lavfi.)
  */
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
@@ -111,6 +112,21 @@ async function main() {
   engine.setClipEffects(lutClip.id, { lut: cubePath });
   const cubeOk = await fetch(`${base}/file?path=${encodeURIComponent(cubePath)}&token=${token}`);
   check(cubeOk.status === 200 && (await cubeOk.text()).startsWith("LUT_3D_SIZE"), `/file for the clip's .cube LUT → 200 (got ${cubeOk.status})`);
+  // HEAD answers with the headers only: an ETag (size + mtime) the live preview
+  // compares to notice a LUT rewritten in place, exposed to the cross-origin renderer.
+  const cubeUrl = `${base}/file?path=${encodeURIComponent(cubePath)}&token=${token}`;
+  const head1 = await fetch(cubeUrl, { method: "HEAD" });
+  const etag1 = head1.headers.get("etag");
+  check(head1.status === 200 && !!etag1 && (await head1.text()) === "", `HEAD /file → 200 with an ETag and no body (got ${head1.status}, ${etag1})`);
+  check((head1.headers.get("access-control-expose-headers") ?? "").includes("ETag") && head1.headers.get("cache-control") === "no-cache",
+    "the ETag is exposed to other origins and the response must be revalidated (no-cache)");
+  check(cubeOk.headers.get("etag") === etag1, "GET carries the same ETag");
+  writeFileSync(cubePath, "LUT_3D_SIZE 2\n1 1 1\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n0 0 0\n"); // same size, new content
+  utimesSync(cubePath, new Date(), new Date(Date.now() + 5000));
+  const etag2 = (await fetch(cubeUrl, { method: "HEAD" })).headers.get("etag");
+  check(!!etag2 && etag2 !== etag1, `rewriting the LUT in place changes its ETag (${etag1} → ${etag2})`);
+  check((await fetch(`${base}/file?path=${encodeURIComponent(cubePath)}`, { method: "HEAD" })).status === 401, "HEAD /file without the token → 401");
+  check((await fetch(`${base}/file?path=${encodeURIComponent(otherCube)}&token=${token}`, { method: "HEAD" })).status === 403, "HEAD /file for a path no clip uses → 403");
   const cubeOther = await fetch(`${base}/file?path=${encodeURIComponent(otherCube)}&token=${token}`);
   check(cubeOther.status === 403, `/file for another .cube → 403 (got ${cubeOther.status})`);
   engine.setClipEffects(lutClip.id, { lut: sysPath });

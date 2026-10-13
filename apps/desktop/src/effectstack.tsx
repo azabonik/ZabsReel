@@ -5,12 +5,15 @@
 // Keys keep their richer controls (keyfx.tsx: Auto, Pick). Rows whose effect
 // has no live preview here (no WebGL2 path, or WebGL2 unavailable and no CSS
 // proxy) carry a "Render exact" badge — only the FFmpeg render shows them; an
-// approximate live preview carries a softer "≈".
+// approximate live preview carries a softer "≈", and so does a fixed-size-kernel
+// effect (sharpen, detail, edges, chromakey, denoise) while the preview
+// processes its clip below the export's resolution (gl/scale.ts).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ComponentType } from "react";
 import { EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, isEnabled, keyColorHex, previewFidelity, type EffectDef } from "@aive/core/effects";
 import { glReady } from "./gl/runtime";
+import { layerScale, onLayerScaleChange } from "./gl/scale";
 import type { VisualEffect } from "./types";
 import { KeyEffectControls, type KeyDetection, type KeyPatch, type RangeProps } from "./keyfx";
 import { isKeyEffect } from "./keying";
@@ -107,6 +110,9 @@ export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemov
   onApplyKey: (clipId: string, type: string, patch: KeyPatch, effectId?: string) => void;
   onDetectKey: (clipId: string) => Promise<KeyDetection | null>;
 }) {
+  // The scale this clip's look last ran at in the WebGL preview (1 = the export's resolution).
+  const scale = useSyncExternalStore(onLayerScaleChange, () => layerScale(clipId));
+  const scaledDown = scale !== undefined && scale < 0.99 && glReady();
   const add = (type: string) => {
     if (!type) return;
     // Keys start from the detected background colour so the first result already works.
@@ -149,6 +155,12 @@ export function EffectStack({ clipId, filters, disabled, Range, onApply, onRemov
                   )}
                   {def && fidelityOf(f.type) === "approx" && (
                     <span className="eff-badge eff-badge-soft" title={`Live preview is approximate — ${effectGL(f.type)?.note ?? ""} Render exact shows the export.`}>
+                      ≈
+                    </span>
+                  )}
+                  {def && fidelityOf(f.type) !== "approx" && fidelityOf(f.type) !== "none" && scaledDown && effectGL(f.type)?.kernel && (
+                    <span className="eff-badge eff-badge-soft"
+                      title={`Live preview is approximate here: this clip is processed at ${Math.round(scale! * 100)}% of the export resolution (scaled playback, or a canvas above the preview's 4096 px limit), so this effect's fixed-size kernel covers a wider area. Render exact shows the export.`}>
                       ≈
                     </span>
                   )}

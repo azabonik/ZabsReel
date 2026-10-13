@@ -7,7 +7,9 @@
  *   2. Legacy stored effects ({type:"blur",amount:8}, keys with params, …) emit
  *      BYTE-IDENTICAL filter strings to b6219ab (literals captured from that
  *      commit's graph.ts). Vignette is the intended exception: it now maps
- *      amount → lens angle and keeps alpha.
+ *      amount → lens angle and keeps alpha. Chromakey is the other one: its
+ *      key copy gets a 1-px smeared border (cropped off again), so the output
+ *      no longer depends on FFmpeg's thread count.
  *   3. Bypassed effects (enabled:false) are skipped without renaming the other
  *      effects' sub-graph labels.
  *   4. rpc: apply_effect validation (clamp + clear errors), the bypass toggle,
@@ -123,8 +125,9 @@ async function main() {
   check(EFFECT_TYPE_IDS.every((t) => !exactOnly(t)), "exactOnly: every effect previews live now (WebGL2; CSS / canvas fallback for some)");
   check(EFFECT_TYPE_IDS.every((t) => !!effectGL(t) && effectGL(t)!.passes.length > 0 && !!effectGL(t)!.note),
     "every effect has a WebGL2 preview (passes + a fidelity note)");
-  check(previewFidelity("denoise") === "approx" && previewFidelity("blur") === "exact" && previewFidelity("chromakey") === "close",
-    "previewFidelity follows the GL entry (denoise ≈, blur exact, chromakey close)");
+  check(previewFidelity("denoise") === "close" && previewFidelity("blur") === "exact" && previewFidelity("chromakey") === "exact" &&
+    EFFECTS.every((e) => previewFidelity(e.type) !== "approx"),
+    "previewFidelity follows the GL entry (blur, chromakey exact; denoise close; nothing approximate any more)");
   check(previewFidelity("sharpen", false) === "none" && previewFidelity("chromakey", false) === "none" &&
     previewFidelity("blur", false) === "close" && previewFidelity("invert", false) === "exact" && previewFidelity("vignette", false) === "close",
     "without WebGL2: GL-only effects and keys have no preview; CSS / canvas proxies remain");
@@ -151,9 +154,9 @@ async function main() {
     [{ type: "colorkey", color: "0x808080" },
       ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]colorkey=0x808080:0.080000:0.040000,format=rgba[keyc1_0k];[keyc1_0b][keyc1_0k]blend=c3_mode=multiply,format=rgba"]],
     [{ type: "chromakey", color: "#00ff00", params: { despill: 0.5 } },
-      ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]chromakey=0x00FF00:0.180000:0.100000,despill=type=green:mix=0.5:expand=0:red=0:green=-0.500000:blue=0:brightness=0,format=rgba[keyc1_0k];[keyc1_0k][keyc1_0b]blend=c3_mode=multiply,format=rgba"]],
+      ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]format=yuva444p,pad=iw+2:ih+2:1:1,fillborders=1:1:1:1:smear,chromakey=0x00FF00:0.180000:0.100000,crop=iw-2:ih-2:1:1,despill=type=green:mix=0.5:expand=0:red=0:green=-0.500000:blue=0:brightness=0,format=rgba[keyc1_0k];[keyc1_0k][keyc1_0b]blend=c3_mode=multiply,format=rgba"]],
     [{ type: "chromakey", color: "auto", params: { similarity: 3 } },
-      ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]chromakey=0x00FF00:1.000000:0.100000,format=rgba[keyc1_0k];[keyc1_0b][keyc1_0k]blend=c3_mode=multiply,format=rgba"]],
+      ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]format=yuva444p,pad=iw+2:ih+2:1:1,fillborders=1:1:1:1:smear,chromakey=0x00FF00:1.000000:0.100000,crop=iw-2:ih-2:1:1,format=rgba[keyc1_0k];[keyc1_0b][keyc1_0k]blend=c3_mode=multiply,format=rgba"]],
     [{ type: "lumakey", params: { threshold: 1 } },
       ["format=rgba,split[keyc1_0a][keyc1_0b];[keyc1_0a]lutrgb=a=maxval,lumakey=threshold=1.000000:tolerance=0.100000:softness=0.050000,format=rgba[keyc1_0k];[keyc1_0b][keyc1_0k]blend=c3_mode=multiply,format=rgba"]],
     [{ type: "nonexistent", amount: 3 }, []],
@@ -292,8 +295,9 @@ async function main() {
     try {
       const { buf } = await renderPadded(bars, fx);
       // The bar is x 0..39: sample the far edge AND right beside the picture (a blurred alpha leaks there).
-      // (blur / pixelate legitimately feather or block across the picture edge: far edge only.)
-      const xs = !["blur", "pixelate"].includes(fx.type) ? [2, 20, 34, 38, 281, 285, 300] : [2];
+      // (blur / pixelate legitimately feather or block across the picture edge, and lens's zoom to fill
+      // scales the canvas-space frame, bars included, so the picture covers part of them: far edge only.)
+      const xs = !["blur", "pixelate", "lens"].includes(fx.type) ? [2, 20, 34, 38, 281, 285, 300] : [2];
       const pad = Math.max(...xs.map((x) => alphaAt(buf, 3, x, 90)));
       const mid = alphaAt(buf, 3, 200, 90);
       const isKey = isKeyType(fx.type);
@@ -552,6 +556,34 @@ async function main() {
     const [p0, p1] = [await lineRow(bentPos, 160), await lineRow(bentPos, 40)];
     check(b1 < b0 && p1 > p0, `k1 > 0 is barrel (ends pulled toward the centre), k1 < 0 pincushion (ends pushed out) — the documented convention (neg ${b0}/${b1}, pos ${p0}/${p1})`);
     check(Math.abs(p0 - p1) >= 4 && Math.sign(p1 - p0) !== Math.sign(b1 - b0), `the opposite sign bends it the other way (centre ${p0}, edge ${p1})`);
+
+    // Zoom to fill (params.fill, default 1): whatever k1 / k2, no pixel of an opaque frame turns
+    // transparent (the binding ray isn't always the corner when the signs differ); fill 0 keeps
+    // the old transparent corners.
+    const alphas = async (fx: EffectInput, w: number, h: number): Promise<Buffer> => {
+      const chain = effectFilterSteps([fx], w, h, "lz").join(",");
+      const { stdout } = await ffmpeg(["-f", "lavfi", "-i", `testsrc2=s=${w}x${h}:r=30:d=0.1`, "-filter_complex", `[0:v]format=rgba${chain ? `,${chain}` : ""},format=rgba[o]`,
+        "-map", "[o]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+      const b = stdout as unknown as Buffer;
+      return Buffer.from(Array.from({ length: w * h }, (_, i) => b[i * 4 + 3]));
+    };
+    const empty: string[] = [];
+    for (const [w, h] of [[320, 180], [180, 320]]) {
+      for (const k1 of [-1, -0.5, 0, 0.3, 0.5, 1]) {
+        for (const k2 of [-1, -0.5, 0, 0.5, 1]) {
+          if (k1 === 0 && k2 === 0) continue;
+          const a = await alphas({ type: "lens", amount: k1, params: { k2 } }, w, h);
+          const n = a.filter((v) => v < 255).length;
+          if (n) empty.push(`${w}×${h} k1 ${k1} k2 ${k2}: ${n} px`);
+        }
+      }
+    }
+    check(empty.length === 0, "lens zoom to fill (default): no transparent pixel for any k1 / k2 (30 settings × 2 aspects)", empty.join("; "));
+    const off = await alphas({ type: "lens", amount: 0.3, params: { fill: 0 } }, 320, 180);
+    check(off[0] === 0 && off[319] === 0 && off[179 * 320] === 0 && off[179 * 320 + 319] === 0, "lens fill 0: the uncovered corners stay transparent (the old look)");
+    const zoomed = effectFilterSteps([{ type: "lens", amount: 0.3 }], 1920, 1080, "lz").join(",");
+    check(zoomed.includes("perspective=") && !effectFilterSteps([{ type: "lens", amount: -0.4, params: { k2: 0.3 } }], 1920, 1080, "lz").join(",").includes("perspective"),
+      "the zoom is a perspective step only when the warp uncovers something (barrel yes, this pincushion no)", zoomed);
   }
   // trails
   {

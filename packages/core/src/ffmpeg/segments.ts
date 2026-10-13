@@ -23,8 +23,9 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 7: color_grade's eq keeps alpha (alphaSafe): graded letterboxed / keyed / masked clips stay transparent.
  * 8: effect stacks are pinned to RGBA (graph.ts EFFECTS_RGBA_PIN): blur / lens / detail no longer run on 4:2:0 chroma.
  * 9: speed ramps render on anchored frame slots (exact footprint, pad + frame cut); xfade gets one cloned frame before FFmpeg 7.
+ * 10: lens zooms to fill by default (no uncovered corners); chromakey pads its edge so the key no longer depends on the CPU count.
  */
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 10;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

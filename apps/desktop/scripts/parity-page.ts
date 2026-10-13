@@ -3,9 +3,36 @@
 // (src/gl/runtime.ts + plan.ts) on raw RGBA test frames and hands back the
 // straight RGBA result, plus a timing loop for the performance numbers.
 
-import { drawCount, glRenderer, loseContextForTest, provideLut, runLayer, type LayerJob } from "../src/gl/runtime";
+// The pipeline must not need EXT_color_buffer_float (many WebGL2 devices lack
+// it): the whole parity run happens with it hidden. Installed before the
+// runtime creates its context.
+const realGetExtension = WebGL2RenderingContext.prototype.getExtension;
+WebGL2RenderingContext.prototype.getExtension = function (this: WebGL2RenderingContext, name: string) {
+  return name === "EXT_color_buffer_float" ? null : realGetExtension.call(this, name);
+} as typeof realGetExtension;
+
+// Live GL textures (created − deleted), for the checks that GPU memory is freed deterministically.
+let liveTex = 0;
+const realCreateTexture = WebGL2RenderingContext.prototype.createTexture;
+const realDeleteTexture = WebGL2RenderingContext.prototype.deleteTexture;
+WebGL2RenderingContext.prototype.createTexture = function (this: WebGL2RenderingContext) {
+  const t = realCreateTexture.call(this);
+  if (t) liveTex++;
+  return t;
+};
+WebGL2RenderingContext.prototype.deleteTexture = function (this: WebGL2RenderingContext, t: WebGLTexture | null) {
+  if (t && !this.isContextLost()) liveTex--;
+  return realDeleteTexture.call(this, t);
+};
+
+import {
+  drawCount, glRenderer, historyGap, loseContextForTest, lutCacheForTest, lutProblem, lutStatus, onGLChange, provideLut, runLayer, setFileUrl,
+  type LayerJob,
+} from "../src/gl/runtime";
 import { cachedPlan, planLayer, passCount, type LayerLook } from "../src/gl/plan";
+import { cancelWarmups, setWarmup, warmIfNeeded, warmupForTest } from "../src/gl/warmup";
 import { parseCube } from "../src/gl/color";
+import { MediaPool } from "../src/mediapool";
 import { colorFilter, vignetteAngles } from "../src/playback";
 import { vignetteLayer } from "../src/vignette2d";
 
@@ -22,6 +49,12 @@ interface RunArgs {
   layerId: string;
   /** .cube files the look references: path → text. */
   luts?: Record<string, string>;
+  /** The source frame shown and source frames per timeline frame (a video clip's temporal clock). */
+  srcFrame?: number;
+  srcStep?: number;
+  /** Processing size (default: the canvas, k = 1). */
+  pw?: number;
+  ph?: number;
 }
 
 const b64ToBytes = (b64: string): Uint8ClampedArray => {
@@ -44,12 +77,17 @@ function fit(srcW: number, srcH: number, cw: number, ch: number) {
 }
 
 function job(a: RunArgs, img: ImageData): LayerJob {
-  const g = { k: 1, w: a.cw, h: a.ch, cw: a.cw, ch: a.ch };
+  const w = a.pw ?? a.cw;
+  const h = a.ph ?? a.ch;
+  const k = w / a.cw;
+  const g = { k, w, h, cw: a.cw, ch: a.ch };
+  const f = fit(a.srcW, a.srcH, a.cw, a.ch);
   return {
     source: img, srcW: a.srcW, srcH: a.srcH, dynamic: true,
     crop: { x: 0, y: 0, w: a.srcW, h: a.srcH },
-    w: a.cw, h: a.ch, pic: fit(a.srcW, a.srcH, a.cw, a.ch),
-    steps: planLayer(a.look, g), k: 1, cw: a.cw, ch: a.ch, frame: a.frame, layerId: a.layerId,
+    w, h, pic: { x: f.x * k, y: f.y * k, w: f.w * k, h: f.h * k },
+    steps: planLayer(a.look, g), k, cw: a.cw, ch: a.ch, frame: a.frame, layerId: a.layerId,
+    ...(a.srcFrame !== undefined ? { srcFrame: a.srcFrame, srcStep: a.srcStep } : {}),
   };
 }
 
@@ -60,13 +98,301 @@ function loadLuts(luts?: Record<string, string>) {
   }
 }
 
+type WarmMode = "ok" | "fail" | "short" | "hang";
+const warmStore = new Map<string, { frames: Uint8Array[]; mode: WarmMode }>();
+const warmRequests: { path: string; from: number; count: number; signal?: AbortSignal | null }[] = [];
+let warmRepaints = 0;
+setWarmup((path, q) => `mock-frames:${encodeURIComponent(JSON.stringify({ path, ...q }))}`, () => warmRepaints++);
+{
+  // The mocked /frames route: the frames asked for, back to back, in odd-sized chunks (a frame spans reads).
+  const pageFetch = window.fetch;
+  window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (!url.startsWith("mock-frames:")) return pageFetch(input, init);
+    const q = JSON.parse(decodeURIComponent(url.slice(12))) as { path: string; from: number; count: number };
+    warmRequests.push({ path: q.path, from: q.from, count: q.count, signal: init?.signal });
+    const src = warmStore.get(q.path);
+    if (!src || src.mode === "fail") return new Response("decode failed", { status: 500 });
+    const n = src.mode === "ok" ? q.count : q.count - 1;
+    const parts = src.frames.slice(q.from, q.from + n);
+    const all = new Uint8Array(parts.reduce((t, f) => t + f.length, 0));
+    parts.reduce((o, f) => (all.set(f, o), o + f.length), 0);
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (let o = 0; o < all.length; o += 70001) c.enqueue(all.subarray(o, o + 70001));
+        if (src.mode !== "hang") c.close();
+        else init?.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch;
+}
+
 const api = {
   renderer: () => glRenderer(),
+  /** True when the hiding above works: a fresh context can't complete an RGBA32F framebuffer. */
+  floatBlocked(): boolean {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    if (!gl) return false;
+    gl.getExtension("EXT_color_buffer_float");
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 4, 4);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return !complete;
+  },
   run(a: RunArgs): string | null {
     loadLuts(a.luts);
     const img = new ImageData(b64ToBytes(a.rgba), a.srcW, a.srcH);
     const out = runLayer(job(a, img), true);
     return out ? bytesToB64(out) : null;
+  },
+  liveTextures: () => liveTex,
+  /**
+   * The paused-frame warm-up (src/gl/warmup.ts, the real module) against a
+   * mocked core /frames route: `warmFrames` stores a clip's source frames and
+   * how the route answers ("ok"; "fail": HTTP 500; "short": one frame fewer
+   * than asked; "hang": all but the last frame, then nothing until aborted).
+   * `warmDraw` draws a paused frame and calls warmIfNeeded like the preview;
+   * `warmLog` says what the route was asked and how often the warm-up asked
+   * for a repaint.
+   */
+  warmFrames(path: string, frames: string[], mode: WarmMode): void {
+    warmStore.set(path, { frames: frames.map(b64ToBytes), mode });
+  },
+  warmDraw(a: RunArgs & { path: string; first: number }): { gap: number | null; out: string | null } {
+    const j = job(a, new ImageData(b64ToBytes(a.rgba), a.srcW, a.srcH));
+    const out = runLayer(j, true);
+    const gap = historyGap(a.layerId, j.steps, a.srcFrame ?? a.frame, a.first);
+    warmIfNeeded(j, { path: a.path, srcFps: 30, first: a.first });
+    return { gap, out: out ? bytesToB64(out) : null };
+  },
+  /** Draw a paused frame (no warm-up) and ask where its history must be rebuilt from. */
+  warmGap(a: RunArgs, first: number): number | null {
+    const j = job(a, new ImageData(b64ToBytes(a.rgba), a.srcW, a.srcH));
+    runLayer(j, true);
+    return historyGap(a.layerId, j.steps, a.srcFrame ?? a.frame, first);
+  },
+  warmLog(): { requests: { path: string; from: number; count: number; aborted: boolean }[]; repaints: number; pending: string[]; settled: string[] } {
+    return { requests: warmRequests.map((r) => ({ path: r.path, from: r.from, count: r.count, aborted: r.signal?.aborted ?? false })), repaints: warmRepaints, ...warmupForTest() };
+  },
+  warmCancel: () => cancelWarmups(),
+  warmMaxBytes: (n: number) => void warmupForTest({ maxBytes: n }),
+  /**
+   * A slider drag: `n` runs of one layer (one source element), each with a NEW
+   * look whose eq and curves tables are new arrays. Returns the live textures
+   * after the first run and after the last (they must not grow per new table).
+   */
+  churn(a: RunArgs, n: number): { first: number; last: number } {
+    const img = new ImageData(b64ToBytes(a.rgba), a.srcW, a.srcH);
+    let first = -1;
+    for (let i = 0; i < n; i++) {
+      const look: LayerLook = { color: { contrast: 1 + i * 0.01 }, grade: { curve: `0/0 0.5/${(0.4 + i * 0.002).toFixed(3)} 1/1` } };
+      runLayer(job({ ...a, look, frame: i }, img), true);
+      if (i === 0) first = liveTex;
+    }
+    return { first, last: liveTex };
+  },
+  /**
+   * The LUT cache through a mocked core /file route (GET + HEAD with ETags):
+   * a .cube rewritten in place must show after its ETag changes, and 12 LUTs
+   * must leave at most 8 cached (oldest dropped, their textures deleted).
+   * A rewrite that fails to parse is read once (not every re-check), keeps
+   * the previous table and says so; a LUT whose first read failed (bad
+   * content, or no file yet) recovers once the file is fixed; a table over
+   * the byte budget is refused before it is parsed.
+   * Returns the outputs (base64) and the cache's state.
+   */
+  async lutCache(a: RunArgs, cubes: { a: string; b: string; many: string[] }): Promise<{
+    before: string | null; after: string | null; idle: string | null; idleRepaints: number; ref: string | null; cached: number; textures: number; live: number[];
+    broken: { gets: number; problem: string | null; out: string | null; fixed: string | null; fixedProblem: string | null };
+    late: { first: string; gets: number; problem: string | null; recovered: string; out: string | null };
+    idleFix: { problem: string | null; repaints: number };
+    missing: { first: string; recovered: string };
+    budget: { state: string; problem: string | null };
+  }> {
+    const store = new Map<string, { text: string; etag: string }>();
+    const gets = new Map<string, number>();
+    const realFetch = window.fetch;
+    window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.startsWith("mock-lut:")) return realFetch(input, init);
+      const path = decodeURIComponent(url.slice(9));
+      if (init?.method !== "HEAD") gets.set(path, (gets.get(path) ?? 0) + 1);
+      const e = store.get(path);
+      if (!e) return new Response("missing", { status: 404 });
+      return new Response(init?.method === "HEAD" ? null : e.text, { status: 200, headers: { ETag: e.etag } });
+    }) as typeof fetch;
+    setFileUrl((p) => `mock-lut:${encodeURIComponent(p)}`);
+    lutCacheForTest(0); // check for a change on every use
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const img = new ImageData(b64ToBytes(a.rgba), a.srcW, a.srcH);
+    const runWith = async (path: string): Promise<Uint8Array | null> => {
+      for (let i = 0; i < 100 && lutStatus(path) !== "ready"; i++) await sleep(10);
+      return runLayer(job({ ...a, look: { lut: path } }, img), true);
+    };
+    try {
+      store.set("live.cube", { text: cubes.a, etag: 'W/"1"' });
+      const before = await runWith("live.cube");
+      store.set("live.cube", { text: cubes.b, etag: 'W/"2"' }); // rewritten in place
+      runLayer(job({ ...a, look: { lut: "live.cube" } }, img), true); // a use: notices the new ETag
+      for (let i = 0; i < 100; i++) {
+        await sleep(10);
+        const c = lutCacheForTest();
+        if (c.paths.includes("live.cube") && i > 5) break;
+      }
+      const after = await runWith("live.cube");
+      // Rewritten again while nothing draws (a paused preview): the idle re-check notices it and asks for a repaint.
+      let repaints = 0;
+      const off = onGLChange(() => repaints++);
+      lutCacheForTest(250);
+      store.set("live.cube", { text: cubes.a, etag: 'W/"3"' });
+      for (let i = 0; i < 60 && repaints === 0; i++) await sleep(50);
+      off();
+      const idle = runLayer(job({ ...a, look: { lut: "live.cube" } }, img), true);
+      lutCacheForTest(0);
+      provideLut("ref.cube", parseCube(cubes.b)!);
+      const ref = runLayer(job({ ...a, look: { lut: "ref.cube" } }, img), true);
+      const live: number[] = [liveTex];
+      for (const [i, text] of cubes.many.entries()) {
+        store.set(`many${i}.cube`, { text, etag: `W/"m${i}"` });
+        await runWith(`many${i}.cube`);
+        // Later runs (other layers) move the frame on, so older LUTs become evictable.
+        for (let j = 0; j < 20; j++) runLayer(job({ ...a, look: {}, layerId: `lru-pad-${j}` }, img), true);
+        live.push(liveTex);
+      }
+      const c = lutCacheForTest(2000);
+      const enc = (u: Uint8Array | null) => (u ? bytesToB64(u) : null);
+      // Re-checks every 50 ms from here; `use` draws with the LUT every 25 ms (a playing preview).
+      lutCacheForTest(50);
+      const use = async (path: string, ms: number, until?: (out: string | null) => boolean) => {
+        let out = enc(runLayer(job({ ...a, look: { lut: path } }, img), true));
+        for (let t = 0; t < ms && !until?.(out); t += 25) {
+          await sleep(25);
+          out = enc(runLayer(job({ ...a, look: { lut: path } }, img), true));
+        }
+        return out;
+      };
+      const why = (path: string) => {
+        const p = lutProblem(path);
+        return p ? `${p.state}: ${p.reason}` : null;
+      };
+      // A ready LUT rewritten with content that doesn't parse: one GET over many re-checks.
+      store.set("live.cube", { text: cubes.b, etag: 'W/"4"' });
+      await use("live.cube", 2000, (out) => out === enc(after));
+      const g0 = gets.get("live.cube") ?? 0;
+      store.set("live.cube", { text: "LUT_3D_SIZE 17\n0 0 0\n", etag: 'W/"5"' });
+      const brokenOut = await use("live.cube", 800);
+      const broken = { gets: (gets.get("live.cube") ?? 0) - g0, problem: why("live.cube"), out: brokenOut, fixed: null as string | null, fixedProblem: null as string | null };
+      store.set("live.cube", { text: cubes.a, etag: 'W/"6"' });
+      broken.fixed = await use("live.cube", 2000, () => lutProblem("live.cube") === null);
+      broken.fixedProblem = why("live.cube");
+      // A LUT whose first read fails (a half-written file), then is fixed on disk.
+      store.set("late.cube", { text: "TITLE \"half\"\nLUT_3D_SIZE 17\n", etag: 'W/"l1"' });
+      await use("late.cube", 2000, () => lutStatus("late.cube") === "error");
+      const lateFirst = lutStatus("late.cube");
+      const gl0 = gets.get("late.cube") ?? 0;
+      await use("late.cube", 600);
+      const late = { first: lateFirst, gets: (gets.get("late.cube") ?? 0) - gl0, problem: why("late.cube"), recovered: "", out: null as string | null };
+      store.set("late.cube", { text: cubes.a, etag: 'W/"l2"' });
+      late.out = await use("late.cube", 2000, () => lutStatus("late.cube") === "ready");
+      late.recovered = lutStatus("late.cube");
+      // The same while nothing draws (a paused preview): the idle re-check notices the fix and asks for a repaint.
+      store.set("idle.cube", { text: "LUT_3D_SIZE 17\n", etag: 'W/"i1"' });
+      await use("idle.cube", 2000, () => lutStatus("idle.cube") === "error");
+      let idleFixRepaints = 0;
+      const offIdle = onGLChange(() => idleFixRepaints++);
+      store.set("idle.cube", { text: cubes.a, etag: 'W/"i2"' });
+      for (let i = 0; i < 60 && lutProblem("idle.cube") !== null; i++) await sleep(50);
+      offIdle();
+      const idleFix = { problem: why("idle.cube"), repaints: idleFixRepaints };
+      // No file yet (404, no ETag): retried on the throttle until it appears.
+      await use("missing.cube", 2000, () => lutStatus("missing.cube") === "error");
+      const missing = { first: lutStatus("missing.cube"), recovered: "" };
+      store.set("missing.cube", { text: cubes.a, etag: 'W/"m"' });
+      await use("missing.cube", 2000, () => lutStatus("missing.cube") === "ready");
+      missing.recovered = lutStatus("missing.cube");
+      // A table over the byte budget (here 50 kB: a 17³ table is 59 kB) is never parsed or kept.
+      lutCacheForTest(50, 50_000);
+      store.set("budget.cube", { text: cubes.a, etag: 'W/"b"' });
+      await use("budget.cube", 2000, () => lutStatus("budget.cube") !== "loading");
+      const budget = { state: lutStatus("budget.cube"), problem: why("budget.cube") };
+      lutCacheForTest(2000, 64 << 20);
+      return {
+        before: enc(before), after: enc(after), idle: enc(idle), idleRepaints: repaints, ref: enc(ref), cached: c.paths.length, textures: c.textures, live,
+        broken, late, idleFix, missing, budget,
+      };
+    } finally {
+      window.fetch = realFetch;
+    }
+  },
+  /**
+   * The preview's decoder pool (src/mediapool.ts, the real class) on a
+   * counter clip with sound (frame n: luma 16 + 6n): paused at n / fps for
+   * each n, the frame it shows; then `playMs` of playback from `playAt` (the
+   * transport clock), driven every animation frame like preview.tsx: when it
+   * sought (ms from the start) and where the element got to.
+   */
+  async mediaPool(a: { url: string; fps: number; ns: number[]; playAt: number; playMs: number }): Promise<{
+    paused: { n: number; shown: number }[]; seeks: number[]; readyState: number; currentTime: number; playing: boolean;
+  }> {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const pool = new MediaPool(host, () => a.url, () => {});
+    // safeSeek is private: log it on the prototype for the duration.
+    const proto = MediaPool.prototype as unknown as { safeSeek: (el: HTMLVideoElement, t: number) => void };
+    const realSeek = proto.safeSeek;
+    let t0 = 0;
+    const seeks: number[] = [];
+    proto.safeSeek = function (this: MediaPool, el: HTMLVideoElement, t: number) {
+      seeks.push(Math.round(performance.now() - t0));
+      realSeek.call(this, el, t);
+    };
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const frameOf = (v: number) => Math.round(v / ((6 * 255) / 219));
+    const cv = document.createElement("canvas");
+    cv.width = 32;
+    cv.height = 18;
+    const g = cv.getContext("2d", { willReadFrequently: true })!;
+    try {
+      pool.beginFrame();
+      const el = pool.acquire("counter", "counter.mp4");
+      for (let i = 0; i < 300 && el.readyState < 2; i++) await sleep(10);
+      const paused: { n: number; shown: number }[] = [];
+      for (const n of a.ns) {
+        pool.beginFrame();
+        pool.acquire("counter", "counter.mp4");
+        const seeked = new Promise<void>((r) => el.addEventListener("seeked", () => r(), { once: true }));
+        pool.sync(el, { srcTime: n / a.fps, playing: false, rate: 1, volume: 1, muted: false });
+        pool.endFrame();
+        await Promise.race([seeked, sleep(2000)]);
+        g.drawImage(el, 0, 0, cv.width, cv.height);
+        paused.push({ n, shown: frameOf(g.getImageData(16, 9, 1, 1).data[1]) });
+      }
+      seeks.length = 0;
+      t0 = performance.now();
+      await new Promise<void>((done) => {
+        const tick = () => {
+          const t = performance.now() - t0;
+          if (t > a.playMs) return done();
+          pool.beginFrame();
+          pool.acquire("counter", "counter.mp4");
+          pool.sync(el, { srcTime: a.playAt + t / 1000, playing: true, rate: 1, volume: 1, muted: false });
+          pool.endFrame();
+          requestAnimationFrame(tick);
+        };
+        tick();
+      });
+      return { paused, seeks, readyState: el.readyState, currentTime: el.currentTime, playing: !el.paused };
+    } finally {
+      proto.safeSeek = realSeek;
+      pool.destroy();
+      host.remove();
+    }
   },
   passes(a: RunArgs): { passes: number; draws: number } {
     const steps = planLayer(a.look, { k: 1, w: a.cw, h: a.ch, cw: a.cw, ch: a.ch });

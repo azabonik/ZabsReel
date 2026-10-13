@@ -85,7 +85,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 - If add_graphic errors, READ the returned error (it carries the real bundler/render message) and fix the code, then retry.
 
 ## Render vs export
-- render_preview (the UI's "Render exact") = a fast, lower-resolution but TRUE composite (cuts, color, captions, graphics, transitions burned in). Use it / get_frame to verify. The live preview panel is only a fast approximation.
+- render_preview (the UI's "Render exact") = a fast, lower-resolution but TRUE composite (cuts, color, captions, graphics, transitions burned in). Use it / get_frame to verify. The live preview panel runs colour grades, curves, LUTs, keys and the visual effects through WebGL with the export's own math, so a look matches the render (grain is random; trails and denoise on an adjustment layer build their history from where playback started); text, captions, transitions and motion graphics are drawn approximately there (and everything falls back to rough CSS approximations without WebGL2), so confirm those with render_preview / get_frame.
 - export_video = the final file written to an absolute path. Pick a per-platform \`preset\` (youtube, youtube_hevc, social=Reels/Shorts/TikTok, square, web=webm/vp9, master) or set container/videoCodec(h264|h265|vp9)/quality(CRF)/videoBitrate/audioCodec/audioBitrate directly; explicit fields override the preset. Resolution & fps come from the canvas. Only the final deliverable.
 
 ## Edit by words (the talking-head workflow)

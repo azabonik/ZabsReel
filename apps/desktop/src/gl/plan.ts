@@ -42,7 +42,12 @@ export interface PlannedPass {
 export interface PlannedStep {
   /** "eq" | "colorbalance" | "hue" | "curves" | "lut3d" | an effect type. */
   kind: string;
-  /** Stable within the layer (history key): "color:…" or "fx:<index>:<type>". */
+  /**
+   * Stable within the layer (history and table keys): "color:…" or
+   * "fx:<effect id>:<type>" — the effect's own id, so reordering or
+   * bypassing other effects keeps its slot (a history step then starts
+   * over when what comes before it changed: histSig).
+   */
   id: string;
   fidelity: GLFidelity;
   passes: PlannedPass[];
@@ -50,8 +55,19 @@ export interface PlannedStep {
   key?: true;
   /** Keeps a history texture across frames. */
   history?: true;
-  /** A 256×1 RGBA table bound to u_aux (eq, curves). */
+  /**
+   * A history step: the ids of the steps before it, in order. The history was
+   * built from what they made, so another set or order starts it over.
+   */
+  histSig?: string;
+  /** A history step: the look's settings up to and including it (a change leaves the history inexact). */
+  histParams?: string;
+  /** An RGBA8 table bound to the samplers the passes declare (eq, curves: 256×1; denoise: its coefficients). */
   aux?: Uint8Array;
+  /** The table's width in texels (rows = length / 4 / width); default one row. */
+  auxWidth?: number;
+  /** A fixed-size pixel kernel: exact only at k = 1 (registry EffectGL.kernel). */
+  kernel?: true;
   /** A .cube path bound to u_lut3 (lut3d). */
   lut?: string;
 }
@@ -104,6 +120,7 @@ export function colorSteps(look: LayerLook): PlannedStep[] {
 /** The enabled effects with a GL preview, in stack order. Effects without one are skipped (they show only in the render). */
 export function effectSteps(filters: readonly VisualEffect[] | undefined, g: GLUniformContext, opts: PlanOptions = {}): PlannedStep[] {
   const out: PlannedStep[] = [];
+  const ids = new Set<string>();
   for (const [i, f] of (filters ?? []).entries()) {
     if (!isEnabled(f)) continue;
     const d = effectByType(f.type);
@@ -113,13 +130,20 @@ export function effectSteps(filters: readonly VisualEffect[] | undefined, g: GLU
     const key = isKeyType(f.type);
     if (key && opts.skipKeys) continue;
     if (gl.active && !gl.active(f, g)) continue;
+    // The effect's own id keys its history / tables (an index would move on a reorder).
+    let id = `fx:${f.id || i}:${f.type}`;
+    if (ids.has(id)) id = `${id}:${i}`;
+    ids.add(id);
+    const aux = gl.aux?.(f);
     out.push({
       kind: f.type,
-      id: `fx:${i}:${f.type}`,
+      id,
       fidelity: gl.fidelity,
       ...(key ? { key: true as const } : {}),
-      ...(gl.history ? { history: true as const } : {}),
-      passes: gl.passes.map((ps) => pass(ps, ps.uniforms ? ps.uniforms(f, g) : {})),
+      ...(gl.history ? { history: true as const, histParams: JSON.stringify((filters ?? []).slice(0, i + 1)) } : {}),
+      ...(gl.kernel ? { kernel: true as const } : {}),
+      ...(aux ? { aux: aux.data, auxWidth: aux.width } : {}),
+      passes: gl.passes.filter((ps) => !ps.active || ps.active(f, g)).map((ps) => pass(ps, ps.uniforms ? ps.uniforms(f, g) : {})),
     });
   }
   return out;
@@ -128,7 +152,33 @@ export function effectSteps(filters: readonly VisualEffect[] | undefined, g: GLU
 /** The whole layer: colour grade then the effect stack. Empty = nothing for the GL path to do. */
 export function planLayer(look: LayerLook | undefined, g: GLUniformContext, opts: PlanOptions = {}): PlannedStep[] {
   if (!look) return [];
-  return [...colorSteps(look), ...effectSteps(look.filters, g, opts)];
+  const steps = [...colorSteps(look), ...effectSteps(look.filters, g, opts)];
+  // A temporal step's history depends on everything before it: its key is
+  // its own id, so it carries what it was built from (runtime.ts history()).
+  let before = "";
+  let color: string | undefined;
+  for (const s of steps) {
+    if (s.history) {
+      color ??= JSON.stringify([look.color, look.grade, look.lut]);
+      s.histSig = before;
+      s.histParams = color + (s.histParams ?? "");
+    }
+    before += `${s.id},`;
+  }
+  return steps;
+}
+
+/**
+ * True when the look has an enabled fixed-size-kernel effect (registry
+ * EffectGL.kernel): the preview then processes the layer at the export's
+ * resolution (k = 1), where those kernels cover what the export's do.
+ */
+export function lookHasKernel(look: LayerLook | undefined): boolean {
+  return !!look?.filters?.some((f) => {
+    if (!isEnabled(f)) return false;
+    const p = effectByType(f.type)?.preview;
+    return !!p && p !== "export-only" && !!p.gl?.kernel;
+  });
 }
 
 /** Total fragment passes in a plan (each a full-frame draw). */

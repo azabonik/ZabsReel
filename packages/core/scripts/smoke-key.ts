@@ -14,6 +14,9 @@
  *   3. A GREEN screen with a red box and a green-tinted "spill" box: chromakey
  *      "auto" + despill removes the green, keeps red, and pulls the spill down.
  *   4. A BLACK background with a white box: lumakey "auto" removes the black.
+ *   5. Determinism: chromakey's export chain gives byte-identical frames with
+ *      1, 3 and 7 filter threads (FFmpeg slices the frame per thread, and the
+ *      bare filter's first pixel of each slice used to depend on that count).
  *
  * Run: npx tsx packages/core/scripts/smoke-key.ts
  */
@@ -21,9 +24,11 @@ import { execa } from "execa";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { EditorEngine } from "../src/engine.js";
 import { dispatch } from "../src/rpc.js";
 import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
+import { effectFilterSteps } from "../src/effects/registry.js";
 
 const FPS = 30;
 type RGB = [number, number, number];
@@ -203,6 +208,19 @@ async function main() {
   check(ds[1] <= Math.max(ds[0], ds[2]) + 15, "despilled box is no longer green-dominant", fmt(ds));
   await expectPx(outD, 1, 640, 600, BLUE, "green screen still keyed with despill on");
   await expectPx(outD, 1, 320, 320, RED, "red subject still kept with despill on", 60);
+
+  // ---- 5. chromakey output does not depend on the CPU count ------------------
+  console.log("5. chromakey export chain: identical output for 1, 3 and 7 filter threads...");
+  const noisy = join(dir, "noisy-green.mkv");
+  await synth(["-f", "lavfi", "-i", "color=0x30C040:s=320x240:r=30:d=0.2,format=yuv444p,noise=alls=60:allf=u+t", "-c:v", "ffv1", noisy]);
+  const keyChain = effectFilterSteps([{ type: "chromakey", color: "0x00FF00", params: { despill: 0.5 } }], 320, 240, "d").join(",");
+  const hashes: string[] = [];
+  for (const threads of [1, 3, 7]) {
+    const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-filter_complex_threads", String(threads), "-i", noisy,
+      "-filter_complex", `[0:v]${keyChain}[o]`, "-map", "[o]", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { reject: true, encoding: "buffer" });
+    hashes.push(createHash("md5").update(stdout as unknown as Buffer).digest("hex"));
+  }
+  check(hashes.every((h) => h === hashes[0]), "the keyed frames are byte-identical whatever the thread count", hashes.join(" / "));
 
   if (failures) throw new Error(`${failures} check(s) failed`);
   console.log("\nKEY SMOKE TEST PASSED");

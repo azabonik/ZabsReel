@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { EditorEngine } from "./engine.js";
 import { dispatch, RpcError, methods } from "./rpc.js";
 import { checkBinaries } from "./ffmpeg/executor.js";
+import { parseFramesQuery, streamFrames } from "./ffmpeg/frames.js";
 import type { Project } from "./types.js";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -33,7 +34,7 @@ const CONTENT_TYPES: Record<string, string> = {
  */
 function cors(res: ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Aive-Token");
 }
 
@@ -54,7 +55,11 @@ async function readBody(req: IncomingMessage): Promise<string> {
  * The persistent local backend. Hosts the EditorEngine and exposes it over:
  *  - HTTP POST /rpc       — used by the MCP server (the AI).
  *  - WebSocket            — used by the desktop UI for live state + commands.
- *  - HTTP GET /file       — streams local media/preview files (Range-enabled)
+ *  - HTTP GET /frames     — decoded source frames (raw RGBA) for the live
+ *    preview's temporal effects after a seek (ffmpeg/frames.ts).
+ *  - HTTP GET /file       — streams local media/preview files (Range-enabled);
+ *    HEAD /file answers with the headers only (ETag = size + mtime, which the
+ *    live preview uses to notice a .cube LUT rewritten in place)
  *                           so the UI can play previews.
  * One engine instance = one source of truth shared by AI and human.
  */
@@ -290,8 +295,20 @@ export class EditorServer {
         return;
       }
 
-      if (req.method === "GET" && url.pathname === "/file") {
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/file") {
         await this.serveFile(url.searchParams.get("path"), req, res);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/frames") {
+        // Decoded source frames for the live preview's trails / denoise (ffmpeg/frames.ts).
+        const q = parseFramesQuery(url.searchParams);
+        if (typeof q === "string") respond(400, { ok: false, error: q });
+        else if (!this.engine.isServablePath(q.path)) respond(403, { ok: false, error: "Forbidden: /frames only decodes files /file would serve." });
+        else {
+          cors(res);
+          await streamFrames(q, res);
+        }
         return;
       }
 
@@ -331,6 +348,17 @@ export class EditorServer {
     const type = CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
     const range = req.headers.range;
     const total = info.size;
+    // A validator for the renderer (size + mtime): it re-reads a LUT whose ETag
+    // changed. no-cache keeps any cache from serving the old bytes without asking;
+    // the renderer is another origin, so the header must be exposed to be readable.
+    res.setHeader("ETag", `W/"${total}-${Math.round(info.mtimeMs)}"`);
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Access-Control-Expose-Headers", "ETag, Content-Length, Content-Range");
+    if (req.method === "HEAD") {
+      res.writeHead(200, { "Content-Length": total, "Content-Type": type, "Accept-Ranges": "bytes" });
+      res.end();
+      return;
+    }
 
     if (range) {
       const match = /bytes=(\d*)-(\d*)/.exec(range);
