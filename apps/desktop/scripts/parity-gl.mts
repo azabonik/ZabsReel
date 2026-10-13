@@ -283,6 +283,8 @@ interface Case {
   temporal?: boolean;
   noise?: boolean;
   fidelity?: GLFidelity;
+  /** An exact case's max, when a measured rounding difference between FFmpeg builds adds up past 3 (say why at the case). */
+  exactMax?: number;
 }
 
 const fx = (type: string, extra: Record<string, unknown> = {}) => ({ id: `${type}`, type, ...extra });
@@ -368,9 +370,13 @@ function cases(): Case[] {
     C("exposure → vibrance (FFmpeg dithers exposure's float output)", { filters: [fx("exposure") as never, fx("vibrance") as never] }, { fidelity: "close" }),
     C("stack: eq → grayscale (YUV chain)", { color: { brightness: 0.05 }, filters: [fx("grayscale") as never] }),
     C("stack: eq → blur (blur in YUV)", { color: { contrast: 1.2 }, filters: [fx("blur", { amount: 4 }) as never] }),
+    // The keys' soft edge rounds one level apart between FFmpeg builds (4.4
+    // and 7.x vs 8.0+, which the GL matches: the single key rows), and the
+    // blur and vignette after it spread that through colour × alpha. Measured
+    // max 3 on 4.4 and 8.0 – 9.0, 3.5 on 7.1 (alpha 247 vs 244); mean ≤ 0.61.
     C("stack: colorkey → blur → vignette (key mid-stack)", {
       filters: [fx("colorkey", { color: "0x808080", params: { similarity: 0.15, blend: 0.1 } }) as never, fx("blur", { amount: 3 }) as never, fx("vignette") as never],
-    }),
+    }, { exactMax: 4 }),
     C("stack: bypassed blur, sepia, invert", { filters: [fx("blur", { amount: 9, enabled: false }) as never, fx("sepia") as never, fx("invert") as never] }),
     C("pillarboxed: chromakey + glow (alpha padding)", { filters: [fx("chromakey", { color: "0x00FF00" }) as never, fx("glow") as never] }, { pillar: true }),
     C("pillarboxed: blur 6 + lens", { filters: [fx("blur", { amount: 6 }) as never, fx("lens") as never] }, { pillar: true }),
@@ -412,8 +418,8 @@ function cases420(): (Case & { adjust?: boolean })[] {
   ];
 }
 
-function threshold(f: GLFidelity, s: Stats): boolean {
-  if (f === "exact") return s.max <= 3 && s.mean <= 1;
+function threshold(f: GLFidelity, s: Stats, exactMax = 3): boolean {
+  if (f === "exact") return s.max <= exactMax && s.mean <= 1;
   if (f === "close") return s.p99 <= 8;
   return true;
 }
@@ -545,7 +551,7 @@ async function main() {
       continue;
     }
     const s = compare(ref, gl);
-    const ok = threshold(fidelity, s);
+    const ok = threshold(fidelity, s, c.exactMax);
     if (!ok) failures++;
     rows.push(`| ${c.name} | ${fidelity} | ${s.max} | ${s.mean} | ${s.p99} | ${ok ? "ok" : "FAIL"} · ${passes}${ok ? "" : ` · worst ${s.maxAt}`} |`);
     if (DUMP && (!ok || ONLY)) {
