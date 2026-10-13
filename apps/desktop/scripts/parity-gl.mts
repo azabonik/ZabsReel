@@ -23,6 +23,7 @@
 //   npx tsx apps/desktop/scripts/parity-gl.mts --only blur,glow --dump
 //   npx tsx apps/desktop/scripts/parity-gl.mts --only 420     # the real-export table only
 //   npx tsx apps/desktop/scripts/parity-gl.mts --only temporal,mediapool   # trails / warm-up / LUT cache; the <video> pool
+//   npx tsx apps/desktop/scripts/parity-gl.mts --only colour,warmcolour   # source colour; a paused trail over corrected files
 //
 // The shaders model FFmpeg 4.4; AIVE_FFMPEG runs the export side on another
 // build (docs/TESTING.md lists the known per-version differences).
@@ -34,6 +35,9 @@
 import { build } from "esbuild";
 import { execa } from "execa";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import type { ServerResponse } from "node:http";
+import { PassThrough } from "node:stream";
+import { finished } from "node:stream/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -44,6 +48,7 @@ import {
 import { probeAsset } from "../../../packages/core/src/ffmpeg/ffprobe.js";
 import { alphaProxyArgs } from "../../../packages/core/src/ffmpeg/cutout.js";
 import { FFMPEG_BIN, adaptFfmpegArgs } from "../../../packages/core/src/ffmpeg/executor.js";
+import { streamFrames } from "../../../packages/core/src/ffmpeg/frames.js";
 import { EFFECTS, effectGL, type GLFidelity } from "@aive/core/effects";
 import type { LayerLook } from "../src/gl/plan";
 
@@ -415,6 +420,41 @@ function threshold(f: GLFidelity, s: Stats): boolean {
 
 // ---- main ---------------------------------------------------------------------------------
 
+/** Flat colour patches (8 × 4) for the source-colour sections: centres averaged, compared per channel. */
+const PATCH: [number, number, number][] = [
+  [255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0],
+  [191, 0, 0], [0, 191, 0], [0, 0, 191], [0, 191, 191], [191, 0, 191], [191, 191, 0], [191, 191, 191], [128, 128, 128],
+  [224, 172, 105], [141, 85, 36], [100, 150, 220], [60, 120, 40], [255, 128, 0], [128, 0, 200], [0, 128, 128], [255, 105, 180],
+  [40, 20, 10], [10, 30, 60], [16, 16, 16], [32, 32, 32], [64, 64, 64], [200, 40, 30], [192, 192, 192], [235, 235, 235],
+];
+const patches = (w: number, h: number): Buffer => {
+  const b = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const c = PATCH[Math.floor((y * 4) / h) * 8 + Math.floor((x * 8) / w)];
+    b.set([...c, 255], (y * w + x) * 4);
+  }
+  return b;
+};
+const centres = (rgba: Uint8Array, w: number, h: number): number[][] => {
+  const out: number[][] = [];
+  for (let row = 0; row < 4; row++) for (let col = 0; col < 8; col++) {
+    const cx = Math.floor(((col + 0.5) * w) / 8), cy = Math.floor(((row + 0.5) * h) / 4);
+    const acc = [0, 0, 0];
+    for (let y = cy - 3; y < cy + 3; y++) for (let x = cx - 3; x < cx + 3; x++) for (let c = 0; c < 3; c++) acc[c] += rgba[(y * w + x) * 4 + c];
+    out.push(acc.map((v) => v / 36));
+  }
+  return out;
+};
+const diff = (a: number[][], b: number[][]) => {
+  let max = 0, sum = 0, at = "";
+  a.forEach((p, i) => p.forEach((v, c) => {
+    const d = Math.abs(v - b[i][c]);
+    sum += d;
+    if (d > max) { max = d; at = `patch ${i} (${PATCH[i]}) ch${c}: ${p.map((x) => x.toFixed(0))} vs ${b[i].map((x) => x.toFixed(0))}`; }
+  }));
+  return { max: Math.round(max * 10) / 10, mean: Math.round((sum / (a.length * 3)) * 100) / 100, at };
+};
+
 async function main() {
   const bundle = join(dir, "page.js");
   await build({ entryPoints: [join(HERE, "parity-page.ts")], bundle: true, format: "iife", outfile: bundle, logLevel: "error", target: "es2022" });
@@ -615,39 +655,6 @@ async function main() {
   // VP8+alpha proxy of a cutout of it (complete tags: Chromium must read both
   // as the export reads the original, uncorrected).
   if (!ONLY || ONLY.has("colour")) {
-    const PATCH: [number, number, number][] = [
-      [255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0],
-      [191, 0, 0], [0, 191, 0], [0, 0, 191], [0, 191, 191], [191, 0, 191], [191, 191, 0], [191, 191, 191], [128, 128, 128],
-      [224, 172, 105], [141, 85, 36], [100, 150, 220], [60, 120, 40], [255, 128, 0], [128, 0, 200], [0, 128, 128], [255, 105, 180],
-      [40, 20, 10], [10, 30, 60], [16, 16, 16], [32, 32, 32], [64, 64, 64], [200, 40, 30], [192, 192, 192], [235, 235, 235],
-    ];
-    const patches = (w: number, h: number): Buffer => {
-      const b = Buffer.alloc(w * h * 4);
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        const c = PATCH[Math.floor((y * 4) / h) * 8 + Math.floor((x * 8) / w)];
-        b.set([...c, 255], (y * w + x) * 4);
-      }
-      return b;
-    };
-    const centres = (rgba: Uint8Array, w: number, h: number): number[][] => {
-      const out: number[][] = [];
-      for (let row = 0; row < 4; row++) for (let col = 0; col < 8; col++) {
-        const cx = Math.floor(((col + 0.5) * w) / 8), cy = Math.floor(((row + 0.5) * h) / 4);
-        const acc = [0, 0, 0];
-        for (let y = cy - 3; y < cy + 3; y++) for (let x = cx - 3; x < cx + 3; x++) for (let c = 0; c < 3; c++) acc[c] += rgba[(y * w + x) * 4 + c];
-        out.push(acc.map((v) => v / 36));
-      }
-      return out;
-    };
-    const diff = (a: number[][], b: number[][]) => {
-      let max = 0, sum = 0, at = "";
-      a.forEach((p, i) => p.forEach((v, c) => {
-        const d = Math.abs(v - b[i][c]);
-        sum += d;
-        if (d > max) { max = d; at = `patch ${i} (${PATCH[i]}) ch${c}: ${p.map((x) => x.toFixed(0))} vs ${b[i].map((x) => x.toFixed(0))}`; }
-      }));
-      return { max: Math.round(max * 10) / 10, mean: Math.round((sum / (a.length * 3)) * 100) / 100, at };
-    };
     // name, size, how the YUV is coded (matrix / range), the tags written (H.264 unless `vp9`).
     const tagsOf = (m: string, p: string, t: string) => ["-colorspace", m, "-color_primaries", p, "-color_trc", t];
     const fixtures: { name: string; w: number; h: number; matrix: "bt709" | "bt601"; range: "tv" | "pc"; tags: string[]; vp9?: boolean }[] = [
@@ -748,6 +755,97 @@ async function main() {
     console.log("\nSource colour: Chromium's decode in the preview (GL, with its correction) vs the export's reading, patch centres:");
     console.log("| file | export reads | preview | max | mean | result |\n|---|---|---|---|---|---|");
     console.log(rowsC.join("\n"));
+  }
+
+  // WARM-UP COLOUR: a paused trail's history is rebuilt from frames the core
+  // decodes (GET /frames, frames.ts), the frame on screen comes from
+  // Chromium's decoder, and the layer's source-colour correction runs over
+  // both (warmup.ts runs the layer's whole plan). So the core must read each
+  // file as Chromium does: a paused trail after a seek must show what the
+  // same frames drawn one by one from the clip's first show. Frame 0 colour
+  // patches, then black (the paused frame 1 shows frame 0's trail), for the
+  // files the preview corrects: incomplete tags, untagged VP9 (corrected from
+  // Chromium 149) and a proxy made before proxies were tagged (its source's
+  // tags at its own size: here an untagged 1920×800 clip's 1280×534 copy).
+  if (!ONLY || ONLY.has("warmcolour")) {
+    const call = <T,>(fn: string, ...a: unknown[]) =>
+      page.evaluate(([f, x]) => (window as unknown as { parity: Record<string, (...v: unknown[]) => unknown> }).parity[f as string](...(x as unknown[])), [fn, a] as const) as Promise<T>;
+    type WarmLog = { repaints: number; pending: string[] };
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const look: LayerLook = { filters: [fx("trails", { id: "tr", amount: 0.9 }) as never] };
+    const fixtures: { name: string; w: number; h: number; matrix: "bt709" | "bt601"; tags: string[]; vp9?: boolean; legacyProxyOf?: { w: number; h: number } }[] = [
+      { name: "partial tags: matrix BT.601 only, HD", w: 1280, h: 720, matrix: "bt601", tags: ["-colorspace", "smpte170m"] },
+      { name: "untagged HD VP9", w: 1280, h: 720, matrix: "bt601", tags: [], vp9: true },
+      { name: "untagged 1920×800's proxy made before proxies were tagged", w: 1280, h: 534, matrix: "bt709", tags: [], legacyProxyOf: { w: 1920, h: 800 } },
+    ];
+    const rowsW: string[] = [];
+    for (const [i, f] of fixtures.entries()) {
+      try {
+        const black = Buffer.alloc(f.w * f.h * 4);
+        for (let k = 3; k < black.length; k += 4) black[k] = 255;
+        for (const [n, frame] of [patches(f.w, f.h), black, black].entries()) await writePng(join(dir, `wc${i}-${n + 1}.png`), frame, f.w, f.h);
+        const file = join(dir, `wc${i}.${f.vp9 ? "webm" : "mp4"}`);
+        await execa(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", "-y", "-framerate", String(FPS), "-i", join(dir, `wc${i}-%d.png`),
+          "-vf", `scale=out_color_matrix=${f.matrix}:out_range=tv:flags=${SWS_CONVERT},format=yuv420p,` +
+            `setparams=colorspace=${f.tags.includes("-colorspace") ? f.tags[f.tags.indexOf("-colorspace") + 1] : "unknown"}:color_primaries=unknown:color_trc=unknown:range=unknown`,
+          ...(f.vp9 ? ["-c:v", "libvpx-vp9", "-lossless", "1", "-deadline", "realtime", "-cpu-used", "8"] : ["-c:v", "libx264", "-crf", "2"]),
+          "-pix_fmt", "yuv420p", ...f.tags, file]);
+        const probed = await probeAsset(file);
+        // The correction the preview applies to the file it plays (composite.ts sourceFixField).
+        const fix = f.legacyProxyOf
+          ? previewColorFix({ width: f.legacyProxyOf.w, height: f.legacyProxyOf.h, color: { codedHeight: f.legacyProxyOf.h }, videoCodec: "h264" }, true)
+          : previewColorFix(probed, false, chromeMajor);
+        // What the core's /frames route sends for frames 0–1 (the real streamFrames, told this Chromium).
+        const sink = new PassThrough();
+        const chunks: Buffer[] = [];
+        sink.on("data", (c: Buffer) => chunks.push(c));
+        const ended = finished(sink);
+        await streamFrames({ path: file, from: 0, count: 2, fps: FPS, w: f.w, h: f.h, crop: { x: 0, y: 0, w: f.w, h: f.h }, ...(chromeMajor ? { chrome: chromeMajor } : {}) },
+          Object.assign(sink, { writeHead: () => sink }) as unknown as ServerResponse);
+        await ended;
+        const decoded = Buffer.concat(chunks);
+        const size = f.w * f.h * 4;
+        if (decoded.length !== 2 * size) throw new Error(`/frames sent ${decoded.length} bytes, want ${2 * size}`);
+        const key = `warmcolour-${i}`;
+        await call("warmFrames", key, [decoded.subarray(0, size), decoded.subarray(size)].map((b) => b.toString("base64")), "ok");
+        const url = pathToFileURL(file).href;
+        const at = (n: number) => (n + 0.5) / FPS;
+        type Drawn = { gap: number | null; out: string | null };
+        const layer = (layerId: string, srcFrame: number, warm?: string) => call<Drawn>("videoLayer", { url, t: at(srcFrame), fix, look, layerId, srcFrame, ...(warm ? { warm } : {}) });
+        // Played from the clip's first frame: the trail the preview builds frame by frame.
+        await layer(`wc-play-${i}`, 0);
+        const played = await layer(`wc-play-${i}`, 1);
+        // Paused on frame 1 after a seek: the warm-up decodes frame 0 through the core, then the frame is drawn again.
+        const rep0 = (await call<WarmLog>("warmLog")).repaints;
+        const first = await layer(`wc-seek-${i}`, 1, key);
+        await sleep(250);
+        for (let t = 0; t < 4000; t += 50) {
+          const l = await call<WarmLog>("warmLog");
+          if (l.repaints > rep0 || !l.pending.includes(`wc-seek-${i}`)) break;
+          await sleep(50);
+        }
+        const again = await layer(`wc-seek-${i}`, 1);
+        if (!played.out || !again.out) throw new Error("GL video run failed");
+        const ref = centres(new Uint8Array(Buffer.from(played.out, "base64")), f.w, f.h);
+        const got = centres(new Uint8Array(Buffer.from(again.out, "base64")), f.w, f.h);
+        const d = diff(ref, got);
+        // The played trail shows frame 0's patches (decayed once): the comparison is about them.
+        const trail = Math.max(...ref.flat());
+        const ok = first.gap === 0 && again.gap === null && trail > 200 && d.max <= 4;
+        if (!ok) failures++;
+        // For the record: the export's trail (the true colours, decayed once). A corrected file is
+        // only an interim match until its tagged proxy lands (see the source colour table).
+        const exp = diff(PATCH.map((c) => c.map((v) => v * 0.9)), got);
+        rowsW.push(`| ${f.name} | ${fix ? "corrected" : "as decoded"} | ${d.max} | ${d.mean} | ${exp.max} / ${exp.mean} | ` +
+          `${ok ? "ok" : `FAIL · historyGap ${first.gap} → ${again.gap}, brightest trail ${trail.toFixed(0)}; ${d.at}`} |`);
+      } catch (err) {
+        failures++;
+        rowsW.push(`| ${f.name} | — | — | — | — | ERROR: ${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 120)} |`);
+      }
+    }
+    console.log(`\nWarm-up colour (Chromium ${chromeMajor ?? "?"}): a paused trail rebuilt from the core's /frames decode vs the same frames played one by one, patch centres:`);
+    console.log("| file | preview | max | mean | vs the export's trail (max / mean) | result |\n|---|---|---|---|---|---|");
+    console.log(rowsW.join("\n"));
   }
 
   // Context loss: the pipeline must refuse to run while lost (the preview then

@@ -6,6 +6,10 @@
  *    round-trip through metadata.synthcut): normalized deep-equal.
  *  - A foreign-shaped OTIO (no synthcut metadata) still imports structurally.
  *  - Missing media becomes offline placeholder assets (missing: true).
+ *  - An .otio whose assets carry no colour description (an older export)
+ *    imports with each file's colour probed: the preview's source-colour
+ *    correction reads it, and a file a Chromium reads unlike the export gets
+ *    its completely tagged proxy, as on import.
  *
  * Run: npx tsx packages/core/scripts/smoke-otio.ts
  * (Self-contained — synthesizes media with ffmpeg lavfi.)
@@ -16,6 +20,7 @@ import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
+import { previewColorFix } from "../src/ffmpeg/colorspace.js";
 import type { Project } from "../src/types.js";
 
 /** The project reduced to the fields that define the edit (order-stable). */
@@ -163,6 +168,42 @@ async function main() {
   check(fclips.length === 2, "both foreign clips placed");
   check(fclips[1].startFrame === 60, `sequential placement (second clip at frame 60, got ${fclips[1].startFrame})`);
   check(fp.assets.some((x) => x.missing), "offline placeholder asset flagged missing:true");
+
+  console.log("5. an .otio without colour descriptions: the import probes them...");
+  {
+    // SD tagged with a matrix only: Chromium ignores it (BT.601 by size), the export reads BT.709.
+    const part = join(dataDir, "part.mp4");
+    await runFfmpeg(["-f", "lavfi", "-i", "testsrc2=size=854x480:rate=30:duration=2", "-vf", "setparams=colorspace=bt709",
+      "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-preset", "veryfast", "-y", part]);
+    const src = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-otio-col-")));
+    const pa = await src.importVideo(part);
+    src.appendClip(pa.id);
+    check(pa.color?.space === "bt709" && previewColorFix(pa, false) !== null, `the file needs the preview's correction (${JSON.stringify(pa.color)})`);
+    const colPath = join(dataDir, "nocolour.otio");
+    await src.exportOtio(colPath);
+    // An older export: no colour, codec or proxy in any asset it carries.
+    const strip = (v: unknown): void => {
+      if (!v || typeof v !== "object") return;
+      const o = v as Record<string, unknown>;
+      if (typeof o.path === "string" && "hasVideo" in o) for (const k of ["color", "videoCodec", "proxyPath", "proxyColor"]) delete o[k];
+      for (const x of Object.values(o)) strip(x);
+    };
+    const json = JSON.parse(readFileSync(colPath, "utf8"));
+    strip(json);
+    check(!JSON.stringify(json).includes('"codedHeight"'), "the stripped .otio carries no colour description");
+    writeFileSync(colPath, JSON.stringify(json), "utf8");
+    const dst = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-otio-col-")));
+    await dst.importOtio(colPath);
+    const got = dst.getAsset(pa.id);
+    check(got.color?.space === "bt709" && got.videoCodec === "h264" && previewColorFix(got, false) !== null,
+      `imported with the file's colour (${JSON.stringify(got.color)} ${got.videoCodec}): the preview corrects it as the export reads it`);
+    let p = dst.getAsset(pa.id);
+    for (let i = 0; i < 300 && !p.proxyPath && !p.proxyError; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      p = dst.getAsset(pa.id);
+    }
+    check(!!p.proxyPath && previewColorFix(p, true) === null, `…and gets its completely tagged proxy (${p.proxyPath ?? p.proxyError ?? "none"})`);
+  }
 
   console.log(failures === 0 ? "\nOTIO SMOKE TEST PASSED" : `\nOTIO SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);

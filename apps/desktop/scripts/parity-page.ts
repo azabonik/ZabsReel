@@ -128,6 +128,21 @@ setWarmup((path, q) => `mock-frames:${encodeURIComponent(JSON.stringify({ path, 
   }) as typeof fetch;
 }
 
+/** A <video> of `url` seeked to `t`, its frame ready to draw. */
+async function videoAt(url: string, t: number): Promise<HTMLVideoElement> {
+  const v = document.createElement("video");
+  v.muted = true;
+  v.src = url;
+  await new Promise<void>((res, rej) => {
+    v.onloadeddata = () => res();
+    v.onerror = () => rej(new Error(`cannot play ${url}`));
+  });
+  v.currentTime = t;
+  await new Promise<void>((res) => { v.onseeked = () => res(); });
+  await new Promise<void>((res) => { v.requestVideoFrameCallback(() => res()); setTimeout(res, 500); });
+  return v;
+}
+
 const api = {
   renderer: () => glRenderer(),
   /** True when the hiding above works: a fresh context can't complete an RGBA32F framebuffer. */
@@ -450,16 +465,7 @@ const api = {
    * at its own size. Straight RGBA, base64.
    */
   async video(a: { url: string; t: number; fix: SourceFix | null; layerId: string }): Promise<string | null> {
-    const v = document.createElement("video");
-    v.muted = true;
-    v.src = a.url;
-    await new Promise<void>((res, rej) => {
-      v.onloadeddata = () => res();
-      v.onerror = () => rej(new Error(`cannot play ${a.url}`));
-    });
-    v.currentTime = a.t;
-    await new Promise<void>((res) => { v.onseeked = () => res(); });
-    await new Promise<void>((res) => { v.requestVideoFrameCallback(() => res()); setTimeout(res, 500); });
+    const v = await videoAt(a.url, a.t);
     const W = v.videoWidth;
     const H = v.videoHeight;
     const out = runLayer({
@@ -467,6 +473,29 @@ const api = {
       steps: a.fix ? withSourceFix(undefined, a.fix) : [], k: 1, cw: W, ch: H, frame: 0, layerId: a.layerId,
     }, true);
     return out ? bytesToB64(out) : null;
+  },
+  /**
+   * A paused <video> clip with a look, drawn as the preview draws it: source
+   * frame `srcFrame` at `t`, Chromium's decode through the source-colour
+   * correction `fix` and the look, at the file's own size. With `warm`, then
+   * warmIfNeeded like the preview (the mocked /frames route serves the frames
+   * stored under that path). Returns the result and where the layer's history
+   * must be rebuilt from.
+   */
+  async videoLayer(a: { url: string; t: number; fix: SourceFix | null; look: LayerLook; layerId: string; srcFrame: number; warm?: string }): Promise<{ gap: number | null; out: string | null }> {
+    const v = await videoAt(a.url, a.t);
+    const W = v.videoWidth;
+    const H = v.videoHeight;
+    const look = planLayer(a.look, { k: 1, w: W, h: H, cw: W, ch: H });
+    const steps = a.fix ? withSourceFix(look, a.fix) : look;
+    const j: LayerJob = {
+      source: v, srcW: W, srcH: H, dynamic: true, crop: { x: 0, y: 0, w: W, h: H }, w: W, h: H, pic: { x: 0, y: 0, w: W, h: H },
+      steps, k: 1, cw: W, ch: H, frame: a.srcFrame, layerId: a.layerId, srcFrame: a.srcFrame, srcStep: 1,
+    };
+    const out = runLayer(j, true);
+    const gap = historyGap(a.layerId, steps, a.srcFrame, 0);
+    if (a.warm) warmIfNeeded(j, { path: a.warm, srcFps: 30, first: 0 });
+    return { gap, out: out ? bytesToB64(out) : null };
   },
   /** Lose the context, try a run (must fail → the preview's CSS fallback), restore, run again. */
   async contextLoss(a: RunArgs): Promise<{ whileLost: boolean; after: string | null }> {

@@ -9,9 +9,11 @@
 // (back to the clip's first, or as far back as can still show: runtime.ts
 // warmWindow, at most WARM_MAX_FRAMES) are decoded by the core (GET /frames,
 // packages/core ffmpeg/frames.ts — far faster than seeking a <video> frame by
-// frame) and run through the layer's own plan into a side history, which then
-// replaces the layer's, and the frame is drawn again. Moving the playhead,
-// changing the look or starting playback abandons a warm-up in progress.
+// frame; read as this Chromium reads the file, so the plan's source-colour
+// correction treats them as the frames the preview draws) and run through the
+// layer's own plan into a side history, which then replaces the layer's, and
+// the frame is drawn again. Moving the playhead, changing the look or
+// starting playback abandons a warm-up in progress.
 
 import type { PlannedStep } from "./plan";
 import { adoptHistory, dropHistory, historyGap, runLayer, type LayerJob } from "./runtime";

@@ -174,7 +174,7 @@ function lookField(fx: Project["tracks"][number]["clips"][number]["effects"]): {
 }
 
 /** This Chromium's major version (how it reads untagged VP9 changed in 149), or undefined outside Chromium. */
-const CHROME_MAJOR = Number(/Chrome\/(\d+)/.exec(typeof navigator === "undefined" ? "" : navigator.userAgent)?.[1]) || undefined;
+export const CHROME_MAJOR = Number(/Chrome\/(\d+)/.exec(typeof navigator === "undefined" ? "" : navigator.userAgent)?.[1]) || undefined;
 const fixes = new WeakMap<MediaAsset, { orig: SourceFix | null; proxy: SourceFix | null }>();
 /** `{ sourceFix }` when Chromium reads the file the clip plays (original or proxy) unlike the export, else nothing. Cached per asset object. */
 function sourceFixField(asset: MediaAsset, path: string | undefined): { sourceFix?: SourceFix } {

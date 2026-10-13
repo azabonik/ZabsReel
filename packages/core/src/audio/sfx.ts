@@ -3,7 +3,7 @@
  * so no licensing questions). Each is rendered once to a 48 kHz mono 16-bit
  * PCM WAV under <dataDir>/sfx/<name>-v1.wav and then imported like any asset.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { safeFileStem } from "../safepath.js";
@@ -182,6 +182,9 @@ export async function ensureSfxFile(dataDir: string, name: SfxName): Promise<str
   const path = join(dir, `${safeFileStem(name)}-v1.wav`);
   if (existsSync(path)) return path;
   await mkdir(dir, { recursive: true });
-  await writeFile(path, encodeWav(synthesizeSfx(name)));
+  // Renamed into place: a write cut short never leaves a short file to reuse.
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  await writeFile(tmp, encodeWav(synthesizeSfx(name)));
+  await rename(tmp, path);
   return path;
 }

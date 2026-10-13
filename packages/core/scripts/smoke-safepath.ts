@@ -56,7 +56,7 @@ import {
 } from "../src/safepath.js";
 import { buildRenderCommand, drawTextStep, EXPORT_PROFILE, type ResolvedMusic } from "../src/ffmpeg/graph.js";
 import { cutoutMergeFilter } from "../src/ffmpeg/cutout.js";
-import { chromiumMatrix } from "../src/ffmpeg/frames.js";
+import { framesColor } from "../src/ffmpeg/frames.js";
 import { keepCodingOpts, resolveSourceColor, tagFramesStep, taggedMatrix } from "../src/ffmpeg/colorspace.js";
 import { parseKeyColor } from "../src/effects/registry.js";
 import { cropPlanToSendcmd } from "../src/reframe/reframe.js";
@@ -732,9 +732,10 @@ async function main() {
       `colour descriptions with a prototype key, a payload or a string coded height are dropped on load, to be probed again (${JSON.stringify([lc?.color, lc?.proxyColor, lc?.videoCodec, la.cutout])})`);
     check(taggedMatrix("constructor") === undefined && taggedMatrix("__proto__") === undefined && taggedMatrix("toString") === undefined && taggedMatrix("bt470bg") === "bt601",
       "taggedMatrix: a prototype key names no matrix");
-    // MUTATION: drop Object.hasOwn in chromiumMatrix → this row fails.
-    check(chromiumMatrix({ height: 360, space: "constructor" }).matrix === "bt601" && chromiumMatrix({ height: 1080, space: "__proto__" }).matrix === "bt709",
-      "chromiumMatrix: a prototype key reads as untagged");
+    // MUTATION: drop Object.hasOwn in taggedMatrix → this row fails.
+    const fc = (h: number, space: string) => framesColor({ height: h, color_space: space, color_primaries: "bt709", color_transfer: "bt709" })?.matrix;
+    check(fc(360, "constructor") === "bt601" && fc(1080, "__proto__") === "bt709",
+      "framesColor (/frames): a prototype key reads as untagged");
     check(JSON.stringify(resolveSourceColor({ space: "constructor", range: "pc,x" }, 1080)) === '{"matrix":"bt709","range":"tv"}' && resolveSourceColor({ space: "hasOwnProperty" }, 480).matrix === "bt601",
       "resolveSourceColor reads a prototype-key space as untagged");
     check(parseKeyColor("constructor") === null && parseKeyColor("green") === "0x00FF00", "parseKeyColor: a prototype key names no key colour");

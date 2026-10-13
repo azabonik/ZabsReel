@@ -290,9 +290,14 @@ export async function otioToProject(
   const tracks: Track[] = [];
 
   // Seed the library from the traveled SynthCut asset list (keeps asset ids and
-  // unplaced assets like the music bed); probe refreshes reality on this disk.
+  // unplaced assets like the music bed); probe refreshes reality on this disk,
+  // the colour description and codec too (the preview's source-colour
+  // correction reads them; an older export carries none). Not a matte-backed
+  // cutout's colour: its file is the gray matte (cutout.colorTags describes it).
   for (const ma of sc.assets ?? []) {
     const probed = await probe(ma.path);
+    const color = ma.cutout ? undefined : probed?.color ?? ma.color;
+    const videoCodec = probed?.videoCodec ?? ma.videoCodec;
     const asset: MediaAsset = probed
       ? {
           ...ma,
@@ -302,6 +307,8 @@ export async function otioToProject(
           fps: probed.fps,
           hasVideo: probed.hasVideo,
           hasAudio: probed.hasAudio,
+          ...(color ? { color } : {}),
+          ...(videoCodec ? { videoCodec } : {}),
         }
       : { ...ma, missing: true };
     if (!probed) missing.push(ma.path);

@@ -58,7 +58,6 @@ import { FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, longFilterGraphIndex }
 import { buildRenderCommand, EXPORT_PROFILE, PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
 import { segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
 import { OUTPUT_COLOR_ARGS, OUTPUT_YUV_STEP } from "../src/ffmpeg/colorspace.js";
-import { segmentKey } from "../src/ffmpeg/segments.js";
 import { expandBleeps } from "../src/audio/bleeps.js";
 import {
   RAMP_PRESETS,

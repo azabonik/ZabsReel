@@ -203,7 +203,7 @@ async function main() {
   const bv = baked.find((s) => s.codec_type === "video");
   check(bv?.codec_name === "ffv1" && bv.pix_fmt === "gray", `only the matte is baked: FFV1 gray (${bv?.codec_name} ${bv?.pix_fmt})`);
   check(baked.some((s) => s.codec_type === "audio"), "the matte file keeps the span's audio");
-  check(r.asset.cutout?.colorPath === person && r.asset.cutout.colorStart === 0, "the cutout's colour is the original footage", r.asset.cutout);
+  check(r.asset.cutout?.colorPath === person && r.asset.cutout.colorStart === 0, `the cutout's colour is the original footage (${JSON.stringify(r.asset.cutout)})`);
   check(!r.downscaled && r.width === W && r.height === H, "processed at native resolution");
   const after = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)!;
   check(after.assetId === r.asset.id, "the clip now points at the cutout");

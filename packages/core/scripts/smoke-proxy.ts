@@ -2,14 +2,16 @@
  * P1-B smoke: preview PROXY media. Synthesizes a "4K-ish" source, confirms a
  * low-res proxy is produced and recorded on the asset, that the proxy is
  * smaller than the original, and that EXPORT still renders at the project
- * canvas (i.e. proxies never degrade the final output). Real FFmpeg.
+ * canvas (i.e. proxies never degrade the final output). Calls while an encode
+ * runs join it (one encode, a whole file for each), and a cancelled encode
+ * leaves no file behind: the next call encodes the whole proxy. Real FFmpeg.
  *
  * Run: npx tsx packages/core/scripts/smoke-proxy.ts
  */
 import { EditorEngine } from "../src/engine.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -32,15 +34,18 @@ async function main() {
     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p", "-y", big,
   ]);
 
-  // 2. Import — proxy generation kicks off in the background; force-await one.
+  // 2. Import — proxy generation kicks off in the background; two calls while it runs join it.
   console.log("2. import + generate proxy...");
   const a = await engine.importVideo(big);
   check(a.width === 3840 && a.height === 2160, "imported 3840x2160 source");
-  const proxied = await engine.generateProxy(a.id);
-  check(!!proxied.proxyPath && existsSync(proxied.proxyPath), "proxy file produced + recorded on asset");
+  const [proxied, joined] = await Promise.all([engine.generateProxy(a.id), engine.generateProxy(a.id)]);
+  const proxyJobs = engine.jobs.list().filter((j) => j.type === "proxy").length;
+  check(proxyJobs === 1, `the import's background encode and two calls during it: one proxy job (${proxyJobs})`);
+  check(!!proxied.proxyPath && existsSync(proxied.proxyPath) && joined.proxyPath === proxied.proxyPath, "proxy file produced + recorded on asset");
   const proxyMeta = await probeAsset(proxied.proxyPath!);
   console.log(`   proxy ${proxyMeta.width}x${proxyMeta.height} (original 3840x2160)`);
   check(proxyMeta.width <= 1280 && proxyMeta.width < a.width, "proxy is low-res (≤1280 long edge)");
+  check(Math.abs(proxyMeta.duration - a.duration) < 0.25, `…and whole when the calls return (${proxyMeta.duration} s of ${a.duration} s)`);
 
   // 3. Export still uses the FULL-RES original (canvas = source here).
   console.log("3. export uses full resolution...");
@@ -50,6 +55,31 @@ async function main() {
   const exp = await probeAsset(out);
   console.log(`   export ${exp.width}x${exp.height} (expect 3840x2160)`);
   check(exp.width === 3840 && exp.height === 2160, "export rendered at full resolution, not the proxy");
+
+  // 4. A cancelled encode (the job panel's Cancel, an app quit) leaves no file behind: FFmpeg ends a
+  // cancelled MP4 as a valid but short file, which every later call took as the proxy.
+  console.log("4. a cancelled proxy encode...");
+  const long = join(dataDir, "long.mp4");
+  await runFfmpeg([
+    "-hide_banner", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=60",
+    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p", "-y", long,
+  ]);
+  const b = await engine.importVideo(long);
+  const pending = engine.generateProxy(b.id);
+  const settled = pending.then(() => null, (err: unknown) => err);
+  const job = engine.jobs.list(true).find((j) => j.type === "proxy");
+  const proxies = join(dataDir, "proxies");
+  const written = () => readdirSync(proxies).filter((n) => n.startsWith(b.id)).reduce((t, n) => t + statSync(join(proxies, n)).size, 0);
+  // Cancel once FFmpeg has written part of the file.
+  for (let i = 0; i < 1500 && written() < 64 << 10; i++) await new Promise((r) => setTimeout(r, 10));
+  const partial = written();
+  check(!!job && engine.jobs.cancel(job.id), `the encode was cancelled while running (${partial} bytes written)`);
+  check((await settled) !== null, "the cancelled call rejects");
+  const left = readdirSync(proxies).filter((n) => n.startsWith(b.id));
+  check(left.length === 0, `no file left in proxies/ (${left.join(", ") || "none"})`);
+  const redone = await engine.generateProxy(b.id);
+  const redoneMeta = await probeAsset(redone.proxyPath!);
+  check(Math.abs(redoneMeta.duration - b.duration) < 0.25, `the next call encodes the whole proxy (${redoneMeta.duration} s of ${b.duration} s)`);
 
   console.log(failures === 0 ? "\nPROXY SMOKE TEST PASSED" : `\nPROXY SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);

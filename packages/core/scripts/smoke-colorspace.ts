@@ -32,7 +32,8 @@
  *     the export does (at 6361c07 they decoded untagged HD as BT.601);
  *  7. preview proxies keep the source's reading with complete tags (a
  *     downscaled copy of untagged HD would otherwise be read as SD), and a
- *     file whose incomplete tags Chromium ignores gets one on import.
+ *     file whose incomplete tags Chromium ignores gets one on import, as does
+ *     untagged VP9 (Chromium 149+ reads it as BT.709, the export as BT.601).
  *
  * Run: npx tsx packages/core/scripts/smoke-colorspace.ts   (no arguments)
  */
@@ -45,7 +46,7 @@ import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { detectKeyColor } from "../src/media/keycolor.js";
 import { graphicPreviewProxy, tagGraphicColor } from "../src/motion/render.js";
 import {
-  chromiumSourceColor, colorFixAffine, inputColorOpts, keepsChromaSamples, OUTPUT_YUV_STEP, previewColorFix, resolveSourceColor, SWS_CONVERT, SWS_RESIZE, type ProbedColor, type SourceColor,
+  chromiumSourceColor, colorFixAffine, inputColorOpts, keepsChromaSamples, needsTaggedProxy, OUTPUT_YUV_STEP, previewColorFix, resolveSourceColor, SWS_CONVERT, SWS_RESIZE, type ProbedColor, type SourceColor,
 } from "../src/ffmpeg/colorspace.js";
 
 const dir = mkdtempSync(join(tmpdir(), "synthcut-colorspace-"));
@@ -314,7 +315,7 @@ async function main() {
       for (const [bake, run, alphaToo] of bakes) {
         if (alpha && !alphaToo) continue;
         const { out, engine, clipId } = await exportOf(src, 1280, 720, async (e, id) => { await run(e, id); });
-        const baked = engine.getAsset(engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clipId)!.assetId);
+        const baked = engine.getAsset(engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clipId)!.assetId!);
         const err = maxErr(patches(out, AS_709));
         check(baked.path !== src && err <= 4, `${srcName}, ${bake}: the bake exports within 4 levels of the true colours (max ${err}; bake tags: ${tagsOf(baked.path)})`);
       }
@@ -475,6 +476,21 @@ async function main() {
       p = engine.getAsset(a.id);
     }
     check(!!p.proxyPath && previewColorFix(p, true) === null, `…so import makes it a completely tagged proxy (${p.proxyPath ? tagsOf(p.proxyPath) : p.proxyError ?? "none"})`);
+  }
+  {
+    // Untagged VP9: Electron's Chromium (148) reads it as the export does, the web shell's 149+ doesn't.
+    const engine = new EditorEngine(mkdtempSync(join(dir, "data-")));
+    const a = await engine.importVideo(vp9HD);
+    check(previewColorFix(a, false, 148) === null && previewColorFix(a, false, 149) !== null && needsTaggedProxy(a),
+      "untagged VP9 needs no correction on Chromium 148, one on 149…");
+    let p = engine.getAsset(a.id);
+    for (let i = 0; i < 300 && !p.proxyPath && !p.proxyError; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      p = engine.getAsset(a.id);
+    }
+    check(!!p.proxyPath && previewColorFix(p, true) === null && p.proxyColor?.space === "smpte170m",
+      `…so import makes it a completely tagged proxy, read alike by every version (${p.proxyPath ? tagsOf(p.proxyPath) : p.proxyError ?? "none"})`);
+    check(!needsTaggedProxy(await probeAsset(untagHD)), "untagged H.264 HD gets none (every version reads it as the export does)");
   }
 
   console.log(failures === 0 ? "\nCOLORSPACE SMOKE TEST PASSED" : `\nCOLORSPACE SMOKE TEST FAILED (${failures})`);

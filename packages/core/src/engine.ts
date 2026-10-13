@@ -2,7 +2,8 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, dirname, basename, isAbsolute, resolve, sep } from "node:path";
+import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
+import { randomBytes } from "node:crypto";
 import { newId } from "./ids.js";
 import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, isProtocolLike } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
@@ -11,7 +12,7 @@ import { StorageJanitor } from "./storage.js";
 import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
-  colorTagArgs, keepCodingOpts, previewColorFix, PROXY_LONG_EDGE, resolveSourceColor, tagFramesStep, type ProbedColor, type SourceColor,
+  colorTagArgs, keepCodingOpts, needsTaggedProxy, PROXY_LONG_EDGE, resolveSourceColor, tagFramesStep, type ProbedColor, type SourceColor,
 } from "./ffmpeg/colorspace.js";
 import {
   detectSilence,
@@ -170,6 +171,16 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * A unique name next to `path` to write it under before renaming it into
+ * place, its extension kept last (FFmpeg picks the muxer from it): a cancelled
+ * or killed encode never leaves a short file under the final name.
+ */
+function tempSibling(path: string): string {
+  const ext = extname(path);
+  return `${path.slice(0, path.length - ext.length)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}${ext}`;
 }
 
 /** Directories scanned to resolve a font family name to a font file. */
@@ -510,6 +521,8 @@ export class EditorEngine extends EventEmitter {
   private assetCaches = new Map<string, { transcript?: AssetTranscript; visualSig?: VisualSignature }>();
   /** Colour descriptions (and codecs) probed again for assets imported before probeAsset recorded them (by path; outside the undo history). */
   private colorProbes = new Map<string, Promise<ColorProbe | undefined>>();
+  /** The running generateProxy job per asset id: a second call joins it (see generateProxy). */
+  private proxyJobs = new Map<string, Promise<MediaAsset>>();
   /** Housekeeping for baked/ + proxies/: trash unused files, restore them on load (see storage.ts). */
   readonly storage: StorageJanitor;
   /** Files the last load()/importOtio() moved back out of the storage trash. */
@@ -895,10 +908,11 @@ export class EditorEngine extends EventEmitter {
     // returns immediately and scrubbing stays smooth. Export still uses the
     // original. Fire-and-forget, but failures are RECORDED on the asset
     // (proxyError) so the state shows why scrubbing stayed slow. Also a file
-    // whose incomplete colour tags Chromium ignores (colorspace.ts): its proxy
-    // carries complete ones, so the preview shows the export's colours exactly
-    // (until then a WebGL2 correction approximates them).
-    if (asset.hasVideo && (Math.max(asset.width, asset.height) > PROXY_TRIGGER_LONG_EDGE || (!asset.isImage && previewColorFix(asset, false)))) {
+    // whose incomplete colour tags Chromium ignores, or untagged VP9 (read by
+    // the Chromium version; colorspace.ts needsTaggedProxy): its proxy carries
+    // complete tags, so the preview shows the export's colours exactly (until
+    // then a WebGL2 correction approximates them).
+    if (asset.hasVideo && (Math.max(asset.width, asset.height) > PROXY_TRIGGER_LONG_EDGE || (!asset.isImage && needsTaggedProxy(asset)))) {
       this.proxyInBackground(asset.id);
     }
     return asset;
@@ -918,10 +932,16 @@ export class EditorEngine extends EventEmitter {
    * Transcode a low-res H.264 PROXY of an asset for snappy preview/scrub, cache
    * it, and record asset.proxyPath. Idempotent. The original is never modified
    * and EXPORT always uses it — proxies are a preview-only optimization.
+   * One encode per asset at a time: a call while one runs (an explicit
+   * generate_proxy right after the import started one in the background, or
+   * probeUnrecordedColors) joins it, whatever its `longEdge`, instead of
+   * taking the file being written for the proxy.
    */
   async generateProxy(assetId: string, longEdge = PROXY_LONG_EDGE): Promise<MediaAsset> {
     const asset = this.getAsset(assetId);
     if (!asset.hasVideo) throw new Error("Asset has no video to proxy");
+    const running = this.proxyJobs.get(assetId);
+    if (running) return running;
     const { promise } = this.jobs.start("proxy", `Proxy ${asset.name}`, async (signal, onProgress) => {
       const dir = join(this.dataDir, "proxies");
       await mkdir(dir, { recursive: true });
@@ -935,12 +955,7 @@ export class EditorEngine extends EventEmitter {
         const out = own ?? join(dir, `${safeFileStem(assetId)}.webm`);
         let proxyColor: ProbedColor | undefined;
         if (!(await fileExists(out))) {
-          try {
-            proxyColor = await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
-          } catch (err) {
-            await rm(out, { force: true });
-            throw err;
-          }
+          proxyColor = await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
         } else {
           // A reused preview says how the preview's decoder reads it (one baked before it was tagged too).
           proxyColor = await probeAsset(out).then((p) => p.color, () => undefined);
@@ -968,8 +983,16 @@ export class EditorEngine extends EventEmitter {
         const args = ["-hide_banner", "-i", asset.path, "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", ...colorTagArgs({ matrix: c.matrix, range: "tv" })];
         if (asset.hasAudio) args.push("-c:a", "aac", "-b:a", "128k");
         else args.push("-an");
-        args.push("-movflags", "+faststart", "-y", out);
-        await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
+        // Written under a temporary name: a file at `out` is always a whole proxy.
+        const tmp = tempSibling(out);
+        args.push("-movflags", "+faststart", "-y", tmp);
+        try {
+          await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
+          await rename(tmp, out);
+        } catch (err) {
+          await rm(tmp, { force: true });
+          throw err;
+        }
       }
       const proxyColor = await probeAsset(out).then((p) => p.color, () => undefined);
       return this.mutate(() => {
@@ -981,6 +1004,10 @@ export class EditorEngine extends EventEmitter {
         return a;
       });
     });
+    this.proxyJobs.set(assetId, promise);
+    promise.finally(() => {
+      if (this.proxyJobs.get(assetId) === promise) this.proxyJobs.delete(assetId);
+    }).catch(() => {});
     return promise;
   }
 
@@ -989,7 +1016,8 @@ export class EditorEngine extends EventEmitter {
    * transparency (ffmpeg/cutout.ts alphaProxyArgs). A matte-backed cutout is
    * merged with its colour on the way. Chromium can't decode FFV1, so cutouts
    * and other alpha video always preview from this. Returns the proxy's
-   * probed colour description (MediaAsset.proxyColor).
+   * probed colour description (MediaAsset.proxyColor). Written under a
+   * temporary name and renamed into place when whole (removed on failure).
    */
   private async encodeAlphaProxy(
     asset: MediaAsset,
@@ -999,8 +1027,15 @@ export class EditorEngine extends EventEmitter {
     onProgress?: (fraction: number) => void,
   ): Promise<ProbedColor | undefined> {
     const src = { path: asset.path, width: asset.width, height: asset.height, duration: asset.duration, hasAudio: asset.hasAudio };
-    const args = alphaProxyArgs({ ...src, color: await this.sourceColor(asset), merge: await this.cutoutMerge(asset) }, outPath, longEdge);
-    await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
+    const tmp = tempSibling(outPath);
+    const args = alphaProxyArgs({ ...src, color: await this.sourceColor(asset), merge: await this.cutoutMerge(asset) }, tmp, longEdge);
+    try {
+      await runFfmpeg(args, { signal, totalDuration: asset.duration, onProgress });
+      await rename(tmp, outPath);
+    } catch (err) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
     return probeAsset(outPath).then((p) => p.color, () => undefined);
   }
 
@@ -3721,8 +3756,8 @@ export class EditorEngine extends EventEmitter {
    * colour onto the asset — in the undo history's copies too — so the
    * preview's correction (previewColorFix) reads it as the export does. Not
    * an undo step, and a saved project stays saved (as pruneLibraryBakes). A
-   * file whose incomplete tags Chromium ignores then gets its completely
-   * tagged proxy, as on import.
+   * file a Chromium reads unlike the export (needsTaggedProxy) then gets its
+   * completely tagged proxy, as on import.
    */
   private async probeUnrecordedColors(): Promise<void> {
     // A matte-backed cutout records its COLOUR SOURCE's description (its own file is the gray matte).
@@ -3746,7 +3781,7 @@ export class EditorEngine extends EventEmitter {
       }
       if (!now) continue;
       this.emit("change", this.project);
-      if (!now.proxyPath && previewColorFix(now, false)) this.proxyInBackground(id);
+      if (!now.proxyPath && needsTaggedProxy(now)) this.proxyInBackground(id);
     }
   }
 
@@ -6185,6 +6220,12 @@ export class EditorEngine extends EventEmitter {
     this.emit("change", this.project);
     await this.storage.remember(path);
     this.storage.schedule();
+    // As load(): what is still unrecorded (a cutout's colour source) is probed in the background.
+    // Media whose colour the import probed gets its tagged proxy where a Chromium needs one, as on import_video.
+    void this.probeUnrecordedColors();
+    for (const a of this.project.assets) {
+      if (a.hasVideo && !a.isImage && !a.missing && !a.proxyPath && a.color && needsTaggedProxy(a)) this.proxyInBackground(a.id);
+    }
     return { project: this.project, warnings: result.warnings, missing: result.missing };
   }
 

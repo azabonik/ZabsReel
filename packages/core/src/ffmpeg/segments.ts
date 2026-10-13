@@ -27,8 +27,9 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 11: clips whose effects end in a two-input filter keep their last frame on FFmpeg 4.4 - 6.1 (one end guard with ramps and cutouts).
  * 12: that guard pads before the effects (a clip whose video ends early keeps its length); a ramp holds its last frame to its footprint.
  * 13: player-accurate source colour reading, RGBA compositing and tagged BT.709 output (ffmpeg/colorspace.ts).
+ * 14: a shape-masked clip keeps its last frame on FFmpeg 4.4 (the mask's alphamerge sits inside the end guard of 11/12).
  */
-const CACHE_VERSION = 13;
+const CACHE_VERSION = 14;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this

@@ -588,16 +588,23 @@ function emitClipVideoParts(
   const fxSteps = fx.filters?.length ? effectSteps(fx.filters, W, H, `c${inputIdx}`) : [];
   if (fxSteps.length) steps.push(...fxSteps, EFFECTS_RGBA_PIN);
 
-  // A sub-graph above (the alpha-keeping keys, colour grade, sharpen, grain, …)
-  // ends in a two-input filter (blend / alphamerge). On FFmpeg 4.4 – 6.1 that
-  // filter ends its stream with no end time, so the fps below took the clip as
-  // ending where its last frame starts and dropped that frame (two at 0.5x): a
-  // black frame at every cut after such a clip. Two padding frames go in BEFORE
-  // the sub-graph, where the stream's end is still exact: the lost end time then
-  // falls on a padding frame, and every real frame keeps its slots. They are
-  // transparent, so a clip whose video ends before its length (an old cutout
-  // behind its audio's delay) still ends where it does without the effect; a
-  // ramp clones instead, since its end guard below holds the last frame to its footprint.
+  // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
+  // space, after color/effects/keys and BEFORE the transform, so it moves,
+  // scales, rotates and flips with the clip. Before the retime, so the end
+  // guard below covers its alphamerge too.
+  if (maskInput !== undefined) steps.push(maskMultiplyStep(maskInput, `mk${inputIdx}`));
+
+  // A sub-graph above (the alpha-keeping keys, colour grade, sharpen, grain,
+  // the shape mask, …) ends in a two-input filter (blend / alphamerge). On
+  // FFmpeg 4.4 – 6.1 that filter ends its stream with no end time, so the fps
+  // below took the clip as ending where its last frame starts and dropped
+  // that frame (two at 0.5x): a black frame at every cut after such a clip.
+  // Two padding frames go in BEFORE the sub-graph, where the stream's end is
+  // still exact: the lost end time then falls on a padding frame, and every
+  // real frame keeps its slots. They are transparent, so a clip whose video
+  // ends before its length (an old cutout behind its audio's delay) still
+  // ends where it does without the effect; a ramp clones instead, since its
+  // end guard below holds the last frame to its footprint.
   const ramped = !!fx.speedRamp?.points.length;
   const pinLength = steps.some((s) => s.includes(";"));
   if (pinLength) {
@@ -618,11 +625,6 @@ function emitClipVideoParts(
   const frames = Math.max(1, Math.round(outDur * fps));
   if (ramped) steps.push(`tpad=stop_mode=clone:stop=${frames}`);
   if (ramped || cutoutMerged || pinLength) steps.push(`trim=end_frame=${frames}`);
-
-  // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
-  // space, after color/effects/keys and BEFORE the transform, so it moves,
-  // scales, rotates and flips with the clip.
-  if (maskInput !== undefined) steps.push(maskMultiplyStep(maskInput, `mk${inputIdx}`));
 
   // Alpha fades so the layer dissolves against whatever is beneath it.
   if (fx.fadeIn && fx.fadeIn > 0) steps.push(`fade=t=in:st=0:d=${fx.fadeIn.toFixed(3)}:alpha=1`);

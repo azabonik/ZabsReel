@@ -211,6 +211,17 @@ export function previewColorFix(a: PreviewColorSource, proxy: boolean, chromeMaj
 }
 
 /**
+ * True when a Chromium the preview may run in reads the file (the original,
+ * not a proxy) unlike the export: Electron's, or a newer one in the browser
+ * web shell (untagged VP9 is read as BT.601 up to 148 and as BT.709 from
+ * {@link CHROMIUM_VP9_BT709_FROM}). Such a file gets a completely tagged
+ * proxy, which every version reads as the export reads the original.
+ */
+export function needsTaggedProxy(a: PreviewColorSource): boolean {
+  return previewColorFix(a, false) !== null || previewColorFix(a, false, CHROMIUM_VP9_BT709_FROM) !== null;
+}
+
+/**
  * swscale flags of the explicit colour/scale steps. Every one rounds
  * accurately and handles chroma at full resolution: accurate_rnd takes
  * swscale off its fast converter (8-bit table arithmetic, the path FFmpeg's

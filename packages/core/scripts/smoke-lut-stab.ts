@@ -55,7 +55,7 @@ async function main() {
 
   console.log("3. stabilize clip 2 (two-pass vidstab)...");
   const stabilized = await engine.stabilizeClip(c2.id);
-  const bakedAsset = engine.getAsset(stabilized.assetId);
+  const bakedAsset = engine.getAsset(stabilized.assetId!);
   console.log(`   clip 2 now references baked asset: ${bakedAsset.name} (${bakedAsset.duration.toFixed(2)}s)`);
   if (!bakedAsset.name.includes("stabilized")) throw new Error("stabilize did not rewire the clip");
 

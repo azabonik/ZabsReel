@@ -672,13 +672,21 @@ let alphaModesPromise: Promise<boolean> | null = null;
 
 /**
  * True when this FFmpeg negotiates alpha modes (8.1+; its `setparams` has an
- * `alpha_mode` option). Probed once, only when a graph uses (un)premultiply.
+ * `alpha_mode` option). Probed once, only when a graph uses (un)premultiply;
+ * a failed probe is not cached (as ffmpegVersion), so an FFmpeg installed
+ * later is asked again.
  */
 export function hasAlphaModes(): Promise<boolean> {
   if (!alphaModesPromise) {
     alphaModesPromise = execa(FFMPEG_BIN, ["-hide_banner", "-h", "filter=setparams"], { reject: false })
-      .then((r) => /^\s*alpha_mode\s/m.test(r.stdout))
-      .catch(() => false);
+      .then((r) => {
+        if (r.failed || r.exitCode !== 0) throw new Error("ffmpeg -h failed");
+        return /^\s*alpha_mode\s/m.test(r.stdout);
+      })
+      .catch(() => {
+        alphaModesPromise = null;
+        return false;
+      });
   }
   return alphaModesPromise;
 }

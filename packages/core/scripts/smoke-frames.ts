@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
 import { EditorServer } from "../src/server.js";
-import { chromiumMatrix } from "../src/ffmpeg/frames.js";
+import { framesColor, parseFramesQuery } from "../src/ffmpeg/frames.js";
 import { runFfmpeg, runFfmpegStdoutBuffer } from "../src/ffmpeg/executor.js";
 
 /** The frame number a grey level shows (RGB from 16 + 6n limited-range luma). */
@@ -140,13 +140,28 @@ async function main() {
   await again.arrayBuffer();
   check(again.status === 200, `the slots free again once the aborted decodes end (got ${again.status})`);
 
-  console.log("5. the YUV matrix is chosen as Chromium does...");
-  check(chromiumMatrix({ height: 360 }).matrix === "bt601", "untagged SD → BT.601");
-  check(chromiumMatrix({ height: 720 }).matrix === "bt709", "untagged HD → BT.709");
-  check(chromiumMatrix({ height: 360, space: "bt709" }).matrix === "bt709", "tagged BT.709 SD → BT.709");
-  check(chromiumMatrix({ height: 1080, space: "smpte170m" }).matrix === "bt601", "tagged BT.601 HD → BT.601");
-  check(chromiumMatrix({ height: 1080, codec: "vp9" }).matrix === "bt601", "untagged VP9 → BT.601");
-  check(chromiumMatrix({ height: 1080, range: "pc" }).range === "pc", "full range kept");
+  console.log("5. the YUV is read as Chromium reads it (the preview's source-colour correction assumes that)...");
+  const read = (s: Parameters<typeof framesColor>[0], chrome?: number) => {
+    const c = framesColor(s, chrome);
+    return c ? `${c.matrix}/${c.range}` : null;
+  };
+  const all = (m: string, p: string, t: string) => ({ color_space: m, color_primaries: p, color_transfer: t });
+  check(read({ height: 360 }) === "bt601/tv", "untagged SD → BT.601");
+  check(read({ height: 720 }) === "bt709/tv", "untagged HD → BT.709");
+  check(read({ height: 360, ...all("bt709", "bt709", "bt709") }) === "bt709/tv", "completely tagged BT.709 SD → BT.709");
+  check(read({ height: 1080, ...all("smpte170m", "smpte170m", "smpte170m") }) === "bt601/tv", "completely tagged BT.601 HD → BT.601");
+  check(read({ height: 1080, color_space: "smpte170m" }) === "bt709/tv" && read({ height: 480, color_space: "bt709" }) === "bt601/tv",
+    "an incomplete description (a matrix only) is ignored: the size guess");
+  check(read({ height: 1080, color_space: "bt709", color_range: "pc" }) === "bt709/tv", "…its range too");
+  check(read({ height: 1080, ...all("bt709", "bt709", "bt709"), color_range: "pc" }) === "bt709/pc", "a complete description's full range kept");
+  check(read({ height: 1080, color_range: "pc" }) === "bt601/pc", "full range without a matrix → BT.601 full (JPEG)");
+  check(read({ height: 1080, codec_name: "vp9" }) === "bt601/tv" && read({ height: 1080, codec_name: "vp9" }, 148) === "bt601/tv" &&
+    read({ height: 1080, codec_name: "vp9" }, 149) === "bt709/tv", "untagged VP9 → BT.601 up to Chromium 148, BT.709 from 149");
+  check(read({ height: 1080, pix_fmt: "gbrp" }) === null, "an RGB stream has no matrix to choose");
+  const q = (s: string) => parseFramesQuery(new URLSearchParams(`path=/x.mp4&from=0&count=1&fps=30&w=8&h=8${s}`));
+  const q149 = q("&chrome=149");
+  check(typeof q149 !== "string" && q149.chrome === 149 && typeof q("") !== "string" && (q("") as { chrome?: number }).chrome === undefined &&
+    typeof q("&chrome=x") === "string", "the query names the Chromium (optional; a bad value is refused)");
 
   await server.stop();
   console.log(failures === 0 ? "\nFRAMES SMOKE TEST PASSED" : `\nFRAMES SMOKE TEST FAILED (${failures})`);

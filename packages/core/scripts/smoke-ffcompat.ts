@@ -338,6 +338,21 @@ async function main(): Promise<void> {
   const [r, g, bl, a] = round;
   check(Math.abs(r - 200) <= 3 && Math.abs(g - 100) <= 3 && Math.abs(bl - 50) <= 3 && Math.abs(a - 127) <= 1,
     `premultiply → alphamerge → unpremultiply keeps rgba(200,100,50,127): got ${r},${g},${bl},${a} (alpha modes ${alphaModes ? "on, retagged" : "off"})`);
+  // A probe that fails (no FFmpeg at FFMPEG_BIN yet) is not cached: an FFmpeg installed later is asked
+  // again, or an 8.1+ build would run (un)premultiply graphs without the retag (an add blend at 60 %
+  // came out at 100 %). In a child process, since FFMPEG_BIN is read at import; the "FFmpeg" installed
+  // there is a script that prints an alpha_mode option.
+  if (process.platform !== "win32") {
+    const fake = join(mkdtempSync(join(tmpdir(), "aive-alphamodes-")), "ffmpeg");
+    const code = `const m = await import(process.argv[1]); const fs = await import("node:fs");
+      const before = await m.hasAlphaModes();
+      fs.writeFileSync(process.argv[2], "#!/bin/sh\\necho '  alpha_mode        <int>        ..FV....... select alpha mode'\\n", { mode: 0o755 });
+      console.log(JSON.stringify({ before, after: await m.hasAlphaModes() }));`;
+    const child = await execa(process.execPath, ["--import", "tsx", "-e", code, join(import.meta.dirname, "../src/ffmpeg/executor.ts"), fake],
+      { env: { ...process.env, AIVE_FFMPEG: fake }, reject: false });
+    const res = /\{.*\}/.exec(child.stdout)?.[0];
+    check(res === '{"before":false,"after":true}', `a failed alpha-mode probe is not cached: FFmpeg installed later is asked again (${res ?? child.stderr.split("\n")[0]})`);
+  }
 
   // ---- audio -------------------------------------------------------------------------
   console.log("audio filters");

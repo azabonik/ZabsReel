@@ -8,15 +8,20 @@
  *
  * Frames come back as raw RGBA, back to back (w × h × 4 bytes each), the
  * clip's crop scaled to the size the preview processes the picture at. YUV
- * is read the way Chromium reads it (the preview's own frames come from
- * Chromium's decoder, and a trail mixes the two): a tagged matrix as tagged,
- * an untagged one as BT.709 from 720 lines up and BT.601 below (full range
- * and VP9: BT.601) — measured on Chromium 143, mean difference 0.1–0.2 levels.
+ * is read the way Chromium reads it (colorspace.ts chromiumSourceColor, for
+ * the Chromium the request names: `chrome`): the preview's own frames come
+ * from Chromium's decoder, a trail mixes the two, and the renderer runs its
+ * whole plan over these frames, the source-colour correction included, which
+ * assumes that reading (an incomplete colour description ignored, untagged
+ * VP9 by the Chromium version). Measured on Chromium 143, mean difference
+ * 0.1–0.2 levels.
  */
 import { execa } from "execa";
 import type { ServerResponse } from "node:http";
 import { stat } from "node:fs/promises";
 import { FFMPEG_BIN, FFPROBE_BIN, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly } from "./executor.js";
+import { chromiumSourceColor, type SourceColor } from "./colorspace.js";
+import { probedColor } from "./ffprobe.js";
 
 /** Most frames one request returns (the renderer asks for at most 90: 3 s at 30 fps). */
 export const FRAMES_MAX = 120;
@@ -39,6 +44,8 @@ export interface FramesQuery {
   h: number;
   /** Source rect to scale to w × h (the clip's crop), in decoded pixels. */
   crop?: { x: number; y: number; w: number; h: number };
+  /** The major version of the Chromium the frames are for (how it reads untagged VP9). */
+  chrome?: number;
 }
 
 /** The query from a /frames URL, or an error message. */
@@ -64,36 +71,54 @@ export function parseFramesQuery(q: URLSearchParams): FramesQuery | string {
     if (![x, y, cw, ch].every((n) => Number.isInteger(n) && n >= 0 && n <= 1e5) || cw < 1 || ch < 1) return "'crop' must be x,y,w,h in whole pixels";
     crop = { x, y, w: cw, h: ch };
   }
-  return { path, from: from as number, count: count as number, fps, w: w as number, h: h as number, ...(crop ? { crop } : {}) };
-}
-
-/** How Chromium reads a stream's YUV (see the header): the scale filter's matrix and range. */
-export function chromiumMatrix(s: { codec?: string; height?: number; space?: string; range?: string }): { matrix: string; range: "tv" | "pc" } {
-  const range = s.range === "pc" ? "pc" : "tv";
-  const tagged: Record<string, string> = {
-    bt709: "bt709", smpte170m: "bt601", bt470bg: "bt601", bt2020nc: "bt2020", bt2020c: "bt2020", smpte240m: "smpte240m", fcc: "fcc",
+  let chrome: number | undefined;
+  if (q.has("chrome")) {
+    const v = int("chrome", 1, 10000);
+    if (typeof v === "string") return v;
+    chrome = v;
+  }
+  return {
+    path, from: from as number, count: count as number, fps, w: w as number, h: h as number,
+    ...(crop ? { crop } : {}), ...(chrome !== undefined ? { chrome } : {}),
   };
-  const t = s.space && Object.hasOwn(tagged, s.space) ? tagged[s.space] : undefined;
-  return { matrix: t ?? (range === "pc" || s.codec === "vp9" ? "bt601" : (s.height ?? 0) >= 720 ? "bt709" : "bt601"), range };
 }
 
-/** Probed colour description per file (path + size + mtime). */
-const probed = new Map<string, Promise<{ matrix: string; range: "tv" | "pc" } | null>>();
+/** The ffprobe fields of a video stream that {@link framesColor} reads. */
+export interface FramesStream {
+  codec_name?: string;
+  height?: number;
+  pix_fmt?: string;
+  color_space?: string;
+  color_range?: string;
+  color_primaries?: string;
+  color_transfer?: string;
+}
 
-async function sourceColor(path: string): Promise<{ matrix: string; range: "tv" | "pc" } | null> {
+/**
+ * How Chromium `chromeMajor` reads a stream's YUV (see the header): the
+ * scale filter's matrix and range, or null for an RGB stream (PNG sequences,
+ * ProRes 4444 decoded as RGB …: no matrix to choose).
+ */
+export function framesColor(s: FramesStream, chromeMajor?: number): SourceColor | null {
+  if (typeof s.pix_fmt === "string" && /^(rgb|bgr|argb|abgr|gbr|gray|pal)/.test(s.pix_fmt)) return null;
+  const height = Number(s.height) || 0;
+  return chromiumSourceColor(probedColor({ ...s, height }), height, s.codec_name, chromeMajor);
+}
+
+/** Probed video stream per file (path + size + mtime). */
+const probed = new Map<string, Promise<FramesStream | null>>();
+
+async function sourceStream(path: string): Promise<FramesStream | null> {
   const info = await stat(path);
   const key = `${path}|${info.size}|${info.mtimeMs}`;
   let p = probed.get(key);
   if (!p) {
-    const probeArgs = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,height,color_space,color_range,pix_fmt", "-of", "json", path];
+    const probeArgs = [
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "stream=codec_name,height,color_space,color_range,color_primaries,color_transfer,pix_fmt", "-of", "json", path,
+    ];
     p = execa(FFPROBE_BIN, ffprobeArgsLocalOnly(probeArgs))
-      .then((r) => {
-        const s = (JSON.parse(r.stdout) as { streams?: Record<string, unknown>[] }).streams?.[0];
-        if (!s) return null;
-        // RGB sources (PNG sequences, ProRes 4444 decoded as RGB …) have no matrix to choose.
-        if (typeof s.pix_fmt === "string" && /^(rgb|bgr|argb|abgr|gbr|gray|pal)/.test(s.pix_fmt)) return null;
-        return chromiumMatrix({ codec: s.codec_name as string, height: Number(s.height), space: s.color_space as string, range: s.color_range as string });
-      })
+      .then((r) => (JSON.parse(r.stdout) as { streams?: FramesStream[] }).streams?.[0] ?? null)
       .catch(() => null);
     if (probed.size > 64) probed.clear();
     probed.set(key, p);
@@ -102,7 +127,7 @@ async function sourceColor(path: string): Promise<{ matrix: string; range: "tv" 
 }
 
 /** The ffmpeg arguments that write frames [from, from + count) of the query's source to stdout. */
-export function framesArgs(q: FramesQuery, color: { matrix: string; range: string } | null): string[] {
+export function framesArgs(q: FramesQuery, color: SourceColor | null): string[] {
   // -ss keeps the first frame at or after the time: half a frame early so a
   // timestamp rounding can't drop frame `from` (frame n starts at n / fps).
   const ss = Math.max(0, (q.from - 0.5) / q.fps);
@@ -137,7 +162,8 @@ export async function streamFrames(q: FramesQuery, res: ServerResponse): Promise
   }
   running++;
   try {
-    const color = await sourceColor(q.path).catch(() => null);
+    const stream = await sourceStream(q.path).catch(() => null);
+    const color = stream ? framesColor(stream, q.chrome) : null;
     const decodeArgs = framesArgs(q, color);
     const child = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(decodeArgs), { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });

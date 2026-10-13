@@ -25,7 +25,7 @@ import {
   HOLD_MS, holdLastFrame, segmentAt, stepFrames, totalDuration,
   type PlayerHandle, type PlaybackStore, type Segment,
 } from "./playback";
-import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composite";
+import { activeLayersAt, CHROME_MAJOR, timelineDurationSec, type ActiveClip } from "./composite";
 import { MediaPool } from "./mediapool";
 import { AudioRouter } from "./audiograph";
 import { isKeyBypassed, onKeyBypassChange } from "./glkey";
@@ -860,11 +860,14 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       scheduleRedraw();
     });
     setFileUrl((p) => api.fileUrl(p)); // repaints through the listener above
-    // A paused trail's warm-up decodes frames through the core's /frames route.
+    // A paused trail's warm-up decodes frames through the core's /frames route,
+    // read as this Chromium reads the file (the layer's source-colour correction
+    // runs over them too).
     setWarmup((p, q) => {
       const u = new URL(api.fileUrl(p));
       u.pathname = "/frames";
       for (const [k, v] of Object.entries(q)) u.searchParams.set(k, String(v));
+      if (CHROME_MAJOR) u.searchParams.set("chrome", String(CHROME_MAJOR));
       return u.toString();
     }, () => {
       drawFnRef.current();

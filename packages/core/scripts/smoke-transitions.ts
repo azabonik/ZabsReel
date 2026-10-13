@@ -11,7 +11,8 @@
  * the export is exactly the timeline's length. The FFmpeg 4-6 workaround (a
  * cloned frame before xfade) is in the graph only when xfadeEofPad asks for
  * it; run with AIVE_FFMPEG pointing at an FFmpeg 7+ build to check the
- * unpadded graph frame by frame too.
+ * unpadded graph frame by frame too. The same after an outgoing clip with a
+ * shape mask (its alphamerge, like an effect's, sits inside the clip's end guard).
  *
  * Run: npx tsx packages/core/scripts/smoke-transitions.ts <clipA> <clipB>
  */
@@ -107,13 +108,17 @@ async function incomingClipTiming(): Promise<void> {
   const asset = await engine.importVideo(src);
   console.log(`  (${await ffmpegVersionLine()})`);
   let failures = 0;
-  for (const [type, frames] of [["wipeup", 15], ["wipedown", 9], ["fade", 20]] as const) {
+  // "masked": the outgoing clip has a shape mask, whose alphamerge ended its stream with no end
+  // time on FFmpeg 4.4 — the whole run came out a frame short (the incoming clip a frame early,
+  // its last frame missing) until the mask moved inside the clip's end guard.
+  for (const [type, frames, masked] of [["wipeup", 15, false], ["wipedown", 9, false], ["fade", 20, false], ["wipeup", 15, true]] as const) {
     for (const t of engine.getProject().tracks) for (const c of [...t.clips]) engine.removeClip(c.id);
-    engine.addClip(asset.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120 });
+    const x = engine.addClip(asset.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120 });
+    if (masked) engine.setClipMask(x.id, { shape: "ellipse" });
     const y = engine.addClip(asset.id, { startFrame: 120, sourceInFrame: 200, sourceOutFrame: 290 });
     engine.setTransition(y.id, type, frames);
     const yStart = engine.getProject().tracks[0].clips.find((c) => c.id === y.id)!.startFrame;
-    if (type === "wipeup") {
+    if (type === "wipeup" && !masked) {
       // The end-of-stream pad is FFmpeg-version dependent: in the graph exactly when asked for.
       const canvas = engine.canvas;
       const { clips } = await (engine as unknown as { stageRender(c: Canvas): Promise<{ clips: ResolvedRenderClip[] }> }).stageRender(canvas);
@@ -124,7 +129,7 @@ async function incomingClipTiming(): Promise<void> {
       if (!ok) failures++;
       console.log(`  ${ok ? "ok  " : "FAIL"} xfadeEofPad:true clones one frame before xfade (tpad=stop_mode=clone:stop=1); xfadeEofPad:false has no clone`);
     }
-    const out = join(dir, `${type}.mp4`);
+    const out = join(dir, `${type}${masked ? "-masked" : ""}.mp4`);
     await engine.exportVideo(out);
     // wipeup reveals the incoming clip from the bottom, wipedown from the top; a fade only after it ends.
     const row = type === "wipedown" ? 0.05 : 0.95;
@@ -135,7 +140,7 @@ async function incomingClipTiming(): Promise<void> {
     for (let n = from; n < yStart + 90; n++) if ((n >= yStart + frames ? mid[n] : idx[n]) !== 200 + (n - yStart)) bad++;
     const ok = bad === 0 && idx.length === engine.timelineDurationFrames();
     if (!ok) failures++;
-    console.log(`  ${ok ? "ok  " : "FAIL"} ${type} (${frames} frames): incoming frames ${from}..${yStart + 89} show source 200 + (n − ${yStart}); ${idx.length} frames = timeline${ok ? "" : ` — ${bad} off`}`);
+    console.log(`  ${ok ? "ok  " : "FAIL"} ${type} (${frames} frames)${masked ? " after a masked clip" : ""}: incoming frames ${from}..${yStart + 89} show source 200 + (n − ${yStart}); ${idx.length} frames = timeline${ok ? "" : ` — ${bad} off`}`);
   }
   if (failures) throw new Error(`${failures} transition timing check(s) failed`);
 }
