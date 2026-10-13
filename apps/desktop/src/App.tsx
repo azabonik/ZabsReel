@@ -54,7 +54,7 @@ const EXPORT_PRESETS = [
 ];
 
 // All transition types the core supports, grouped so the picker reads as an
-// organized menu rather than a flat dump (mirrors TRANSITION_TYPES in core/rpc.ts).
+// organized menu rather than a flat dump (mirrors TRANSITION_TYPES in core/types.ts).
 const TRANSITION_GROUPS: { label: string; types: string[] }[] = [
   { label: "Fade", types: ["fade", "dissolve", "fadeblack", "fadewhite"] },
   { label: "Wipe", types: ["wipeleft", "wiperight", "wipeup", "wipedown"] },

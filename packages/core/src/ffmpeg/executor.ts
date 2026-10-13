@@ -1,8 +1,9 @@
 import { execa, type ResultPromise } from "execa";
 import { randomUUID } from "node:crypto";
+import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { looksLikeProtocol, protocolName } from "../safepath.js";
 import {
   FILTERGRAPH_OPTIONS, acrossfadeUnreliable, adaptFilterGraph, parseFfmpegVersion, preferredFilterScriptFlag, usesPremultiply,
@@ -59,6 +60,144 @@ function ffmpegOption(a: string): { base: string; fromFile: boolean } | null {
 const FORBIDDEN_FILTERS: ReadonlySet<string> = new Set(["movie", "amovie", "subtitles", "ass", "zmq", "azmq", "frei0r", "frei0r_src", "ladspa", "lv2"]);
 
 /**
+ * Every filter SynthCut builds (ffmpeg/graph.ts with the effect, audio-effect
+ * and blend registries, the bakes, timefx, analysis, matting, reframe, the
+ * FFmpeg 8.1 alpha-mode adaptation and the colour pipeline), then the
+ * generators and meters its smokes run through runFfmpeg. A graph that names
+ * any other filter is refused: graph text is built from project values in many
+ * places, and FFmpeg has too many filters that read or write files by option
+ * (metadata, ametadata, psnr, ssim, vidstabdetect, libvmaf, deshake,
+ * signature, sr/dnn_*, arnndn, removelogo, …, more in every release) to deny
+ * them one by one. A filter that SynthCut uses and that takes a file is only
+ * accepted with a file in its working directory (see {@link FILE_OPTIONS}).
+ * Inventory: a static scan of the source plus a full test-matrix run with
+ * AIVE_GUARD_REPORT set (every filter a run builds is logged), on FFmpeg 4.4
+ * and 8.1.
+ */
+const ALLOWED_FILTERS: ReadonlySet<string> = new Set([
+  // video
+  "alphaextract", "alphamerge", "blend", "cas", "chromakey", "color", "colorbalance", "colorchannelmixer", "colorhold",
+  "colorkey", "crop", "curves", "despill", "drawtext", "edgedetect", "eq", "exposure", "fade", "fillborders", "format",
+  "fps", "framerate", "gblur", "geq", "hflip", "histogram", "hqdn3d", "hue", "lagfun", "lenscorrection", "lumakey",
+  "lut", "lut2", "lut3d", "lutrgb", "minterpolate", "negate", "noise", "overlay", "pad", "perspective", "premultiply",
+  "reverse", "rgbashift", "rotate", "scale", "select", "sendcmd", "setparams", "setpts", "setsar", "showinfo",
+  "signalstats", "split", "tpad", "trim", "unpremultiply", "unsharp", "vectorscope", "vflip", "vibrance",
+  "vidstabdetect", "vidstabtransform", "vignette", "waveform", "xfade",
+  // audio
+  "acompressor", "acrossfade", "adeclick", "adelay", "aecho", "aeval", "afade", "afftdn", "afftfilt", "aformat",
+  "agate", "alimiter", "amix", "anlmdn", "anoisesrc", "anullsrc", "apad", "aresample", "areverse", "asetnsamples",
+  "asetpts", "asetrate", "asettb", "asoftclip", "asplit", "atempo", "atrim", "deesser", "dynaudnorm", "ebur128",
+  "equalizer", "highpass", "highshelf", "loudnorm", "lowpass", "lowshelf", "rubberband", "sidechaincompress",
+  "silencedetect", "vibrato", "volume",
+  // both
+  "concat", "metadata", "null",
+  // generators and meters the smokes run through runFfmpeg (no file options)
+  "aevalsrc", "anull", "nullsrc", "sine", "testsrc", "testsrc2", "volumedetect", "zoompan",
+]);
+
+/** How the guard treats the options of an allowed filter that can open a file. */
+interface FileOptionRule {
+  /**
+   * Options (with every alias) naming a file SynthCut stages, each with the
+   * name the engine gives that file: only such a bare name, in an owned
+   * working directory. A write option can then never overwrite another kind
+   * of file (a bake, a project) in that directory.
+   */
+  files?: Readonly<Record<string, RegExp>>;
+  /** Options SynthCut never sets that read or write a file (or run commands): refused. */
+  refused?: readonly string[];
+  /** The positional (unnamed) values SynthCut passes, in order ("file": the `file` option's); a further one is refused (it could reach a file option). */
+  positional: readonly ("value" | "file")[];
+  /** What a file the filter reads may hold; checked before the run (sendcmd: the commands it sends to other filters). */
+  content?: RegExp;
+}
+
+/** Text files of overlays and captions (engine stageRender: txt_<overlay>.txt, cap_<clip>_<cue>.txt). */
+const TEXT_FILE = /^(?:txt|cap)_.*\.txt$/;
+/** Fonts staged for drawtext (engine stageFont / resolveFont: font.ttf, font_<n>.ttf / .otf). */
+const FONT_FILE = /^font(?:_\d+)?\.(?:ttf|otf)$/;
+/** LUTs staged for lut3d (engine stageRender: lut<n>.cube). */
+const LUT_FILE = /^lut\d+\.cube$/;
+/** vidstab transform files (engine stabilize: <clip>-stab-<run>.trf). */
+const TRF_FILE = /\.trf$/;
+/** The auto-reframe crop plan (engine reframe: <clip>-reframe.txt). */
+const REFRAME_FILE = /-reframe\.txt$/;
+
+/**
+ * The only sendcmd file SynthCut writes: the auto-reframe crop plan, exactly
+ * as reframe.ts cropPlanToSendcmd writes it (`<seconds> crop x|y <integer>;`
+ * per line). sendcmd applies its commands at run time to any filter in the
+ * graph, past every option check here (curves plot= writes any file, drawtext
+ * reinit re-reads its files), so nothing else may be in it: no other target
+ * or command, no interval flags, no comments.
+ */
+const REFRAME_PLAN = /^(?:\d+\.\d{3} crop [xy] -?\d+;\r?\n)+$/;
+/** Largest sendcmd file the guard reads (a reframe plan is a few KB: at most 2 lines per sampled frame). */
+const SENDCMD_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The allowed filters with an option that opens a file (from `ffmpeg -h
+ * filter=<name>` on FFmpeg 4.4 – 9.0). SynthCut stages every file such a
+ * filter reads or writes in the run's working directory and names it there
+ * (lut0.cube, font_0.ttf, txt_….txt, …-stab-….trf, …-reframe.txt); a path, a
+ * protocol, a name outside that directory or a name of another shape can only
+ * be injected.
+ */
+const FILE_OPTIONS: Readonly<Record<string, FileOptionRule>> = {
+  drawtext: { files: { fontfile: FONT_FILE, textfile: TEXT_FILE }, positional: [] },
+  lut3d: { files: { file: LUT_FILE }, positional: ["file"] },
+  vidstabdetect: { files: { result: TRF_FILE }, positional: [] },
+  vidstabtransform: { files: { input: TRF_FILE }, positional: [] },
+  sendcmd: { files: { filename: REFRAME_FILE, f: REFRAME_FILE }, refused: ["commands", "c"], positional: [], content: REFRAME_PLAN },
+  metadata: { refused: ["file"], positional: ["value"] },
+  curves: { refused: ["psfile", "plot"], positional: [] },
+  loudnorm: { refused: ["stats_file"], positional: [] },
+};
+
+/**
+ * Allowed filters with a run-time command that opens a file: curves' psfile
+ * and plot options carry the T (runtime) flag, and drawtext's reinit command
+ * re-reads textfile / fontfile (`ffmpeg -h filter=<name>` on 4.4, 8.1 and
+ * 9.0: no other allowed filter has a T-flagged file option). A graph with
+ * sendcmd may not have them, whatever its command file holds.
+ */
+const RUNTIME_FILE_FILTERS: ReadonlySet<string> = new Set(["curves", "drawtext"]);
+
+/**
+ * A file name in the working directory: no directory part, drive, protocol or
+ * leading dot. A leading "-" is allowed: bake names start with a clip id
+ * (safeFileStem keeps a plain-token id such as "-x" as it is).
+ */
+const BARE_FILE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
+
+/** Directories whose subtrees SynthCut owns as FFmpeg working directories, besides the OS temp dir (see {@link addFfmpegWorkRoot}). */
+const workRoots = new Set<string>();
+
+/**
+ * Own `dir` (the engine's data dir) as a root for FFmpeg working
+ * directories: a graph that names a file by bare name is only run with its
+ * cwd inside one of these or inside the OS temp dir.
+ */
+export function addFfmpegWorkRoot(dir: string): void {
+  workRoots.add(resolve(dir));
+}
+
+/**
+ * True when `cwd` is set and inside a SynthCut-owned directory. A bare file
+ * name resolves against the spawn's cwd: without one it is the process's own
+ * (the launch directory, often the user's home), where an injected
+ * textfile= would read the user's files and result= would write there.
+ */
+function ownedWorkDir(cwd: string | undefined): boolean {
+  if (!cwd) return false;
+  const at = resolve(cwd);
+  return [resolve(tmpdir()), ...workRoots].some((root) => {
+    const rel = relative(root, at);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  });
+}
+
+/**
  * One token the way FFmpeg's av_get_token reads it (libavutil/avstring.c):
  * leading whitespace skipped, `\x` is a literal x, `'…'` is literal up to the
  * next quote, unquoted trailing whitespace dropped; it stops before an
@@ -91,14 +230,21 @@ function avGetToken(s: string, start: number, term: string): { token: string; en
   return { token: out.slice(0, end), end: i };
 }
 
+/** One filter of a graph: its name (lower case, no `@instance`) and its argument string as the graph parser hands it to the filter. */
+export interface GraphFilter {
+  name: string;
+  /** The `=…` part with the graph level of quoting removed (undefined: no arguments). */
+  args?: string;
+}
+
 /**
- * The filter names of graph `g`, read the way libavfilter's graph parser does
+ * The filters of graph `g`, read the way libavfilter's graph parser does
  * (graphparser.c: [labels] name[@id][=args][labels], separated by `,` / `;`),
  * so quoting or escaping a name (`'movie'=…`, `mo\vie=…`) can't hide it from the
  * check the way it would from a pattern. Throws on a graph it can't read.
  */
-export function filterGraphNames(g: string): string[] {
-  const names: string[] = [];
+export function filterGraphFilters(g: string): GraphFilter[] {
+  const filters: GraphFilter[] = [];
   let i = 0;
   const skipWs = () => {
     while (i < g.length && /\s/.test(g[i])) i++;
@@ -116,29 +262,159 @@ export function filterGraphNames(g: string): string[] {
     if (i >= g.length) break;
     const name = avGetToken(g, i, "=,;[");
     i = name.end;
-    names.push(name.token.split("@")[0].toLowerCase());
-    if (g[i] === "=") i = avGetToken(g, i + 1, "[],;").end;
+    const filter: GraphFilter = { name: name.token.split("@")[0].toLowerCase() };
+    if (g[i] === "=") {
+      const args = avGetToken(g, i + 1, "[],;");
+      filter.args = args.token;
+      i = args.end;
+    }
+    filters.push(filter);
     labels();
     if (i >= g.length) break;
     if (g[i] !== "," && g[i] !== ";") throw new Error(`unexpected "${g[i]}" in a filtergraph`);
     i++;
   }
-  return names;
+  return filters;
 }
 
-/** Throw when filtergraph `g` (the value of `flag`) uses a {@link FORBIDDEN_FILTERS} filter, or can't be read. */
-function assertGraphSafe(g: string, flag: string): void {
-  let names: string[];
+/** The filter names of graph `g` ({@link filterGraphFilters}). */
+export function filterGraphNames(g: string): string[] {
+  return filterGraphFilters(g).map((f) => f.name);
+}
+
+/** One option of a filter's arguments: `key` is undefined for a positional (shorthand) value. */
+export interface FilterOption {
+  key?: string;
+  value: string;
+}
+
+/** av_opt_get_key_value's key characters (libavutil/opt.c is_key_char). */
+const OPTION_KEY_CHAR = /[A-Za-z0-9_\-/.]/;
+const OPTION_WS = /[ \n\t\r]/;
+
+/**
+ * A filter's argument string split into options the way libavfilter's
+ * process_options reads it (av_opt_get_key_value with "=" and ":"): a
+ * `key=` prefix names the option, anything else is the next positional
+ * value, and every value is one more av_get_token level (so `'…'` and `\:`
+ * can't hide a path from the checks below).
+ */
+export function filterOptions(args: string): FilterOption[] {
+  const out: FilterOption[] = [];
+  let i = 0;
+  while (i < args.length) {
+    let k = i;
+    while (k < args.length && OPTION_WS.test(args[k])) k++;
+    const keyStart = k;
+    while (k < args.length && OPTION_KEY_CHAR.test(args[k])) k++;
+    const keyEnd = k;
+    while (k < args.length && OPTION_WS.test(args[k])) k++;
+    const named = args[k] === "=";
+    const value = avGetToken(args, named ? k + 1 : i, ":");
+    out.push(named ? { key: args.slice(keyStart, keyEnd), value: value.token } : { value: value.token });
+    i = value.end;
+    if (i < args.length) i++; // the ":" separator
+  }
+  return out;
+}
+
+/**
+ * AIVE_GUARD_REPORT: instead of refusing a graph for an unknown filter or a
+ * file option, log what strict mode would refuse ("1": to stderr, otherwise
+ * appended to that file) and let it run. For collecting the filters a test
+ * run uses; never set in production. The always-forbidden filters and an
+ * unreadable graph are refused in both modes.
+ */
+function refuseOrReport(message: string): void {
+  const to = process.env.AIVE_GUARD_REPORT;
+  if (!to) throw new Error(message);
+  const line = `[ffmpeg-guard] ${message}\n`;
+  if (to === "1") process.stderr.write(line);
+  else appendFileSync(to, line);
+}
+
+/**
+ * Throw when filtergraph `g` (the value of `flag`) can't be read, uses a
+ * {@link FORBIDDEN_FILTERS} filter or one that is not in
+ * {@link ALLOWED_FILTERS}, or gives an allowed filter an option that opens a
+ * file outside its working directory `cwd` ({@link FILE_OPTIONS}).
+ */
+function assertGraphSafe(g: string, flag: string, cwd: string | undefined): void {
+  let filters: GraphFilter[];
   try {
-    names = filterGraphNames(g);
+    filters = filterGraphFilters(g);
   } catch (err) {
     throw new Error(`Refusing an ffmpeg ${flag} graph SynthCut can't read safely: ${(err as Error).message}.`);
   }
-  const bad = names.find((n) => FORBIDDEN_FILTERS.has(n));
+  const bad = filters.find((f) => FORBIDDEN_FILTERS.has(f.name));
   if (bad) {
     throw new Error(
-      `Refusing an ffmpeg ${flag} graph that uses the ${bad} filter — SynthCut never builds one (it opens files, URLs or sockets by itself), so this came from an injected project field.`,
+      `Refusing an ffmpeg ${flag} graph that uses the ${bad.name} filter — SynthCut never builds one (it opens files, URLs or sockets by itself), so this came from an injected project field.`,
     );
+  }
+  const commanded = filters.some((f) => f.name === "sendcmd") && filters.find((f) => RUNTIME_FILE_FILTERS.has(f.name));
+  if (commanded) {
+    refuseOrReport(
+      `Refusing an ffmpeg ${flag} graph with both sendcmd and ${commanded.name} (a run-time command could make ${commanded.name} open a file) — SynthCut never builds that, so this came from an injected project field.`,
+    );
+  }
+  for (const f of filters) {
+    if (!ALLOWED_FILTERS.has(f.name)) {
+      refuseOrReport(
+        `Refusing an ffmpeg ${flag} graph that uses the unknown filter "${f.name}" — SynthCut never builds it, so this came from an injected project field.`,
+      );
+    } else if (f.args !== undefined) {
+      assertOptionsSafe(f.name, f.args, flag, cwd);
+    }
+  }
+}
+
+/** Refuse (or report) a `name=args` filter whose options could open a file SynthCut did not stage. */
+function assertOptionsSafe(name: string, args: string, flag: string, cwd: string | undefined): void {
+  let options: FilterOption[];
+  try {
+    options = filterOptions(args);
+  } catch (err) {
+    throw new Error(`Refusing an ffmpeg ${flag} graph SynthCut can't read safely: ${(err as Error).message}.`);
+  }
+  const rule = FILE_OPTIONS[name];
+  const refuse = (what: string) =>
+    refuseOrReport(`Refusing an ffmpeg ${flag} graph: ${name} ${what} — SynthCut never builds that, so this came from an injected project field.`);
+  /** A file option's bare name, opened in `cwd`: only of the engine's `shape`, in a SynthCut-owned working directory, and holding what the rule allows. */
+  const fileOk = (value: string, shape: RegExp | undefined, what: string) => {
+    if (!BARE_FILE.test(value)) refuse(`${what} "${value}" outside its working directory`);
+    else if (!shape?.test(value)) refuse(`${what} "${value}", a name SynthCut never gives that file`);
+    else if (!ownedWorkDir(cwd)) refuse(`${what} "${value}" in ${cwd ? `"${cwd}", which is not a SynthCut working directory` : "the process's working directory"}`);
+    else if (rule?.content && !fileHolds(join(cwd!, value), rule.content)) refuse(`${what} "${value}", which holds more than SynthCut ever writes to it`);
+  };
+  const shapeOf = (key: string) => (rule?.files && Object.hasOwn(rule.files, key) ? rule.files[key] : undefined);
+  let positional = 0;
+  for (const o of options) {
+    if (o.key === undefined) {
+      const slot = rule?.positional[positional++];
+      if (!rule) continue;
+      if (slot === undefined) refuse(`has an unexpected positional value "${o.value}"`);
+      else if (slot === "file") fileOk(o.value, shapeOf("file"), "reads the file");
+      continue;
+    }
+    // FFmpeg 7.0+ reads an option's value from the file a "/" key prefix names (-vf drawtext=/text=…).
+    if (o.key.startsWith("/")) {
+      refuse(`reads option ${o.key.slice(1)} from the file "${o.value}"`);
+      continue;
+    }
+    if (!rule) continue;
+    const key = o.key.toLowerCase();
+    if (rule.refused?.includes(key)) refuse(`option ${o.key}="${o.value}"`);
+    else if (shapeOf(key)) fileOk(o.value, shapeOf(key), "opens the file");
+  }
+}
+
+/** True when `path` is a readable file of at most {@link SENDCMD_MAX_BYTES} whose whole text `content` matches. */
+function fileHolds(path: string, content: RegExp): boolean {
+  try {
+    return statSync(path).size <= SENDCMD_MAX_BYTES && content.test(readFileSync(path, "utf8"));
+  } catch {
+    return false;
   }
 }
 
@@ -151,31 +427,52 @@ function inputFormat(args: readonly string[], i: number): string | undefined {
 }
 
 /**
- * Final backstop against SSRF / protocol reads at the FFmpeg boundary. The core
- * only ever hands FFmpeg/ffprobe LOCAL files (plus its own pipes and
- * `-f lavfi`/`-f concat` inputs it builds by bare name); a `scheme:` input or a
- * filter that opens its own source (movie=, subtitles=, zmq …, see
- * {@link FORBIDDEN_FILTERS}) could only come from an unvalidated path in a
- * crafted project that slipped past the load-time guard. This refuses both so
- * an unvalidated path can never be treated as a protocol. It is the TypeScript
- * half; {@link ffmpegArgsLocalOnly} adds FFmpeg's own `-protocol_whitelist`, so
- * an input form this parser misreads is still refused by FFmpeg itself.
+ * Final backstop against SSRF / protocol reads and file reads or writes at the
+ * FFmpeg boundary. The core only ever hands FFmpeg/ffprobe LOCAL files (plus
+ * its own pipes and `-f lavfi`/`-f concat` inputs it builds by bare name) and
+ * builds graphs from its own filters; anything else could only come from a
+ * project value that slipped past the load-time guard. What this guarantees
+ * for every graph option (`-vf`, `-af`, `-filter_complex`, `-filter:v:0`, a
+ * `-f lavfi` input …):
+ * - no filter that opens its own source (movie=, subtitles=, zmq …, see
+ *   {@link FORBIDDEN_FILTERS}) and no filter SynthCut does not build
+ *   ({@link ALLOWED_FILTERS}: metadata's file=, psnr, ssim, asendcmd …);
+ * - a filter option opens a file only by a bare name of the shape the engine
+ *   gives that file ({@link FILE_OPTIONS}), in a `cwd` SynthCut owns (the data
+ *   dir or the OS temp dir, {@link addFfmpegWorkRoot}); with `cwd` unset any
+ *   such name is refused, since it would open in the process's own directory;
+ * - the options that write or read other files (curves plot / psfile,
+ *   metadata file, loudnorm stats_file, sendcmd commands) and FFmpeg 7+'s
+ *   `/option` (a value read from a file) are refused;
+ * - run-time commands: sendcmd's file must hold only the reframe crop plan
+ *   ({@link REFRAME_PLAN}), and a graph with sendcmd may not have a filter
+ *   whose run-time commands open files ({@link RUNTIME_FILE_FILTERS});
+ * - a graph read from a file (`-filter_complex_script`, `-/vf` …) is refused.
+ * Bitstream filters (`-bsf:v h264_metadata=…`) are not checked: none of them
+ * on FFmpeg 4.4 – 9.0 has an option that names a file, and they don't read the
+ * `/option` file form. It is the TypeScript half; {@link ffmpegArgsLocalOnly}
+ * adds FFmpeg's own `-protocol_whitelist`, so an input form this parser
+ * misreads is still refused by FFmpeg itself.
  *
  * Exempt `-i` inputs: anything with no colon (a bare filename like `v.txt`,
  * never a protocol), `pipe:N` / `-`, and an input declared by a `-f lavfi` /
- * `-f concat` (anullsrc, the concat list; a lavfi graph is scanned for the
- * forbidden filters instead). A Windows drive path (`C:\…`) has a colon but is
+ * `-f concat` (anullsrc, the concat list; a lavfi graph is checked like any
+ * other graph instead). A Windows drive path (`C:\…`) has a colon but is
  * NOT a protocol — {@link looksLikeProtocol} lets it through.
+ *
+ * `cwd` is the spawn's working directory, where a bare file name in a graph
+ * opens.
  */
-export function guardFfmpegArgs(args: readonly string[]): void {
+export function guardFfmpegArgs(args: readonly string[], cwd?: string): void {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "-i") {
       const input = args[i + 1];
       if (input === undefined) continue;
-      const fmt = inputFormat(args, i);
+      // FFmpeg matches a format name case-insensitively (`-f LAVFI` is lavfi).
+      const fmt = inputFormat(args, i)?.toLowerCase();
       if (fmt === "lavfi") {
-        assertGraphSafe(input, "-f lavfi -i");
+        assertGraphSafe(input, "-f lavfi -i", cwd);
         continue;
       }
       if (fmt === "concat") continue;
@@ -192,7 +489,7 @@ export function guardFfmpegArgs(args: readonly string[]): void {
       }
       if (FILTERGRAPH_OPTION_BASES.has(opt.base)) {
         const g = args[i + 1];
-        if (typeof g === "string") assertGraphSafe(g, a);
+        if (typeof g === "string") assertGraphSafe(g, a, cwd);
       }
     }
   }
@@ -228,11 +525,12 @@ export const PROTOCOL_WHITELIST = "file,pipe,fd";
  * `args` checked by {@link guardFfmpegArgs} and with `-protocol_whitelist`
  * before every `-i`, so FFmpeg itself refuses any input that is not a local
  * file or pipe even where the TypeScript guard reads the input name differently
- * from FFmpeg. Every ffmpeg spawn in the core goes through this. The added
- * flags are not part of any cache key (segmentKey hashes clip data, not args).
+ * from FFmpeg. Every ffmpeg spawn in the core goes through this; pass the
+ * spawn's `cwd` when its graph names files. The added flags are not part of
+ * any cache key (segmentKey hashes clip data, not args).
  */
-export function ffmpegArgsLocalOnly(args: readonly string[]): string[] {
-  guardFfmpegArgs(args);
+export function ffmpegArgsLocalOnly(args: readonly string[], cwd?: string): string[] {
+  guardFfmpegArgs(args, cwd);
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "-i" && i + 1 < args.length) out.push("-protocol_whitelist", PROTOCOL_WHITELIST);
@@ -305,7 +603,8 @@ export interface FfmpegRunOptions {
    * Working directory. Set this when the filtergraph references files by bare
    * name (LUTs, vidstab transform files) — on Windows, absolute paths with a
    * drive-letter colon cannot be parsed inside a filtergraph, so we cd into the
-   * directory and use relative filenames instead.
+   * directory and use relative filenames instead. Such a graph is refused
+   * unless this is inside the data dir or the OS temp dir (addFfmpegWorkRoot).
    */
   cwd?: string;
 }
@@ -441,7 +740,7 @@ export function withFilterGraphFile(args: readonly string[], at: number, file: s
  * the run.
  */
 export async function runFfmpeg(built: string[], opts: FfmpegRunOptions = {}): Promise<void> {
-  const args = ffmpegArgsLocalOnly(await adaptFfmpegArgs(built));
+  const args = ffmpegArgsLocalOnly(await adaptFfmpegArgs(built), opts.cwd);
   const at = longFilterGraphIndex(args);
   if (at < 0) return runFfmpegOnce(args, opts);
   if (filterScriptFlag === null) {

@@ -209,7 +209,8 @@ export function parseKeyColor(c: string | undefined): string | null {
   const s = (c ?? "").trim().toLowerCase();
   const m = /^(?:0x|#)?([0-9a-f]{6})(?:[0-9a-f]{2})?$/.exec(s);
   if (m) return `0x${m[1].toUpperCase()}`;
-  const named = KEY_COLOR_NAMES[s];
+  // An own key only: "constructor" would name Object's own function.
+  const named = Object.hasOwn(KEY_COLOR_NAMES, s) ? KEY_COLOR_NAMES[s] : undefined;
   return named ? `0x${named}` : null;
 }
 

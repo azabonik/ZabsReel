@@ -73,7 +73,7 @@ export function chromiumMatrix(s: { codec?: string; height?: number; space?: str
   const tagged: Record<string, string> = {
     bt709: "bt709", smpte170m: "bt601", bt470bg: "bt601", bt2020nc: "bt2020", bt2020c: "bt2020", smpte240m: "smpte240m", fcc: "fcc",
   };
-  const t = s.space ? tagged[s.space] : undefined;
+  const t = s.space && Object.hasOwn(tagged, s.space) ? tagged[s.space] : undefined;
   return { matrix: t ?? (range === "pc" || s.codec === "vp9" ? "bt601" : (s.height ?? 0) >= 720 ? "bt709" : "bt601"), range };
 }
 

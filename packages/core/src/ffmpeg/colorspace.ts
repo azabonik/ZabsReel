@@ -55,9 +55,9 @@ const MATRICES: Record<string, YuvMatrix> = {
 
 const known = (v: string | undefined): v is string => !!v && v !== "unknown" && v !== "reserved" && v !== "unspecified";
 
-/** The matrix a tag names, or undefined when it names none swscale has. */
+/** The matrix a tag names, or undefined when it names none swscale has (an own key only: a loaded "constructor" names none). */
 export function taggedMatrix(space: string | undefined): YuvMatrix | undefined {
-  return space ? MATRICES[space] : undefined;
+  return space && Object.hasOwn(MATRICES, space) ? MATRICES[space] : undefined;
 }
 
 /** Players' guess for an untagged matrix: BT.709 from 720 lines up, BT.601 below. */

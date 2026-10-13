@@ -47,6 +47,11 @@ export function cutoutColorInputArgs(c: Pick<CutoutMerge, "colorPath" | "colorSt
   return ["-ss", ss.toFixed(6), ...(span !== undefined ? ["-t", span.toFixed(6)] : []), "-i", c.colorPath];
 }
 
+/** `v` when it is a finite number, else `fallback`. */
+function finiteOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
 /**
  * Filter chain that merges a colour stream and its matte stream into one
  * yuva420p stream labelled `out` (labels are given with their brackets).
@@ -70,6 +75,8 @@ export function cutoutColorInputArgs(c: Pick<CutoutMerge, "colorPath" | "colorSt
  */
 export function cutoutMergeFilter(colorLabel: string, matteLabel: string, out: string, m: Pick<CutoutMerge, "fps" | "width" | "height" | "range">): string {
   const tag = out.replace(/[[\]]/g, "");
+  // Asset numbers from a loaded project: never text in the graph (safepath.ts coerces them on load too).
+  m = { ...m, width: finiteOr(m.width, 0), height: finiteOr(m.height, 0), fps: finiteOr(m.fps, 0) };
   const half = (0.5 / (m.fps > 0 ? m.fps : 30)).toFixed(6);
   const frame = (1 / (m.fps > 0 ? m.fps : 30)).toFixed(6);
   return (

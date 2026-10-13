@@ -4,7 +4,7 @@ import { mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes
 import { homedir } from "node:os";
 import { join, dirname, basename, isAbsolute, resolve, sep } from "node:path";
 import { newId } from "./ids.js";
-import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, assertProjectMediaLocal, assertLocalMediaPath, isProtocolLike } from "./safepath.js";
+import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, isProtocolLike } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
@@ -22,7 +22,7 @@ import {
   type SceneCut,
   type ColorInspection,
 } from "./ffmpeg/analysis.js";
-import { acrossfadeNeedsMix, ffmpegVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
+import { acrossfadeNeedsMix, addFfmpegWorkRoot, ffmpegVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
 import { xfadeNeedsEofPad } from "./ffmpeg/version.js";
 import { stabilizeFilters, type StabilizeOptions } from "./ffmpeg/stabilize.js";
 import { EFFECTS, effectByType } from "./effects/registry.js";
@@ -216,7 +216,7 @@ function fontMatches(file: string, want: string): boolean {
 async function findSystemFont(name: string): Promise<string | undefined> {
   const want = fontKey(name);
   if (!want) return undefined;
-  const alias = FONT_ALIASES[want];
+  const alias = Object.hasOwn(FONT_ALIASES, want) ? FONT_ALIASES[want] : undefined;
   const matches = (file: string) => fontMatches(file, want) || (alias ? fontMatches(file, alias) : false);
   for (const dir of FONT_DIRS) {
     let entries;
@@ -518,6 +518,8 @@ export class EditorEngine extends EventEmitter {
   /** Directory where previews, thumbnails and other render artifacts are written. */
   constructor(readonly dataDir: string) {
     super();
+    // Renders and bakes run FFmpeg in render/ and baked/ with files named by bare name.
+    addFfmpegWorkRoot(dataDir);
     this.storage = new StorageJanitor(dataDir, {
       liveProjects: () => [this.project, ...this.undoStack, ...this.redoStack],
       runningJobs: () => this.jobs.list(true),
@@ -6202,12 +6204,14 @@ export class EditorEngine extends EventEmitter {
 
 /**
  * The untrusted-input checks for a loaded/imported project (see load()): ids
- * sanitised, numbers coerced, non-local media refused (throws), bleep sounds
- * coerced. Mutates and returns `project`, which must not be live yet.
+ * sanitised, numbers and the values that reach FFmpeg graphs coerced,
+ * non-local media refused (throws), bleep sounds coerced. Mutates and
+ * returns `project`, which must not be live yet.
  */
 function validateLoadedProject(project: Project): Project {
   sanitizeProjectIds(project);
   coerceProjectNumbers(project);
+  coerceProjectValues(project);
   assertProjectMediaLocal(project);
   sanitizeBleepSounds(project);
   return project;

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { EditorEngine } from "./engine.js";
-import { clipDurationFrames, clipEndFrame } from "./types.js";
+import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
 import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
@@ -81,24 +81,6 @@ const TEXT_STYLE_FIELDS = {
   boxColor: colorField.optional(),
   boxBorderW: z.number().int().min(0).max(200).optional(),
 };
-
-const TRANSITION_TYPES = [
-  "fade",
-  "dissolve",
-  "wipeleft",
-  "wiperight",
-  "wipeup",
-  "wipedown",
-  "slideleft",
-  "slideright",
-  "circleopen",
-  "circleclose",
-  "fadeblack",
-  "fadewhite",
-  "radial",
-  "smoothleft",
-  "smoothright",
-] as const;
 
 const KEYFRAME_PROPERTIES = ["x", "y", "scale", "rotation", "opacity", "volume"] as const;
 /** Built-in bleep sounds (synthesized, see audio/sfx.ts). */

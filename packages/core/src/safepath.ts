@@ -16,9 +16,13 @@
  *    path as a local file (accepted) vs a URL/protocol form (rejected).
  *  - {@link sanitizeProjectIds} rewrites non-token ids on load/import.
  *  - {@link assertProjectMediaLocal} refuses a project whose media is non-local.
+ *  - {@link coerceProjectNumbers} / {@link coerceProjectValues} give every
+ *    value that reaches an FFmpeg graph the type the model says it has.
  */
 import { newId } from "./ids.js";
-import type { Project, MediaAsset, Clip, Track } from "./types.js";
+import { isTransitionType, type Project, type MediaAsset, type Clip, type Track } from "./types.js";
+import { isBlendMode } from "./effects/compositing.js";
+import { parseKeyColor } from "./effects/registry.js";
 
 /** Max length of a sanitised filename stem (ids are ~15 chars; this is slack). */
 const MAX_STEM = 64;
@@ -296,6 +300,194 @@ export function coerceProjectNumbers(project: Project): number {
       cl.sourceOutFrame = Math.round(num(cl.sourceOutFrame, (cl.sourceInFrame as number) + 1, 0));
       if (cl.audioOffsetFrames !== undefined) cl.audioOffsetFrames = Math.round(num(cl.audioOffsetFrames, 0));
     }
+  }
+  return fixed;
+}
+
+type Rec = Record<string, unknown>;
+
+/**
+ * Give every field of a loaded/imported project that reaches an FFmpeg graph
+ * (export, preview, thumbnails, bakes) the type the model says it has, so no
+ * project text is spliced into a filtergraph: asset geometry, fps, duration
+ * and cutout start; probed colour descriptions and codecs; transitions (a
+ * known xfade type); clip effects (speed,
+ * volume, fades, opacity, colour, grade, crop, transform, blend mode, speed
+ * ramp, visual and audio effects with their params and key colours, bleeps);
+ * keyframes; text overlay and caption styles and timing; graphics; track
+ * volume; music. A wrong-typed optional field is dropped (its default
+ * applies), a wrong-typed required one falls back to a safe value and an
+ * unknown transition type becomes "fade". Ranges are not clamped here: the
+ * graph builders clamp (effects/registry.ts paramValue …), and a value a
+ * valid project holds is never changed. Mutates `project`; returns how many
+ * fields were changed (0 for any project SynthCut wrote).
+ */
+export function coerceProjectValues(project: Project): number {
+  let fixed = 0;
+  const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  const drop = (o: Rec, k: string) => {
+    delete o[k];
+    fixed++;
+  };
+  /** Drop each of `keys` that is present but not a finite number. */
+  const nums = (o: Rec, ...keys: string[]) => {
+    for (const k of keys) if (o[k] !== undefined && !finite(o[k])) drop(o, k);
+  };
+  /** Drop each of `keys` that is present but not a string. */
+  const strs = (o: Rec, ...keys: string[]) => {
+    for (const k of keys) if (o[k] !== undefined && typeof o[k] !== "string") drop(o, k);
+  };
+  /** A present non-finite (or below `min`) number becomes `fallback`. */
+  const num = (o: Rec, k: string, fallback: number, min = -Infinity) => {
+    if (o[k] !== undefined && !(finite(o[k]) && (o[k] as number) >= min)) {
+      o[k] = fallback;
+      fixed++;
+    }
+  };
+  /** `o[k]` when it is a plain object; dropped (undefined) when it is something else. */
+  const obj = (o: Rec, k: string): Rec | undefined => {
+    const v = o[k];
+    if (v === undefined) return undefined;
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) return v as Rec;
+    drop(o, k);
+    return undefined;
+  };
+  /** `o[k]`'s entries that `keep` accepts (an array of objects); a non-array is dropped. */
+  const list = (o: Rec, k: string, keep: (e: Rec) => boolean = () => true): Rec[] => {
+    const v = o[k];
+    if (v === undefined) return [];
+    if (!Array.isArray(v)) {
+      drop(o, k);
+      return [];
+    }
+    const kept = v.filter((e): e is Rec => e !== null && typeof e === "object" && !Array.isArray(e) && keep(e as Rec));
+    if (kept.length !== v.length) {
+      o[k] = kept;
+      fixed += v.length - kept.length;
+    }
+    return kept;
+  };
+  /** Keyframe tracks: every keyframe has a finite frame and value. */
+  const keyframes = (o: Rec, k: string) => {
+    const tracks = obj(o, k);
+    if (tracks) for (const p of Object.keys(tracks)) list(tracks, p, (kf) => finite(kf.frame) && finite(kf.value));
+  };
+  /** A text overlay / caption style (TextStyle). */
+  const style = (s: Rec) => {
+    nums(s, "x", "y", "fontSize", "outlineWidth", "shadowX", "shadowY", "boxBorderW");
+    strs(s, "position", "font", "color", "outlineColor", "shadowColor", "boxColor");
+  };
+  /** An ffprobe name: a colour space, range, primaries or transfer ("bt709", "arib-std-b67" …) or a codec ("h264"). */
+  const token = (v: unknown) => typeof v === "string" && /^[a-z0-9_-]{1,32}$/.test(v);
+  /**
+   * A probed colour description (ProbedColor): ffprobe names and a positive
+   * integer coded height, or the whole description is dropped (load probes
+   * the file again, probeUnrecordedColors). Its matrix and range name the
+   * scale filter's in_color_matrix / in_range.
+   */
+  const colour = (o: Rec, k: string) => {
+    const c = obj(o, k);
+    if (!c) return;
+    const named = ["space", "range", "primaries", "transfer"].every((f) => c[f] === undefined || token(c[f]));
+    const height = c.codedHeight === undefined || (Number.isInteger(c.codedHeight) && (c.codedHeight as number) > 0);
+    if (!named || !height) drop(o, k);
+  };
+  /** A visual or audio effect's params: only finite numbers. */
+  const params = (e: Rec) => {
+    const p = obj(e, "params");
+    if (p) nums(p, ...Object.keys(p));
+  };
+
+  for (const a of project.assets ?? []) {
+    const r = a as unknown as Rec;
+    num(r, "duration", 0, 0);
+    num(r, "width", 0, 0);
+    num(r, "height", 0, 0);
+    num(r, "fps", 0, 0);
+    colour(r, "color");
+    colour(r, "proxyColor");
+    if (r.videoCodec !== undefined && !token(r.videoCodec)) drop(r, "videoCodec");
+    const cut = obj(r, "cutout");
+    if (cut) {
+      num(cut, "colorStart", 0, 0);
+      // The colour source's codec and description are recorded (and probed again) together.
+      if (cut.colorCodec !== undefined && !token(cut.colorCodec)) {
+        drop(cut, "colorCodec");
+        if (cut.colorTags !== undefined) drop(cut, "colorTags");
+      }
+      colour(cut, "colorTags");
+    }
+    const rev = obj(r, "reversedFrom");
+    if (rev) {
+      num(rev, "sourceInFrame", 0, 0);
+      num(rev, "sourceOutFrame", 0, 0);
+    }
+  }
+  for (const t of project.tracks ?? []) {
+    nums(t as unknown as Rec, "volume");
+    for (const c of t.clips ?? []) {
+      const cl = c as unknown as Rec;
+      const tr = obj(cl, "transition");
+      if (tr) {
+        if (!isTransitionType(tr.type)) {
+          tr.type = "fade";
+          fixed++;
+        }
+        num(tr, "durationFrames", 1, 0);
+      }
+      keyframes(cl, "keyframes");
+      for (const ov of list(cl, "overlays", (o) => typeof o.text === "string")) {
+        style(ov);
+        nums(ov, "startFrame", "endFrame");
+        keyframes(ov, "keyframes");
+      }
+      const cap = obj(cl, "captions");
+      if (cap) {
+        list(cap, "cues", (q) => finite(q.startFrame) && finite(q.endFrame) && typeof q.text === "string");
+        const st = obj(cap, "style");
+        if (st) style(st);
+      }
+      for (const g of list(cl, "graphics")) nums(g, "opacity", "startFrame", "endFrame");
+
+      const fx = obj(cl, "effects");
+      if (!fx) continue;
+      nums(fx, "speed", "volume", "fadeInFrames", "fadeOutFrames", "opacity");
+      strs(fx, "lut");
+      const ramp = obj(fx, "speedRamp");
+      if (ramp) {
+        nums(ramp, "phase");
+        if (list(ramp, "points", (pt) => finite(pt.src) && finite(pt.speed)).length === 0) drop(fx, "speedRamp");
+      }
+      const color = obj(fx, "color");
+      if (color) nums(color, "brightness", "contrast", "saturation", "gamma");
+      const grade = obj(fx, "grade");
+      if (grade) {
+        nums(grade, "temperature", "tint", "hue");
+        for (const w of ["lift", "gamma", "gain"]) {
+          const wheel = obj(grade, w);
+          if (wheel) nums(wheel, "r", "g", "b");
+        }
+        strs(grade, "curve", "curveR", "curveG", "curveB");
+      }
+      const crop = obj(fx, "crop");
+      if (crop && !["x", "y", "width", "height"].every((k) => finite(crop[k]))) drop(fx, "crop");
+      const tf = obj(fx, "transform");
+      if (tf) nums(tf, "x", "y", "scale", "rotation");
+      if (fx.blendMode !== undefined && !isBlendMode(fx.blendMode)) drop(fx, "blendMode");
+      for (const e of list(fx, "filters", (e) => typeof e.type === "string")) {
+        nums(e, "amount");
+        params(e);
+        // A key colour is stored resolved ("0xRRGGBB"); "auto" is resolved by the graph builder's fallback.
+        if (e.color !== undefined && !(typeof e.color === "string" && (e.color === "auto" || parseKeyColor(e.color)))) drop(e, "color");
+      }
+      for (const e of list(fx, "audioFilters", (e) => typeof e.type === "string")) params(e);
+      for (const b of list(fx, "bleeps", (b) => finite(b.start) && finite(b.end))) nums(b, "volume");
+    }
+  }
+  const music = obj(project as unknown as Rec, "music");
+  if (music) {
+    num(music, "volume", 1, 0);
+    nums(music, "fadeInFrames", "fadeOutFrames");
   }
   return fixed;
 }

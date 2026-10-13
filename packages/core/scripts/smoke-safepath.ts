@@ -12,6 +12,23 @@
  *                                filter that opens its own source (movie=,
  *                                subtitles=, zmq …), whatever leaked.
  *   5b. -protocol_whitelist    — FFmpeg itself refuses any non-file input.
+ *   9. filter allowlist        — the executor refuses any filter SynthCut
+ *                                doesn't build and any file option outside
+ *                                the run's directory (metadata file=, psnr,
+ *                                vidstabdetect result=, drawtext textfile= …),
+ *                                and any bare file name unless the spawn's
+ *                                cwd is in the data dir or the OS temp dir
+ *                                and the name has the engine's shape; a
+ *                                sendcmd file holds only a reframe crop plan.
+ *   10. coerceProjectValues    — load gives every graph-bound value its type
+ *                                (transition, asset geometry, probed colour
+ *                                descriptions, effect params and colours, eq,
+ *                                volume, speed …), and the
+ *                                graph sinks format them as numbers / known
+ *                                names again; the export of a crafted project
+ *                                passes the strict guard with no payload text.
+ *   11. round trip             — a project using every graph-bound field
+ *                                saves and loads unchanged (nothing coerced).
  * One layer has no assertion of its own: importOtio skips probing a protocol
  * target_url, but guardFfprobeArgs refuses the same probe and the probe error
  * is swallowed, so nothing observable changes without the skip (it only saves
@@ -23,20 +40,27 @@
  */
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { EditorEngine } from "../src/engine.js";
-import { runFfmpeg, runFfprobe, guardFfmpegArgs, guardFfprobeArgs, ffmpegArgsLocalOnly } from "../src/ffmpeg/executor.js";
+import { runFfmpeg, runFfprobe, guardFfmpegArgs, guardFfprobeArgs, ffmpegArgsLocalOnly, filterGraphNames, addFfmpegWorkRoot } from "../src/ffmpeg/executor.js";
 import {
   safeFileStem,
   isLocalMediaPath,
   looksLikeProtocol,
   assertLocalMediaPath,
   sanitizeProjectIds,
+  coerceProjectNumbers,
+  coerceProjectValues,
 } from "../src/safepath.js";
-import { drawTextStep } from "../src/ffmpeg/graph.js";
-import type { Project } from "../src/types.js";
+import { buildRenderCommand, drawTextStep, EXPORT_PROFILE, type ResolvedMusic } from "../src/ffmpeg/graph.js";
+import { cutoutMergeFilter } from "../src/ffmpeg/cutout.js";
+import { chromiumMatrix } from "../src/ffmpeg/frames.js";
+import { keepCodingOpts, resolveSourceColor, tagFramesStep, taggedMatrix } from "../src/ffmpeg/colorspace.js";
+import { parseKeyColor } from "../src/effects/registry.js";
+import { cropPlanToSendcmd } from "../src/reframe/reframe.js";
+import type { Canvas, Project, ResolvedRenderClip } from "../src/types.js";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -53,6 +77,8 @@ const threw = async (fn: () => unknown, label: string): Promise<boolean> => {
 };
 
 async function main() {
+  // These rows test the strict guard: a matrix run in report mode must neither loosen them nor log their payloads.
+  delete process.env.AIVE_GUARD_REPORT;
   const root = mkdtempSync(join(tmpdir(), "aive-safepath-"));
   const dataDir = join(root, "data");
   const clip = join(root, "a.mp4");
@@ -170,7 +196,7 @@ async function main() {
   const port = (srv.address() as AddressInfo).port;
   const url = (name: string) => `http://127.0.0.1:${port}/${name}`;
 
-  const guardThrew = (args: string[]) => { try { guardFfmpegArgs(args); return false; } catch { return true; } };
+  const guardThrew = (args: string[], cwd?: string) => { try { guardFfmpegArgs(args, cwd); return false; } catch { return true; } };
   try {
     // ---- 4. SSRF: load/import refuse non-local media ----------------------
     // MUTATION: remove assertProjectMediaLocal from load()/importOtio() → the
@@ -367,6 +393,8 @@ async function main() {
     }
     check(guardThrew(["-f", "lavfi", "-i", `movie=${url("l.mp4")}`]), "guardFfmpegArgs scans a -f lavfi -i graph for movie=");
     check(guardThrew(["-f", "lavfi", "-t", "1", "-i", `amovie=${url("l.mp4")}`]), "…also when another input option sits between -f lavfi and -i");
+    // MUTATION: compare inputFormat's value as given (no toLowerCase) → these rows fail.
+    check(guardThrew(["-f", "LAVFI", "-i", "movie=x.mp4"]) && guardThrew(["-f", "LaVfI", "-i", "movie=x.mp4"]), "…also when -f spells lavfi in another case (FFmpeg reads -f LAVFI as lavfi)");
     check(guardThrew(["-vf", "scale=16:16,'unterminated"]), "guardFfmpegArgs refuses a graph it can't read (unterminated quote)");
     // Graph options are matched by base name, as FFmpeg reads them: a stream
     // specifier (-filter:v:0, -af:1) or the plain -filter still gets its graph
@@ -381,17 +409,18 @@ async function main() {
     check(guardThrew(["-/vf", join(root, "graph.txt")]), "guardFfmpegArgs refuses -/vf (a graph read from a file)");
     check(guardThrew(["-filter_complex_script", join(root, "graph.txt")]) && guardThrew(["-filter_script:v", join(root, "graph.txt")]), "guardFfmpegArgs refuses -filter_complex_script / -filter_script");
     check(!guardThrew(["-i", "/abs/a.mp4", "-filter:v", "signalstats,metadata=print", "-f", "null", "-"]), "guardFfmpegArgs passes the core's own -filter:v graph (analysis.ts)");
+    writeFileSync(join(root, "c-reframe.txt"), cropPlanToSendcmd([{ t: 0, x: 0, y: 0 }]));
     for (const g of [
       "sendcmd=f=c-reframe.txt,crop=10:10:0:0,scale=16:16",
-      "lut3d=file=look.cube:interp=tetrahedral",
-      "drawtext=textfile=t.txt:fontfile=f.ttf:fontsize=48",
+      "lut3d=file=lut0.cube:interp=tetrahedral",
+      "drawtext=textfile=txt_t.txt:fontfile=font_0.ttf:fontsize=48",
       "vidstabtransform=input=t.trf:smoothing=10",
       "signalstats,metadata=print",
       "[0:a]volume=1[bass];[bass]anull[movie_out]",
       "drawtext=text='Movie\\, ass\\: 10\\:30':fontsize=48,setpts='(PTS-STARTPTS)/2'",
       "[a\\]b]null[o]",
     ]) {
-      check(!guardThrew(["-filter_complex", g]), `guardFfmpegArgs passes the core's own graph ${JSON.stringify(g)}`);
+      check(!guardThrew(["-filter_complex", g], root), `guardFfmpegArgs passes the core's own graph ${JSON.stringify(g)}`);
     }
 
     // ---- 5b. FFmpeg's own protocol whitelist on every input ------------------
@@ -483,6 +512,315 @@ async function main() {
     check(st.includes(`fontcolor=${c}:`) && st.includes(`boxcolor=${c}:`), `legit colour ${c} passes unchanged`);
   }
   check(drawTextStep({ ...ovBase, fontSize: 72.5 }).includes("fontsize=72.5:"), "a legit numeric fontsize passes unchanged");
+  check(drawTextStep({ ...ovBase, position: "constructor" }) === drawTextStep(ovBase), "a prototype-key position is placed as the default (bottom)");
+
+  // ---- 9. strict filter allowlist + file options --------------------------
+  // Any filter SynthCut doesn't build is refused (not a denylist): the four
+  // payloads measured on the denylist guard, an unknown name, every file
+  // option of an allowed filter pointing outside the run's directory, in
+  // quoted / escaped / positional / "/key" (FFmpeg 7+ file value) spellings.
+  // MUTATION: remove "file" from metadata's refused options → the metadata
+  // rows fail; drop the vidstabdetect rule → the vidstabdetect rows fail; add
+  // "psnr" to ALLOWED_FILTERS → the psnr row fails.
+  console.log("9. strict filter allowlist and file options...");
+  {
+    const guardThrew = (args: string[], cwd?: string) => { try { guardFfmpegArgs(args, cwd); return false; } catch { return true; } };
+    const pwn = join(root, "pwn.txt");
+    for (const [flag, g] of [
+      ["-vf", `metadata=mode=print:file=${pwn}`],
+      ["-filter_complex", `[0:v][1:v]psnr=stats_file=${pwn}`],
+      ["-vf", `vidstabdetect=result=${pwn}`],
+      ["-vf", "drawtext=textfile=/etc/passwd"],
+      ["-vf", "scale=16:16,boxblur=2"],
+      ["-af", `anull,ametadata=mode=print:file=${pwn}`],
+      ["-vf", `ssim=f=${pwn}`],
+      ["-filter_complex", `[0:v]'metadata'=mode=print:file=${pwn}[v]`],
+      ["-filter_complex", `[0:v]metadata='mode=print:file=${pwn}'[v]`],
+      ["-vf", `metadata=mode=print:file\\=${pwn}`],
+      ["-vf", `metadata=print:file='${pwn}'`],
+      ["-vf", `metadata=print:k:v:equal:0:${pwn}`],
+      ["-vf", `signalstats,metadata@m=print:file=${pwn}`],
+      ["-vf", `vidstabdetect=shakiness=5:result='${pwn}'`],
+      ["-vf", `vidstabdetect=${pwn}`],
+      ["-vf", "vidstabtransform=input=../x.trf"],
+      ["-vf", "drawtext=textfile='/etc/passwd':fontsize=20"],
+      ["-vf", "drawtext=textfile=\\/etc\\/passwd"],
+      ["-vf", "drawtext=fontfile=C\\:/Windows/Fonts/x.ttf:text=a"],
+      ["-vf", "drawtext=/text=/etc/passwd"],
+      ["-vf", "drawtext=f.ttf"],
+      ["-vf", "lut3d=/etc/passwd"],
+      ["-vf", "lut3d=file='../look.cube'"],
+      ["-vf", "sendcmd=f=/tmp/cmds.txt,crop=8:8"],
+      ["-vf", "sendcmd=c='0 drawtext reinit textfile=/etc/passwd',drawtext=text=a"],
+      ["-vf", `curves=psfile=${pwn}`],
+      ["-vf", `curves=all='0/0 1/1':plot=${pwn}`],
+      ["-af", `loudnorm=I=-14:stats_file=${pwn}`],
+    ] as const) {
+      check(guardThrew([flag, g]), `guardFfmpegArgs refuses ${flag} ${JSON.stringify(g)}`);
+    }
+    check(guardThrew(["-f", "lavfi", "-i", `sine,ametadata=mode=print:file=${pwn}`]), "…and the same in a -f lavfi -i graph");
+    // The forms SynthCut builds (graph.ts, the stabilize / reframe bakes, analysis.ts).
+    writeFileSync(join(root, "clip_1-reframe.txt"), cropPlanToSendcmd([{ t: 0, x: 0, y: 0 }, { t: 1.25, x: 16, y: 8 }]));
+    for (const g of [
+      "lut3d=lut0.cube",
+      "lut3d=file=lut12.cube:interp=tetrahedral",
+      "drawtext=textfile=txt_text_1.txt:fontfile=font_0.ttf:fontsize=48:fontcolor=white:x=(w-text_w)/2:y=h*0.06",
+      "vidstabdetect=shakiness=5:accuracy=15:result=clip_1-stab-x1.trf",
+      "vidstabdetect=result=-x-stab-x1.trf",
+      "vidstabtransform=input=clip_1-stab-x1.trf:smoothing=10:optzoom=1:crop=black:optalgo=gauss,unsharp=5:5:0.8:3:3:0.4",
+      "sendcmd=f=clip_1-reframe.txt,crop=8:8:0:0,scale=16:16,setsar=1,format=yuv420p",
+      "signalstats,metadata=print",
+      "curves=all='0/0 0.5/0.6 1/1'",
+      "curves=r='0/0 1/1':g='0/0 1/1'",
+      "loudnorm=I=-14.000000:TP=-1.500000:LRA=11,aresample=48000",
+    ]) {
+      check(!guardThrew(["-filter_complex", g], root), `guardFfmpegArgs passes SynthCut's ${JSON.stringify(g.slice(0, 60))}`);
+    }
+    // A bare name opens in the spawn's cwd: only a SynthCut-owned one (the data dir, the OS temp dir) will do.
+    // MUTATION: make ownedWorkDir return true → the "no cwd" row fails.
+    const text = ["-vf", "drawtext=textfile=txt_notes.txt:fontfile=font.ttf"];
+    const fakeData = join(dirname(tmpdir()), "synthcut-smoke-unused", "data"); // never created: the guard only compares paths
+    addFfmpegWorkRoot(fakeData);
+    check(guardThrew(text), "a drawtext textfile with no cwd (the process's own: often the user's home) is refused");
+    check(guardThrew(text, homedir()) && guardThrew(text, dirname(tmpdir())), "…and with cwd = the user's home or another directory SynthCut doesn't own");
+    check(guardThrew(text, `${fakeData}-other`) && guardThrew(text, join(fakeData, "..")), "…and with cwd beside or above the data dir");
+    check(!guardThrew(text, join(root, "render")) && !guardThrew(text, join(fakeData, "render")) && !guardThrew(text, fakeData),
+      "…and passes with cwd in the OS temp dir or in a data dir the engine owns");
+    check(!guardThrew(["-vf", "scale=16:16,format=yuv420p"]), "a graph that names no file needs no cwd");
+    // sendcmd sends its file's commands to any filter at run time, past every option check:
+    // the round-1 bypass wrote a file anywhere through curves plot= (FFmpeg 4.4 – 9.0).
+    // MUTATION: drop the content check (FILE_OPTIONS sendcmd content) → the "x-reframe.txt"
+    // row fails; drop the name shapes (fileOk's shape test) → the "result=notes.txt" row
+    // fails; drop the sendcmd + curves/drawtext refusal → the "grammar-clean file" rows fail.
+    const plot = join(root, "pwn-plot.plt");
+    writeFileSync(join(root, "txt_ov3.txt"), `0 curves plot ${plot};\n`);
+    check(guardThrew(["-vf", "sendcmd=f=txt_ov3.txt,curves=all='0/0 1/1'"], root), "the round-1 repro (sendcmd f= an overlay text file holding `curves plot`) is refused");
+    writeFileSync(join(root, "x-reframe.txt"), `0 curves plot ${plot};\n`);
+    check(guardThrew(["-vf", "sendcmd=f=x-reframe.txt,crop=8:8"], root), "a reframe-named sendcmd file holding `curves plot` is refused (content check)");
+    const plan = cropPlanToSendcmd([{ t: 0, x: 0, y: 0 }, { t: 0.5, x: 16, y: 16 }]);
+    for (const [why, text] of [
+      ["an extra command", `${plan}0.500 crop w 8;\n`],
+      ["another target", "0.000 scale x 4;\n"],
+      ["a named instance", "0.000 crop@c x 4;\n"],
+      ["a flag interval", "0.000 [enter] crop x 4;\n"],
+      ["an end time", "0.000-1.000 crop x 4;\n"],
+      ["a non-integer argument", "0.000 crop x 4.5;\n"],
+      ["an expression argument", "0.000 crop x iw/2;\n"],
+      ["a comment", `# plan\n${plan}`],
+      ["two commands on a line", "0.000 crop x 4, crop y 4;\n"],
+      ["nothing", ""],
+    ] as const) {
+      writeFileSync(join(root, "bad-reframe.txt"), text);
+      check(guardThrew(["-vf", "sendcmd=f=bad-reframe.txt,crop=32:32:0:0"], root), `a sendcmd file with ${why} is refused`);
+    }
+    // MUTATION: drop the SENDCMD_MAX_BYTES test in fileHolds → the "over 1 MiB" row fails.
+    writeFileSync(join(root, "big-reframe.txt"), "0.000 crop x 0;\n".repeat(70_000));
+    check(guardThrew(["-vf", "sendcmd=f=big-reframe.txt,crop=32:32:0:0"], root), "a grammar-clean sendcmd file over 1 MiB is refused (size cap)");
+    check(guardThrew(["-vf", "sendcmd=f=gone-reframe.txt,crop=32:32:0:0"], root), "a sendcmd file that doesn't exist is refused");
+    writeFileSync(join(root, "y-reframe.txt"), plan);
+    check(guardThrew(["-vf", "sendcmd=f=y-reframe.txt,crop=32:32:0:0,curves=all='0/0 1/1'"], root), "sendcmd + curves in one graph is refused, even with a grammar-clean file");
+    check(guardThrew(["-filter_complex", "[0:v]sendcmd=f=y-reframe.txt,crop=32:32:0:0[c];[c]drawtext=textfile=txt_a.txt:fontfile=font.ttf[o]"], root), "…and sendcmd + drawtext (reinit) likewise");
+    writeFileSync(join(root, "cmds.txt"), plan);
+    for (const [g, why] of [
+      ["vidstabdetect=result=notes.txt", "a vidstabdetect result= that is not *.trf"],
+      ["vidstabtransform=input=project.aive", "a vidstabtransform input= that is not *.trf"],
+      ["lut3d=look.cube", "a lut3d file that is not lut<n>.cube"],
+      ["drawtext=textfile=notes.txt:fontfile=font.ttf", "a drawtext textfile that is not txt_/cap_*.txt"],
+      ["drawtext=textfile=txt_a.txt:fontfile=clip.mp4", "a drawtext fontfile that is not font[_n].ttf/otf"],
+      ["sendcmd=f=cmds.txt,crop=32:32:0:0", "a sendcmd file that is not *-reframe.txt (even with a clean plan)"],
+    ] as const) {
+      check(guardThrew(["-vf", g], root), `${why} is refused (in an owned cwd)`);
+    }
+    // The real auto-reframe bake (engine reframe), with cropPlanToSendcmd's file, passes and runs.
+    const bakeVf = `sendcmd=f=y-reframe.txt,crop=32:32:0:0,scale=48:48${keepCodingOpts({ matrix: "bt601", range: "tv" })},setsar=1,format=yuv420p,${tagFramesStep({ matrix: "bt601", range: "tv" })}`;
+    const bakeArgs = ["-hide_banner", "-loglevel", "error", "-i", clip, "-vf", bakeVf, "-c:v", "libx264", "-preset", "ultrafast", "-an", "-y", "y-reframe.mp4"];
+    check(!guardThrew(bakeArgs, root), `the reframe bake command passes (${bakeVf.slice(0, 70)}…)`);
+    const baked = await runFfmpeg(bakeArgs, { cwd: root }).then(() => existsSync(join(root, "y-reframe.mp4")), (err) => { console.log(`    bake: ${(err as Error).message}`); return false; });
+    check(baked, "…and FFmpeg runs it");
+    check(!existsSync(plot), "no plot file was written");
+    // Report mode (AIVE_GUARD_REPORT): logs what strict mode refuses and lets
+    // it run, for collecting the filters a test run uses; movie= stays refused.
+    const report = join(root, "guard-report.txt");
+    process.env.AIVE_GUARD_REPORT = report;
+    try {
+      check(!guardThrew(["-vf", "scale=16:16,boxblur=2"]), "report mode lets an unknown filter through…");
+      check(existsSync(report) && readFileSync(report, "utf8").includes('unknown filter "boxblur"'), "…and logs its name");
+      check(guardThrew(["-vf", `movie=${pwn}`]), "report mode still refuses movie=");
+    } finally {
+      delete process.env.AIVE_GUARD_REPORT;
+    }
+    check(guardThrew(["-vf", "scale=16:16,boxblur=2"]), "strict again once AIVE_GUARD_REPORT is unset");
+  }
+
+  // ---- 10. graph-bound project values are typed on load and at the sinks --
+  // A crafted .aive puts filtergraph payloads into a transition type, asset
+  // geometry / fps and cutout start, effect params and colours, eq, volume,
+  // speed and a track volume, plus a LUT whose (legitimate) file name holds
+  // , : [ ]. Each layer has its own rows:
+  // MUTATION (load): drop the width line of coerceProjectValues → the
+  // "asset width" row fails; drop the transition check → the "transition"
+  // row fails.
+  // MUTATION (sink): use clip.transition.type raw in graph.ts → the "sink
+  // xfade" row fails; drop the finiteOr re-binding in cutoutMergeFilter → the
+  // "sink cutout" row fails.
+  // Probed colour descriptions (asset color / proxyColor / videoCodec, cutout
+  // colorTags / colorCodec) hold a prototype key ("constructor") and payloads.
+  // MUTATION: drop the colour lines of coerceProjectValues → the "colour
+  // descriptions" row fails; drop Object.hasOwn in taggedMatrix → the
+  // "taggedMatrix" row fails.
+  console.log("10. crafted graph values are coerced on load and formatted at the sinks...");
+  {
+    const pwn = join(root, "pwn-load.txt");
+    const pay = `,metadata=mode=print:file=${pwn}`;
+    const lutDir = join(root, "luts");
+    mkdirSync(lutDir, { recursive: true });
+    const lutPath = join(lutDir, "look,x:y[z]';.cube");
+    writeFileSync(lutPath, "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n");
+    const cr = structuredClone(tpl) as unknown as Project;
+    const a0 = cr.assets[0] as unknown as Record<string, unknown>;
+    a0.width = `64:flags=bicubic${pay}`;
+    a0.fps = `10${pay}`;
+    a0.cutout = { colorPath: clip, colorStart: `0${pay}`, colorTags: { space: `bt709${pay}`, range: "tv" }, colorCodec: `h264${pay}` };
+    const a1 = structuredClone(a0);
+    delete a1.cutout;
+    Object.assign(a1, {
+      id: "asset_col", width: 64, fps: 10, videoCodec: `h264${pay}`,
+      color: { space: "constructor", range: "pc,metadata=mode=print:file=x", primaries: `bt709${pay}`, transfer: "bt709", codedHeight: "64" },
+      proxyColor: { space: "bt709", range: `tv${pay}`, codedHeight: 64 },
+    });
+    cr.assets.push(a1 as unknown as Project["assets"][number]);
+    const c0 = cr.tracks[0].clips[0];
+    const c1 = structuredClone(c0);
+    c1.id = "clip_two";
+    c1.startFrame = 5;
+    c1.overlays = [];
+    (c1 as unknown as Record<string, unknown>).transition = { type: `fade${pay}`, durationFrames: 3 };
+    cr.tracks[0].clips.push(c1);
+    const c2 = structuredClone(c1);
+    Object.assign(c2, { id: "clip_col", assetId: "asset_col", startFrame: 16 });
+    delete c2.transition;
+    cr.tracks[0].clips.push(c2);
+    (cr.tracks[0] as unknown as Record<string, unknown>).volume = `0.5${pay}`;
+    c0.effects = {
+      color: { brightness: `0.1${pay}` as unknown as number, contrast: 1.1 },
+      volume: `2${pay}` as unknown as number,
+      speed: `1${pay}` as unknown as number,
+      lut: lutPath,
+      filters: [
+        { id: "fx_a", type: "blur", amount: `2${pay}` as unknown as number },
+        { id: "fx_b", type: "chromakey", color: `0x00FF00${pay}`, params: { similarity: `0.1${pay}` as unknown as number, blend: 0.05 } },
+      ],
+    };
+    const crFile = join(root, "crafted-values.aive");
+    writeFileSync(crFile, JSON.stringify(cr));
+    const ec = new EditorEngine(join(dataDir, "values"));
+    const lp = await ec.load(crFile);
+    const la = lp.assets[0];
+    const [l0, l1] = lp.tracks[0].clips;
+    check(typeof la.width === "number" && la.width === 0, `asset width: a string becomes a number on load (${JSON.stringify(la.width)})`);
+    check(typeof la.fps === "number" && typeof la.cutout?.colorStart === "number", `asset fps and cutout start are numbers on load (${JSON.stringify([la.fps, la.cutout?.colorStart])})`);
+    check(l1?.transition?.type === "fade", `transition: an unknown type becomes "fade" on load (${JSON.stringify(l1?.transition?.type)})`);
+    const fxa = l0.effects?.filters?.find((f) => f.id === "fx_a");
+    const fxb = l0.effects?.filters?.find((f) => f.id === "fx_b");
+    check(!!fxa && fxa.amount === undefined && !!fxb && fxb.color === undefined && fxb.params?.similarity === undefined && fxb.params?.blend === 0.05,
+      `effect amount / param / colour payloads are dropped, valid params kept (${JSON.stringify([fxa, fxb])})`);
+    check(l0.effects?.color?.brightness === undefined && l0.effects?.color?.contrast === 1.1 && l0.effects?.volume === undefined && l0.effects?.speed === undefined,
+      `eq, volume and speed payloads are dropped (${JSON.stringify(l0.effects?.color)})`);
+    check(lp.tracks[0].volume === undefined, "a track volume payload is dropped");
+    const lc = lp.assets.find((a) => a.id === "asset_col");
+    check(!!lc && lc.color === undefined && lc.proxyColor === undefined && lc.videoCodec === undefined && la.cutout?.colorTags === undefined && la.cutout?.colorCodec === undefined,
+      `colour descriptions with a prototype key, a payload or a string coded height are dropped on load, to be probed again (${JSON.stringify([lc?.color, lc?.proxyColor, lc?.videoCodec, la.cutout])})`);
+    check(taggedMatrix("constructor") === undefined && taggedMatrix("__proto__") === undefined && taggedMatrix("toString") === undefined && taggedMatrix("bt470bg") === "bt601",
+      "taggedMatrix: a prototype key names no matrix");
+    // MUTATION: drop Object.hasOwn in chromiumMatrix → this row fails.
+    check(chromiumMatrix({ height: 360, space: "constructor" }).matrix === "bt601" && chromiumMatrix({ height: 1080, space: "__proto__" }).matrix === "bt709",
+      "chromiumMatrix: a prototype key reads as untagged");
+    check(JSON.stringify(resolveSourceColor({ space: "constructor", range: "pc,x" }, 1080)) === '{"matrix":"bt709","range":"tv"}' && resolveSourceColor({ space: "hasOwnProperty" }, 480).matrix === "bt601",
+      "resolveSourceColor reads a prototype-key space as untagged");
+    check(parseKeyColor("constructor") === null && parseKeyColor("green") === "0x00FF00", "parseKeyColor: a prototype key names no key colour");
+    check(l0.effects?.lut === lutPath, "a LUT whose file name holds , : [ ] ' ; is kept on load");
+    // The export command the engine builds from the loaded project.
+    const canvas: Canvas = { width: lp.width, height: lp.height, fps: lp.fps };
+    const internals = ec as unknown as {
+      stageRender(c: Canvas, o: object): Promise<{ clips: ResolvedRenderClip[]; cwd: string }>;
+      resolveMusic(): ResolvedMusic | undefined;
+    };
+    const staged = await internals.stageRender(canvas, {});
+    const cmd = buildRenderCommand(staged.clips, canvas, join(root, "values.mp4"), EXPORT_PROFILE, internals.resolveMusic()).args;
+    const graph = cmd[cmd.indexOf("-filter_complex") + 1];
+    let guardOk = true;
+    try { guardFfmpegArgs(cmd, staged.cwd); } catch (err) { guardOk = false; console.log(`    guard: ${(err as Error).message}`); }
+    check(guardOk, "the export command of the loaded project passes the strict guard (allowlisted filters only)");
+    check(!cmd.join(" ").includes(pwn) && !filterGraphNames(graph).includes("metadata") && !/native code|function|constructor|undefined/.test(graph),
+      "no payload text, metadata filter or prototype value in the export command");
+    check(graph.includes("xfade=transition=fade:") && /lut3d=lut\d+\.cube/.test(graph) && !graph.includes("look,x"), `xfade uses "fade" and lut3d the staged bare name (${graph.match(/lut3d=[^,;[]*/)?.[0]})`);
+    const exported = await ec.exportVideo(join(root, "values.mp4")).then(() => true, (err) => { console.log(`    export error: ${(err as Error).message}`); return false; });
+    check(exported && !existsSync(pwn), "the crafted project exports, and no payload file was written");
+    // Sinks: the same payloads straight into the graph builders (as if a value slipped past load).
+    const raw = structuredClone(staged.clips);
+    const r1 = raw.find((c) => c.transition)!;
+    (r1.transition as { type: string }).type = `wipeleft${pay}`;
+    const r0 = raw.find((c) => c !== r1 && !c.sfx)!;
+    r0.effects = { ...r0.effects, color: { brightness: `0.1${pay}` as unknown as number }, volume: `2${pay}` as unknown as number, speed: `1${pay}` as unknown as number };
+    r0.trackVolume = `0.5${pay}` as unknown as number;
+    const music: ResolvedMusic = { path: clip, volume: `0.3${pay}` as unknown as number };
+    const sinkCmd = buildRenderCommand(raw, canvas, join(root, "sink.mp4"), EXPORT_PROFILE, music).args;
+    const sinkGraph = sinkCmd[sinkCmd.indexOf("-filter_complex") + 1];
+    check(!sinkGraph.includes(pwn) && sinkGraph.includes("xfade=transition=fade:"), "sink xfade: an unknown transition type is built as fade, no payload in eq / volume / speed");
+    const merge = cutoutMergeFilter("[1:v]", "[0:v]", "[m]", { width: `64:flags=bicubic${pay}` as unknown as number, height: 64, fps: `10${pay}` as unknown as number, range: "tv" });
+    check(!merge.includes(pwn) && merge.includes("scale=0:64:"), `sink cutout: string geometry / fps never reach the merge graph (${merge.slice(0, 60)})`);
+  }
+
+  // ---- 11. a project using every graph-bound field round-trips unchanged ---
+  // Nothing SynthCut writes is coerced: the counters return 0 and load keeps
+  // every value. MUTATION: make coerceProjectValues treat effects.lut as a
+  // number (nums instead of strs) → the counter and round-trip rows fail.
+  console.log("11. a full-featured project saves and loads with nothing coerced...");
+  {
+    const ef = new EditorEngine(join(dataDir, "full"));
+    const asset = await ef.importVideo(clip);
+    const lut = join(root, "full.cube");
+    writeFileSync(lut, "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n");
+    const A = ef.addClip(asset.id, { sourceOutFrame: 10 });
+    const B = ef.addClip(asset.id, { startFrame: 6, sourceOutFrame: 10 });
+    ef.setTransition(B.id, "circleopen", 3);
+    ef.setClipEffects(A.id, { color: { brightness: 0.05, contrast: 1.1, saturation: 1.2, gamma: 0.9 }, lut, crop: { x: 2, y: 2, width: 60, height: 60 }, volume: 0.8, fadeInFrames: 2, fadeOutFrames: 2 });
+    ef.setClipGrade(A.id, { temperature: 0.2, tint: -0.1, hue: 10, lift: { r: 0.1 }, gamma: { g: -0.05 }, gain: { b: 0.1 }, curve: "0/0 0.5/0.6 1/1", curveR: "0/0 1/0.9" });
+    ef.applyEffect(A.id, { type: "chromakey", color: "0x00FF00", params: { similarity: 0.12, blend: 0.05 } });
+    ef.applyEffect(A.id, { type: "blur", amount: 2 });
+    ef.applyEffect(B.id, { type: "vignette", amount: 0.5 });
+    ef.setClipTransform(A.id, { transform: { x: 0.1, y: -0.1, scale: 0.9, rotation: 5, flipH: true }, opacity: 0.9 });
+    ef.setClipBlendMode(B.id, "screen");
+    ef.setClipMask(A.id, { shape: "ellipse", x: 0.5, y: 0.5, w: 0.6, h: 0.6, feather: 0.1 });
+    ef.setKeyframes(A.id, "x", [{ frame: 0, value: 0 }, { frame: 5, value: 0.2, ease: "easeOut" }]);
+    ef.setKeyframes(A.id, "volume", [{ frame: 0, value: 1 }, { frame: 8, value: 0.5 }]);
+    const ov = ef.addTextOverlay(A.id, { text: "full", position: "top", fontSize: 20, color: "#ffe14d", outlineWidth: 2, outlineColor: "black", shadowX: 2, shadowY: 2, box: true, boxColor: "black@0.55", startFrame: 1, endFrame: 8 });
+    ef.animateText(A.id, ov.id, "opacity", [{ frame: 0, value: 0 }, { frame: 3, value: 1 }]);
+    await ef.addBleep({ clipId: A.id, start: 0.2, end: 0.4, volume: 0.6 });
+    await ef.applyAudioEffect(A.id, { type: "echo", params: { delay: 120 } });
+    ef.setTrackProperties(ef.getProject().tracks[0].index, { volume: 0.9 });
+    ef.setSpeedRamp(B.id, { preset: "montage" });
+    ef.setMusic(asset.id, { volume: 0.3, fadeInFrames: 2, fadeOutFrames: 2, duck: true });
+    const adj = ef.addAdjustmentClip({ startFrame: 0, durationFrames: 10 });
+    ef.applyEffect(adj.id, { type: "grayscale" });
+    const fullFile = join(root, "full.aive");
+    await ef.save(fullFile);
+    // The colour fields as probeAsset and a matte cutout record them (ffprobe names).
+    const withColour = JSON.parse(readFileSync(fullFile, "utf8")) as Project;
+    const fa = withColour.assets.find((a) => a.id === asset.id)!;
+    fa.color = { space: "bt709", range: "tv", primaries: "bt709", transfer: "bt709", codedHeight: 64 };
+    fa.proxyColor = { space: "smpte170m", range: "tv", primaries: "smpte170m", transfer: "smpte170m", codedHeight: 360 };
+    withColour.assets.push({ ...structuredClone(fa), id: "asset_cut", name: "cutout", proxyColor: undefined,
+      cutout: { colorPath: clip, colorStart: 0, colorAssetId: fa.id, colorTags: { space: "bt2020nc", range: "pc", primaries: "bt2020", transfer: "arib-std-b67", codedHeight: 2160 }, colorCodec: "hevc" } });
+    writeFileSync(fullFile, JSON.stringify(withColour, null, 2));
+    const saved = JSON.parse(readFileSync(fullFile, "utf8")) as Project;
+    check(!!saved.assets.find((a) => a.id === "asset_cut")?.cutout?.colorTags && !!saved.assets.find((a) => a.id === asset.id)?.proxyColor, "the full-featured project has color, proxyColor and cutout colorTags");
+    const counts = [coerceProjectNumbers(structuredClone(saved)), coerceProjectValues(structuredClone(saved))];
+    check(counts[0] === 0 && counts[1] === 0, `nothing in a full-featured saved project is coerced (numbers ${counts[0]}, values ${counts[1]})`);
+    const back = await new EditorEngine(join(dataDir, "full2")).load(fullFile);
+    const strip = (p: Project) => JSON.stringify({ ...p, revision: 0, updatedAt: 0 });
+    check(strip(back) === strip(saved), "load keeps every value of the full-featured project");
+  }
 
   rmSync(root, { recursive: true, force: true });
   console.log(failures === 0 ? "\nALL SAFEPATH CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

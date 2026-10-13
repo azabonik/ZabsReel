@@ -438,22 +438,29 @@ export interface ResolvedGraphic {
 }
 
 /** Supported crossfade/transition styles (FFmpeg xfade transitions). */
-export type TransitionType =
-  | "fade"
-  | "dissolve"
-  | "wipeleft"
-  | "wiperight"
-  | "wipeup"
-  | "wipedown"
-  | "slideleft"
-  | "slideright"
-  | "circleopen"
-  | "circleclose"
-  | "fadeblack"
-  | "fadewhite"
-  | "radial"
-  | "smoothleft"
-  | "smoothright";
+export const TRANSITION_TYPES = [
+  "fade",
+  "dissolve",
+  "wipeleft",
+  "wiperight",
+  "wipeup",
+  "wipedown",
+  "slideleft",
+  "slideright",
+  "circleopen",
+  "circleclose",
+  "fadeblack",
+  "fadewhite",
+  "radial",
+  "smoothleft",
+  "smoothright",
+] as const;
+export type TransitionType = (typeof TRANSITION_TYPES)[number];
+
+/** True for one of {@link TRANSITION_TYPES} (a loaded project's transition type is untrusted text). */
+export function isTransitionType(v: unknown): v is TransitionType {
+  return typeof v === "string" && (TRANSITION_TYPES as readonly string[]).includes(v);
+}
 
 /**
  * A transition entering a clip from the previous clip on the SAME track. The

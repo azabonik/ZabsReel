@@ -1,4 +1,5 @@
 import { muteGainExpr } from "../audio/mutes.js";
+import { isTransitionType } from "../types.js";
 import type {
   Canvas,
   ClipEffects,
@@ -303,7 +304,7 @@ const EQ_FORMAT = "format=yuv444p";
 
 /** FFmpeg `eq` for the basic colour grade. Wrap with alphaSafe(): eq drops alpha (probed on FFmpeg 4.4; colorbalance/hue/curves/lut3d/colortemperature keep it). */
 function eqStep(c: { brightness?: number; contrast?: number; saturation?: number; gamma?: number }): string {
-  return `eq=brightness=${c.brightness ?? 0}:contrast=${c.contrast ?? 1}:saturation=${c.saturation ?? 1}:gamma=${c.gamma ?? 1}`;
+  return `eq=brightness=${dtNum(c.brightness, 0)}:contrast=${dtNum(c.contrast, 1)}:saturation=${dtNum(c.saturation, 1)}:gamma=${dtNum(c.gamma, 1)}`;
 }
 
 /**
@@ -551,7 +552,7 @@ function emitClipVideoParts(
   srcLabel = `[${inputIdx}:v]`,
 ): void {
   const fx = clip.effects ?? {};
-  const speed = fx.speed ?? 1;
+  const speed = dtNum(fx.speed, 1);
   const outDur = clip.outDuration;
   const steps: string[] = [];
 
@@ -671,7 +672,7 @@ const OVERLAY_XY: Record<string, { x: string; y: string }> = {
   bottomright: { x: "w-text_w-w*0.05", y: "h-text_h-h*0.06" },
 };
 
-/** A finite number, or the fallback. Guards against a project string ("12,movie=…") leaking into the graph. */
+/** A finite number, or the fallback. Guards against a project string ("12,movie=…") leaking into the graph (drawtext styles, eq, volume, speed). */
 function dtNum(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
@@ -694,7 +695,7 @@ export function drawTextStep(ov: ResolvedOverlay): string {
     x = `(w*${fx.toFixed(4)}-text_w/2)`;
     y = `(h*${fy.toFixed(4)}-text_h/2)`;
   } else {
-    const xy = OVERLAY_XY[ov.position] ?? OVERLAY_XY.bottom;
+    const xy = Object.hasOwn(OVERLAY_XY, ov.position) ? OVERLAY_XY[ov.position] : OVERLAY_XY.bottom;
     x = xy.x;
     y = xy.y;
   }
@@ -746,7 +747,7 @@ export function drawTextStep(ov: ResolvedOverlay): string {
 /** Build the per-clip audio filter chain for a clip that has source audio (constant speed). */
 function audioFilterChain(clip: ResolvedRenderClip): string {
   const fx = clip.effects ?? {};
-  const speed = fx.speed ?? 1;
+  const speed = dtNum(fx.speed, 1);
   const steps = audioSourceSteps(clip);
   if (Math.abs(speed - 1) > 1e-6) {
     for (const f of atempoFactors(speed)) steps.push(`atempo=${f}`);
@@ -792,11 +793,11 @@ function audioOutputSteps(clip: ResolvedRenderClip): string[] {
   if (volKf?.length) {
     steps.push(`volume=eval=frame:volume='${kfExpr(volKf, fx.volume ?? 1, "t")}'`);
   } else if (fx.volume !== undefined && Math.abs(fx.volume - 1) > 1e-6) {
-    steps.push(`volume=${fx.volume}`);
+    steps.push(`volume=${dtNum(fx.volume, 1)}`);
   }
   // Track-level gain multiplies the clip's own volume.
   if (clip.trackVolume !== undefined && Math.abs(clip.trackVolume - 1) > 1e-6) {
-    steps.push(`volume=${clip.trackVolume}`);
+    steps.push(`volume=${dtNum(clip.trackVolume, 1)}`);
   }
   if (fx.fadeIn && fx.fadeIn > 0) steps.push(`afade=t=in:st=0:d=${fx.fadeIn.toFixed(3)}`);
   if (fx.fadeOut && fx.fadeOut > 0) {
@@ -955,6 +956,11 @@ function groupRuns(entries: { clip: ResolvedRenderClip; idx: number }[]): Run[] 
     }
   }
   return runs;
+}
+
+/** The xfade transition for a clip's type: a known one (types.ts TRANSITION_TYPES), else "fade" — never project text. */
+function xfadeTransition(type: unknown): string {
+  return isTransitionType(type) ? type : "fade";
 }
 
 /** Clamp a transition overlap to what the two clip durations allow. */
@@ -1245,7 +1251,7 @@ export function buildRenderCommand(
           filterParts.push(`${cur}tpad=stop_mode=clone:stop=1${from}`);
         }
         filterParts.push(
-          `${from}[v${run.idxs[i]}]xfade=transition=${clip.transition!.type}:duration=${d.toFixed(3)}:offset=${(curDur - d).toFixed(3)}[${out}]`,
+          `${from}[v${run.idxs[i]}]xfade=transition=${xfadeTransition(clip.transition!.type)}:duration=${d.toFixed(3)}:offset=${(curDur - d).toFixed(3)}[${out}]`,
         );
       } else {
         // No usable overlap: hard concat the two run members.
@@ -1459,7 +1465,7 @@ export function buildRenderCommand(
     if (music) {
       const mIdx = nextIndex++;
       inputArgs.push("-stream_loop", "-1", "-t", total.toFixed(6), "-i", music.path);
-      const mSteps = ["asetpts=PTS-STARTPTS", "aresample=48000", `volume=${music.volume}`];
+      const mSteps = ["asetpts=PTS-STARTPTS", "aresample=48000", `volume=${dtNum(music.volume, 1)}`];
       if (music.fadeIn && music.fadeIn > 0) mSteps.push(`afade=t=in:st=0:d=${music.fadeIn.toFixed(3)}`);
       if (music.fadeOut && music.fadeOut > 0) {
         mSteps.push(`afade=t=out:st=${Math.max(0, total - music.fadeOut).toFixed(3)}:d=${music.fadeOut.toFixed(3)}`);

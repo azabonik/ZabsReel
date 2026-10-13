@@ -100,6 +100,15 @@ npx tsx packages/core/scripts/smoke-security.ts
 # dirty state and undo history unchanged), the executor refuses protocol inputs and
 # filters that open their own source, and FFmpeg gets -protocol_whitelist
 # file,pipe,fd on every input (127.0.0.1 listener + sandbox, self-synthesizes media).
+# Graph values from a loaded project get their model type (transition type, asset
+# geometry, probed colour descriptions, effect params and colours, eq, volume,
+# speed, …) on load and again in the graph builders, and the executor accepts only
+# the filters SynthCut builds, with files only of the engine's names in a working
+# directory SynthCut owns (data dir or OS temp; no metadata file=, psnr, drawtext
+# textfile=/etc/…), and a sendcmd file only when it holds a reframe crop plan
+# (no runtime curves plot=). AIVE_GUARD_REPORT=<file> (or 1 for stderr) logs what strict
+# mode would refuse instead of refusing it: run the matrix with it after adding
+# a filter, and add any logged name to ALLOWED_FILTERS in ffmpeg/executor.ts.
 # Accepted risk: UNC (\\server\share) and //host/share media paths are accepted
 # for NAS workflows, so on a Windows host a crafted project can make probe,
 # thumbnail and render open an SMB connection to the named host, which can send
