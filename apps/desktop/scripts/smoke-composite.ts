@@ -22,6 +22,9 @@
 // dry until it loads, then rebuilds with real worklet nodes (stopped on the
 // next rebuild), and a failed load makes them render-only again. The real
 // worklet DSP is measured in packages/core/scripts/smoke-voicefx.ts.
+// Live playback: MediaPool.sync steering a curve-speed clip (rate pull, the
+// re-seek throttle) and resumeNear on a fake <video>, the preview's
+// last-frame hold, and a refused slider commit reverting (revertIfRefused).
 //
 // Imports `@aive/core/effects` through the package exports (core's dist/), so
 // build core first (`npm run build`, or `npx tsc -b packages/core`).
@@ -35,10 +38,12 @@ import type { Bleep, Clip, MediaAsset, Project, Track } from "../src/types";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
 import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../../../packages/core/src/audio/bleeps";
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
-import { buildSegments, colorFilter, sourceTimeFor, vignetteAngles } from "../src/playback";
+import { buildSegments, colorFilter, exactSourceTimeFor, HOLD_MS, holdLastFrame, revertIfRefused, sourceTimeFor, stepFrames, vignetteAngles } from "../src/playback";
+import { MediaPool, type SyncOpts } from "../src/mediapool";
+import { curveView, pointPlace } from "../src/speedrampview";
 import { clipDurationFrames as deskDuration } from "../src/types";
 import { clipDurationFrames as coreDuration } from "../../../packages/core/src/types";
-import { clipFootprintFrames, clipTimeMap } from "@aive/core/speed";
+import { clipFootprintFrames, clipTimeMap, rampFrameModel, sourceFrameShownAt } from "@aive/core/speed";
 import { KEY_DEFAULTS, KEY_DEFAULT_COLOR, KEY_EFFECT_TYPES, isKeyEffect, keyPlan } from "../src/keying";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas } from "../src/maskdraw";
 import {
@@ -358,19 +363,94 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   const pj: Project = { ...project, assets: [vidA], tracks: [track("video", 0, [rc])], music: undefined };
   const pa = new Map(pj.assets.map((a) => [a.id, a]));
   const map = clipTimeMap(rc, FPS);
+  const model = rampFrameModel(rc, FPS);
+  const fp = clipFootprintFrames(rc, FPS);
   let bad = 0;
   for (let i = 0; i < 120; i++) {
-    const tl = (map.duration * (i + 0.5)) / 120;
+    const tl = ((fp / FPS) * (i + 0.5)) / 120;
     const p = activeLayersAt(pj, pa, 1 + tl).clips.find((c) => c.clipId === "R");
-    if (!p || Math.abs(p.srcTime - map.sourceAt(tl)) > 1e-9 || Math.abs(p.rate - map.speedAt(p.srcTime)) > 1e-9 || !p.ramped) bad++;
+    if (!p || Math.abs(p.srcTime - Math.min(model.sourceAt(tl), 6 - 0.5 / FPS)) > 1e-9 || Math.abs(p.rate - map.speedAt(p.srcTime)) > 1e-9 || !p.ramped) bad++;
   }
-  check("ramp: plan srcTime = the curve's sourceAt, rate = its speed there, flagged ramped (120 playheads)", bad === 0, `${bad} bad`);
-  const fp = clipFootprintFrames(rc, FPS);
+  check("ramp: plan srcTime = the curve's (frame-centred) sourceAt, rate = its speed there, flagged ramped (120 playheads)", bad === 0, `${bad} bad`);
   check("ramp: desktop clipDurationFrames == core's == speed.ts footprint", deskDuration(rc, FPS) === fp && coreDuration(rc as never, FPS) === fp && fp !== 150, `${deskDuration(rc, FPS)} / ${coreDuration(rc as never, FPS)} / ${fp}`);
   check("ramp: timeline length uses the ramped footprint", near(timelineDurationSec(pj), (30 + fp) / FPS, 1e-9));
   const seg = buildSegments([rc], pa, FPS)[0];
-  check("ramp: segment end = start + curve duration; scrub maps exactly", near(seg.end - seg.start, map.duration, 1e-9) && near(sourceTimeFor(seg, seg.start + 1.234), map.sourceAt(1.234), 1e-12));
-  check("ramp: past the clip end nothing is active", !activeLayersAt(pj, pa, 1 + map.duration + 0.01).clips.some((c) => c.clipId === "R"));
+  // Known issue A1: the preview held the last frame for the curve's unrounded length (a fraction of a frame too long or short).
+  check(
+    `ramp: the preview ends the clip on the engine's footprint (${fp} frames, not the curve's ${(map.duration * FPS).toFixed(3)})`,
+    near(seg.end - seg.start, fp / FPS, 1e-12) && Math.abs(map.duration * FPS - fp) > 1e-3 && near(sourceTimeFor(seg, seg.start + 1.234), model.sourceAt(1.234), 1e-12),
+  );
+  check("ramp: past the clip's last frame nothing is active", !activeLayersAt(pj, pa, 1 + fp / FPS + 1e-6).clips.some((c) => c.clipId === "R") && !!activeLayersAt(pj, pa, 1 + (fp - 0.5) / FPS).clips.some((c) => c.clipId === "R"));
+  // Paused / scrubbing: every timeline frame shows exactly the source frame the export shows.
+  let still = 0;
+  for (let n = 0; n < fp; n++) {
+    const p = activeLayersAt(pj, pa, 1 + n / FPS, { exactFrames: true }).clips.find((c) => c.clipId === "R");
+    if (!p || Math.floor(p.srcTime * FPS) !== sourceFrameShownAt(rc, n, FPS) || Math.abs(p.srcTime * FPS - Math.floor(p.srcTime * FPS) - 0.5) > 1e-6) still++;
+  }
+  check(`ramp: a paused preview shows the exported source frame at every one of the ${fp} frames (the middle of it)`, still === 0, `${still} off`);
+  // Constant speed: the segment is the footprint too (0.75x: 100 frames -> 133, not 133.33), and paused frames are the export's.
+  const cc = clip("K", "vidA", 0, 0, { sourceInFrame: 10, sourceOutFrame: 110, effects: { speed: 0.75 } });
+  const cs = buildSegments([cc], pa, FPS)[0];
+  let cstill = 0;
+  for (let n = 0; n < 133; n++) if (Math.floor(exactSourceTimeFor(cs, n / FPS) * FPS) !== sourceFrameShownAt(cc, n, FPS)) cstill++;
+  check("constant 0.75x: the segment ends on the footprint (133 frames) and paused frames are the export's", near(cs.end - cs.start, 133 / FPS, 1e-12) && cstill === 0 && sourceTimeFor(cs, cs.end - 1e-9) < 110 / FPS, `${cstill} off`);
+  // Known issue A3: the curve editor shows the points a trim / split left outside the clip (they shape its ends).
+  {
+    const pts = ramp.points; // src 1 .. 6
+    const whole = curveView(pts, 1, 6);
+    const right = curveView(pts, 3.4, 6); // the right half of a split at 3.4: points 1, 2.2 lie before it
+    const short = curveView([{ src: 0, speed: 2 }, { src: 100, speed: 0.5 }, { src: 5.2, speed: 1 }], 5, 6); // a 1 s window of a long asset
+    const places = pts.map((p) => pointPlace(p, right, 3.4, 6));
+    const farPlaces = [{ src: 0, speed: 2 }, { src: 100, speed: 0.5 }, { src: 5.2, speed: 1 }].map((p) => pointPlace(p, short, 5, 6));
+    check(
+      "curve editor: no points outside → the view is the clip's range; a split half widens to the points before it (shaded, draggable); far points sit on the edges as ghosts",
+      whole.lo === 1 && whole.hi === 6 && right.lo === 1 && right.hi === 6 &&
+        JSON.stringify(places) === JSON.stringify(["out", "out", "in", "in", "in"]) &&
+        short.lo === 3.5 && short.hi === 7.5 && JSON.stringify(farPlaces) === JSON.stringify(["ghost-lo", "ghost-hi", "in"]),
+      JSON.stringify({ whole, right, short, places, farPlaces }),
+    );
+  }
+  // Frame stepping onto a cut: 120 steps of 1/30 s added up to 3.9999999999999996, a hair before frame 120, and a
+  // paused preview stepped onto the next clip's first frame still showed the previous clip's last frame.
+  {
+    const cutA = clip("CA", "vidA", 0, 120);
+    const cutB = clip("CB", "vidB", 120, 60);
+    const cp: Project = { ...project, assets: [vidA, vidB], tracks: [track("video", 0, [cutA, cutB])], music: undefined };
+    const cpa = new Map(cp.assets.map((a) => [a.id, a]));
+    let t = 0;
+    let offGrid = 0;
+    for (let i = 1; i <= 150; i++) {
+      t = stepFrames(t, 1, FPS);
+      if (t !== i / FPS) offGrid++;
+    }
+    for (let i = 149; i >= 0; i--) {
+      t = stepFrames(t, -1, FPS);
+      if (t !== i / FPS) offGrid++;
+    }
+    let drift = 0; // the old step: 120 x (+ 1/fps) from 0 sums to just under 4 s
+    for (let i = 0; i < 120; i++) drift += 1 / FPS;
+    const ids = (sec: number, exact: boolean) => activeLayersAt(cp, cpa, sec, { exactFrames: exact }).clips.map((c) => c.clipId).join();
+    check(
+      "frame step: 150 steps forward and back stay exactly on the frame grid; off the grid a step moves one frame",
+      offGrid === 0 && near(stepFrames(10.4 / FPS, 1, FPS), 11.4 / FPS, 1e-12) && near(stepFrames(10.4 / FPS, -2, FPS), 8.4 / FPS, 1e-12),
+      `${offGrid} steps off the grid`,
+    );
+    check(
+      "paused: a playhead a hair under a cut (float noise) shows the next clip's first frame, exactly as at the cut",
+      drift < 4 && ids(drift, true) === "CB" && ids(4, true) === "CB" && ids(3.99, true) === "CA" && ids(119.5 / FPS, true) === "CA",
+      `${drift}: ${ids(drift, true)}`,
+    );
+    // Butted clips: a clip's segment ends exactly where the next one starts (start + duration could be an ulp past it).
+    let both = 0;
+    for (let s = 0; s < 60; s++) {
+      for (const len of [1, 7, 13, 29, 31, 97]) {
+        const segs = buildSegments([clip("P", "vidA", s, len), clip("Q", "vidB", s + len, 10)], cpa, FPS);
+        const at = (s + len) / FPS;
+        if (segs[0].end !== segs[1].start || segs.filter((g) => at >= g.start && at < g.end).length !== 1) both++;
+      }
+    }
+    check("butted clips: a segment ends exactly on the next clip's start (one clip active at the cut, 360 cases)", both === 0, `${both} cases with both / neither active`);
+  }
   const plain = activeLayersAt(project, assetById, 10 / FPS).clips.find((c) => c.clipId === "A")!;
   check("constant clip: rate = speed, not flagged ramped", plain.rate === 1 && plain.ramped === undefined);
   // Audio "mute": the picture plays silently and its bleeps are dropped.
@@ -1013,6 +1093,113 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   check("plan: a clip without a look has no draw.look (drawn directly, no GL)", activeLayersAt(lp, la, 1.5).clips.find((c) => c.clipId === "L2")?.draw?.look === undefined);
 }
 
+// --- live playback of a curve-speed clip: MediaPool.sync (follow) and resumeNear on a fake <video> ---
+console.log("\nlive playback of a curve-speed clip (MediaPool.sync follow / resumeNear, fake <video>, stubbed clock)");
+{
+  let clock = 10_000;
+  const perf = performance as { now: () => number };
+  const realNow = perf.now;
+  perf.now = () => clock;
+  const fake = (t: number, paused = false) => ({
+    t, paused, seeking: false, readyState: 4, playbackRate: 1, muted: false, volume: 1, seeks: [] as number[], plays: 0, pauses: 0,
+    get currentTime() { return this.t; },
+    set currentTime(v: number) { this.t = v; this.seeks.push(v); },
+    play() { this.plays++; this.paused = false; return Promise.resolve(); },
+    pause() { this.pauses++; this.paused = true; },
+  });
+  type Fake = ReturnType<typeof fake>;
+  const pool = new MediaPool({} as HTMLElement, (p) => p, () => {});
+  const sync = (e: Fake, srcTime: number, rate: number, extra: Partial<SyncOpts> = {}) =>
+    pool.sync(e as unknown as HTMLVideoElement, { srcTime, playing: true, rate, follow: true, volume: 1, muted: false, ...extra });
+  try {
+    // Steering: the curve's rate + 12 × the error, clamped to [rate/2, 3 rate] and to what browsers play (1/16..16).
+    const steer = (rate: number, err: number) => {
+      const e = fake(10);
+      sync(e, 10 + err, rate);
+      return e;
+    };
+    const s1 = steer(2, 0.05);
+    check("follow: behind by 0.05 s at 2x → rate 2 + 12·0.05 = 2.6, no seek", near(s1.playbackRate, 2.6, 1e-9) && s1.seeks.length === 0, `${s1.playbackRate} / ${s1.seeks}`);
+    const s2 = steer(2, -0.15);
+    check("follow: ahead by 0.15 s at 2x → clamped to half the rate (1)", near(s2.playbackRate, 1, 1e-9) && s2.seeks.length === 0, `${s2.playbackRate}`);
+    const s3 = steer(10, 0.6);
+    check("follow: 10x behind by 0.6 s → 17.2 clamped to the browser max 16 (under the 0.8 s seek threshold)", s3.playbackRate === 16 && s3.seeks.length === 0, `${s3.playbackRate}`);
+    const s4 = steer(0.1, -0.05);
+    check("follow: 0.1x ahead → clamped to the browser min 1/16", s4.playbackRate === 0.0625 && s4.seeks.length === 0, `${s4.playbackRate}`);
+    const s5 = fake(10);
+    sync(s5, 10.05, 2, { follow: false });
+    check("no follow (constant speed): the rate is the clip's (no steering), no seek under 0.08 s", s5.playbackRate === 2 && s5.seeks.length === 0, `${s5.playbackRate}`);
+    const s6 = fake(10);
+    sync(s6, 12, 20, { playing: false });
+    check("follow, paused transport: the rate is clamped (16), the element pauses and parks on srcTime", s6.playbackRate === 16 && s6.pauses === 1 && s6.seeks.join() === "12", `${s6.playbackRate} / ${s6.pauses} / ${s6.seeks}`);
+
+    // Re-seek throttle: at most one follow seek per FOLLOW_SEEK_GAP_MS (400 ms), none while a seek is pending.
+    const e = fake(5);
+    sync(e, 5.3, 1);
+    check("follow: drift 0.3 s behind at 1x → one seek, landing 0.06 s AHEAD (5.36)", e.seeks.length === 1 && near(e.seeks[0], 5.36, 1e-9), `${e.seeks}`);
+    clock += 100;
+    e.t = 5;
+    sync(e, 5.4, 1);
+    check("follow: drifted again 100 ms later → no second seek (throttled)", e.seeks.length === 1, `${e.seeks}`);
+    clock += 350;
+    e.seeking = true;
+    sync(e, 5.5, 1);
+    check("follow: 450 ms later but a seek is still pending → no seek", e.seeks.length === 1, `${e.seeks}`);
+    e.seeking = false;
+    sync(e, 5.5, 1);
+    check("follow: 450 ms later, seek done → seeks again", e.seeks.length === 2 && near(e.seeks[1], 5.56, 1e-9), `${e.seeks}`);
+    clock += 500;
+    e.t = 6;
+    sync(e, 5.5, 1);
+    check("follow: AHEAD by 0.5 s → seeks exactly to srcTime (no lead)", e.seeks.length === 3 && e.seeks[2] === 5.5, `${e.seeks}`);
+    const p = fake(3, true);
+    sync(p, 4, 2);
+    check("follow: a paused element seeks to srcTime and plays", p.seeks.join() === "4" && p.plays === 1, `${p.seeks} / ${p.plays}`);
+
+    // resumeNear: play a paused element already within 0.06 s of srcTime; anything else is left to sync.
+    const r = (t: number, src: number, rate: number, set: Partial<Fake> = {}) => {
+      const el = Object.assign(fake(t, true), set);
+      pool.resumeNear(el as unknown as HTMLVideoElement, src, rate);
+      return el;
+    };
+    const r1 = r(5, 5.05, 20);
+    check("resumeNear: paused 0.05 s from srcTime → plays at the clamped rate (16), no seek", r1.plays === 1 && r1.playbackRate === 16 && r1.seeks.length === 0, `${r1.plays} / ${r1.playbackRate}`);
+    const r2 = r(5, 5, 0);
+    check("resumeNear: rate 0 → plays at 1x", r2.plays === 1 && r2.playbackRate === 1);
+    const r3 = r(5, 5.07, 1);
+    check("resumeNear: 0.07 s away → neither seeks nor plays", r3.plays === 0 && r3.seeks.length === 0 && r3.playbackRate === 1);
+    const r4 = r(5, 5, 2, { paused: false });
+    check("resumeNear: already playing → untouched", r4.plays === 0 && r4.playbackRate === 1);
+    const r5 = r(5, 5, 2, { seeking: true });
+    const r6 = r(5, 5, 2, { readyState: 1 });
+    check("resumeNear: seeking, or no frame decoded yet (readyState < 2) → untouched", r5.plays === 0 && r6.plays === 0 && r5.seeks.length === 0 && r6.seeks.length === 0);
+  } finally {
+    perf.now = realNow;
+  }
+}
+
+// --- the canvas hold while a decoder has no frame (preview.tsx) ---
+console.log("\npreview hold: keep the last frame while a layer's decoder catches up");
+check("hold: a missing frame on a painted canvas starts the hold", holdLastFrame(true, true, 0, 5000));
+check("hold: still held just inside HOLD_MS", holdLastFrame(true, true, 5000, 5000 + HOLD_MS - 1));
+check("hold: past HOLD_MS it paints (black where the frame is missing)", !holdLastFrame(true, true, 5000, 5000 + HOLD_MS));
+check("hold: every frame decoded → paints", !holdLastFrame(false, true, 0, 5000));
+check("hold: nothing of this size on the canvas yet (first frame, a resize) → paints", !holdLastFrame(true, false, 0, 5000));
+
+// --- a slider's refused commit puts it back (App.tsx WheelRow / RangeField) ---
+async function sliderRevertChecks(): Promise<void> {
+  console.log("\nslider commit refused → the slider reverts (revertIfRefused)");
+  const run = async (r: unknown) => {
+    let reverted = 0;
+    revertIfRefused(r, () => reverted++);
+    await new Promise((res) => setTimeout(res, 0));
+    return reverted;
+  };
+  check("revert: the commit resolved null (refused, e.g. a locked track) → reverts", (await run(Promise.resolve(null))) === 1);
+  check("revert: the commit resolved a result → keeps the value", (await run(Promise.resolve({ ok: true }))) === 0);
+  check("revert: the commit failed (rejected) → reverts", (await run(Promise.reject(new Error("rpc down")))) === 1);
+  check("revert: a synchronous commit (no promise) → keeps the value", (await run(undefined)) === 0);
+}
 
 // --- the voice AudioWorklet route (async: runs after the synchronous checks) ---
 async function voiceWorkletRouterChecks(): Promise<void> {
@@ -1116,6 +1303,8 @@ async function voiceWorkletRouterChecks(): Promise<void> {
 
 void voiceWorkletRouterChecks()
   .catch((e) => { failures++; console.error("  FAIL voice worklet checks threw:", e); })
+  .then(sliderRevertChecks)
+  .catch((e) => { failures++; console.error("  FAIL slider revert checks threw:", e); })
   .then(() => {
     console.log(failures === 0 ? "\nPASS — all checks green" : `\nFAIL — ${failures} check(s) failed`);
     process.exit(failures === 0 ? 0 : 1);

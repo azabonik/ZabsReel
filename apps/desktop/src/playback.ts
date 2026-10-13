@@ -9,7 +9,7 @@
 
 import { useSyncExternalStore } from "react";
 import { DEFAULT_PREVIEW_SCALE, effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
-import { clipTimeMap, hasSpeedRamp, type ClipTimeMap } from "@aive/core/speed";
+import { clipFootprintFrames, clipTimeMap, hasSpeedRamp, rampFrameModel, sourceFrameShownAt, type ClipTimeMap, type RampFrameModel } from "@aive/core/speed";
 import type { Clip, MediaAsset, ColorAdjust, ColorGrade, VisualEffect } from "./types";
 
 export interface PlaybackState {
@@ -69,8 +69,9 @@ export interface PlayerHandle {
 
 /**
  * A clip flattened onto the timeline: where it sits (start/end in timeline
- * seconds) and which slice of its source it shows. `tlDur` already accounts for
- * speed, so the timeline and the source playhead stay in lockstep.
+ * seconds) and which slice of its source it shows. `tlDur` is the clip's
+ * footprint (whole frames, as the engine and the export count it), so a clip
+ * ends on the same frame in the preview as in the export.
  */
 export interface Segment {
   clip: Clip;
@@ -86,6 +87,8 @@ export interface Segment {
    * (`@aive/core/speed`, the same code the export retimes with).
    */
   map?: ClipTimeMap;
+  /** A speed-ramped clip's frame model (`@aive/core/speed` "Ramp frames"): the export's exact frames. */
+  frames?: RampFrameModel;
   srcIn: number;
   srcOut: number;
   path?: string;
@@ -105,19 +108,34 @@ export function buildSegments(clips: Clip[], assetById: Map<string, MediaAsset>,
     const start = clip.startFrame / fps;
     const asset = clip.assetId ? assetById.get(clip.assetId) : undefined; // adjustment layers have no source
     const path = asset?.proxyPath ?? asset?.path; // preview prefers a low-res proxy; export uses the original
+    // The footprint, in whole frames as the engine and the export count it (not the continuous source / speed).
+    const fpFrames = clipFootprintFrames(clip, fps);
+    const tlDur = Math.max(0.01, fpFrames / fps);
+    // End exactly where a butted next clip starts: start + tlDur can be an ulp past (endFrame)/fps, and both clips were then active there.
+    const end = fpFrames / fps >= 0.01 ? (clip.startFrame + fpFrames) / fps : start + tlDur;
     if (hasSpeedRamp(clip) && !clip.adjustment) {
       const map = clipTimeMap(clip, fps);
-      const tlDur = Math.max(0.01, map.duration);
-      return { clip, asset, index, start, end: start + tlDur, tlDur, speed: (srcOut - srcIn) / tlDur, map, srcIn, srcOut, path, fps };
+      const frames = rampFrameModel(clip, fps);
+      return { clip, asset, index, start, end, tlDur, speed: (srcOut - srcIn) / tlDur, map, frames, srcIn, srcOut, path, fps };
     }
     const speed = clip.effects?.speed ?? 1;
-    const tlDur = Math.max(0.01, (srcOut - srcIn) / speed);
-    return { clip, asset, index, start, end: start + tlDur, tlDur, speed, srcIn, srcOut, path, fps };
+    return { clip, asset, index, start, end, tlDur, speed, srcIn, srcOut, path, fps };
   });
 }
 
 export function totalDuration(segments: Segment[]): number {
   return segments.length ? segments[segments.length - 1].end : 0;
+}
+
+/**
+ * The playhead `frames` frames from `time`. On the frame grid (within float noise) it steps from the frame
+ * number, not by adding frames / fps: 120 steps of 1/30 s reach 3.9999999999999996, a hair before frame 120,
+ * which still showed the previous clip's last frame at a cut.
+ */
+export function stepFrames(time: number, frames: number, fps: number): number {
+  const g = time * fps;
+  const n = Math.round(g);
+  return (Math.abs(g - n) < 1e-4 ? n + frames : g + frames) / fps;
 }
 
 /** Which segment is under a given timeline time (clamped to the last clip). */
@@ -129,10 +147,28 @@ export function segmentAt(segments: Segment[], time: number): Segment | undefine
   return segments[segments.length - 1];
 }
 
-/** Source time inside a segment for a given timeline time (a ramp maps through its curve, exactly). */
+/**
+ * Source time inside a segment for a given timeline time, for LIVE playback: a
+ * ramp maps through its curve, centred on the export's frames
+ * (RampFrameModel.sourceAt); constant speed is linear. Never past the clip's
+ * last source frame (a footprint rounded up runs a hair past source / speed).
+ */
 export function sourceTimeFor(seg: Segment, time: number): number {
-  if (seg.map) return seg.map.sourceAt(Math.max(0, time - seg.start));
-  return seg.srcIn + Math.max(0, time - seg.start) * seg.speed;
+  const local = Math.max(0, time - seg.start);
+  const s = seg.frames ? seg.frames.sourceAt(local) : seg.srcIn + local * seg.speed;
+  return Math.min(Math.max(seg.srcIn, s), Math.max(seg.srcIn, seg.srcOut - 0.5 / seg.fps));
+}
+
+/**
+ * Source time for a STILL frame (paused / scrubbing): the middle of the very
+ * source frame the export shows at that timeline frame (speed.ts
+ * sourceFrameShownAt — a ramp's frame model, or FFmpeg's pick at a constant
+ * speed), so a paused preview shows the exported frame.
+ */
+export function exactSourceTimeFor(seg: Segment, time: number): number {
+  if (!seg.clip.assetId || seg.asset?.isImage) return sourceTimeFor(seg, time);
+  const n = Math.max(0, Math.floor((time - seg.start) * seg.fps + 1e-6));
+  return (sourceFrameShownAt(seg.clip, n, seg.fps) + 0.5) / seg.fps;
 }
 
 /** Playback rate of a segment's source at a source time: its constant speed, or the curve's speed there. */
@@ -230,4 +266,25 @@ export function tickInterval(pxPerSec: number): number {
   const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
   for (const s of steps) if (s >= raw) return s;
   return 600;
+}
+
+/** How long (ms) the canvas keeps the last frame while a layer's decoder has none (a seek, a load). */
+export const HOLD_MS = 250;
+
+/**
+ * Whether the preview keeps the frame already on the canvas instead of painting a new one: a layer has no decoded
+ * frame (`late`), the canvas shows a frame of the current size (`painted`), and the hold started less than HOLD_MS
+ * ago (`holdStart` is 0 before it starts). Past HOLD_MS it paints, black where a frame is still missing.
+ */
+export function holdLastFrame(late: boolean, painted: boolean, holdStart: number, now: number): boolean {
+  return late && painted && (!holdStart || now - holdStart < HOLD_MS);
+}
+
+/**
+ * A slider keeps its own value while dragged and resyncs when the project changes. A refused or failed commit
+ * (a locked track, say: run() resolves null) leaves the project as it was, so nothing would resync it and the
+ * slider would stay on the rejected value: `revert` puts it back.
+ */
+export function revertIfRefused(r: unknown, revert: () => void): void {
+  if (r && typeof (r as Promise<unknown>).then === "function") (r as Promise<unknown>).then((res) => { if (res === null) revert(); }, revert);
 }

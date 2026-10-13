@@ -9,7 +9,11 @@
 //
 // Editor gestures: drag a point (both axes; it stays between its neighbours),
 // double-click empty space to add a point, click a point then Delete /
-// Backspace to remove it.
+// Backspace to remove it. Points outside the clip's used range (left there by
+// a trim or a split — they still shape the curve at its ends) are shown too:
+// the editor widens to them over a shaded "outside the clip" band, and one
+// too far out sits on the edge as a ghost marker (speedrampview.ts); all of
+// them can be dragged and deleted like the others.
 
 import {
   useEffect, useMemo, useRef, useState,
@@ -21,6 +25,7 @@ import {
   type RampAudio, type RampPreset, type SpeedRampPoint,
 } from "@aive/core/speed";
 import type { Clip } from "./types";
+import { curveView, pointPlace } from "./speedrampview";
 import "./speedramp.css";
 
 export interface SpeedRampParams {
@@ -163,24 +168,33 @@ function CurveEditor(props: { clip: Clip; fps: number; disabled: boolean; onComm
   const srcIn = clip.sourceInFrame / fps;
   const srcOut = Math.max(srcIn + 1e-3, clip.sourceOutFrame / fps);
   const span = srcOut - srcIn;
+  // The x-range: the clip's used range, widened to the stored points outside it (stable while dragging).
+  const view = useMemo(() => curveView(stored, srcIn, srcOut), [storedKey, srcIn, srcOut]); // eslint-disable-line react-hooks/exhaustive-deps
+  const vSpan = Math.max(1e-3, view.hi - view.lo);
+  const plotW = W - PAD_L - PAD_R;
 
-  const xOf = (s: number) => PAD_L + ((s - srcIn) / span) * (W - PAD_L - PAD_R);
+  const xOf = (s: number) => PAD_L + ((clamp(s, view.lo, view.hi) - view.lo) / vSpan) * plotW;
   const yOf = (v: number) => PAD_T + (1 - (Math.log10(clamp(v, RAMP_MIN_SPEED, RAMP_MAX_SPEED)) - LOG_MIN) / LOG_SPAN) * (H - PAD_T - PAD_B);
-  const sOf = (x: number) => srcIn + ((x - PAD_L) / (W - PAD_L - PAD_R)) * span;
+  const sOf = (x: number) => view.lo + ((x - PAD_L) / plotW) * vSpan;
   const vOf = (y: number) => 10 ** (LOG_MIN + (1 - (y - PAD_T) / (H - PAD_T - PAD_B)) * LOG_SPAN);
 
-  const path = useMemo(() => {
-    if (!points.length) return "";
+  // The curve over the whole view; the parts outside the clip are drawn dimmed.
+  const paths = useMemo(() => {
+    if (!points.length) return { inside: "", before: "", after: "" };
     const c = buildSpeedCurve(points);
-    const n = 120;
-    let d = "";
-    for (let i = 0; i <= n; i++) {
-      const s = srcIn + (span * i) / n;
-      d += `${i ? "L" : "M"}${xOf(s).toFixed(2)},${yOf(curveSpeedAt(c, s)).toFixed(2)}`;
-    }
-    return d;
+    const trace = (a: number, b: number, n: number) => {
+      if (b - a < 1e-9) return "";
+      let d = "";
+      for (let i = 0; i <= n; i++) {
+        const s = a + ((b - a) * i) / n;
+        d += `${i ? "L" : "M"}${xOf(s).toFixed(2)},${yOf(curveSpeedAt(c, s)).toFixed(2)}`;
+      }
+      return d;
+    };
+    return { inside: trace(srcIn, srcOut, 120), before: trace(view.lo, srcIn, 40), after: trace(srcOut, view.hi, 40) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [points, srcIn, span]);
+  }, [points, srcIn, srcOut, view.lo, view.hi]);
+  const outside = points.filter((p) => pointPlace(p, view, srcIn, srcOut) !== "in").length;
 
   const durationSec = clipFootprintFrames({ ...clip, effects: { ...clip.effects, speedRamp: { ...clip.effects?.speedRamp, points } } }, fps) / fps;
 
@@ -205,8 +219,8 @@ function CurveEditor(props: { clip: Clip; fps: number; disabled: boolean; onComm
     const base = draft ?? stored;
     const prev = base[d.index - 1];
     const next = base[d.index + 1];
-    const lo = Math.max(srcIn, prev ? prev.src + MIN_GAP : -Infinity);
-    const hi = Math.min(srcOut, next ? next.src - MIN_GAP : Infinity);
+    const lo = Math.max(view.lo, prev ? prev.src + MIN_GAP : -Infinity);
+    const hi = Math.min(view.hi, next ? next.src - MIN_GAP : Infinity);
     const src = lo <= hi ? clamp(sOf(x), lo, hi) : base[d.index].src;
     const speed = Math.round(clamp(vOf(y), RAMP_MIN_SPEED, RAMP_MAX_SPEED) * 100) / 100;
     d.moved = true;
@@ -222,7 +236,7 @@ function CurveEditor(props: { clip: Clip; fps: number; disabled: boolean; onComm
     if (disabled || points.length >= RAMP_MAX_POINTS) return;
     const { x, y } = toView(e);
     if (x < PAD_L || x > W - PAD_R) return;
-    const src = clamp(sOf(x), srcIn, srcOut);
+    const src = clamp(sOf(x), view.lo, view.hi);
     if (points.some((p) => Math.abs(p.src - src) < MIN_GAP * 2)) return;
     const speed = Math.round(clamp(vOf(y), RAMP_MIN_SPEED, RAMP_MAX_SPEED) * 100) / 100;
     const next = [...points, { src, speed }].sort((a, b) => a.src - b.src);
@@ -266,25 +280,37 @@ function CurveEditor(props: { clip: Clip; fps: number; disabled: boolean; onComm
             <text className="sr-tick" x={PAD_L - 8} y={yOf(v) + 3}>{fmtX(v)}x</text>
           </g>
         ))}
-        <path className="sr-curve" d={path} />
-        {points.map((p, i) =>
-          p.src >= srcIn - 1e-6 && p.src <= srcOut + 1e-6 ? (
-            <circle
-              key={i}
-              className={`sr-pt ${selected === i ? "sel" : ""}`}
-              cx={xOf(p.src)}
-              cy={yOf(p.speed)}
-              r={selected === i ? 6 : 4.5}
-              onPointerDown={onPointDown(i)}
-            >
-              <title>{`${fmtX(p.speed)}x at ${p.src.toFixed(2)} s`}</title>
+        {view.lo < srcIn - 1e-6 && <rect className="sr-out" x={PAD_L} y={PAD_T} width={xOf(srcIn) - PAD_L} height={H - PAD_T - PAD_B}><title>Outside the clip (trimmed away)</title></rect>}
+        {view.hi > srcOut + 1e-6 && <rect className="sr-out" x={xOf(srcOut)} y={PAD_T} width={W - PAD_R - xOf(srcOut)} height={H - PAD_T - PAD_B}><title>Outside the clip (trimmed away)</title></rect>}
+        <path className="sr-curve out" d={paths.before} />
+        <path className="sr-curve out" d={paths.after} />
+        <path className="sr-curve" d={paths.inside} />
+        {points.map((p, i) => {
+          const place = pointPlace(p, view, srcIn, srcOut);
+          const tip = `${fmtX(p.speed)}x at ${p.src.toFixed(2)} s${place === "in" ? "" : " — outside the clip; it shapes the curve at the clip's ends (drag or Delete)"}`;
+          const cls = `sr-pt ${place === "in" ? "" : place === "out" ? "out" : "ghost"} ${selected === i ? "sel" : ""}`;
+          if (place === "ghost-lo" || place === "ghost-hi") {
+            // Too far out to fit: an arrowhead on the edge, pointing at it.
+            const x = place === "ghost-lo" ? PAD_L : W - PAD_R;
+            const y = yOf(p.speed);
+            const dx = place === "ghost-lo" ? -1 : 1;
+            return (
+              <polygon key={i} className={cls} points={`${x + dx * 6},${y} ${x - dx * 2},${y - 5} ${x - dx * 2},${y + 5}`} onPointerDown={onPointDown(i)}>
+                <title>{tip}</title>
+              </polygon>
+            );
+          }
+          return (
+            <circle key={i} className={cls} cx={xOf(p.src)} cy={yOf(p.speed)} r={selected === i ? 6 : 4.5} onPointerDown={onPointDown(i)}>
+              <title>{tip}</title>
             </circle>
-          ) : null,
-        )}
+          );
+        })}
       </svg>
       <div className="sr-meta">
         <span>Duration {durationSec.toFixed(2)} s</span>
         <span className="sr-dim">(1x: {span.toFixed(2)} s)</span>
+        {outside > 0 && <span className="sr-dim">· {outside} outside the clip (shaded)</span>}
       </div>
     </div>
   );

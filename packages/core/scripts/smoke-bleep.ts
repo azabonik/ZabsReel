@@ -24,9 +24,12 @@ import { methods } from "../src/rpc.js";
 import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
 import { findProfanity } from "../src/audio/profanity.js";
 import { SFX_NAMES, SFX_RATE, sfxDuration, synthesizeSfx } from "../src/audio/sfx.js";
-import { planSegments, segmentKey } from "../src/ffmpeg/segments.js";
+import { planSegments, segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
 import { PREVIEW_PROFILE, previewCanvas } from "../src/ffmpeg/graph.js";
 import type { AssetTranscript, Clip, ResolvedRenderClip, TranscriptWord } from "../src/types.js";
+
+/** These keys compare one project against itself: any fixed FFmpeg build will do. */
+const BUILD: SegmentBuild = { ffmpeg: "", xfadeEofPad: false };
 
 const FPS = 30;
 
@@ -182,7 +185,7 @@ async function main() {
   const keysNow = async (): Promise<string[]> => {
     const { clips: staged } = await (engine as unknown as { stageRender(): Promise<{ clips: ResolvedRenderClip[] }> }).stageRender();
     const segs = planSegments(staged, 6);
-    return segs.map((s) => segmentKey(staged, s, previewCanvas(engine.canvas), PREVIEW_PROFILE, {}, null));
+    return segs.map((s) => segmentKey(staged, s, previewCanvas(engine.canvas), PREVIEW_PROFILE, {}, null, BUILD));
   };
   const keysA = await keysNow();
   await call("set_bleep", { clipId: clip.id, bleepId: b1!.id, volume: 0.5 });

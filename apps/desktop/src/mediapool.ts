@@ -9,6 +9,10 @@ const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 /** playbackRate range browsers accept (Chromium: 1/16..16). */
 const MIN_RATE = 0.0625;
 const MAX_RATE = 16;
+/** Least time between two drift-correcting seeks of a curve-speed clip (see sync). */
+const FOLLOW_SEEK_GAP_MS = 400;
+/** How far (s) a paused element may be from where it should be and still just play on (see resumeNear). */
+const RESUME_TOLERANCE = 0.06;
 
 export interface SyncOpts {
   /** Source time (seconds) this clip should be at. */
@@ -44,6 +48,8 @@ export class MediaPool {
   private readonly lru: string[] = [];
   /** clipIds acquired in the current frame (protected from eviction/pause). */
   private used = new Set<string>();
+  /** When each element last seeked to follow a speed curve (performance.now()). */
+  private readonly lastFollowSeek = new WeakMap<HTMLVideoElement, number>();
 
   constructor(host: HTMLElement, fileUrl: (path: string) => string, onSeeked: () => void, cap = 8) {
     this.host = host;
@@ -92,16 +98,26 @@ export class MediaPool {
     if (o.playing) {
       if (o.follow) {
         // Curve speed: rate = the curve's speed + a proportional pull toward the
-        // expected source time (closes the gap in ~0.25 s), clamped to what
-        // browsers play; seek only past a rate-scaled threshold.
+        // expected source time (closes the gap in ~0.1 s), clamped to what
+        // browsers play. Seek only past a rate-scaled threshold, never while a
+        // seek is still pending and at most every FOLLOW_SEEK_GAP_MS: when the
+        // decoder can't keep up (8x on a loaded machine) seeking every frame
+        // only restarts decoding at a keyframe and falls further behind (seek
+        // thrash). A seek while behind lands a little AHEAD — about what the
+        // playhead covers during a seek — so it is not behind again on arrival.
         const err = o.srcTime - el.currentTime;
-        const steer = Math.min(rate * 2, Math.max(rate * 0.5, rate + 8 * err));
+        const steer = Math.min(rate * 3, Math.max(rate * 0.5, rate + 12 * err));
         el.playbackRate = Math.min(MAX_RATE, Math.max(MIN_RATE, steer));
+        const now = performance.now();
+        const seekTo = (t: number) => {
+          this.lastFollowSeek.set(el, now);
+          this.safeSeek(el, t);
+        };
         if (el.paused) {
-          this.safeSeek(el, o.srcTime);
+          seekTo(o.srcTime);
           void el.play().catch(() => {});
-        } else if (Math.abs(err) > 0.08 * Math.max(1, rate)) {
-          this.safeSeek(el, o.srcTime);
+        } else if (!el.seeking && Math.abs(err) > 0.08 * Math.max(1, rate) && now - (this.lastFollowSeek.get(el) ?? -Infinity) > FOLLOW_SEEK_GAP_MS) {
+          seekTo(o.srcTime + (err > 0 ? Math.min(0.5, 0.06 * rate) : 0));
         }
         return;
       }
@@ -124,6 +140,18 @@ export class MediaPool {
     for (const [clipId, el] of this.byClip) {
       if (!this.used.has(clipId) && !el.paused) el.pause();
     }
+  }
+
+  /**
+   * Play a paused element that already sits at `srcTime` (within RESUME_TOLERANCE): a clip parked on its first
+   * frame ahead of a cut, or playback resuming where it was paused. sync's seek-and-play would drop it to
+   * HAVE_METADATA for the seek — a frame the canvas can't draw. Anything else is left to sync.
+   */
+  resumeNear(el: HTMLVideoElement, srcTime: number, rate: number): void {
+    if (!el.paused || el.seeking || el.readyState < 2 || !Number.isFinite(srcTime)) return;
+    if (Math.abs(el.currentTime - srcTime) > RESUME_TOLERANCE) return;
+    el.playbackRate = Math.min(MAX_RATE, Math.max(MIN_RATE, rate > 0 ? rate : 1));
+    void el.play().catch(() => {});
   }
 
   /** Pause all decoders (transport stop / empty timeline). */

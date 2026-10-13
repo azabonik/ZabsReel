@@ -22,8 +22,9 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 6: sharpen / denoise / edges keep alpha (alphaSafe), plus the look and style effects.
  * 7: color_grade's eq keeps alpha (alphaSafe): graded letterboxed / keyed / masked clips stay transparent.
  * 8: effect stacks are pinned to RGBA (graph.ts EFFECTS_RGBA_PIN): blur / lens / detail no longer run on 4:2:0 chroma.
+ * 9: speed ramps render on anchored frame slots (exact footprint, pad + frame cut); xfade gets one cloned frame before FFmpeg 7.
  */
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 9;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this
@@ -98,11 +99,19 @@ export async function collectMtimes(clips: ResolvedRenderClip[]): Promise<Record
   return out;
 }
 
+/** The FFmpeg build a segment is rendered with: its pixels differ between builds. */
+export interface SegmentBuild {
+  /** First line of `ffmpeg -version` (executor.ts ffmpegVersionLine). */
+  ffmpeg: string;
+  /** The graph pads xfade's input by one cloned frame (graph.ts RenderOptions.xfadeEofPad). */
+  xfadeEofPad: boolean;
+}
+
 /**
- * Content key for one segment: sha1 over the canvas, encode settings, and the
- * JSON of every intersecting resolved clip with its position REBASED to the
- * segment window (so identical content reuses cache regardless of where it
- * sits on the timeline) plus source-file mtimes.
+ * Content key for one segment: sha1 over the canvas, encode settings, the
+ * FFmpeg build, and the JSON of every intersecting resolved clip with its
+ * position REBASED to the segment window (so identical content reuses cache
+ * regardless of where it sits on the timeline) plus source-file mtimes.
  */
 export function segmentKey(
   clips: ResolvedRenderClip[],
@@ -111,6 +120,7 @@ export function segmentKey(
   profile: RenderProfile,
   mtimes: Record<string, number>,
   hwEncoder: string | null | undefined,
+  build: SegmentBuild,
 ): string {
   const deps = clipsIntersecting(clips, seg).map((c) => ({
     ...c,
@@ -133,6 +143,8 @@ export function segmentKey(
     crf: profile.crf,
     preset: profile.preset,
     enc: hwEncoder ?? "sw",
+    ff: build.ffmpeg,
+    pad: build.xfadeEofPad ? 1 : 0,
     deps,
   });
   return createHash("sha1").update(payload).digest("hex");

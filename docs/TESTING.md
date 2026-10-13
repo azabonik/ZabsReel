@@ -76,7 +76,7 @@ from `scratch/`.
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
 # smoke-composite imports @aive/core/effects from core's dist/, so build first.
-npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
+npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, fidelity) and the colour maths vs graph.ts
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
 # Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
@@ -143,7 +143,7 @@ npx tsx packages/core/scripts/smoke-multitrack.ts                      # self-sy
 
 # Effects, keys, transitions, LUT/stabilize, color grade, per-clip transform + keyframes
 npx tsx packages/core/scripts/smoke-effects.ts     scratch/a.mp4 scratch/b.mp4
-npx tsx packages/core/scripts/smoke-transitions.ts scratch/a.mp4 scratch/b.mp4
+npx tsx packages/core/scripts/smoke-transitions.ts scratch/a.mp4 scratch/b.mp4   # + on synthesized frame-index-coded media: the incoming clip of a wipe / fade lands on the modelled frames (FFmpeg before 7 ended an xfade a frame early)
 npx tsx packages/core/scripts/smoke-lut-stab.ts    scratch/a.mp4 scratch/b.mp4   # + stabilize options on a synthesized shaky clip
 npx tsx packages/core/scripts/smoke-color.ts       scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-transform.ts   scratch/a.mp4 scratch/b.mp4
@@ -202,10 +202,33 @@ npx tsx packages/core/scripts/smoke-voice.ts
 # playwright-core + a Chromium (as parity-gl; SYNTHCUT_SKIP_BROWSER=1 skips).
 npx tsx packages/core/scripts/smoke-voicefx.ts
 
-# Time effects: freeze_frame (ripples the timeline + linked audio), chunked frame-exact
-# reverse_clip (and its un-reverse), smooth_slow_motion (blend + optical flow, no
-# duplicated frames) — self-contained, verified by decoding frame-index-coded media
+# Time effects: freeze_frame (ripples the timeline + linked audio; ripple 'all'
+# moves other tracks and markers, 'none' overwrites), chunked frame-exact
+# reverse_clip (and its un-reverse; the linked detached audio is reversed with it,
+# a J-cut head becomes an L-cut tail), smooth_slow_motion (blend + optical flow, no
+# duplicated frame even at the end, exact frame count at 0.25x, the plain linked
+# audio moves onto the bake, a J/L partner keeps its speed ratio) — self-contained,
+# verified by decoding frame-index-coded media and a chirp
 npx tsx packages/core/scripts/smoke-time.ts
+
+# Cut rounding at CONSTANT speeds: split_clip at every frame at 0.25x … 4x (halves
+# butt, the right half ends where the clip did; 1x–4x exactly where asked),
+# cut_range on a grid (pieces butt, the next clip closes up, one-frame heads /
+# tails kept, no gap), two-track ripple_delete_ranges, exports of pieces spread
+# one black frame apart (exact footprints and frames), and freeze_frame holding
+# exactly the exported frame at 0.5x–4x — also on a 29.97 fps source with a
+# 1/30000 timebase; get_frame shows the exported frame anywhere in a frame period
+# around 1x | 3x | 0.5x cuts, from a cached segment and from a full preview
+# (self-contained, frame-index-coded media)
+npx tsx packages/core/scripts/smoke-cuts.ts
+
+# Locked tracks: every edit that would change or move a clip on a locked track —
+# direct (trim, move, split, effects, remove, add, cut_range) or by a ripple (speed
+# change 'all', a linked clip on it, freeze 'all', ripple_delete_ranges, transcript
+# cuts) — is refused naming the track with the project, undo and redo history
+# untouched; ripple 'none' / 'track' edits that leave it alone, renaming, an fps
+# change and removing the track still work; bakes refuse before any work
+npx tsx packages/core/scripts/smoke-locks.ts
 
 # Speed ramps (curve speed): the shared source↔timeline mapping (speed.ts —
 # constant speed exactly as before, round trips, monotonic, ∫ds/speed), every
@@ -214,8 +237,12 @@ npx tsx packages/core/scripts/smoke-time.ts
 # kept, click-free joins, bursts on the curve) and mute, bleeps on the mapped
 # words, split / cut_range / trim keep the curve, cuts in a slow section snap to
 # their source frame (pieces and the next clip stay butted, tracks stay in sync),
-# freeze holds the shown frame, locate / transcript cuts, reverse mirrors the
-# curve, OTIO, undo, long filtergraphs passed from a file (self-contained).
+# splits add up EXACTLY at every split point of every preset and of flat 0.1x /
+# 10x / 2x / 4x curves, pieces spread one black frame apart render exactly their
+# footprints and the modelled frames, freeze holds exactly the exported frame (also
+# on exact half-frame ties), locate / transcript cuts, reverse mirrors the curve
+# and keeps the footprint, OTIO, undo, long filtergraphs passed from a file
+# (self-contained). Every frame check is exact (no ±1).
 # RAMPS_BASELINE_REF=<git ref> also checks that constant-speed timelines emit the
 # exact ffmpeg command of the graph builder at that ref (byte-identical renders).
 # smoke-composite.ts checks the preview's ramp mapping and the ramped bleep mirror.
@@ -233,7 +260,10 @@ RAMPS_BASELINE_REF=dd38598 npx tsx packages/core/scripts/smoke-ramps.ts
 # a linked mic recording (curve moved by its sync offset), a J-cut head, smooth
 # slow motion and reverse; a later clip's own linked mic moves with it (freeze too);
 # L-cut tails / J-cut heads changed from either side stay in sync (trimmed to fit,
-# reported in splitEdits); a straddler holds the clips joined to it; split pairs
+# reported in splitEdits) — and an L-cut tail checked BY EAR after 0.5x / 2x /
+# bullet / montage (a chirp whose pitch is its source time: the sound under the
+# picture plays the moment shown, the tail goes on from there, the next audio
+# clip is never played over); a straddler holds the clips joined to it; split pairs
 # and collisions are refused; exports have no black gap after montage and no
 # overlap after bullet (self-contained, frame-index-coded media).
 npx tsx packages/core/scripts/smoke-ripple.ts

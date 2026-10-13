@@ -23,9 +23,13 @@
 .sr-grid.one { stroke: var(--line-2); stroke-dasharray: 3 3; }
 .sr-tick { fill: var(--ink-4); font-size: 8.5px; text-anchor: end; font-variant-numeric: tabular-nums; }
 .sr-curve { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.sr-curve.out { stroke-opacity: 0.45; stroke-dasharray: 4 3; }
+.sr-out { fill: var(--surface-2); opacity: 0.55; }
 .sr-pt { fill: var(--surface-1); stroke: var(--accent); stroke-width: 2; cursor: grab; }
 .sr-pt:active { cursor: grabbing; }
 .sr-pt.sel { fill: var(--accent); stroke: var(--accent-ink); }
+.sr-pt.out, .sr-pt.ghost { fill: var(--bg); stroke-dasharray: 2 2; }
+.sr-pt.out.sel, .sr-pt.ghost.sel { fill: var(--accent); stroke-dasharray: none; }
 .sr-meta { display: flex; gap: 6px; font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .sr-dim { color: var(--ink-4); }
 .sr-audio { display: flex; align-items: center; gap: 8px; }

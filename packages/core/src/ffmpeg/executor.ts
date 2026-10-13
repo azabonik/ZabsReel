@@ -17,6 +17,22 @@ import { join } from "node:path";
 export const FFMPEG_BIN = process.env.AIVE_FFMPEG || "ffmpeg";
 export const FFPROBE_BIN = process.env.AIVE_FFPROBE || "ffprobe";
 
+let versionLine: Promise<string> | undefined;
+/** First line of FFMPEG_BIN's `-version` banner, probed once ("" when it does not run). */
+export function ffmpegVersionLine(): Promise<string> {
+  versionLine ??= execa(FFMPEG_BIN, ["-version"]).then(
+    (r) => r.stdout.split("\n")[0].trim(),
+    () => "",
+  );
+  return versionLine;
+}
+
+/** Major version of FFMPEG_BIN (0 when the banner has none, e.g. a git snapshot build). */
+export async function ffmpegMajorVersion(): Promise<number> {
+  const m = /^ffmpeg version n?(\d+)\.\d/.exec(await ffmpegVersionLine());
+  return m ? Number(m[1]) : 0;
+}
+
 export class FfmpegError extends Error {
   constructor(
     message: string,

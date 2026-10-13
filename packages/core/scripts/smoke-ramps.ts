@@ -28,6 +28,14 @@
  *     plays: split at every frame, cut_range on a grid and a two-track
  *     ripple_delete_ranges keep the pieces and the next clip butted (exports
  *     have no gap) and both tracks lose the same frames.
+ *  6c. Splits add up EXACTLY (known issue A2): at every split point of every
+ *     preset and of flat 0.1x / 10x curves the halves' footprints sum to the
+ *     whole and the right half ends where the clip did; split into pieces and
+ *     spread apart by one black frame each, the export shows exactly each
+ *     piece's footprint (a frame too many would cover the black gap) and every
+ *     frame is the source frame the model predicts — also on flat 2x / 4x
+ *     curves and on clips whose ramp points all lie outside them (A4: exact
+ *     half-frame ties), and freeze_frame holds exactly that frame there.
  *  7. RPC surface + undo: one undo step each, set_clip_speed clears a ramp,
  *     preset XOR points, normalized points, audio-only change, refusals (still
  *     image, smooth_slow_motion), reverse mirrors the curve, OTIO export
@@ -48,7 +56,7 @@ import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
 import { FFMPEG_BIN, INLINE_FILTERGRAPH_MAX, longFilterGraphIndex } from "../src/ffmpeg/executor.js";
 import { buildRenderCommand, EXPORT_PROFILE, PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
-import { segmentKey } from "../src/ffmpeg/segments.js";
+import { segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
 import { expandBleeps } from "../src/audio/bleeps.js";
 import {
   RAMP_PRESETS,
@@ -59,6 +67,7 @@ import {
   curveSpeedAt,
   localFrameAtSource,
   presetRampPoints,
+  RAMP_TIE_EPS,
   rampAudioChunks,
   rampSetptsExpr,
   sourceFrameAtLocalFrame,
@@ -67,6 +76,9 @@ import {
   type SpeedRampPoint,
 } from "../src/speed.js";
 import type { AssetTranscript, Clip, ResolvedRenderClip } from "../src/types.js";
+
+/** These keys compare one project against itself: any fixed FFmpeg build will do. */
+const BUILD: SegmentBuild = { ffmpeg: "", xfadeEofPad: false };
 
 const FPS = 30;
 let failures = 0;
@@ -184,16 +196,17 @@ function mappingProperties(): void {
   check(constMismatch === 0, `constant speed == the pre-ramp formulas (${cases} trims × speeds × fps)`, `${constMismatch} mismatches`);
   check(clipFootprintFrames({ sourceInFrame: 0, sourceOutFrame: 90 }, 30) === 90, "no effects → 1x");
 
-  // A flat ramp is constant speed.
+  // A flat ramp is constant speed (its frames round on the curve's own timeline: within a frame of round(span / v)).
   let flatBad = 0;
   for (const v of [0.25, 0.5, 1, 2, 3.5]) {
     const clip = { sourceInFrame: 30, sourceOutFrame: 211, effects: { speedRamp: { points: [{ src: 0, speed: v }, { src: 20, speed: v }] } } };
     const map = clipTimeMap(clip, 30);
     if (!near(map.duration, (181 / 30) / v, 1e-9)) flatBad++;
-    if (clipFootprintFrames(clip, 30) !== Math.max(1, Math.round(181 / v))) flatBad++;
+    const anchored = Math.floor(211 / v + 0.5 + RAMP_TIE_EPS) - Math.floor(30 / v + 0.5 + RAMP_TIE_EPS);
+    if (clipFootprintFrames(clip, 30) !== anchored || Math.abs(anchored - 181 / v) > 1) flatBad++;
     if (!near(map.sourceAt(2), 1 + 2 * v, 1e-9)) flatBad++;
   }
-  check(flatBad === 0, "flat ramp at v == constant speed v (duration, footprint, mapping)");
+  check(flatBad === 0, "flat ramp at v == constant speed v (duration, mapping; footprint = the anchored slots, within a frame of span / v)");
 
   // Random ramps: round trips, monotonicity, derivative = speed, integral, additivity.
   const r = rng(7);
@@ -284,7 +297,8 @@ function mappingProperties(): void {
     for (const c of ch) if (Math.abs(c.outEnd - Math.round(map.timelineAt(1 + c.srcEnd / 48000) * 48000)) > 1) chunkBad++;
   }
   check(chunkBad === 0, "audio chunk plan: contiguous, sample-exact boundaries on the curve");
-  check(rampSetptsExpr({ points: [{ src: 0, speed: 2 }] }, 1, 3) === "(-0.5+((PTS-STARTPTS)*TB-(-1))/2)/TB", "single-point ramp = linear setpts (X/2)", rampSetptsExpr({ points: [{ src: 0, speed: 2 }] }, 1, 3));
+  const lin2 = rampSetptsExpr({ points: [{ src: 0, speed: 2 }] }, 1, 3, 30);
+  check(lin2 === "(max(floor((0+((PTS-STARTPTS)*TB-(-1))/2)*30+0.500001)-(15),0)+0.25)/30/TB", "single-point ramp = linear setpts (slot of X/2, anchored at slot 15)", lin2);
 }
 
 // ---- 2. constant speed untouched ---------------------------------------------
@@ -321,7 +335,7 @@ async function constantUntouched(dir: string, engine: EditorEngine, codedId: str
   const stage = async () => (engine as unknown as { stageRender(c: typeof canvas, o: { audio: boolean }): Promise<{ clips: ResolvedRenderClip[] }> }).stageRender(canvas, { audio: false });
   const key = async () => {
     const { clips } = await stage();
-    return segmentKey(clips, { start: 0, end: 2 }, canvas, PREVIEW_PROFILE, {}, null);
+    return segmentKey(clips, { start: 0, end: 2 }, canvas, PREVIEW_PROFILE, {}, null, BUILD);
   };
   const k0 = await key();
   engine.setSpeedRamp(clip.id, { preset: "montage" });
@@ -434,8 +448,8 @@ async function main(): Promise<void> {
       if (Math.abs(got - want) <= 1) within1++;
     });
     check(
-      idx.length === res.durationFrames && within1 === idx.length && exact >= idx.length - 1,
-      `${preset}: ${idx.length} frames (footprint ${res.durationFrames}, was ${res.previousDurationFrames}), ${exact} exact, all within ±1 of the mapping`,
+      idx.length === res.durationFrames && exact === idx.length,
+      `${preset}: ${idx.length} frames (footprint ${res.durationFrames}, was ${res.previousDurationFrames}), every frame exactly the one the mapping predicts`,
       `within1=${within1}`,
     );
     const vd = await probeDur(out, "v");
@@ -484,9 +498,9 @@ async function main(): Promise<void> {
     const idx = await frameIndexes(pv.path);
     let bad = 0;
     idx.forEach((got, n) => {
-      if (Math.abs(got - sourceFrameShownAt(c, n, FPS)) > 1) bad++;
+      if (got !== sourceFrameShownAt(c, n, FPS)) bad++;
     });
-    check(bad === 0 && Math.abs(idx.length - clipFootprintFrames(c, FPS)) <= 1, `render_preview (segment cache) follows the curve too (${idx.length} frames)`, `${bad} bad`);
+    check(bad === 0 && idx.length === clipFootprintFrames(c, FPS), `render_preview (segment cache) shows exactly the export's frames (${idx.length} frames)`, `${bad} bad`);
   }
 
   // Burst positions follow the curve (stretch alignment), and mute is silent.
@@ -589,7 +603,7 @@ async function main(): Promise<void> {
     const samePts = JSON.stringify(L.effects?.speedRamp?.points) === JSON.stringify(whole.effects?.speedRamp?.points) && JSON.stringify(R.effects?.speedRamp?.points) === JSON.stringify(whole.effects?.speedRamp?.points);
     check(samePts, "split: both halves keep the same anchored curve");
     check(
-      R.sourceInFrame === Math.round(clipTimeMap(whole, FPS).sourceAt(at / FPS) * FPS) &&
+      R.sourceInFrame === sourceFrameAtLocalFrame(whole, at, FPS) &&
         R.startFrame === localFrameAtSource(whole, R.sourceInFrame / FPS, FPS) &&
         R.startFrame === clipFootprintFrames(L, FPS) &&
         r.atFrame === R.startFrame &&
@@ -597,12 +611,12 @@ async function main(): Promise<void> {
       `split at ${at}: right half starts on the mapped source frame ${R.sourceInFrame}, where it plays (frame ${R.startFrame}), butted to the left half`,
     );
     const sum = clipFootprintFrames(L, FPS) + clipFootprintFrames(R, FPS);
-    check(Math.abs(sum - wholeDur) <= 1, `split halves' lengths add up (${sum} vs ${wholeDur})`);
+    check(sum === wholeDur, `split halves' lengths add up exactly (${sum} vs ${wholeDur})`);
     const out = await exportNow();
     const idx = await frameIndexes(out);
     let diff = 0;
-    for (let n = 0; n < Math.min(idx.length, ref.length); n++) if (Math.abs(idx[n] - ref[n]) > 1) diff++;
-    check(diff === 0 && Math.abs(idx.length - ref.length) <= 1, `split export shows the same frames as the unsplit clip (±1; ${idx.length} vs ${ref.length} frames)`, `${diff} differ`);
+    for (let n = 0; n < Math.min(idx.length, ref.length); n++) if (idx[n] !== ref[n]) diff++;
+    check(diff === 0 && idx.length === ref.length, `split export shows exactly the unsplit clip's frames (${idx.length} vs ${ref.length} frames)`, `${diff} differ`);
     engine.undo();
     check(clipById(clip.id).effects?.speedRamp !== undefined && tracks()[0].clips.length === 1, "undo restores the unsplit ramped clip");
 
@@ -625,7 +639,7 @@ async function main(): Promise<void> {
     const tidx = await frameIndexes(tout);
     let tbad = 0;
     tidx.forEach((got, n) => {
-      if (Math.abs(got - sourceFrameShownAt(t, n, FPS)) > 1) tbad++;
+      if (got !== sourceFrameShownAt(t, n, FPS)) tbad++;
     });
     check(tbad === 0 && tidx.length === clipFootprintFrames(t, FPS), `trimmed ramp export follows the window of the same curve (${tidx.length} frames)`);
     engine.undo();
@@ -695,7 +709,7 @@ async function main(): Promise<void> {
       if (r.left !== r.right) {
         const L = clipById(r.left);
         const R = clipById(r.right);
-        if (end(L) !== R.startFrame || R.startFrame !== localFrameAtSource(whole, R.sourceInFrame / FPS, FPS) || r.atFrame !== R.startFrame || Math.abs(end(R) - dur) > 1) bad++;
+        if (end(L) !== R.startFrame || R.startFrame !== localFrameAtSource(whole, R.sourceInFrame / FPS, FPS) || r.atFrame !== R.startFrame || end(R) !== dur) bad++;
         moved = Math.max(moved, Math.abs(R.startFrame - at));
       }
       engine.undo();
@@ -707,11 +721,11 @@ async function main(): Promise<void> {
     const R = clipById(r.right);
     const idx = await frameIndexes(await exportNow());
     let diff = 0;
-    for (let n = 0; n < end(R); n++) if (Math.abs(idx[n] - ref[n]) > 1) diff++;
+    for (let n = 0; n < end(R); n++) if (idx[n] !== ref[n]) diff++;
     const gaps = idx.map((v, n) => (v === 0 ? n : -1)).filter((n) => n >= 0);
     check(
       diff === 0 && gaps.every((n) => n >= end(R) && n < clipById(next.id).startFrame),
-      `split at 211 → ${r.atFrame}: export shows the unsplit frames (±1), no gap inside the clip`,
+      `split at 211 → ${r.atFrame}: export shows exactly the unsplit frames, no gap inside the clip`,
       `${diff} differ, gaps at ${gaps.join(",")}`,
     );
     engine.undo();
@@ -749,6 +763,110 @@ async function main(): Promise<void> {
     );
     engine.undo();
     engine.removeTrack(v2.index);
+  }
+
+  // ---- 6c. splits add up exactly; every piece renders exactly its footprint ----
+  console.log("\nsplits add up exactly; pieces render exactly their footprints (A2 / A4)");
+  {
+    const cases: Array<{ name: string; points?: SpeedRampPoint[]; preset?: (typeof RAMP_PRESETS)[number]; inF: number; outF: number }> = [
+      ...RAMP_PRESETS.map((preset) => ({ name: preset, preset, inF: 30, outF: 210 })),
+      { name: "flat 0.1x", points: [{ src: 0, speed: 0.1 }], inF: 31, outF: 61 },
+      { name: "flat 10x", points: [{ src: 0, speed: 10 }], inF: 11, outF: 239 },
+      { name: "flat 2x", points: [{ src: 0, speed: 2 }, { src: 1, speed: 2 }], inF: 31, outF: 211 },
+      { name: "flat 4x", points: [{ src: 0, speed: 4 }, { src: 1, speed: 4 }], inF: 31, outF: 211 },
+      { name: "points after the clip", points: [{ src: 7.5, speed: 2 }, { src: 7.9, speed: 3 }], inF: 31, outF: 211 },
+      { name: "points before the clip", points: [{ src: 0.1, speed: 0.5 }, { src: 0.5, speed: 4 }], inF: 31, outF: 211 },
+    ];
+    let points = 0;
+    let notAdditive = 0;
+    let endMoved = 0;
+    for (const cs of cases) {
+      clearTimeline();
+      const clip = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: cs.inF, sourceOutFrame: cs.outF });
+      await call("set_speed_ramp", { clipId: clip.id, ...(cs.preset ? { preset: cs.preset } : { points: cs.points }) });
+      const whole = clipById(clip.id);
+      const dur = clipFootprintFrames(whole, FPS);
+      // Pure: every source frame as the cut — the two windows' footprints add up.
+      for (let S = cs.inF + 1; S < cs.outF; S++) {
+        const l = { ...whole, sourceOutFrame: S };
+        const r = { ...whole, sourceInFrame: S };
+        if (localFrameAtSource(whole, S / FPS, FPS) < 1 || localFrameAtSource(whole, S / FPS, FPS) >= dur) continue; // a 0-frame piece is never cut
+        points++;
+        if (clipFootprintFrames(l, FPS) + clipFootprintFrames(r, FPS) !== dur) notAdditive++;
+      }
+      // Engine: split at every timeline frame — halves butt and the right half ends where the clip did.
+      for (let at = 2; at < dur - 1; at++) {
+        const res = engine.splitClip(clip.id, at);
+        if (res.left !== res.right) {
+          const L = clipById(res.left);
+          const R = clipById(res.right);
+          if (L.startFrame + clipFootprintFrames(L, FPS) !== R.startFrame || R.startFrame + clipFootprintFrames(R, FPS) !== dur) endMoved++;
+        }
+        engine.undo();
+      }
+    }
+    check(notAdditive === 0 && points > 1200, `${points} split points (every preset + flat 0.1x / 10x / 2x / 4x + outside points): left + right footprint == whole exactly`, `${notAdditive} not additive`);
+    check(endMoved === 0, "split_clip at every frame of each: halves butt and the right half ends where the clip did", `${endMoved} moved`);
+
+    // Export: pieces spread apart by one black frame — each shows exactly its footprint, every frame as modelled.
+    for (const cs of cases) {
+      clearTimeline();
+      const clip = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: cs.inF, sourceOutFrame: cs.outF });
+      await call("set_speed_ramp", { clipId: clip.id, ...(cs.preset ? { preset: cs.preset } : { points: cs.points }) });
+      const dur = clipFootprintFrames(clipById(clip.id), FPS);
+      let ids = [clip.id];
+      for (let k = 1; k <= 7; k++) {
+        const at = Math.round((dur * k) / 8) + (k % 3);
+        const host = ids.map(clipById).find((c) => c.startFrame < at && at < c.startFrame + clipFootprintFrames(c, FPS));
+        if (!host) continue;
+        const r = engine.splitClip(host.id, at - host.startFrame);
+        if (r.left !== r.right) ids = ids.filter((x) => x !== host.id).concat([r.left, r.right]);
+      }
+      const pieces = ids.map(clipById).sort((a, b) => a.startFrame - b.startFrame);
+      const sumFp = pieces.reduce((n, p) => n + clipFootprintFrames(p, FPS), 0);
+      // Spread: piece i moves right by i frames (a black frame after each piece).
+      engine.moveClips(pieces.map((p, i) => ({ clipId: p.id, startFrame: p.startFrame + i })).reverse());
+      const placed = pieces.map((p) => clipById(p.id));
+      const idx = await frameIndexes(await exportNow());
+      let bad = 0;
+      let gapBad = 0;
+      for (const p of placed) {
+        const F = clipFootprintFrames(p, FPS);
+        for (let n = 0; n < F; n++) if (idx[p.startFrame + n] !== sourceFrameShownAt(p, n, FPS)) bad++;
+        const gap = p.startFrame + F;
+        if (gap < idx.length && idx[gap] !== 0) gapBad++;
+      }
+      const lastEnd = placed[placed.length - 1].startFrame + clipFootprintFrames(placed[placed.length - 1], FPS);
+      check(
+        sumFp === dur && bad === 0 && gapBad === 0 && idx.length === lastEnd,
+        `${cs.name}: ${placed.length} pieces (footprints sum to ${sumFp} = ${dur}) each render exactly their frames, the black gap after each stays black`,
+        `${bad} frames off, ${gapBad} gaps covered, ${idx.length} vs ${lastEnd} frames`,
+      );
+    }
+
+    // A4: freeze_frame holds exactly the frame the export shows, also on exact half-frame ties.
+    for (const cs of cases.filter((c) => /flat [24]x|points/.test(c.name))) {
+      clearTimeline();
+      const clip = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: cs.inF, sourceOutFrame: cs.outF });
+      await call("set_speed_ramp", { clipId: clip.id, points: cs.points });
+      const c = clipById(clip.id);
+      const ref = await frameIndexes(await exportNow());
+      let off = 0;
+      const tried: string[] = [];
+      for (const n of [1, 2, 3, 7, 10, 21, 33]) {
+        if (n >= clipFootprintFrames(c, FPS) - 1) continue;
+        const res = await call<{ assetId: string }>("freeze_frame", { clipId: clip.id, atSeconds: n / FPS, durationSeconds: 0.2 });
+        const held = (await frameIndexes(engine.getProject().assets.find((a) => a.id === res.assetId)!.path))[0];
+        if (held !== ref[n]) off++;
+        tried.push(`${n}:${held}/${ref[n]}`);
+        engine.undo();
+      }
+      check(off === 0, `${cs.name}: freeze_frame holds exactly the exported frame (${tried.join(" ")})`);
+    }
+    // Leave the undo history as short as this section found it (section 7 counts undo steps; the stack is capped).
+    while (engine.undo()) {
+      /* unwind */
+    }
   }
 
   // ---- 7. rpc surface, undo, refusals, reverse, OTIO, fps -------------------
@@ -819,7 +937,7 @@ async function main(): Promise<void> {
     await call("reverse_clip", { clipId: clip.id, audio: "mute" });
     const rev = clipById(clip.id);
     const revMap = clipTimeMap(rev, FPS);
-    check(Math.abs(clipFootprintFrames(rev, FPS) - preDur) <= 1, `reverse keeps the ramped footprint (${clipFootprintFrames(rev, FPS)} vs ${preDur})`);
+    check(clipFootprintFrames(rev, FPS) === preDur, `reverse keeps the ramped footprint exactly (${clipFootprintFrames(rev, FPS)} vs ${preDur})`);
     // Original asset second s plays reversed at u = span - (s - in): the speed there is the same.
     let mirrorBad = 0;
     for (let i = 1; i < 10; i++) {
@@ -834,9 +952,9 @@ async function main(): Promise<void> {
     ridx.forEach((got, n) => {
       // Reversed media frame k shows original frame (30 + 180 - 1 - k).
       const k = sourceFrameShownAt(rev, n, FPS);
-      if (Math.abs(got - (30 + 179 - k)) > 1) rbad++;
+      if (got !== 30 + 179 - k) rbad++;
     });
-    check(rbad === 0 && Math.abs(ridx.length - preDur) <= 1, `reversed ramped export follows the mirrored curve (${ridx.length} frames)`, `${rbad} bad`);
+    check(rbad === 0 && ridx.length === preDur, `reversed ramped export follows the mirrored curve exactly (${ridx.length} frames)`, `${rbad} bad`);
     await call("reverse_clip", { clipId: clip.id });
     const back = clipById(clip.id);
     check(JSON.stringify(back.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])) === JSON.stringify(pre.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])), "un-reverse restores the original curve");
@@ -853,6 +971,33 @@ async function main(): Promise<void> {
     const imported = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.effects?.speedRamp);
     check(!!imported && JSON.stringify(imported.effects!.speedRamp) === JSON.stringify(back.effects!.speedRamp), "OTIO round trip keeps the speed ramp");
     engine.undo();
+
+    // A reverse whose mirrored curve would round a frame the other way keeps the footprint through its rounding
+    // phase — and the phase survives save → load and an OTIO round trip (a clip must not change length on reopen).
+    {
+      const pc = engine.addClip(coded.id, { startFrame: 400, sourceInFrame: 31, sourceOutFrame: 120, trackIndex: tracks()[0].index });
+      await call("set_speed_ramp", { clipId: pc.id, points: [{ src: 0, speed: 2 }] }); // flat 2x: slots on exact halves
+      const fp0 = clipFootprintFrames(clipById(pc.id), FPS);
+      await call("reverse_clip", { clipId: pc.id, audio: "mute" });
+      const rc = clipById(pc.id);
+      const phase = rc.effects?.speedRamp?.phase;
+      check(fp0 === 44 && clipFootprintFrames(rc, FPS) === 44 && typeof phase === "number" && phase > 0, `reverse of a flat 2x ramp on an odd frame keeps 44 frames through a rounding phase (${phase})`);
+      const aive = join(dir, "phase.aive");
+      await engine.save(aive);
+      const e2 = new EditorEngine(dir);
+      await e2.load(aive);
+      const lc = e2.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === pc.id)!;
+      check(lc.effects?.speedRamp?.phase === phase && clipFootprintFrames(lc, FPS) === 44, "save → load keeps the phase and the footprint");
+      const otioP = join(dir, "phase.otio");
+      await call("export_otio", { path: otioP });
+      await call("import_otio", { path: otioP });
+      const oc = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.effects?.speedRamp?.phase !== undefined)!;
+      check(!!oc && oc.effects?.speedRamp?.phase === phase && clipFootprintFrames(oc, FPS) === 44, "an OTIO round trip keeps the phase and the footprint");
+      // import_otio replaced the project (clip ids kept, history cleared): un-reverse the imported clip.
+      await call("reverse_clip", { clipId: pc.id });
+      check(clipFootprintFrames(clipById(pc.id), FPS) === 44, "un-reverse keeps the footprint too");
+      engine.removeClip(pc.id);
+    }
 
     // fps change: ramp points are seconds, the timing holds.
     const before = clipTimeMap(clipById(clip.id), FPS).duration;
@@ -901,7 +1046,7 @@ async function main(): Promise<void> {
     let bad = 0;
     idx.forEach((got, n) => {
       const k = placed.findIndex((c) => n >= c.startFrame && n < c.startFrame + clipFootprintFrames(c, FPS));
-      if (k < 0 || Math.abs(got - sourceFrameShownAt(placed[k], n - placed[k].startFrame, FPS)) > 1) bad++;
+      if (k < 0 || got !== sourceFrameShownAt(placed[k], n - placed[k].startFrame, FPS)) bad++;
     });
     const vDur = await probeDur(out, "v");
     const aDur = await probeDur(out, "a");

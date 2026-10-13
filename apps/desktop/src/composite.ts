@@ -15,7 +15,7 @@
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
 import { clipDurationFrames } from "./types";
 import {
-  buildSegments, colorFilter, fadeOpacity, rateAt, sourceTimeFor, vignetteAngles, type Segment,
+  buildSegments, colorFilter, exactSourceTimeFor, fadeOpacity, rateAt, sourceTimeFor, vignetteAngles, type Segment,
 } from "./playback";
 import { muteGainAt } from "./mutes";
 import { bleepMuteSpans, expandBleeps, type BleepLayer } from "./bleeps";
@@ -243,12 +243,16 @@ export function activeLayersAt(
   project: Project | null,
   assetById: Map<string, MediaAsset>,
   playheadSec: number,
+  /** `exactFrames`: a still frame (paused / scrubbing) — each clip shows exactly the source frame the export does. */
+  opts: { exactFrames?: boolean } = {},
 ): FramePlan {
   const out: ActiveClip[] = [];
   if (!project) return { clips: out };
   const fps = project.fps;
   const pvScale = previewScaleFor(project.width, project.height);
-  const t = playheadSec;
+  // A still frame is the export's frame n: the start of the frame the playhead is in (float noise just under a
+  // frame start, e.g. 3.9999999999999996 for 120/30, is that frame).
+  const t = opts.exactFrames ? Math.floor(playheadSec * fps + 1e-6) / fps : playheadSec;
 
   const tracks = [...project.tracks].sort((a, b) => {
     // Video tracks first (bottom→top by index), then audio tracks.
@@ -266,7 +270,7 @@ export function activeLayersAt(
     for (const seg of active) {
       const asset = seg.asset;
       const gain = segmentGain(seg, active, t);
-      const srcTime = sourceTimeFor(seg, t);
+      const srcTime = opts.exactFrames ? exactSourceTimeFor(seg, t) : sourceTimeFor(seg, t);
 
       // ADJUSTMENT layer: no source — contribute its color-proxy filter so the
       // renderer applies it to the composite of everything below.

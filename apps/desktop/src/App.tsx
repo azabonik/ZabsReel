@@ -5,7 +5,7 @@ import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker
 import { clipDurationFrames } from "./types";
 import { SpeedPanel, type SpeedRampParams } from "./speedramp";
 import {
-  buildSegments, createPlaybackStore, fmtTime, usePlaybackValue,
+  buildSegments, createPlaybackStore, fmtTime, revertIfRefused, usePlaybackValue,
   type PlayerHandle,
 } from "./playback";
 import { PreviewPlayer } from "./preview";
@@ -1230,6 +1230,9 @@ function WheelRow({ label, wheel, onChange }: {
   const [local, setLocal] = useState<{ r?: number; g?: number; b?: number }>(wheel);
   const dragging = useRef(false);
   useEffect(() => { if (!dragging.current) setLocal(wheel); }, [wheel]);
+  const wheelRef = useRef(wheel);
+  wheelRef.current = wheel;
+  const commit = (ch: "r" | "g" | "b", v: number) => revertIfRefused(onChange(ch, v), () => { if (!dragging.current) setLocal(wheelRef.current); });
   return (
     <div className="wheel-row">
       <span className="wheel-label">{label}</span>
@@ -1240,8 +1243,8 @@ function WheelRow({ label, wheel, onChange }: {
             <input type="range" min={-1} max={1} step={0.02} value={local[ch] ?? 0}
               aria-label={`${label} ${ch.toUpperCase()}`}
               onChange={(e) => { dragging.current = true; setLocal((s) => ({ ...s, [ch]: Number(e.target.value) })); }}
-              onPointerUp={(e) => { dragging.current = false; onChange(ch, Number((e.target as HTMLInputElement).value)); }}
-              onKeyUp={(e) => { dragging.current = false; onChange(ch, Number((e.target as HTMLInputElement).value)); }}
+              onPointerUp={(e) => { dragging.current = false; commit(ch, Number((e.target as HTMLInputElement).value)); }}
+              onKeyUp={(e) => { dragging.current = false; commit(ch, Number((e.target as HTMLInputElement).value)); }}
               onPointerCancel={() => { dragging.current = false; }} />
           </label>
         ))}
@@ -1260,7 +1263,10 @@ function RangeField({
   const dragging = useRef(false);
   useEffect(() => { if (!dragging.current) setV(value); }, [value]);
   const pct = max > min ? Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100)) : 0;
-  const reset = () => { dragging.current = false; setV(def); onCommit(def); };
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const commit = (nv: number) => revertIfRefused(onCommit(nv), () => { if (!dragging.current) setV(valueRef.current); });
+  const reset = () => { dragging.current = false; setV(def); commit(def); };
   return (
     <div className="rfield">
       <div className="rfield-top">
@@ -1276,9 +1282,9 @@ function RangeField({
         type="range" min={min} max={max} step={step} value={v} aria-label={label}
         style={{ "--range-fill": `${pct}%` } as CSSProperties}
         onChange={(e) => { dragging.current = true; setV(Number(e.target.value)); }}
-        onPointerUp={() => { dragging.current = false; onCommit(v); }}
+        onPointerUp={() => { dragging.current = false; commit(v); }}
         onPointerCancel={() => { dragging.current = false; }}
-        onKeyUp={() => { dragging.current = false; onCommit(v); }}
+        onKeyUp={() => { dragging.current = false; commit(v); }}
         onBlur={() => { dragging.current = false; }}
       />
     </div>

@@ -592,7 +592,11 @@ export interface Track {
   volume?: number;
   /** Video is excluded from the composite when hidden. */
   hidden?: boolean;
-  /** Editing on this track is disabled in the UI when locked. */
+  /**
+   * Locked: editing on this track is disabled in the UI, and the engine
+   * refuses any edit (direct, or a ripple from another track) that would add,
+   * remove, move or change one of its clips (EditorEngine.assertLockedUntouched).
+   */
   locked?: boolean;
   /** UI display height in pixels. */
   height?: number;
@@ -735,7 +739,7 @@ export interface ResolvedKeyframe {
 export interface ResolvedEffects {
   speed?: number;
   /** Speed curve (points in ASSET seconds; graph.ts retimes via speed.ts). Replaces `speed`. */
-  speedRamp?: { points: SpeedRampPoint[]; audio?: "stretch" | "mute" };
+  speedRamp?: { points: SpeedRampPoint[]; audio?: "stretch" | "mute"; phase?: number };
   volume?: number;
   /** Fade durations in seconds. */
   fadeIn?: number;

@@ -566,11 +566,14 @@ function emitClipVideoParts(
   if (fxSteps.length) steps.push(...fxSteps, EFFECTS_RGBA_PIN);
 
   // Reset timestamps and apply speed in one go. A speed RAMP retimes with its
-  // closed-form curve (speed.ts rampSetptsExpr: τ(source seconds) / TB); the
-  // fps filter then picks frames deterministically for both.
-  if (fx.speedRamp?.points.length) steps.push(`setpts='${rampSetptsExpr(fx.speedRamp, clip.sourceIn, clip.sourceSpan)}'`);
-  else steps.push(`setpts=(PTS-STARTPTS)/${speed}`);
-  steps.push(`fps=${fps}`);
+  // closed-form curve (speed.ts rampSetptsExpr: the frame slot of each source
+  // frame); the fps filter then picks frames deterministically for both.
+  if (fx.speedRamp?.points.length) {
+    // A ramp's setpts emits the shared frame model's slots (speed.ts "Ramp frames"); its length is the
+    // model's footprint, not what the fps filter derives from the input's end: clone-pad, then cut to it.
+    steps.push(`setpts='${rampSetptsExpr(fx.speedRamp, clip.sourceIn, clip.sourceSpan, fps)}'`, `fps=${fps}`);
+    steps.push("tpad=stop_mode=clone:stop=2", `trim=end_frame=${Math.max(1, Math.round(outDur * fps))}`);
+  } else steps.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${fps}`);
 
   // Shape mask: multiplied into the alpha in the clip's own (fitted) picture
   // space, after color/effects/keys and BEFORE the transform, so it moves,
@@ -932,6 +935,13 @@ export interface RenderOptions {
   videoOnly?: boolean;
   /** Audio-only render (no video graph) — the preview's single audio pass. */
   audioOnly?: boolean;
+  /**
+   * Work around xfade's end-of-stream bug before FFmpeg 7 (a transition one
+   * frame short, the incoming clip one frame late): set it from
+   * ffmpegMajorVersion() < 7. Off for FFmpeg 7+, where it would leave a hair
+   * of the outgoing clip in the frame after a wipe.
+   */
+  xfadeEofPad?: boolean;
   /** Wrap the output in MPEG-TS (losslessly concat-able segments). */
   mpegts?: boolean;
 }
@@ -1113,8 +1123,16 @@ export function buildRenderCommand(
       offsets.push(curDur - d);
       const out = `vrun${r}_${i}`;
       if (d > 0) {
+        // Before FFmpeg 7, xfade sees the outgoing stream's EOF while its last frame is still queued: it drops
+        // that frame (the transition is a frame short) and shifts the incoming clip a frame late. One cloned
+        // frame past the end (blended at progress 0, then the stream ends) keeps both on time (opts.xfadeEofPad).
+        let from = cur;
+        if (opts.xfadeEofPad) {
+          from = `[xpad${r}_${i}]`;
+          filterParts.push(`${cur}tpad=stop_mode=clone:stop=1${from}`);
+        }
         filterParts.push(
-          `${cur}[v${run.idxs[i]}]xfade=transition=${clip.transition!.type}:duration=${d.toFixed(3)}:offset=${(curDur - d).toFixed(3)}[${out}]`,
+          `${from}[v${run.idxs[i]}]xfade=transition=${clip.transition!.type}:duration=${d.toFixed(3)}:offset=${(curDur - d).toFixed(3)}[${out}]`,
         );
       } else {
         // No usable overlap: hard concat the two run members.

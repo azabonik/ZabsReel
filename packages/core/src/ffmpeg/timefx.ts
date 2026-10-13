@@ -1,6 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runFfmpeg, runFfprobe } from "./executor.js";
+import type { FrameClock } from "../speed.js";
 
 /**
  * Time-effect bakes: chunked frame-exact REVERSE and SMOOTH SLOW MOTION
@@ -58,6 +59,24 @@ export async function probeVideoFormat(file: string): Promise<VideoFormat | unde
     if (!st) return undefined;
     const pixFmt = st.pix_fmt ?? "yuv420p";
     return { width: st.width ?? 0, height: st.height ?? 0, pixFmt, hasAlpha: /^(yuva|gbrap|rgba|bgra|argb|abgr|ya\d)/.test(pixFmt) };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The first video stream's timebase and frame rate (speed.ts FrameClock), so a
+ * constant-speed freeze_frame can model FFmpeg's integer timestamps exactly.
+ */
+export async function probeFrameClock(file: string): Promise<FrameClock | undefined> {
+  try {
+    const out = await runFfprobe(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=time_base,r_frame_rate", "-of", "json", file]);
+    const st = (JSON.parse(out) as { streams?: { time_base?: string; r_frame_rate?: string }[] }).streams?.[0];
+    const ratio = (r?: string) => (r ?? "").split("/").map(Number);
+    const [tbNum, tbDen] = ratio(st?.time_base);
+    const [rateNum, rateDen] = ratio(st?.r_frame_rate);
+    if (![tbNum, tbDen, rateNum, rateDen].every((n) => Number.isInteger(n) && n > 0)) return undefined;
+    return { tbNum, tbDen, rateNum, rateDen };
   } catch {
     return undefined;
   }
@@ -208,6 +227,21 @@ export function atempoChain(speed: number): string {
   return parts.join(",");
 }
 
+/** Source frames the interpolators are given past a smooth-slow span (and cloned after the input). */
+const INTERP_LOOKAHEAD_FRAMES = 4;
+
+/** "a/b" or a plain decimal as an exact integer ratio [num, den]. */
+function ratio(r: string): [number, number] {
+  const [a, b] = r.split("/");
+  if (b !== undefined) return [Number(a), Number(b)];
+  const [i, f = ""] = a.split(".");
+  const den = 10 ** f.length;
+  const num = Number(i + f);
+  const g = (x: number, y: number): number => (y ? g(y, x % y) : x);
+  const d = g(num, den) || 1;
+  return [num / d, den / d];
+}
+
 export interface SmoothSlowOptions {
   input: string;
   hasAudio: boolean;
@@ -219,6 +253,10 @@ export interface SmoothSlowOptions {
   spanSec: number;
   /** Exact number of project-fps frames to write (= the clip's timeline footprint). */
   outFrames: number;
+  /** The source's frame rate (default: the project's). */
+  sourceFps?: number;
+  /** Seconds of the source that exist after the span (its duration − span end; default 0 = the span ends the file). */
+  availableAfterSec?: number;
   /** Output path (.mp4; .mkv when `alpha`). */
   outPath: string;
   /**
@@ -235,18 +273,41 @@ export interface SmoothSlowOptions {
  * at the project frame rate without stutter. The source is interpolated up to
  * projectFps / speed frames per source-second and those frames are then stamped
  * at the project rate; audio is slowed with a pitch-preserving atempo chain. The
- * output is exactly `outFrames` frames long.
+ * output is exactly `outFrames` frames long, every one of them new: the last
+ * output frames sit between the span's last source frame and the one after it,
+ * so the interpolator is given a few source frames past the span (when the file
+ * has them). A span that ends the file has no frame after it: its frames are
+ * spread so the last output frame lands on the last source frame instead
+ * (motion up to (1 / speed − 1) output frames slower at the very end — 1 frame
+ * at 0.5x, 3 at 0.25x — rather than a held frame).
  */
 export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   const pfps = rateExpr(o.projectFps);
-  const target = o.projectFps / o.speed;
-  const interp =
+  const srcFps = o.sourceFps && o.sourceFps > 0 ? o.sourceFps : o.projectFps;
+  // Source frames past the span the interpolators need to reach the span's end (minterpolate stops a few
+  // frames before the end of its input, framerate one frame).
+  const extraSec = Math.min(Math.max(0, o.availableAfterSec ?? 0), INTERP_LOOKAHEAD_FRAMES / srcFps);
+  const atEnd = extraSec < (INTERP_LOOKAHEAD_FRAMES - 0.5) / srcFps;
+  const spanFrames = Math.max(2, Math.round(o.spanSec * srcFps));
+  // The interpolation rate as an exact ratio (framerate fails on a long decimal): the project rate slowed by
+  // `speed`, or — for a span that ends the file — the rate that puts its last source frame on the last output frame.
+  const [sN, sD] = ratio(rateExpr(srcFps));
+  const [pN, pD] = ratio(pfps);
+  const [vN, vD] = ratio(String(o.speed));
+  const target = atEnd ? `${(Math.max(2, o.outFrames) - 1) * sN}/${(spanFrames - 1) * sD}` : `${pN * vD}/${pD * vN}`;
+  // Cloned frames after the input let the interpolators run up to its real last frame (they come after the
+  // frames written; -frames:v cuts them).
+  const interp = `tpad=stop_mode=clone:stop=${INTERP_LOOKAHEAD_FRAMES},${
     o.mode === "optical-flow" && !o.alpha
-      ? `minterpolate=fps=${target.toFixed(6)}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`
-      : `framerate=fps=${target.toFixed(6)}`;
+      ? `minterpolate=fps=${target}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`
+      : `framerate=fps=${target}`
+  }`;
   const outDur = o.outFrames / o.projectFps;
+  // Pin the count: setpts stamps every interpolated frame at the project rate; a clone pad only guards a short
+  // read and is cut off by -frames:v.
   const tail = `setpts=N/(${pfps})/TB,fps=${pfps},tpad=stop_mode=clone:stop=4`;
-  const args = ["-hide_banner", "-y", "-ss", o.startSec.toFixed(6), "-t", o.spanSec.toFixed(6), "-i", o.input];
+  const readSec = o.spanSec + (atEnd ? 0 : extraSec);
+  const args = ["-hide_banner", "-y", "-ss", o.startSec.toFixed(6), "-t", readSec.toFixed(6), "-i", o.input];
   if (o.alpha) {
     // The interpolation filters drop the alpha plane: blend colour and alpha separately, then merge them back.
     args.push(
@@ -258,7 +319,7 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   } else {
     args.push("-vf", `${interp},${tail}`, "-frames:v", String(o.outFrames), "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p");
   }
-  if (o.hasAudio) args.push("-af", atempoChain(o.speed), "-c:a", "aac", "-b:a", "192k");
+  if (o.hasAudio) args.push("-af", `atrim=0:${o.spanSec.toFixed(6)},${atempoChain(o.speed)}`, "-c:a", "aac", "-b:a", "192k");
   else args.push("-an");
   if (!o.alpha) args.push("-movflags", "+faststart");
   args.push("-t", outDur.toFixed(6), "-progress", "pipe:1", "-nostats", o.outPath);

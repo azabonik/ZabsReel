@@ -13,9 +13,10 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
-import { planSegments } from "../src/ffmpeg/segments.js";
+import { planSegments, segmentKey } from "../src/ffmpeg/segments.js";
+import { PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
-import { runFfmpeg } from "../src/ffmpeg/executor.js";
+import { ffmpegVersionLine, runFfmpeg } from "../src/ffmpeg/executor.js";
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), "aive-cache-"));
@@ -98,6 +99,20 @@ async function main() {
     const withBlur = planSegments([...plain, adj("blur")], 12);
     check(before === 3 && withBlur.length === 3, `no temporal effect: cuts at clip edges (${before} / ${withBlur.length} segments)`);
     check(withTrails.length === 2 && withTrails[0].start === 0 && withTrails[0].end === 8, `trails adjustment 0-8 s: first segment is 0-8 s (${JSON.stringify(withTrails)})`);
+  }
+
+  console.log("N. the segment key follows the FFmpeg build (version banner + xfade end-of-stream pad)...");
+  {
+    const rc = (startSec: number, outDuration: number, extra: object = {}) => ({ path: "/x.mp4", startSec, outDuration, ...extra }) as never;
+    const clips = [rc(0, 4), rc(3, 4, { transition: { type: "fade", durationSec: 1 } })];
+    const seg = { start: 0, end: 7 };
+    const canvas = { width: 640, height: 360, fps: 30 };
+    const line = await ffmpegVersionLine();
+    const key = (ffmpeg: string, xfadeEofPad: boolean) => segmentKey(clips, seg, canvas, PREVIEW_PROFILE, {}, null, { ffmpeg, xfadeEofPad });
+    check(/^ffmpeg version /.test(line) && line === (await ffmpegVersionLine()), `version banner probed once and stable ("${line}")`);
+    check(key(line, true) === key(line, true), "same build: same key");
+    check(key(line, true) !== key(line, false), "xfadeEofPad on / off: different keys");
+    check(key("ffmpeg version 4.4.2", false) !== key("ffmpeg version 7.1", false), "another FFmpeg version: different key");
   }
 
   console.log(failures === 0 ? "\nCACHE SMOKE TEST PASSED" : `\nCACHE SMOKE TEST FAILED (${failures})`);

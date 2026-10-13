@@ -13,8 +13,21 @@
  *     leaves no files, undo restores;
  *   - smooth slow motion at speed 0.5 (blend + optical-flow): timeline duration
  *     unchanged, baked frame count == the clip's footprint, NO duplicated
- *     consecutive frames (unlike plain speed 0.5, measured as the control),
- *     pitch preserved, refuses at speed 1, cancel leaves no files, undo restores.
+ *     consecutive frames — not even at the very end (known issue A9; unlike
+ *     plain speed 0.5, measured as the control) — on a span inside the file
+ *     every other baked frame IS the source frame and 0.25x keeps its count,
+ *     pitch preserved, refuses at speed 1, cancel leaves no files, undo restores;
+ *   - freeze_frame ripple modes (A11): 'all' also moves other tracks' later
+ *     clips and the markers, refuses to break a transition; 'none' overwrites
+ *     the clip (nothing moves, the timeline keeps its length, linked audio is
+ *     silent under the still);
+ *   - linked clips (A10): reverse_clip reverses the detached audio with its
+ *     picture (one bake shared, chirp runs backwards in sync, a J-cut head
+ *     becomes an L-cut tail, a collision is refused before baking,
+ *     linked:false keeps the old behaviour, calling it again restores both,
+ *     one undo step); smooth_slow_motion re-points the plain detached audio at
+ *     the bake, and a J/L-cut partner keeps its speed RATIO through later
+ *     speed changes (a ramp on such a pair is refused).
  *
  * Run: npx tsx packages/core/scripts/smoke-time.ts
  */
@@ -487,8 +500,8 @@ async function main() {
       assert(n === 180, `${mode}: baked has 180 frames = 2x the 90-frame span (got ${n})`);
       const d = await consecutiveDiffs(baked.path, 160, 90);
       const dupAt = d.map((x, i) => (x < 0.05 ? i : -1)).filter((i) => i >= 0);
-      // The only allowed repeats are in the final hold (<= 4 frames): interpolating forward needs a next source frame the span doesn't have.
-      assert(dupAt.every((i) => i >= d.length - 4), `${mode}: no duplicated consecutive frames except the final hold (<= 4 frames) (repeats at ${JSON.stringify(dupAt)} of ${d.length}; plain 0.5x has ${dupCtrl})`);
+      // Not even at the end: the span ends the file, so its frames are spread to land the last source frame last.
+      assert(dupAt.length === 0, `${mode}: no duplicated consecutive frames anywhere, not even at the end (repeats at ${JSON.stringify(dupAt)} of ${d.length}; plain 0.5x has ${dupCtrl})`);
       const hz = await freqAt(baked.path, 1.0, 2.0);
       assert(Math.abs(hz - 440) < 15 && baked.duration > 5.9 && baked.duration < 6.15, `${mode}: audio slowed to 6 s with pitch preserved (${hz.toFixed(0)} Hz, ${baked.duration.toFixed(2)} s)`);
       const out = await exportNow(`smooth-${mode}.mp4`);
@@ -505,6 +518,193 @@ async function main() {
     await promise.catch(() => (canceled = true));
     assert(canceled && bakedFiles().join(",") === files0, "cancel -> no partial slow-mo file remains");
     assert(cur(clip.id).effects?.speed === 0.5, "cancel leaves the clip alone");
+  }
+
+  // ======================= SMOOTH SLOW MOTION inside the file (A9) ==========
+  console.log("smooth_slow_motion on a span inside the file");
+  {
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    for (const speed of [0.5, 0.25]) {
+      for (const mode of ["blend", "optical-flow"] as const) {
+        const clip = engine.addClip(mov.id, { startFrame: 0, sourceInFrame: 15, sourceOutFrame: 60 }); // ends 1 s before the file
+        engine.setClipEffects(clip.id, { speed });
+        const want = Math.round(45 / speed);
+        const r = await call<{ assetId: string }>("smooth_slow_motion", { clipId: clip.id, mode });
+        const baked = engine.getProject().assets.find((a) => a.id === r.assetId)!;
+        const n = await frameCount(baked.path);
+        const d = await consecutiveDiffs(baked.path, 160, 90);
+        const dupAt = d.map((x, i) => (x < 0.05 ? i : -1)).filter((i) => i >= 0);
+        let srcOff = 0;
+        if (mode === "blend") {
+          // Every 1/speed-th baked frame is a real source frame (blend = exact at the source times).
+          const step = Math.round(1 / speed);
+          const gray = async (f: string, ss: number) => {
+            const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-v", "error", "-ss", ss.toFixed(4), "-i", f, "-frames:v", "1", "-vf", "scale=160:90,format=gray", "-f", "rawvideo", "-"], { encoding: "buffer" });
+            return Buffer.from(stdout as unknown as Uint8Array);
+          };
+          for (const k of [0, 11, 29, 44]) {
+            const a = await gray(baked.path, (k * step + 0.5) / FPS);
+            const b = await gray(mov.path, (15 + k + 0.5) / FPS);
+            let sum = 0;
+            for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+            if (sum / a.length > 3) srcOff++;
+          }
+        }
+        assert(n === want && dupAt.length === 0 && srcOff === 0, `${speed}x ${mode}: ${n} frames (footprint ${want}), no repeated frame${mode === "blend" ? ", every " + Math.round(1 / speed) + "th frame is the source frame" : ""} (repeats at ${JSON.stringify(dupAt)}, ${srcOff} source frames off)`);
+        engine.undo();
+        engine.removeClip(clip.id);
+      }
+    }
+  }
+
+  // ======================= FREEZE FRAME ripple modes (A11) ===================
+  console.log("freeze_frame ripple modes");
+  {
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    for (const t of tracks().filter((t) => t.clips.length === 0 && t.index !== tracks()[0].index)) engine.removeTrack(t.index);
+    const v1 = tracks().find((t) => t.kind === "video")!;
+    const a1 = engine.addTrack("audio");
+    const v2 = engine.addTrack("video", { name: "V2" });
+    const x = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120, trackIndex: v1.index });
+    const tail = engine.addClip(coded.id, { startFrame: 120, sourceInFrame: 0, sourceOutFrame: 30, trackIndex: v1.index });
+    const ax = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120, trackIndex: a1.index });
+    engine.setClipEffects(x.id, { volume: 0 });
+    engine.linkClips([x.id, ax.id]);
+    const o1 = engine.addClip(coded.id, { startFrame: 20, sourceInFrame: 0, sourceOutFrame: 20, trackIndex: v2.index }); // straddles frame 30
+    const o2 = engine.addClip(coded.id, { startFrame: 50, sourceInFrame: 0, sourceOutFrame: 30, trackIndex: v2.index }); // after it
+    engine.setMarkers([10, 100]);
+    const len0 = engine.timelineDurationFrames();
+
+    const r = await call<{ durationFrames: number; shiftedClips: number; shiftedMarkers: number }>("freeze_frame", { clipId: x.id, atSeconds: 1, durationSeconds: 2, ripple: "all" });
+    assert(cur(tail.id).startFrame === 180 && cur(o1.id).startFrame === 20 && cur(o2.id).startFrame === 110, `ripple 'all': the tail (180) and the later V2 clip (110) move, the V2 clip straddling the freeze point stays (20)`);
+    assert(JSON.stringify(engine.getProject().markers!.map((m) => m.frame)) === "[10,160]" && r.shiftedMarkers === 1, "ripple 'all': the marker after the freeze point moves (100 -> 160), the one before stays");
+    engine.undo();
+    await call("freeze_frame", { clipId: x.id, atSeconds: 1, durationSeconds: 2 });
+    assert(cur(o2.id).startFrame === 50 && JSON.stringify(engine.getProject().markers!.map((m) => m.frame)) === "[10,100]", "ripple 'track' (default): other tracks and markers stay, as before");
+    engine.undo();
+
+    // 'all' refuses to break a transition into a clip that would move away from one that stays.
+    const o3 = engine.addClip(coded.id, { startFrame: 35, sourceInFrame: 40, sourceOutFrame: 50, trackIndex: v2.index });
+    engine.setTransition(o3.id, "fade", 4);
+    const snap = snapshot();
+    let err = "";
+    try {
+      await call("freeze_frame", { clipId: x.id, atSeconds: 1, durationSeconds: 2, ripple: "all" });
+    } catch (e) {
+      err = (e as Error).message;
+    }
+    assert(/transition/.test(err) && snapshot() === snap, `ripple 'all' that would break a transition on another track is refused, nothing changes (${err.slice(0, 80)}...)`);
+    for (const c of [o1, o2, o3]) engine.removeClip(c.id); // V2 sits above V1: keep the export showing V1
+
+    // 'none': the still overwrites the clip; nothing moves; linked audio is silent under it.
+    const rn = await call<{ stillClipId: string; durationFrames: number; shiftedClips: number }>("freeze_frame", { clipId: x.id, atSeconds: 1, durationSeconds: 0.5, ripple: "none" });
+    const v1c = tracks().find((t) => t.id === v1.id)!.clips.map((c) => [c.startFrame, c.startFrame + (c.sourceOutFrame - c.sourceInFrame), c.sourceInFrame]);
+    const a1c = tracks().find((t) => t.id === a1.id)!.clips.map((c) => [c.startFrame, c.startFrame + (c.sourceOutFrame - c.sourceInFrame), c.sourceInFrame]);
+    assert(rn.durationFrames === 15 && rn.shiftedClips === 0 && engine.timelineDurationFrames() === len0, `ripple 'none': a 15-frame still, nothing shifted, the timeline keeps its length (${engine.timelineDurationFrames()} = ${len0})`);
+    assert(JSON.stringify(v1c) === "[[0,30,0],[30,45,0],[45,120,45],[120,150,0]]", `ripple 'none': V1 = left | still | the clip resumes on source 45 at frame 45 | tail unmoved (${JSON.stringify(v1c)})`);
+    assert(JSON.stringify(a1c) === "[[0,30,0],[45,120,45]]", `ripple 'none': the linked audio is silent under the still and stays in sync (${JSON.stringify(a1c)})`);
+    const out = await exportNow("freeze-none.mp4");
+    const idx = await frameIndexes(out);
+    assert(idx.length === len0 && idx[29] === 29 && idx[30] === 30 && idx[44] === 30 && idx[45] === 45 && idx[119] === 119 && idx[120] === 0, `export: ...29 | 30 held x15 | 45...119 | tail (${idx[29]},${idx[30]},${idx[44]},${idx[45]},${idx[119]},${idx[120]})`);
+    engine.undo();
+    const rEnd = await call<{ durationFrames: number }>("freeze_frame", { clipId: x.id, atSeconds: 100 / FPS, durationSeconds: 2, ripple: "none" });
+    assert(rEnd.durationFrames === 20 && cur(tail.id).startFrame === 120, `ripple 'none' near the end: the still stops at the clip's end (${rEnd.durationFrames} of 60 frames), the tail stays`);
+    engine.undo();
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    engine.setMarkers([]);
+    engine.removeTrack(v2.index);
+    engine.removeTrack(a1.index);
+  }
+
+  // ======================= LINKED clips: reverse + smooth slow motion (A10) ====
+  console.log("linked clips: reverse_clip and smooth_slow_motion");
+  {
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    const v1 = tracks().find((t) => t.kind === "video")!;
+    const a1 = engine.addTrack("audio");
+    const pic = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120, trackIndex: v1.index });
+    const snd = engine.addClip(coded.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 120, trackIndex: a1.index });
+    engine.setClipEffects(pic.id, { volume: 0 });
+    engine.linkClips([pic.id, snd.id]);
+    const undo0 = (engine as unknown as { undoStack: unknown[] }).undoStack.length;
+    const r = await call<{ assetId: string; linked: { clipId: string; assetId: string; startFrame: number }[] }>("reverse_clip", { clipId: pic.id });
+    assert((engine as unknown as { undoStack: unknown[] }).undoStack.length === undo0 + 1, "reverse of a linked pair is ONE undo step");
+    assert(r.linked.length === 1 && r.linked[0].clipId === snd.id && cur(snd.id).assetId === r.assetId && cur(snd.id).startFrame === 0, "the detached audio is reversed too — sharing the picture's bake, in place");
+    const out = await exportNow("rev-linked.mp4");
+    const idx = await frameIndexes(out);
+    const f1 = await freqAt(out, 0.4, 0.6); // = source 3.5 s reversed -> ~1250 Hz
+    const f2 = await freqAt(out, 3.4, 3.6); // = source 0.5 s -> ~350 Hz
+    assert(idx[0] === 119 && idx[60] === 59 && Math.abs(f1 - 1250) < 60 && Math.abs(f2 - 350) < 60, `picture and sound run backwards together (frame 0 = ${idx[0]}, 60 = ${idx[60]}; ${f1.toFixed(0)} Hz at 0.5 s, ${f2.toFixed(0)} Hz at 3.5 s)`);
+    const back = await call<{ restored: boolean; linked: { restored: boolean }[] }>("reverse_clip", { clipId: pic.id });
+    assert(back.restored && back.linked.length === 1 && back.linked[0].restored && cur(pic.id).assetId === coded.id && cur(snd.id).assetId === coded.id, "calling it again restores both (no bake)");
+    const only = await call<{ linked: unknown[] }>("reverse_clip", { clipId: pic.id, linked: false });
+    assert(only.linked.length === 0 && cur(snd.id).assetId === coded.id, "linked:false reverses only the picture (the old behaviour)");
+    engine.undo();
+    // Called on the detached audio: the picture is reversed with it.
+    const fromSnd = await call<{ linked: { clipId: string }[] }>("reverse_clip", { clipId: snd.id });
+    assert(fromSnd.linked.some((l) => l.clipId === pic.id) && cur(pic.id).assetId !== coded.id, "reverse_clip on the detached audio reverses its picture too");
+    engine.undo();
+    assert(cur(pic.id).assetId === coded.id && cur(snd.id).assetId === coded.id, "undo restores both");
+
+    // A J-cut head becomes an L-cut tail.
+    engine.removeClip(pic.id);
+    const p2 = engine.addClip(coded.id, { startFrame: 30, sourceInFrame: 30, sourceOutFrame: 120, trackIndex: v1.index });
+    const s2 = engine.addClip(coded.id, { startFrame: 20, sourceInFrame: 20, sourceOutFrame: 120, trackIndex: a1.index });
+    engine.setClipEffects(p2.id, { volume: 0 });
+    engine.linkClips([p2.id, s2.id]);
+    const blocker = engine.addClip(coded.id, { startFrame: 125, sourceInFrame: 0, sourceOutFrame: 10, trackIndex: a1.index });
+    const files0 = bakedFiles().length;
+    let err = "";
+    try {
+      await call("reverse_clip", { clipId: p2.id });
+    } catch (e) {
+      err = (e as Error).message;
+    }
+    assert(/J\/L cut/.test(err) && bakedFiles().length === files0, `a reversed J-cut that would run into the next audio clip is refused before baking (${err.slice(0, 70)}...)`);
+    engine.removeClip(blocker.id);
+    await call("reverse_clip", { clipId: p2.id });
+    assert(cur(s2.id).startFrame === 30 && cur(s2.id).startFrame + (cur(s2.id).sourceOutFrame - cur(s2.id).sourceInFrame) === 130, `its 10-frame J-cut head is now a 10-frame L-cut tail (audio ${cur(s2.id).startFrame}..130, picture 30..120)`);
+    const jout = await exportNow("rev-jcut.mp4");
+    const jidx = await frameIndexes(jout);
+    // At timeline frame t the picture shows source 149 - t; the sound plays source 150 - t: 2.0 s -> source 3.0 s -> 1100 Hz.
+    const jf = await freqAt(jout, 1.9, 2.1);
+    assert(jidx[60] === 89 && Math.abs(jf - 1100) < 60, `reversed J/L pair stays in sync (frame 60 = ${jidx[60]}, ${jf.toFixed(0)} Hz at 2 s, want 1100)`);
+    engine.undo();
+
+    // Smooth slow motion: the plain detached audio moves onto the bake; a J/L partner keeps its speed ratio.
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    const p3 = engine.addClip(mov.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 60, trackIndex: v1.index });
+    const s3 = engine.addClip(mov.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: 60, trackIndex: a1.index });
+    engine.setClipEffects(p3.id, { volume: 0 });
+    engine.linkClips([p3.id, s3.id]);
+    await call("set_clip_speed", { clipId: p3.id, speed: 0.5 });
+    const sm = await call<{ assetId: string; linked: string[] }>("smooth_slow_motion", { clipId: p3.id, mode: "blend" });
+    assert(sm.linked.includes(s3.id) && cur(s3.id).assetId === sm.assetId && cur(s3.id).effects?.speed === undefined, "smooth_slow_motion re-points the plain detached audio at the bake (its slowed sound), speed 1");
+    const sp = await call<{ linked: { clipId: string; durationFrames: number }[]; durationFrames: number }>("set_clip_speed", { clipId: p3.id, speed: 2 });
+    assert(cur(s3.id).effects?.speed === 2 && sp.linked[0]?.durationFrames === sp.durationFrames, "a later speed change keeps picture and sound together");
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    const p4 = engine.addClip(mov.id, { startFrame: 20, sourceInFrame: 10, sourceOutFrame: 60, trackIndex: v1.index });
+    const s4 = engine.addClip(mov.id, { startFrame: 10, sourceInFrame: 5, sourceOutFrame: 60, trackIndex: a1.index }); // 5 source frames of J-cut head
+    engine.linkClips([p4.id, s4.id]);
+    await call("set_clip_speed", { clipId: p4.id, speed: 0.5 });
+    const before4 = { p: cur(p4.id).startFrame, s: cur(s4.id).startFrame };
+    await call("smooth_slow_motion", { clipId: p4.id, mode: "blend" });
+    assert(cur(s4.id).assetId === mov.id && cur(s4.id).effects?.speed === 0.5 && cur(p4.id).startFrame === before4.p && cur(s4.id).startFrame === before4.s, "a J-cut partner keeps its speed (0.5x) and place — still in sync");
+    await call("set_clip_speed", { clipId: p4.id, speed: 2 });
+    const P = cur(p4.id);
+    const S = cur(s4.id);
+    // In sync: at the picture's first frame the sound plays the picture's first source frame (10).
+    console.log(`     (after 2x: picture ${JSON.stringify([P.startFrame, P.sourceInFrame, P.sourceOutFrame, P.effects?.speed])}, sound ${JSON.stringify([S.startFrame, S.sourceInFrame, S.sourceOutFrame, S.effects?.speed])})`);
+    assert(S.effects?.speed === undefined && S.sourceInFrame + (P.startFrame - S.startFrame) * 1 === 10, `the speed RATIO is kept: picture 2x of the 0.5x bake = 1x, sound 1x (sound source at the picture's start = ${S.sourceInFrame + (P.startFrame - S.startFrame)})`);
+    err = "";
+    try {
+      await call("set_speed_ramp", { clipId: p4.id, preset: "montage" });
+    } catch (e) {
+      err = (e as Error).message;
+    }
+    assert(/ratio/.test(err), `a speed ramp can't keep the ratio: refused (${err.slice(0, 80)}...)`);
+    while (allClips().length) engine.removeClip(allClips()[0].id);
+    engine.removeTrack(a1.index);
   }
 
   console.log("\nsmoke-time: ALL OK");

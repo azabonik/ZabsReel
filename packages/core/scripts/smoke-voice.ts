@@ -35,12 +35,15 @@ import { tmpdir } from "node:os";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
 import { FFMPEG_BIN, runFfmpegCaptureStderr } from "../src/ffmpeg/executor.js";
-import { planSegments, segmentKey } from "../src/ffmpeg/segments.js";
+import { planSegments, segmentKey, type SegmentBuild } from "../src/ffmpeg/segments.js";
 import { PREVIEW_PROFILE, previewCanvas } from "../src/ffmpeg/graph.js";
 import {
   AUDIO_EFFECTS, audioEffectFilterSteps, audioPreviewPlan, validateAudioEffect,
 } from "../src/effects/audio.js";
 import type { AssetTranscript, Clip, ResolvedRenderClip, TranscriptWord } from "../src/types.js";
+
+/** These keys compare one project against itself: any fixed FFmpeg build will do. */
+const BUILD: SegmentBuild = { ffmpeg: "", xfadeEofPad: false };
 
 const SR = 48000;
 const FPS = 30;
@@ -724,7 +727,7 @@ async function main() {
     (engine as unknown as { stageRender(c: EditorEngine["canvas"], o?: { audio?: boolean }): Promise<Staged> }).stageRender(engine.canvas, o);
   const vOnly = await stageWith({ audio: false });
   const withAudio = await stageWith();
-  const segKeys = (s: Staged) => planSegments(s.clips, 12).map((g) => segmentKey(s.clips, g, previewCanvas({ width: 160, height: 90, fps: FPS }), PREVIEW_PROFILE, {}, null)).join();
+  const segKeys = (s: Staged) => planSegments(s.clips, 12).map((g) => segmentKey(s.clips, g, previewCanvas({ width: 160, height: 90, fps: FPS }), PREVIEW_PROFILE, {}, null, BUILD)).join();
   check(!vOnly.clips[0].effects?.loudness && !!vOnly.clips[0].effects?.audioFilters?.length && !!withAudio.clips[0].effects?.loudness,
     "video-only staging skips the loudness measurement (export/preview staging measures)");
   check(segKeys(vOnly) === segKeys(withAudio), "segment keys are the same with or without the measurement");
@@ -763,7 +766,7 @@ async function main() {
     const { clips } = await stage();
     const canvas = previewCanvas({ width: 160, height: 90, fps: FPS });
     const segs = planSegments(clips, 6);
-    return segs.map((s) => segmentKey(clips, s, canvas, PREVIEW_PROFILE, {}, null)).join();
+    return segs.map((s) => segmentKey(clips, s, canvas, PREVIEW_PROFILE, {}, null, BUILD)).join();
   };
   const k0 = await keys();
   const fxId = (cur(bClip.id).effects!.audioFilters![0]).id;

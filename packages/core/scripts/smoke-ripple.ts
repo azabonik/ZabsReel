@@ -38,6 +38,11 @@
  *     entering it through a transition and the clip butted to it (notMoved
  *     reasons); a clip after a gap still moves; a same-footage cutaway on
  *     another video track is not a speed partner, a same-moment copy is;
+ *   - an L-cut tail by EAR (known issue A13): picture frames + a chirp sound
+ *     (pitch = source time) — after 0.5x / 2x / the bullet and montage curves
+ *     on the picture, the sound under the picture plays the moment the picture
+ *     shows, the tail goes on from there, and it never plays over the next
+ *     audio clip, which starts on its own moment;
  *   - smooth_slow_motion and reverse_clip keep the length (nothing moves twice);
  *   - export: after montage on A the old gap region shows B's footage (no
  *     black); after bullet on A, B starts where A ends (no overlap).
@@ -51,7 +56,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { EditorEngine } from "../src/engine.js";
 import { methods } from "../src/rpc.js";
 import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
-import { RAMP_PRESETS, clipFootprintFrames, sourceFrameShownAt } from "../src/speed.js";
+import { RAMP_PRESETS, clipFootprintFrames, clipTimeMap, sourceFrameShownAt } from "../src/speed.js";
 import type { Clip } from "../src/types.js";
 
 const FPS = 30;
@@ -561,7 +566,7 @@ async function main(): Promise<void> {
       const len = clipFootprintFrames(t.clip(t.ids.A), FPS);
       await t.call("reverse_clip", { clipId: t.ids.A, audio: "mute" });
       const r2 = JSON.stringify(t.engine.getProject().tracks.map((x) => x.clips.map((c) => [c.id, c.startFrame])));
-      check(r1 === r2 && Math.abs(clipFootprintFrames(t.clip(t.ids.A), FPS) - len) <= 1, "reverse_clip on a ramped clip: same length, nothing moved");
+      check(r1 === r2 && clipFootprintFrames(t.clip(t.ids.A), FPS) === len, "reverse_clip on a ramped clip: same length exactly, nothing moved");
     }
 
     // ---- export: the edit stays seamless ------------------------------------------
@@ -588,14 +593,118 @@ async function main(): Promise<void> {
       const out2 = join(dir, "bullet.mp4");
       await t.engine.exportVideo(out2);
       const idx2 = await frameIndexes(out2);
-      check(idx2.length === D2 + 120 && Math.abs(idx2[D2 - 1] - sourceFrameShownAt(A2, D2 - 1, FPS)) <= 1 && idx2[D2] === 100 && idx2[D2 + 59] === 159, `bullet: A plays to its end (frame ${D2 - 1} = ${idx2[D2 - 1]}), then B from its first frame (${idx2[D2]})`);
+      check(idx2.length === D2 + 120 && idx2[D2 - 1] === sourceFrameShownAt(A2, D2 - 1, FPS) && idx2[D2] === 100 && idx2[D2 + 59] === 159, `bullet: A plays to its end (frame ${D2 - 1} = ${idx2[D2 - 1]}), then B from its first frame (${idx2[D2]})`);
     }
+
+    await lCutTailSync(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 
   console.log(failures ? `\n${failures} FAILED` : "\nall ripple checks passed");
   process.exit(failures ? 1 : 0);
+}
+
+/**
+ * A13: an L-cut tail stays in sync BY EAR after a speed change. The sound is a
+ * chirp whose pitch is its source time (f = 300 + 100·t Hz), the picture
+ * encodes its source frame: at a timeline moment under the picture the pitch
+ * must say the source moment the picture shows; in the tail the sound goes on
+ * from there; the next audio clip is never played over.
+ */
+async function lCutTailSync(dir: string): Promise<void> {
+  console.log("\nL-cut tail by ear (picture frame vs chirp pitch)");
+  const src = join(dir, "chirp.mp4");
+  await execa(FFMPEG_BIN, [
+    "-hide_banner", "-y",
+    "-f", "lavfi", "-i", `color=c=gray:s=160x90:r=${FPS}:d=10,format=yuv420p,geq=lum='if(gt(mod(floor(N/pow(2,floor(X*8/W))),2),0),220,30)':cb=128:cr=128`,
+    "-f", "lavfi", "-i", "aevalsrc='0.5*sin(2*PI*(300*t+50*t*t))':s=48000:d=10",
+    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-g", "15", "-c:a", "pcm_s16le", src.replace(".mp4", ".mov"),
+  ]);
+  const media = src.replace(".mp4", ".mov");
+  const pcm = async (file: string): Promise<Float32Array> => {
+    const { stdout } = await execa(FFMPEG_BIN, ["-hide_banner", "-v", "error", "-i", file, "-vn", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"], { encoding: "buffer", maxBuffer: 1 << 29 });
+    const b = Buffer.from(stdout as unknown as Uint8Array);
+    const out = new Float32Array(Math.floor(b.length / 4));
+    for (let i = 0; i < out.length; i++) out[i] = b.readFloatLE(i * 4);
+    return out;
+  };
+  /** Source seconds the chirp says at timeline second t (its pitch over ±12 ms, from interpolated zero crossings), or NaN when silent. */
+  const heard = (a: Float32Array, t: number): number => {
+    const i0 = Math.max(1, Math.round((t - 0.012) * 48000));
+    const i1 = Math.min(a.length, Math.round((t + 0.012) * 48000));
+    const xs: number[] = [];
+    let e = 0;
+    for (let i = i0; i < i1; i++) {
+      e += a[i] * a[i];
+      if (a[i - 1] < 0 !== a[i] < 0) xs.push(i - 1 + a[i - 1] / (a[i - 1] - a[i]));
+    }
+    if (e / Math.max(1, i1 - i0) < 1e-4 || xs.length < 3) return NaN;
+    const hz = (xs.length - 1) / 2 / ((xs[xs.length - 1] - xs[0]) / 48000);
+    return (hz - 300) / 100;
+  };
+  for (const op of [{ speed: 0.5 }, { speed: 2 }, { preset: "bullet" }, { preset: "montage" }] as const) {
+    const engine = new EditorEngine(dir);
+    engine.setProjectSettings({ width: 160, height: 90, fps: FPS, name: "lcut" });
+    const asset = await engine.importVideo(media);
+    const call = async <T,>(name: keyof typeof methods, params: Record<string, unknown>): Promise<T> => {
+      const m = methods[name];
+      return (await m.handler(engine, (m.schema as { parse: (x: unknown) => unknown }).parse(params) as never)) as T;
+    };
+    const v1 = engine.getProject().tracks[0].index;
+    const a1 = engine.addTrack("audio", { name: "A1" }).index;
+    const A = engine.addClip(asset.id, { trackIndex: v1, startFrame: 0, sourceInFrame: 30, sourceOutFrame: 120 });
+    const B = engine.addClip(asset.id, { trackIndex: v1, startFrame: 90, sourceInFrame: 180, sourceOutFrame: 240 });
+    const Aa = engine.addClip(asset.id, { trackIndex: a1, startFrame: 0, sourceInFrame: 30, sourceOutFrame: 150 }); // 30-frame L-cut tail
+    const Ba = engine.addClip(asset.id, { trackIndex: a1, startFrame: 120, sourceInFrame: 210, sourceOutFrame: 240 });
+    engine.setClipEffects(A.id, { volume: 0 });
+    engine.setClipEffects(B.id, { volume: 0 });
+    engine.linkClips([A.id, Aa.id]);
+    engine.linkClips([B.id, Ba.id]);
+    const label = "speed" in op ? `${op.speed}x` : op.preset;
+    if ("speed" in op) await call("set_clip_speed", { clipId: A.id, speed: op.speed });
+    else await call("set_speed_ramp", { clipId: A.id, preset: op.preset });
+    const clip = (id: string) => engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === id)!;
+    const a = clip(A.id);
+    const aa = clip(Aa.id);
+    const ba = clip(Ba.id);
+    const b = clip(B.id);
+    const out = join(dir, `lcut-${label}.mp4`);
+    await engine.exportVideo(out);
+    const idx = await frameIndexes(out);
+    const snd = await pcm(out);
+    // Under the picture: the picture shows exactly the frames of the shared frame model, and the sound plays the
+    // same curve — its pitch says the source moment the curve reaches there. (A ramp's stretched sound is made of
+    // constant-tempo chunks joined by 8 ms crossfades, where two pitches overlap: the median of seven nearby
+    // measurements steps over a join.)
+    const map = clipTimeMap(a, FPS);
+    const sync = (m: ReturnType<typeof clipTimeMap>, t0: number, t: number): number => {
+      const d = [-0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06].map((o) => heard(snd, t + o) - m.sourceAt(t + o - t0)).filter(Number.isFinite).sort((x, y) => x - y);
+      return d.length ? d[d.length >> 1] : NaN;
+    };
+    let off = 0;
+    let picOff = 0;
+    let worst = 0;
+    const endA = end(a);
+    for (let n = 0; n < endA; n++) if (idx[n] !== sourceFrameShownAt(a, n, FPS)) picOff++;
+    for (let k = 1; k <= 12; k++) {
+      const t = (endA * k) / 13 / FPS;
+      const d = Math.abs(sync(map, 0, t));
+      worst = Math.max(worst, d);
+      // Within the source span one picture frame covers there (half a source frame, or half the frames a fast
+      // part skips per timeline frame), plus 10 ms of measuring slack.
+      if (!(d <= Math.max(0.5, map.speedAt(map.sourceAt(t)) / 2) / FPS + 0.01)) off++;
+    }
+    // The tail goes on from the picture's last moment (the curve's end speed); B's audio starts on its own moment.
+    const tailSync = sync(clipTimeMap(aa, FPS), aa.startFrame / FPS, (endA + Math.min(8, (end(aa) - endA) / 2)) / FPS);
+    const bSync = sync(clipTimeMap(ba, FPS), ba.startFrame / FPS, (ba.startFrame + 10) / FPS);
+    const noOverlap = end(aa) <= ba.startFrame;
+    check(
+      off === 0 && picOff === 0 && Math.abs(tailSync) <= 0.025 && noOverlap && Math.abs(bSync) <= 0.025 && b.startFrame === endA && ba.startFrame - b.startFrame === 30,
+      `L-cut, ${label} on the picture: picture on the frame model, the sound under it on the same curve (worst ${(worst * 1000).toFixed(0)} ms), the tail goes on from there (${(tailSync * 1000).toFixed(0)} ms), it ends at ${end(aa)} <= B's audio at ${ba.startFrame}, which plays its own moment (${(bSync * 1000).toFixed(0)} ms)`,
+      `${off} moments off, ${picOff} picture frames off`,
+    );
+  }
 }
 
 void main().catch((e) => {

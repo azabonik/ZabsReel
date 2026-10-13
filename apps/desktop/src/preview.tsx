@@ -22,7 +22,7 @@ import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
 import type { MediaAsset, MusicSettings, Project, TextStyle } from "./types";
 import {
-  segmentAt, totalDuration,
+  HOLD_MS, holdLastFrame, segmentAt, stepFrames, totalDuration,
   type PlayerHandle, type PlaybackStore, type Segment,
 } from "./playback";
 import { activeLayersAt, timelineDurationSec, type ActiveClip } from "./composite";
@@ -300,6 +300,9 @@ interface Props {
   onSelectClip: (clipId: string) => void;
 }
 
+/** How far ahead (s) of a cut the next clip's decoder is bound and parked on its first frame. */
+const PREROLL_SEC = 0.5;
+
 export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPlayer(
   { segments, project, assetById, music, musicAsset, api, store, onSelectClip },
   ref,
@@ -319,6 +322,10 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
   // a quarter when frames still come too slowly (gl/governor.ts). A GPU stays at full.
   const governorRef = useRef(new PlaybackGovernor(() => (glSoftware() ? 2 : 1), () => (glSoftware() ? 4 : 1)));
   const glRanRef = useRef(false); // the last frame ran a WebGL look
+  // A layer's decoder has no frame yet: since when the canvas holds the last frame instead (0 = not holding),
+  // and the canvas size last painted (a resize clears the canvas, so there is nothing to hold).
+  const holdRef = useRef(0);
+  const paintedRef = useRef("");
   const phRef = useRef(0);
   const drawFnRef = useRef<() => void>(() => {});
   // Still images can't go through the <video> pool — cache one <img> per path and
@@ -376,13 +383,8 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     const W = canvas.width;
     const H = canvas.height;
 
-    ctx.globalAlpha = 1;
-    ctx.filter = "none";
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, W, H);
-
     const project = projectRef.current;
-    const plan = activeLayersAt(project, assetsRef.current, phRef.current);
+    const plan = activeLayersAt(project, assetsRef.current, phRef.current, { exactFrames: !playingRef.current });
     const router = routerRef.current;
     const cw = project?.width ?? W;
     const ch = project?.height ?? H;
@@ -506,6 +508,70 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       if (c.adjust?.mask) c.adjust = { ...c.adjust, mask: { ...c.adjust.mask, ...drag } };
     }
 
+    // Drive every clip's decoder before painting, so a layer with no frame yet (a seek in flight, a clip just
+    // reached) is known before the canvas is cleared.
+    const els = new Map<ActiveClip, HTMLVideoElement>();
+    for (const c of plan.clips) {
+      if (c.adjust || !c.path || c.isImage) continue;
+      const el = pool.acquire(c.clipId, c.path);
+      // Live audio effects play through Web Audio; the route's gain then
+      // carries the volume (fades, keyframes, bleep mutes, inaudible = 0).
+      const routed = !!router?.route(el, c.audio?.fx);
+      // A bleep about to sound is bound + parked at 0 but kept paused.
+      const playing = playingRef.current && !c.bleep?.preroll;
+      if (playing) pool.resumeNear(el, c.srcTime, c.rate);
+      pool.sync(el, {
+        srcTime: c.srcTime,
+        playing,
+        rate: c.rate,
+        follow: c.ramped,
+        volume: c.audio?.volume ?? 0,
+        muted: !c.audio,
+        routed,
+      });
+      if (routed) router!.setGain(el, c.audio?.volume ?? 0);
+      els.set(c, el);
+    }
+    // Playing toward a cut: bind the clips that start within PREROLL_SEC and park them, paused, on their first
+    // frame, so the cut shows that frame on time instead of waiting for a decoder to load and seek there.
+    if (playingRef.current && project) {
+      let next = Infinity;
+      for (const tr of project.tracks) {
+        for (const cl of tr.clips) {
+          const s = cl.startFrame / project.fps;
+          if (s > phRef.current && s < next) next = s;
+        }
+      }
+      if (next - phRef.current <= PREROLL_SEC) {
+        for (const c of activeLayersAt(project, assetsRef.current, next).clips) {
+          if (c.adjust || !c.path || c.isImage || plan.clips.some((p) => p.clipId === c.clipId)) continue;
+          const el = pool.acquire(c.clipId, c.path);
+          const routed = !!router?.route(el, c.audio?.fx);
+          pool.sync(el, { srcTime: c.srcTime, playing: false, rate: c.rate, follow: c.ramped, volume: 0, muted: true, routed });
+          if (routed) router!.setGain(el, 0);
+        }
+      }
+    }
+    // A layer with no decoded frame would paint black: hold the last frame instead, for up to HOLD_MS.
+    const late = [...els].some(([c, el]) => !!c.draw && !(el.readyState >= 2 && el.videoWidth > 0));
+    const now = performance.now();
+    if (!late) holdRef.current = 0;
+    else if (holdLastFrame(late, paintedRef.current === `${W}x${H}`, holdRef.current, now)) {
+      if (!holdRef.current) {
+        holdRef.current = now;
+        // Paused, a seek that never lands sends no event: paint what there is when the hold runs out.
+        if (!playingRef.current) window.setTimeout(() => drawFnRef.current(), HOLD_MS + 20);
+      }
+      for (const c of plan.clips) for (const g of c.graphics) pool.acquire(`gfx:${g.key}`, g.path); // keep them playing
+      pool.endFrame();
+      return;
+    }
+    paintedRef.current = `${W}x${H}`;
+    ctx.globalAlpha = 1;
+    ctx.filter = "none";
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+
     for (const c of plan.clips) {
       if (c.adjust) {
         applyAdjust(c.adjust.colorFilter, c.adjust.vignette, c.adjust.mask, c.adjust.look, c.clipId);
@@ -528,21 +594,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         paintGraphics(c.graphics);
         continue;
       }
-      const el = pool.acquire(c.clipId, c.path);
-      // Live audio effects play through Web Audio; the route's gain then
-      // carries the volume (fades, keyframes, bleep mutes, inaudible = 0).
-      const routed = !!router?.route(el, c.audio?.fx);
-      pool.sync(el, {
-        srcTime: c.srcTime,
-        // A bleep about to sound is bound + parked at 0 but kept paused.
-        playing: playingRef.current && !c.bleep?.preroll,
-        rate: c.rate,
-        follow: c.ramped,
-        volume: c.audio?.volume ?? 0,
-        muted: !c.audio,
-        routed,
-      });
-      if (routed) router!.setGain(el, c.audio?.volume ?? 0);
+      const el = els.get(c)!;
       if (c.draw && el.readyState >= 2 && el.videoWidth > 0 && drawLayer(ctx, el, c.draw, W, H, glFor(c))) glRanRef.current = true;
       paintGraphics(c.graphics);
     }
@@ -708,7 +760,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
       pause: doPause,
       toggle: () => (playingRef.current ? doPause() : doPlay()),
       seek: doSeek,
-      step: (frames) => doSeek(phRef.current + frames / fps),
+      step: (frames) => doSeek(stepFrames(phRef.current, frames, fps)),
       jumpClip: (dir) => {
         const segs = segments;
         if (!segs.length) return;
