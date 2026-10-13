@@ -629,13 +629,14 @@ async function main() {
   // ---- 10. stabilize cancel cleanup ---------------------------------------------------
   console.log("10. canceled stabilize leaves no .trf / partial .mp4 in baked/...");
   {
-    // 640x360: vidstabdetect costs ~0.3 CPU-s per 720p frame, so a 720p minute
-    // took over the old 60 s wait on a loaded machine. The encode pass stays
-    // several seconds long, which is all the cancel needs.
+    // 320x180 x 40 s: vidstabdetect's cost scales with pixels (~0.3 CPU-s per
+    // 720p frame), so a bigger clip outran even a 150 s wait while the machine
+    // ran several matrices at once. The encode pass still lasts well over the
+    // 300 ms the cancel waits for.
     const long = join(dir, "long.mp4");
-    await ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=60", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", long]);
+    await ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=40", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", long]);
     const St = new EditorEngine(join(dir, "stab"));
-    St.setProjectSettings({ width: 640, height: 360, fps: 30, name: "stab" });
+    St.setProjectSettings({ width: 320, height: 180, fps: 30, name: "stab" });
     const sa = await St.importVideo(long);
     const sc = St.addClip(sa.id, { startFrame: 0 });
     const bakedDir = join(St.dataDir, "baked");
@@ -645,10 +646,10 @@ async function main() {
       p.catch(() => {});
       const want = phase === "analysis" ? ".trf" : ".mp4";
       // Wait for the phase's file, not for a fixed time: stop early only if the
-      // job ends first (the 150 s cap only bounds a hung ffmpeg).
+      // job ends first (the 300 s cap only bounds a hung ffmpeg).
       const stabRunning = () => St.jobs.list(true).some((j) => j.type === "stabilize");
       const t0 = Date.now();
-      while (!stabFiles().some((f) => f.endsWith(want)) && stabRunning() && Date.now() - t0 < 150_000) await new Promise((r) => setTimeout(r, 25));
+      while (!stabFiles().some((f) => f.endsWith(want)) && stabRunning() && Date.now() - t0 < 300_000) await new Promise((r) => setTimeout(r, 25));
       const seen = stabFiles();
       const running = St.jobs.list(true).filter((j) => j.type === "stabilize");
       check(seen.some((f) => f.endsWith(want)) && running.length === 1, `${phase}: the job is mid-run with ${want} on disk (${seen.join(", ")})`);
