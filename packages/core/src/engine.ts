@@ -4,6 +4,7 @@ import { mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes
 import { homedir } from "node:os";
 import { join, dirname, basename, isAbsolute, resolve, sep } from "node:path";
 import { newId } from "./ids.js";
+import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, assertProjectMediaLocal, assertLocalMediaPath, isProtocolLike } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
@@ -46,7 +47,7 @@ import { cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffm
 import { renderGraphic } from "./motion/render.js";
 import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
-import { BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
+import { BLEEP_DEFAULT_SOUND, BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
 import {
   describeAudioStack, measureNoiseFloor, removeAudioEffectFrom, reorderAudioEffectIn, resolveAudioFx, upsertAudioEffect,
 } from "./audio/fx.js";
@@ -862,6 +863,8 @@ export class EditorEngine extends EventEmitter {
     if (!isAbsolute(path)) {
       throw new Error(`Import path must be absolute, got "${path}"`);
     }
+    // Absolute but still a protocol/URL or device path must not be probed.
+    assertLocalMediaPath(path, "import path");
     const asset = await probeAsset(path);
     // A file taken from SynthCut's own baked/ folder is the user's media now.
     if (isEngineBake(asset, this.dataDir)) asset.userImported = true;
@@ -909,7 +912,7 @@ export class EditorEngine extends EventEmitter {
         // A cutout's preview is baked next to its matte (baked/<clip>-cutout-*.webm): reuse it while it
         // exists instead of encoding a second copy here and leaving the first behind.
         const own = asset.proxyPath?.endsWith(".webm") && (await fileExists(asset.proxyPath)) ? asset.proxyPath : undefined;
-        const out = own ?? join(dir, `${assetId}.webm`);
+        const out = own ?? join(dir, `${safeFileStem(assetId)}.webm`);
         if (!(await fileExists(out))) {
           try {
             await this.encodeAlphaProxy(asset, out, longEdge, signal, onProgress);
@@ -925,7 +928,7 @@ export class EditorEngine extends EventEmitter {
           return a;
         });
       }
-      const out = join(dir, `${assetId}.mp4`);
+      const out = join(dir, `${safeFileStem(assetId)}.mp4`);
       if (!(await fileExists(out))) {
         // Scale the long edge down to `longEdge`, keep aspect, even dims; fast preset.
         const scale = asset.width >= asset.height
@@ -1673,6 +1676,9 @@ export class EditorEngine extends EventEmitter {
    * through setClipSpeed, which ripples and keeps linked clips in sync.
    */
   setClipEffects(clipId: string, patch: ClipEffects): Clip {
+    // A LUT path reaches FFmpeg's lut3d filter; refuse a URL/protocol form here
+    // so apply_lut (and the desktop app) can never point it at the network.
+    if (patch.lut !== undefined) assertLocalMediaPath(patch.lut, "LUT path");
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const current = clip.effects ?? {};
@@ -2437,7 +2443,7 @@ export class EditorEngine extends EventEmitter {
     const { promise } = this.jobs.start("transcribe", `Transcribe ${asset.name}`, async (signal) => {
       const dir = join(this.dataDir, "transcripts");
       await mkdir(dir, { recursive: true });
-      const wav = join(dir, `${assetId}.wav`);
+      const wav = join(dir, `${safeFileStem(assetId)}.wav`);
       await runFfmpeg(["-hide_banner", "-i", asset.path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", wav], { signal });
 
       const model = opts.model ?? DEFAULT_MODEL;
@@ -3800,7 +3806,7 @@ export class EditorEngine extends EventEmitter {
       if (clip.overlays?.length) {
         overlays = [];
         for (const ov of clip.overlays) {
-          const textFile = `txt_${ov.id}.txt`;
+          const textFile = `txt_${safeFileStem(ov.id)}.txt`;
           const dWrap = defaultTextStyle(this.project.height, ov.fontSize);
           // Auto-wrap to the canvas (drawtext has no wrapping); explicit
           // newlines in the author's text are respected as-is.
@@ -3835,7 +3841,7 @@ export class EditorEngine extends EventEmitter {
         const capFont = await this.resolveFont(work, st.font, fontCache, defaultFont);
         for (let i = 0; i < clip.captions.cues.length; i++) {
           const cue = clip.captions.cues[i];
-          const textFile = `cap_${clip.id}_${i}.txt`;
+          const textFile = `cap_${safeFileStem(clip.id)}_${i}.txt`;
           const dWrap = defaultTextStyle(this.project.height, st.fontSize);
           // Same auto-wrap as overlays — imported SRT cues can be long lines.
           await writeFile(join(work, textFile), wrapText(cue.text, maxCharsPerLine(this.project.width, dWrap.fontSize)), "utf8");
@@ -4173,7 +4179,7 @@ export class EditorEngine extends EventEmitter {
 
     const dir = join(this.dataDir, "captions");
     await mkdir(dir, { recursive: true });
-    const wav = join(dir, `${clipId}.wav`);
+    const wav = join(dir, `${safeFileStem(clipId)}.wav`);
 
     await runFfmpeg([
       "-hide_banner",
@@ -4659,7 +4665,7 @@ export class EditorEngine extends EventEmitter {
     const asset = this.getAsset(assetId);
     const dir = join(this.dataDir, "thumbnails");
     await mkdir(dir, { recursive: true });
-    const outPath = join(dir, `${assetId}.jpg`);
+    const outPath = join(dir, `${safeFileStem(assetId)}.jpg`);
     const time = Math.min(Math.max(0, atSeconds), Math.max(0, asset.duration - 0.1));
     const merge = this.cutoutMerge(asset);
     if (merge) {
@@ -4753,7 +4759,7 @@ export class EditorEngine extends EventEmitter {
     await mkdir(dir, { recursive: true });
     // Unique per run: re-stabilizing reads the previous bake (and the undo
     // history may still reference it), so never write over it.
-    const stem = `${clipId}-stab-${Date.now().toString(36)}`;
+    const stem = `${safeFileStem(clipId)}-stab-${Date.now().toString(36)}`;
     const trfName = `${stem}.trf`;
     const outName = `${stem}.mp4`;
     const outPath = join(dir, outName);
@@ -4890,8 +4896,8 @@ export class EditorEngine extends EventEmitter {
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
-    const cmdName = `${clipId}-reframe.txt`;
-    const outName = `${clipId}-reframe.mp4`;
+    const cmdName = `${safeFileStem(clipId)}-reframe.txt`;
+    const outName = `${safeFileStem(clipId)}-reframe.mp4`;
     const outPath = join(dir, outName);
     await writeFile(join(dir, cmdName), cropPlanToSendcmd(keys), "utf8");
 
@@ -4999,7 +5005,7 @@ export class EditorEngine extends EventEmitter {
     await mkdir(dir, { recursive: true });
     // Unique per run: an earlier cutout of this clip may still be referenced by
     // the undo history, so never overwrite it.
-    const stem = `${clipId}-cutout-${Date.now().toString(36)}`;
+    const stem = `${safeFileStem(clipId)}-cutout-${Date.now().toString(36)}`;
     const outPath = join(dir, `${stem}.mkv`);
     const proxyPath = join(dir, `${stem}.webm`);
 
@@ -5142,7 +5148,7 @@ export class EditorEngine extends EventEmitter {
 
     const dir = join(this.dataDir, "baked");
     await mkdir(dir, { recursive: true });
-    const pngPath = join(dir, `${targetId}-freeze-${Date.now().toString(36)}-${newId("f").slice(-4)}.png`);
+    const pngPath = join(dir, `${safeFileStem(targetId)}-freeze-${Date.now().toString(36)}-${newId("f").slice(-4)}.png`);
     let still: MediaAsset;
     try {
       await grabFrame(asset.path, srcSec, pngPath, undefined, this.cutoutMerge(asset));
@@ -5478,7 +5484,7 @@ export class EditorEngine extends EventEmitter {
         }
         const video = m.video || (m.clipId === clipId && asset.hasVideo && !asset.hasAudio);
         if (!video && !withAudio) continue; // nothing to bake (a silent partner): left as it is
-        const stem = `${m.clipId}-rev-${Date.now().toString(36)}`;
+        const stem = `${safeFileStem(m.clipId)}-rev-${Date.now().toString(36)}`;
         // A remove_background cutout carries alpha: keep it (FFV1 yuva420p in Matroska) instead of flattening to opaque H.264.
         // A matte-backed cutout's file is only its matte: the bake merges the original colour back in.
         const cutout = video ? this.cutoutMerge(asset) : undefined;
@@ -5599,7 +5605,7 @@ export class EditorEngine extends EventEmitter {
     await mkdir(dir, { recursive: true });
     const cutout = this.cutoutMerge(asset); // a matte-backed cutout: merge its colour back in
     const alpha = !!cutout || (await probeVideoFormat(asset.path))?.hasAlpha === true; // keep a cutout's transparency
-    const outPath = join(dir, `${clipId}-slowmo-${Date.now().toString(36)}.${alpha ? "mkv" : "mp4"}`);
+    const outPath = join(dir, `${safeFileStem(clipId)}-slowmo-${Date.now().toString(36)}.${alpha ? "mkv" : "mp4"}`);
     let baked: MediaAsset;
     try {
       await bakeSmoothSlow({
@@ -5963,11 +5969,19 @@ export class EditorEngine extends EventEmitter {
     if (!loaded.tracks || !Array.isArray(loaded.assets)) {
       throw new Error("File is not a valid .aive project");
     }
+    // A .aive is untrusted input: an id like `../../x` would make a bake escape
+    // the data dir, and a `scheme:` media path would make FFmpeg/ffprobe open a
+    // URL/protocol (SSRF). Sanitise ids (non-token ids → fresh newId, refs
+    // rewritten) and refuse any non-local media BEFORE the project is used or
+    // its asset caches are keyed. All of it runs on the local copy: a refused
+    // file must leave the open project, its path, dirty state and undo history
+    // as they were (else the next autosave writes the refused file over it).
+    const project = validateLoadedProject(migrateProject(loaded));
     // Bring back any baked/proxy file it names that a clean-up moved to the trash.
-    this.lastRestoredFromTrash = await this.storage.restore(loaded);
+    this.lastRestoredFromTrash = await this.storage.restore(project);
     this.undoStack = [];
     this.redoStack = [];
-    this.project = migrateProject(loaded);
+    this.project = project;
     // Pull persisted transcripts/visual fingerprints OUT of the live project
     // into the engine cache (kept outside the undo history); leave markers.
     this.assetCaches.clear();
@@ -6020,8 +6034,19 @@ export class EditorEngine extends EventEmitter {
     } catch {
       throw new Error(`"${basename(path)}" is not valid JSON. OTIO files are plain JSON — check the export from the other tool.`);
     }
-    this.lastRestoredFromTrash = await this.storage.restore(json);
+    // Bring trashed bakes the file names back BEFORE probing, so a handed-off
+    // bake that clean-up moved to the trash imports as media, not as an offline
+    // placeholder (storage.restore: "call it BEFORE using the project"). A refused
+    // import only leaves those files back in baked/, where clean-up trashes them
+    // again; the open project is untouched either way.
+    const restored = await this.storage.restore(json);
     const result = await otioToProject(json, async (mediaPath) => {
+      // A protocol/URL target_url (http:, file:, data:, …) must NOT be probed:
+      // ffprobe would open the protocol (SSRF). Treat it as missing here; the
+      // assertProjectMediaLocal guard below then refuses the import outright. A
+      // scheme-free relative/local path is probed as before (not a network
+      // vector), so a foreign OTIO with a relative target_url still imports.
+      if (isProtocolLike(mediaPath)) return null;
       try {
         return await probeAsset(mediaPath);
       } catch {
@@ -6029,9 +6054,15 @@ export class EditorEngine extends EventEmitter {
       }
     });
 
+    // An .otio is untrusted input too (see load()): otioToProject already skips
+    // probing a non-local target_url, but the path still travels into the
+    // project — sanitise ids and refuse non-local media before it is used, on
+    // the local copy so a refused import leaves the open project untouched.
+    const project = validateLoadedProject(migrateProject(result.project));
+    this.lastRestoredFromTrash = restored;
     this.undoStack = [];
     this.redoStack = [];
-    this.project = migrateProject(result.project);
+    this.project = project;
     // Extract any transcripts/visual indexes that traveled in asset metadata.
     this.assetCaches.clear();
     for (const a of this.project.assets) {
@@ -6066,6 +6097,34 @@ export class EditorEngine extends EventEmitter {
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
     this.storage.schedule();
+  }
+}
+
+/**
+ * The untrusted-input checks for a loaded/imported project (see load()): ids
+ * sanitised, numbers coerced, non-local media refused (throws), bleep sounds
+ * coerced. Mutates and returns `project`, which must not be live yet.
+ */
+function validateLoadedProject(project: Project): Project {
+  sanitizeProjectIds(project);
+  coerceProjectNumbers(project);
+  assertProjectMediaLocal(project);
+  sanitizeBleepSounds(project);
+  return project;
+}
+
+/**
+ * Coerce any bleep whose `sound` is not a known built-in to the default. A
+ * loaded project's bleep.sound is untrusted and is used to build the SFX WAV
+ * filename (`<sound>-v1.wav`); an unknown value has no synthesiser anyway.
+ */
+function sanitizeBleepSounds(loaded: Project): void {
+  for (const track of loaded.tracks ?? []) {
+    for (const clip of track.clips ?? []) {
+      for (const b of clip.effects?.bleeps ?? []) {
+        if (b.sound !== undefined && !SFX_NAMES.includes(b.sound as SfxName)) b.sound = BLEEP_DEFAULT_SOUND;
+      }
+    }
   }
 }
 

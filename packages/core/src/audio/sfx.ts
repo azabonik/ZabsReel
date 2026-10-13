@@ -6,6 +6,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { safeFileStem } from "../safepath.js";
 import type { BleepSound } from "../types.js";
 
 export type SfxName = BleepSound;
@@ -175,7 +176,10 @@ export function sfxDuration(name: SfxName): number {
 /** Write (once) and return the WAV path for a built-in sound. */
 export async function ensureSfxFile(dataDir: string, name: SfxName): Promise<string> {
   const dir = join(dataDir, "sfx");
-  const path = join(dir, `${name}-v1.wav`);
+  // `name` is a known built-in, but it comes from (untrusted) project data on
+  // the render path — keep it to a filename-safe token so it can never form a
+  // traversal even if a future caller skips the SFX_NAMES check.
+  const path = join(dir, `${safeFileStem(name)}-v1.wav`);
   if (existsSync(path)) return path;
   await mkdir(dir, { recursive: true });
   await writeFile(path, encodeWav(synthesizeSfx(name)));

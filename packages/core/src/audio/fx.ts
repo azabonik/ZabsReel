@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { execa } from "execa";
-import { FFMPEG_BIN, anlmdnWorks, ffmpegVersion } from "../ffmpeg/executor.js";
+import { FFMPEG_BIN, anlmdnWorks, ffmpegArgsLocalOnly, ffmpegVersion } from "../ffmpeg/executor.js";
 import { hasAfftdnV2, hasAfftfiltV2 } from "../ffmpeg/version.js";
 import { newId } from "../ids.js";
 import {
@@ -140,10 +140,11 @@ export async function measureLoudness(src: AudioFxSource, steps: string[], signa
   if (loudnessCache.has(key)) return loudnessCache.get(key)!;
   let L: number | null = null;
   try {
-    const r = await execa(FFMPEG_BIN, [
+    const args = [
       "-hide_banner", "-nostats", "-ss", src.sourceIn.toFixed(6), "-t", src.sourceSpan.toFixed(6), "-i", src.path,
       "-vn", "-af", chain.join(","), "-f", "null", "-",
-    ], { reject: true, ...(signal ? { cancelSignal: signal } : {}) });
+    ];
+    const r = await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args), { reject: true, ...(signal ? { cancelSignal: signal } : {}) });
     const m = [...r.stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
     if (m.length) L = Number(m[m.length - 1][1]);
   } catch (err) {
@@ -180,12 +181,14 @@ export async function measureNoiseFloor(path: string, startSec: number, durSec: 
   }
   const key = `${path}|${mtime}|${startSec.toFixed(3)}|${dur.toFixed(3)}`;
   if (floorCache.has(key)) return floorCache.get(key)!;
+  const floorArgs = [
+    "-hide_banner", "-v", "error", "-ss", startSec.toFixed(3), "-t", dur.toFixed(3), "-i", path,
+    "-vn", "-ac", "1", "-ar", String(FLOOR_RATE), "-f", "f32le", "-",
+  ];
+  const floorRun = ffmpegArgsLocalOnly(floorArgs);
   const levels = await new Promise<number[]>((resolve) => {
     const levelsOut: number[] = [];
-    const child = spawn(FFMPEG_BIN, [
-      "-hide_banner", "-v", "error", "-ss", startSec.toFixed(3), "-t", dur.toFixed(3), "-i", path,
-      "-vn", "-ac", "1", "-ar", String(FLOOR_RATE), "-f", "f32le", "-",
-    ], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(FFMPEG_BIN, floorRun, { stdio: ["ignore", "pipe", "ignore"] });
     let carry: Buffer = Buffer.alloc(0);
     let sum = 0;
     let n = 0;

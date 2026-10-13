@@ -652,15 +652,26 @@ const OVERLAY_XY: Record<string, { x: string; y: string }> = {
   bottomright: { x: "w-text_w-w*0.05", y: "h-text_h-h*0.06" },
 };
 
-/** Build a single drawtext filter step for a resolved overlay. */
-function drawTextStep(ov: ResolvedOverlay): string {
+/** A finite number, or the fallback. Guards against a project string ("12,movie=…") leaking into the graph. */
+function dtNum(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+/** An FFmpeg colour token (name, #rrggbb[aa], 0xRRGGBB, name@alpha), or the fallback.
+ *  Alpha is a 0..1 float (e.g. @0.55, @1.0) or a hex byte (e.g. @0x80), both accepted by FFmpeg. */
+const DT_COLOR = /^(0x[0-9A-Fa-f]{6,8}|#[0-9A-Fa-f]{3,8}|[A-Za-z]+)(@(0x[0-9A-Fa-f]{1,2}|1(\.0+)?|0?\.\d+|0))?$/;
+function dtColor(v: unknown, fallback: string): string {
+  return typeof v === "string" && DT_COLOR.test(v) ? v : fallback;
+}
+
+/** Build a single drawtext filter step for a resolved overlay (exported for smoke-safepath). */
+export function drawTextStep(ov: ResolvedOverlay): string {
   // Free x/y placement (fraction of canvas, text centered on the point) wins;
   // otherwise fall back to the keyword position.
   let x: string;
   let y: string;
   if (ov.x !== undefined || ov.y !== undefined) {
-    const fx = Math.min(1, Math.max(0, ov.x ?? 0.5));
-    const fy = Math.min(1, Math.max(0, ov.y ?? 0.5));
+    const fx = Math.min(1, Math.max(0, dtNum(ov.x, 0.5)));
+    const fy = Math.min(1, Math.max(0, dtNum(ov.y, 0.5)));
     x = `(w*${fx.toFixed(4)}-text_w/2)`;
     y = `(h*${fy.toFixed(4)}-text_h/2)`;
   } else {
@@ -678,11 +689,15 @@ function drawTextStep(ov: ResolvedOverlay): string {
   if (kf?.x?.length) x = `'(w*(${kfExpr(kf.x, ov.x ?? 0.5, "t")})-text_w/2)'`;
   if (kf?.y?.length) y = `'(h*(${kfExpr(kf.y, ov.y ?? 0.5, "t")})-text_h/2)'`;
 
+  // Numeric sizes and colour tokens come from (untrusted) project style fields:
+  // coerce them so a crafted value can't inject a `,movie=…`/extra option into
+  // the filtergraph. Legitimate values (numbers, "white", "#ffe14d", "black@0.55")
+  // are unchanged; the drawtext file/font names are engine-generated.
   const parts = [
     `drawtext=textfile=${ov.textFile}`,
     `fontfile=${ov.fontFile}`,
-    `fontsize=${ov.fontSize}`,
-    `fontcolor=${ov.color}`,
+    `fontsize=${dtNum(ov.fontSize, 48)}`,
+    `fontcolor=${dtColor(ov.color, "white")}`,
     `x=${x}`,
     `y=${y}`,
   ];
@@ -690,17 +705,17 @@ function drawTextStep(ov: ResolvedOverlay): string {
   if (kf?.opacity?.length) {
     parts.push(`alpha='clip(${kfExpr(kf.opacity, 1, "t")},0,1)'`);
   }
-  if (ov.outlineWidth && ov.outlineWidth > 0) {
-    parts.push(`borderw=${ov.outlineWidth}`, `bordercolor=${ov.outlineColor ?? "black"}`);
+  if (dtNum(ov.outlineWidth, 0) > 0) {
+    parts.push(`borderw=${dtNum(ov.outlineWidth, 0)}`, `bordercolor=${dtColor(ov.outlineColor, "black")}`);
   }
-  if ((ov.shadowX && ov.shadowX !== 0) || (ov.shadowY && ov.shadowY !== 0)) {
+  if (dtNum(ov.shadowX, 0) !== 0 || dtNum(ov.shadowY, 0) !== 0) {
     parts.push(
-      `shadowx=${ov.shadowX ?? 2}`,
-      `shadowy=${ov.shadowY ?? 2}`,
-      `shadowcolor=${ov.shadowColor ?? "black"}`,
+      `shadowx=${dtNum(ov.shadowX, 2)}`,
+      `shadowy=${dtNum(ov.shadowY, 2)}`,
+      `shadowcolor=${dtColor(ov.shadowColor, "black")}`,
     );
   }
-  if (ov.box) parts.push("box=1", `boxcolor=${ov.boxColor}`, `boxborderw=${ov.boxBorderW ?? 12}`);
+  if (ov.box) parts.push("box=1", `boxcolor=${dtColor(ov.boxColor, "black@0.55")}`, `boxborderw=${dtNum(ov.boxBorderW, 12)}`);
   if (ov.start !== undefined || ov.end !== undefined) {
     const start = ov.start ?? 0;
     const end = ov.end ?? 1e9;

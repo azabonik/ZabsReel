@@ -16,7 +16,7 @@
 import { execa } from "execa";
 import type { ServerResponse } from "node:http";
 import { stat } from "node:fs/promises";
-import { FFMPEG_BIN, FFPROBE_BIN } from "./executor.js";
+import { FFMPEG_BIN, FFPROBE_BIN, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly } from "./executor.js";
 
 /** Most frames one request returns (the renderer asks for at most 90: 3 s at 30 fps). */
 export const FRAMES_MAX = 120;
@@ -85,7 +85,8 @@ async function sourceColor(path: string): Promise<{ matrix: string; range: "tv" 
   const key = `${path}|${info.size}|${info.mtimeMs}`;
   let p = probed.get(key);
   if (!p) {
-    p = execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,height,color_space,color_range,pix_fmt", "-of", "json", path])
+    const probeArgs = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,height,color_space,color_range,pix_fmt", "-of", "json", path];
+    p = execa(FFPROBE_BIN, ffprobeArgsLocalOnly(probeArgs))
       .then((r) => {
         const s = (JSON.parse(r.stdout) as { streams?: Record<string, unknown>[] }).streams?.[0];
         if (!s) return null;
@@ -137,7 +138,8 @@ export async function streamFrames(q: FramesQuery, res: ServerResponse): Promise
   running++;
   try {
     const color = await sourceColor(q.path).catch(() => null);
-    const child = execa(FFMPEG_BIN, framesArgs(q, color), { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
+    const decodeArgs = framesArgs(q, color);
+    const child = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(decodeArgs), { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
     const stop = () => {
       if (child.exitCode === null) child.kill("SIGKILL");

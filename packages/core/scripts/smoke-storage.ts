@@ -316,6 +316,14 @@ async function main() {
   await call("export_otio", { path: otio });
   const idx6c = JSON.parse(readFileSync(indexPath, "utf8")) as { projects: string[] };
   check(idx6c.projects.includes(otio), "export_otio recorded the .otio (another NLE may use the bakes)");
+  // An .otio handoff whose bake was cleaned into the trash: import_otio must bring it back
+  // BEFORE probing, or the bake imports as an offline placeholder.
+  await call("new_project");
+  mkdirSync(join(baked, ".trash"), { recursive: true });
+  renameSync(restoreMe, join(baked, ".trash", "restore-me.mp4"));
+  const imp6 = await call<{ project: { assets: { path: string; missing?: boolean }[] }; missing?: string[] }>("import_otio", { path: otio });
+  check(existsSync(restoreMe), "import_otio moved the handed-off bake back out of the trash");
+  check(imp6.project.assets.every((a) => !a.missing) && (imp6.missing ?? []).length === 0, "…before probing it: it imports as media, not an offline placeholder", imp6.missing);
 
   console.log("7. trash retention and emptyTrash...");
   setTrashedAt(baked, "orphan-old.mkv", 8 * DAY);

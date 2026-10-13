@@ -2,7 +2,7 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execa } from "execa";
-import { FFMPEG_BIN } from "../ffmpeg/executor.js";
+import { FFMPEG_BIN, ffmpegArgsLocalOnly } from "../ffmpeg/executor.js";
 import { FaceDetector } from "./detector.js";
 
 /**
@@ -68,27 +68,24 @@ export async function trackSubject(opts: TrackOptions): Promise<TrackResult> {
   const work = await mkdtemp(join(tmpdir(), "aive-reframe-"));
   const rawPath = join(work, "frames.rgb");
   try {
-    await execa(
-      FFMPEG_BIN,
-      [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-ss",
-        opts.sourceIn.toFixed(6),
-        "-t",
-        opts.span.toFixed(6),
-        "-i",
-        opts.path,
-        "-vf",
-        `fps=${fps.toFixed(6)},scale=${sw}:${sh},pad=${DET}:${DET}:${px}:${py}:color=black,format=rgb24`,
-        "-f",
-        "rawvideo",
-        "-y",
-        rawPath,
-      ],
-      { reject: true },
-    );
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      opts.sourceIn.toFixed(6),
+      "-t",
+      opts.span.toFixed(6),
+      "-i",
+      opts.path,
+      "-vf",
+      `fps=${fps.toFixed(6)},scale=${sw}:${sh},pad=${DET}:${DET}:${px}:${py}:color=black,format=rgb24`,
+      "-f",
+      "rawvideo",
+      "-y",
+      rawPath,
+    ];
+    await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args), { reject: true });
 
     const detector = await FaceDetector.create();
     const frameBytes = DET * DET * 3;

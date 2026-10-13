@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import type { Readable, Writable } from "node:stream";
 import { execa } from "execa";
-import { FFMPEG_BIN, FfmpegError, ffmpegStderrDetail } from "../ffmpeg/executor.js";
+import { FFMPEG_BIN, FfmpegError, ffmpegArgsLocalOnly, ffmpegStderrDetail } from "../ffmpeg/executor.js";
 
 /**
  * The remove_background frame pipeline: decoder ffmpeg → raw RGB frames →
@@ -292,14 +292,14 @@ export async function runMattePipeline(o: PipelineOptions, signal: AbortSignal, 
 
   // Both are only ever stopped to throw their output away, so SIGKILL: an ffmpeg blocked
   // writing to a pipe nobody reads any more ignores SIGTERM (until execa's 5 s force-kill).
-  const decoder = execa(FFMPEG_BIN, decArgs, {
+  const decoder = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(decArgs), {
     reject: true,
     stdin: "ignore",
     buffer: { stdout: false, stderr: true },
     cancelSignal: signal,
     killSignal: "SIGKILL",
   });
-  const encoder = execa(FFMPEG_BIN, encArgs, {
+  const encoder = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(encArgs), {
     reject: true,
     stdout: "ignore",
     buffer: { stderr: true },

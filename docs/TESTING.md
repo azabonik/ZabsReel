@@ -95,6 +95,17 @@ npx tsx packages/core/scripts/smoke-legacy-migrate.ts
 # Security: session-token auth (HTTP/WS) + /file allowlist, HEAD /file and its ETag (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
 
+# Untrusted .aive / .otio: crafted ids stay inside the data dir, URL/protocol media
+# is refused on load/import (and a refused open leaves the open project, its path,
+# dirty state and undo history unchanged), the executor refuses protocol inputs and
+# filters that open their own source, and FFmpeg gets -protocol_whitelist
+# file,pipe,fd on every input (127.0.0.1 listener + sandbox, self-synthesizes media).
+# Accepted risk: UNC (\\server\share) and //host/share media paths are accepted
+# for NAS workflows, so on a Windows host a crafted project can make probe,
+# thumbnail and render open an SMB connection to the named host, which can send
+# the user's NTLM credentials.
+npx tsx packages/core/scripts/smoke-safepath.ts
+
 # Frame picking at exact frame boundaries: get_frame(n / fps) shows frame n; GET /frames
 # (the preview's trail / denoise warm-up) returns exactly the source frames asked for,
 # cropped and scaled, with the token, the /file allowlist and its number checks (self-synthesizes)

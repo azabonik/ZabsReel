@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { looksLikeProtocol, protocolName } from "../safepath.js";
 import {
   FILTERGRAPH_OPTIONS, acrossfadeUnreliable, adaptFilterGraph, parseFfmpegVersion, preferredFilterScriptFlag, usesPremultiply,
   type FfmpegVersion,
@@ -29,6 +30,222 @@ export function ffmpegVersionLine(): Promise<string> {
 /** FFmpeg generation of FFMPEG_BIN: its release major, or the one its libavfilter implies for a git build (0 when unknown). */
 export async function ffmpegMajorVersion(): Promise<number> {
   return (await ffmpegVersion().catch(() => null))?.generation ?? 0;
+}
+
+/**
+ * Options whose value is a filtergraph, by base name: FFmpeg also accepts them
+ * with a stream specifier (`-filter:v:0`, `-af:1`) and, from 7.0, with a `/`
+ * prefix that reads the value from a file (`-/vf graph.txt`).
+ */
+const FILTERGRAPH_OPTION_BASES: ReadonlySet<string> = new Set(["filter", "vf", "af", "filter_complex", "lavfi"]);
+/** Options that read a filtergraph from a file (older spellings of `-/…`). */
+const FILTERGRAPH_FILE_OPTIONS: ReadonlySet<string> = new Set(["filter_script", "filter_complex_script"]);
+
+/** An argument read as an FFmpeg option: its base name (no "-", "/" or ":stream"), and whether "-/" reads the value from a file. */
+function ffmpegOption(a: string): { base: string; fromFile: boolean } | null {
+  if (a.length < 2 || a[0] !== "-") return null;
+  const fromFile = a[1] === "/";
+  return { base: a.slice(fromFile ? 2 : 1).split(":")[0], fromFile };
+}
+
+/**
+ * Filters that open media, sockets or shared libraries on their own (outside
+ * the `-i` inputs and so outside `-protocol_whitelist`): movie/amovie and
+ * subtitles/ass open any URL through libavformat, zmq/azmq bind a socket, and
+ * frei0r/ladspa/lv2 load a plugin library by path. SynthCut never builds any
+ * of them (it does use sendcmd, lut3d and vidstab, which read its own local
+ * files). Matched at a filter-name position, with an optional `@instance`.
+ */
+const FORBIDDEN_FILTERS: ReadonlySet<string> = new Set(["movie", "amovie", "subtitles", "ass", "zmq", "azmq", "frei0r", "frei0r_src", "ladspa", "lv2"]);
+
+/**
+ * One token the way FFmpeg's av_get_token reads it (libavutil/avstring.c):
+ * leading whitespace skipped, `\x` is a literal x, `'…'` is literal up to the
+ * next quote, unquoted trailing whitespace dropped; it stops before an
+ * unquoted, unescaped character in `term`. Returns the token and where it ended.
+ */
+function avGetToken(s: string, start: number, term: string): { token: string; end: number } {
+  let i = start;
+  while (i < s.length && /\s/.test(s[i])) i++;
+  let out = "";
+  let keep = 0; // length of `out` that trailing-whitespace trimming must not cut (escaped or quoted text)
+  while (i < s.length && !term.includes(s[i])) {
+    const c = s[i];
+    if (c === "\\" && i + 1 < s.length) {
+      out += s[i + 1];
+      keep = out.length;
+      i += 2;
+    } else if (c === "'") {
+      const close = s.indexOf("'", i + 1);
+      if (close < 0) throw new Error("unterminated quote in a filtergraph");
+      out += s.slice(i + 1, close);
+      keep = out.length;
+      i = close + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  let end = out.length;
+  while (end > keep && /\s/.test(out[end - 1])) end--;
+  return { token: out.slice(0, end), end: i };
+}
+
+/**
+ * The filter names of graph `g`, read the way libavfilter's graph parser does
+ * (graphparser.c: [labels] name[@id][=args][labels], separated by `,` / `;`),
+ * so quoting or escaping a name (`'movie'=…`, `mo\vie=…`) can't hide it from the
+ * check the way it would from a pattern. Throws on a graph it can't read.
+ */
+export function filterGraphNames(g: string): string[] {
+  const names: string[] = [];
+  let i = 0;
+  const skipWs = () => {
+    while (i < g.length && /\s/.test(g[i])) i++;
+  };
+  const labels = () => {
+    for (skipWs(); g[i] === "["; skipWs()) {
+      // A label is itself an av_get_token up to "]", so an escaped "\]" doesn't end it.
+      const label = avGetToken(g, i + 1, "]");
+      if (g[label.end] !== "]") throw new Error("unterminated [label] in a filtergraph");
+      i = label.end + 1;
+    }
+  };
+  for (;;) {
+    labels();
+    if (i >= g.length) break;
+    const name = avGetToken(g, i, "=,;[");
+    i = name.end;
+    names.push(name.token.split("@")[0].toLowerCase());
+    if (g[i] === "=") i = avGetToken(g, i + 1, "[],;").end;
+    labels();
+    if (i >= g.length) break;
+    if (g[i] !== "," && g[i] !== ";") throw new Error(`unexpected "${g[i]}" in a filtergraph`);
+    i++;
+  }
+  return names;
+}
+
+/** Throw when filtergraph `g` (the value of `flag`) uses a {@link FORBIDDEN_FILTERS} filter, or can't be read. */
+function assertGraphSafe(g: string, flag: string): void {
+  let names: string[];
+  try {
+    names = filterGraphNames(g);
+  } catch (err) {
+    throw new Error(`Refusing an ffmpeg ${flag} graph SynthCut can't read safely: ${(err as Error).message}.`);
+  }
+  const bad = names.find((n) => FORBIDDEN_FILTERS.has(n));
+  if (bad) {
+    throw new Error(
+      `Refusing an ffmpeg ${flag} graph that uses the ${bad} filter — SynthCut never builds one (it opens files, URLs or sockets by itself), so this came from an injected project field.`,
+    );
+  }
+}
+
+/** The `-f <format>` given as an input option of the `-i` at index `i` (between the previous `-i` and it). */
+function inputFormat(args: readonly string[], i: number): string | undefined {
+  for (let j = i - 1; j > 0 && args[j - 1] !== "-i"; j--) {
+    if (args[j - 1] === "-f") return args[j];
+  }
+  return undefined;
+}
+
+/**
+ * Final backstop against SSRF / protocol reads at the FFmpeg boundary. The core
+ * only ever hands FFmpeg/ffprobe LOCAL files (plus its own pipes and
+ * `-f lavfi`/`-f concat` inputs it builds by bare name); a `scheme:` input or a
+ * filter that opens its own source (movie=, subtitles=, zmq …, see
+ * {@link FORBIDDEN_FILTERS}) could only come from an unvalidated path in a
+ * crafted project that slipped past the load-time guard. This refuses both so
+ * an unvalidated path can never be treated as a protocol. It is the TypeScript
+ * half; {@link ffmpegArgsLocalOnly} adds FFmpeg's own `-protocol_whitelist`, so
+ * an input form this parser misreads is still refused by FFmpeg itself.
+ *
+ * Exempt `-i` inputs: anything with no colon (a bare filename like `v.txt`,
+ * never a protocol), `pipe:N` / `-`, and an input declared by a `-f lavfi` /
+ * `-f concat` (anullsrc, the concat list; a lavfi graph is scanned for the
+ * forbidden filters instead). A Windows drive path (`C:\…`) has a colon but is
+ * NOT a protocol — {@link looksLikeProtocol} lets it through.
+ */
+export function guardFfmpegArgs(args: readonly string[]): void {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-i") {
+      const input = args[i + 1];
+      if (input === undefined) continue;
+      const fmt = inputFormat(args, i);
+      if (fmt === "lavfi") {
+        assertGraphSafe(input, "-f lavfi -i");
+        continue;
+      }
+      if (fmt === "concat") continue;
+      if (input === "-" || /^pipe:\d*$/.test(input)) continue;
+      assertFfmpegInputLocal(input, "ffmpeg -i input");
+    } else {
+      const opt = ffmpegOption(a);
+      if (!opt) continue;
+      // A graph read from a file can't be checked here; the core always passes
+      // graphs inline (runFfmpeg moves a long one into its own file only after
+      // this check), so a file-reading graph option can only be injected.
+      if (FILTERGRAPH_FILE_OPTIONS.has(opt.base) || (opt.fromFile && FILTERGRAPH_OPTION_BASES.has(opt.base))) {
+        throw new Error(`Refusing ffmpeg option ${a}: it reads a filtergraph from a file, which SynthCut never passes itself.`);
+      }
+      if (FILTERGRAPH_OPTION_BASES.has(opt.base)) {
+        const g = args[i + 1];
+        if (typeof g === "string") assertGraphSafe(g, a);
+      }
+    }
+  }
+}
+
+/** Assert a single ffmpeg/ffprobe input is local (not a protocol). Bare, colon-free names pass. */
+function assertFfmpegInputLocal(input: string, where: string): void {
+  if (!input.includes(":")) return; // bare filename — can't be a protocol
+  if (looksLikeProtocol(input)) {
+    const scheme = protocolName(input);
+    const shown = input.length > 120 ? `${input.slice(0, 117)}…` : input;
+    throw new Error(
+      `Refusing ${where} "${shown}": "${scheme}:" is a protocol/URL, not a local file. SynthCut only reads local media (relink the file to this machine).`,
+    );
+  }
+  // Has a colon but is not a protocol (a Windows drive path C:\…) — allowed.
+}
+
+/** Guard ffprobe args: the media file is the LAST positional argument. */
+export function guardFfprobeArgs(args: readonly string[]): void {
+  const last = args[args.length - 1];
+  if (typeof last === "string") assertFfmpegInputLocal(last, "ffprobe input");
+}
+
+/**
+ * The only protocols FFmpeg/ffprobe may open for an input: local files and the
+ * core's own pipes (`-i -` is `pipe:` in FFmpeg 4.x and `fd:` in newer builds).
+ * Nested opens (a concat list's entries, an image sequence) inherit it.
+ */
+export const PROTOCOL_WHITELIST = "file,pipe,fd";
+
+/**
+ * `args` checked by {@link guardFfmpegArgs} and with `-protocol_whitelist`
+ * before every `-i`, so FFmpeg itself refuses any input that is not a local
+ * file or pipe even where the TypeScript guard reads the input name differently
+ * from FFmpeg. Every ffmpeg spawn in the core goes through this. The added
+ * flags are not part of any cache key (segmentKey hashes clip data, not args).
+ */
+export function ffmpegArgsLocalOnly(args: readonly string[]): string[] {
+  guardFfmpegArgs(args);
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-i" && i + 1 < args.length) out.push("-protocol_whitelist", PROTOCOL_WHITELIST);
+    out.push(args[i]);
+  }
+  return out;
+}
+
+/** {@link ffmpegArgsLocalOnly} for ffprobe: the whitelist goes before the input (the last argument). */
+export function ffprobeArgsLocalOnly(args: readonly string[]): string[] {
+  guardFfprobeArgs(args);
+  if (args.length === 0) return [];
+  return [...args.slice(0, -1), "-protocol_whitelist", PROTOCOL_WHITELIST, args[args.length - 1]];
 }
 
 export class FfmpegError extends Error {
@@ -63,8 +280,9 @@ export function ffmpegStderrDetail(stderr: string, maxLines = 5, maxChars = 600)
 
 /** Run ffprobe and return its stdout (typically JSON). */
 export async function runFfprobe(args: string[]): Promise<string> {
+  const run = ffprobeArgsLocalOnly(args);
   try {
-    const { stdout } = await execa(FFPROBE_BIN, args, { reject: true });
+    const { stdout } = await execa(FFPROBE_BIN, run, { reject: true });
     return stdout;
   } catch (err: unknown) {
     const e = err as { stderr?: string; shortMessage?: string; message?: string };
@@ -223,7 +441,7 @@ export function withFilterGraphFile(args: readonly string[], at: number, file: s
  * the run.
  */
 export async function runFfmpeg(built: string[], opts: FfmpegRunOptions = {}): Promise<void> {
-  const args = await adaptFfmpegArgs(built);
+  const args = ffmpegArgsLocalOnly(await adaptFfmpegArgs(built));
   const at = longFilterGraphIndex(args);
   if (at < 0) return runFfmpegOnce(args, opts);
   if (filterScriptFlag === null) {
@@ -309,7 +527,7 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
  * pipe rawvideo to `pipe:1`, e.g. reading the mean RGB of a frame as 3 bytes).
  */
 export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
-  const { stdout } = await execa(FFMPEG_BIN, await adaptFfmpegArgs(args), {
+  const { stdout } = await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(await adaptFfmpegArgs(args)), {
     reject: true,
     encoding: "buffer",
   });
@@ -318,8 +536,9 @@ export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
 
 /** Run ffmpeg and return combined stderr (used by analysis filters that log to stderr). */
 export async function runFfmpegCaptureStderr(args: string[]): Promise<string> {
+  const run = ffmpegArgsLocalOnly(await adaptFfmpegArgs(args));
   try {
-    const result = await execa(FFMPEG_BIN, await adaptFfmpegArgs(args), { reject: false, all: false });
+    const result = await execa(FFMPEG_BIN, run, { reject: false, all: false });
     return result.stderr ?? "";
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string };
