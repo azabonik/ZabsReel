@@ -136,9 +136,17 @@ async function main() {
     left = await decoders();
   }
   if (counted) check(left === 0, `aborted requests leave no ffmpeg running within 1.5 s (got ${left})`);
-  const again = await fetch(url({ from: 0, count: 1, fps: 30, w: W, h: H }));
-  await again.arrayBuffer();
-  check(again.status === 200, `the slots free again once the aborted decodes end (got ${again.status})`);
+  // A slot frees when the server's `await child` settles, a moment after pgrep
+  // stops seeing the killed ffmpeg (a zombie has no command line), so allow
+  // the server up to 2 s. MUTATION: drop `running--` in streamFrames → 429 throughout.
+  let again = 0;
+  for (let i = 0; i < 20 && again !== 200; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 100));
+    const r = await fetch(url({ from: 0, count: 1, fps: 30, w: W, h: H }));
+    await r.arrayBuffer();
+    again = r.status;
+  }
+  check(again === 200, `the slots free again within 2 s once the aborted decodes end (got ${again})`);
 
   console.log("5. the YUV is read as Chromium reads it (the preview's source-colour correction assumes that)...");
   const read = (s: Parameters<typeof framesColor>[0], chrome?: number) => {
