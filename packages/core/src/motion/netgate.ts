@@ -65,7 +65,7 @@ const READS = ["stat", "lstat", "readFile", "readdir", "readlink", "realpath", "
 /**
  * Wrap the reads of a webpack input file system in place: a path that is not
  * local (unc.ts) never reaches the real function; the callback gets the G9
- * error (the `…Sync` forms throw it).
+ * error (the `…Sync` forms, and a call without a callback, throw it).
  */
 export function gateInputFileSystem(fs: object): void {
   const target = fs as Record<string, unknown>;
@@ -81,6 +81,7 @@ export function gateInputFileSystem(fs: object): void {
         if (!why) return real.call(this, p, ...rest);
         const callback = rest[rest.length - 1];
         if (typeof callback === "function") process.nextTick(callback, new Error(why));
+        else throw new Error(why); // no callback (a promise-style caller): fail loudly, never return undefined
       };
     }
     const realSync = target[`${name}Sync`];

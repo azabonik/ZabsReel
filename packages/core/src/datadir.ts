@@ -17,12 +17,16 @@
  * same reason strings; smoke-brand checks they agree.
  *
  * It runs before any engine exists, on folders the environment chose, so it
- * reads through the network-path gate's bootstrap (io/gatedfs.ts).
+ * reads through the network-path gate's bootstrap (io/gatedfs.ts). A data
+ * folder on a network computer is allowed; a Windows device / NT path or a
+ * server name with no key (unc.ts) is refused here, at startup, because every
+ * later read and write in it would be refused.
  */
 import { bootstrap } from "./io/gatedfs.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { DATA_DIR_PARTS, LEGACY } from "./brand.js";
+import { DATA_DIR_PARTS, LEGACY, PRODUCT_NAME } from "./brand.js";
+import { classifyPath } from "./unc.js";
 
 /** True when <dir>/server.json or <dir>/projects.json exists as a regular file. */
 export function holdsState(dir: string): boolean {
@@ -37,6 +41,22 @@ export function holdsState(dir: string): boolean {
 }
 
 /**
+ * Throw when any of `paths` (a folder as given and as resolved) is a form
+ * unc.ts refuses, with a message that says how to fix it. `what` names the
+ * setting at the start of the message.
+ */
+function assertUsable(what: string, ...paths: string[]): void {
+  for (const p of paths) {
+    const c = classifyPath(p);
+    if (c.kind === "refused") {
+      throw new Error(
+        `${what} can't be the ${PRODUCT_NAME} data folder: ${c.reason} Set AIVE_DATA_DIR to a folder on a drive letter or a \\\\server\\share path, and start ${PRODUCT_NAME} again.`,
+      );
+    }
+  }
+}
+
+/**
  * Resolve the data folder. `reason` says which rule chose it, for the one log
  * line each process prints ("data dir: <dir> (<reason>)").
  */
@@ -46,9 +66,14 @@ export function resolveDataDir(opts: { env?: Record<string, string | undefined>;
 } {
   const env = opts.env ?? process.env;
   const home = opts.home ?? homedir();
-  if (env.AIVE_DATA_DIR) return { dir: resolve(env.AIVE_DATA_DIR), reason: "AIVE_DATA_DIR" };
+  if (env.AIVE_DATA_DIR) {
+    const dir = resolve(env.AIVE_DATA_DIR);
+    assertUsable(`AIVE_DATA_DIR "${env.AIVE_DATA_DIR}"`, env.AIVE_DATA_DIR, dir);
+    return { dir, reason: "AIVE_DATA_DIR" };
+  }
   const fresh = join(home, ...DATA_DIR_PARTS);
   const old = join(home, ...LEGACY.dataDirParts);
+  assertUsable(`The home folder "${home}"`, home, fresh, old);
   if (holdsState(fresh)) {
     return { dir: fresh, reason: holdsState(old) ? `new (old folder also has data: ${old})` : "new" };
   }

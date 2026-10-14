@@ -20,9 +20,17 @@
  *                            function (spied); a server that is not allowed
  *                            is refused when enforced (logged once and let
  *                            through in log mode); an allowed one calls through.
+ *                            The data folder bootstrap refuses those forms
+ *                            too, and resolveDataDir refuses such a folder
+ *                            at startup.
+ *                            R5 (Windows, tested through the platform/cwd
+ *                            seam): a relative path is classified where it
+ *                            resolves, so a cwd on a share is covered.
  *  6. G7 argv              — ffmpegArgsLocalOnly / ffprobeArgsLocalOnly /
  *                            runTool check every argument, the cwd and each
- *                            file line of a -f concat list the same way.
+ *                            file line of a -f concat list the same way; on
+ *                            Windows the process's own cwd when no spawn cwd
+ *                            is given, and relative arguments in the spawn cwd.
  *  8. lint                 — scripts/check-io-imports.mjs --self-test, and the
  *                            core passes it.
  *  11. G9                  — graphicRequestRefusal refuses network, device and
@@ -48,7 +56,8 @@ import { classifyPath, normalizeHost } from "../src/unc.js";
 import { assertLocalMediaPath, assertProjectMediaLocal, isLocalMediaPath, isProtocolLike } from "../src/safepath.js";
 import { EditorEngine } from "../src/engine.js";
 import * as gfs from "../src/io/gatedfs.js";
-import { ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool, spawnFfmpegStream } from "../src/ffmpeg/executor.js";
+import { resolveDataDir } from "../src/datadir.js";
+import { assertArgvReachable, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool, spawnFfmpegStream } from "../src/ffmpeg/executor.js";
 import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
 import type { Project } from "../src/types.js";
 
@@ -202,6 +211,19 @@ async function main() {
   const rpcErr = await errOf(() => assertLocalMediaPath(dav, "import path"));
   check(/names the network computer/.test(rpcErr) && /Only plain names/.test(rpcErr) && /and use that path instead\.$/.test(rpcErr) && !/project file/.test(rpcErr),
     `assertLocalMediaPath refuses it with the rpc wording (${rpcErr})`);
+  check(!rpcErr.includes("`"), `the refusal is plain text, with no Markdown backticks (${rpcErr})`);
+  // An empty server name has its own sentence: no `names the network computer ""`.
+  const emptyErr = await errOf(() => assertLocalMediaPath(`\\\\\\${H}\\s\\a.mp4`, "import path"));
+  check(/^import path ".*" has no computer name after its leading slashes, which .* can't use\. Map that folder to a drive letter, or use the computer's plain name, and use that path instead\.$/.test(emptyErr) && !emptyErr.includes('""'),
+    `an empty server name gets its own sentence, with no empty quotes (${emptyErr})`);
+  const emptyLoad = await loadErr(project(`\\\\\\${H}\\s\\a.mp4`));
+  check(/has no computer name after its leading slashes/.test(emptyLoad) && /open the project again\.$/.test(emptyLoad) && !emptyLoad.includes('""'), `load gives it the project-file fix (${emptyLoad})`);
+  // A device path: the rpc fix says "use" once; the project-file fix is unchanged.
+  const devErr = await errOf(() => assertLocalMediaPath(`//?/UNC/${H}/s/a.mp4`, "import path"));
+  check(/is a Windows device path .* does not open\. Map that folder to a drive letter or a \\\\server\\share path, and use that path instead\.$/.test(devErr) && !/Use a drive-letter/.test(devErr),
+    `a device path's rpc refusal says how to fix it without "Use … and use" (${devErr})`);
+  const devLoad = await loadErr(project(`//?/UNC/${H}/s/a.mp4`));
+  check(/does not open\. Use a drive-letter or \\\\server\\share path, then change this path in the project file/.test(devLoad), `a device path's load refusal keeps the project-file wording (${devLoad})`);
   const ipErr = await errOf(() => assertLocalMediaPath("\\\\127.1\\s\\a.mp4", "import path"));
   check(/Write the address in the usual a\.b\.c\.d form\./.test(ipErr), `the middle sentence names the rule that failed (${ipErr.slice(0, 120)})`);
   const zwErr = await errOf(() => assertLocalMediaPath("\\\\na\u200Bs.invalid\\s\\a.mp4", "import path"));
@@ -300,11 +322,16 @@ async function main() {
   };
 
   // ---- 5. G8 gatedfs ----------------------------------------------------------
-  // MUTATION: remove the check from copyFile's second argument (paths [0, 1] →
-  // [0]) → the copyFile-to rows fail (the spy sees the call). Make existsSync
+  // MUTATION: remove the check from copyFile's or rename's second argument
+  // (paths [0, 1] → [0]) → the copyFile-to / rename-to rows fail (the spy sees
+  // the call); [0, 1] → [1] → the rename-from rows fail. Make existsSync
   // call through → its rows fail. Let refused forms through (return null for
   // "refused" in blocked()) → the device / @SSL rows fail in both modes. Ignore
-  // ENFORCED → the enforce rows fail under AIVE_NETWORK_GATE=enforce.
+  // ENFORCED → the enforce rows fail under AIVE_NETWORK_GATE=enforce. Let the
+  // bootstrap skip the refused check (bootstrapping before the refused test in
+  // blocked()) → the early bootstrap rows fail. Drop assertUsable from
+  // resolveDataDir → the data folder rows fail. Drop R5 from classifyFsText →
+  // the R5 rows fail.
   console.log("5. G8 gatedfs: nothing reaches the real fs function unless allowed...");
   const spied: string[] = [];
   const fsMod = require("node:fs") as Record<string, unknown>;
@@ -313,6 +340,7 @@ async function main() {
     [fspMod, "stat", async () => ({ spy: true })],
     [fspMod, "readFile", async () => "spy"],
     [fspMod, "copyFile", async () => undefined],
+    [fspMod, "rename", async () => undefined],
     [fspMod, "readdir", async () => []],
     [fsMod, "createReadStream", () => ({ spy: true })],
     [fsMod, "existsSync", () => true],
@@ -329,11 +357,36 @@ async function main() {
   try {
     const NET = "//zr-evil-5.invalid/s/x";
     const LOCAL = join(root, "local-file");
-    // datadir.ts's bootstrap allows any path until the engine first sets the allowed servers.
+    // datadir.ts's bootstrap allows a path on any server until the engine first sets the allowed servers.
     check(gfs.networkGateEnforced() === enforced, `networkGateEnforced() is ${enforced} (NETWORK_GATE "${gfs.NETWORK_GATE}"; only the variable's "enforce" changes it)`);
     spied.length = 0;
     const early = await thrown(() => gfs.bootstrap.statSync(`${NET}/server.json`));
     check(early === null && spied.length === 1, `bootstrap.statSync calls through before any setAllowedNetworkHosts (${early?.message}; ${JSON.stringify(spied)})`);
+    const refusedForms = [`//./UNC/zr-evil-5.invalid/s/x`, `\\??\\UNC\\zr-evil-5.invalid\\s\\x`, `\\\\zr-evil-5.invalid@SSL\\s\\x`, new URL("file:///%5C%5Czr-evil-5.invalid/s/x")];
+    // The bootstrap skips only the trust decision on a server: refused forms are refused before any setAllowedNetworkHosts too.
+    for (const p of refusedForms) {
+      spied.length = 0;
+      const e = await thrown(() => gfs.bootstrap.statSync(p));
+      check(e instanceof gfs.BlockedPathError && spied.length === 0, `bootstrap.statSync(${String(p)}) is refused before any setAllowedNetworkHosts, the real function is never called (${e?.message.slice(0, 90)}; ${JSON.stringify(spied)})`);
+    }
+    // datadir.ts refuses such a folder at startup, where the cause is, and touches nothing.
+    for (const [label, opts] of [
+      ["AIVE_DATA_DIR \\\\?\\C:\\zr", { env: { AIVE_DATA_DIR: "\\\\?\\C:\\zr" }, home: root }],
+      ["AIVE_DATA_DIR //./x", { env: { AIVE_DATA_DIR: "//./x" }, home: root }],
+      ["AIVE_DATA_DIR \\??\\C:\\zr", { env: { AIVE_DATA_DIR: "\\??\\C:\\zr" }, home: root }],
+      ["AIVE_DATA_DIR on a keyless server", { env: { AIVE_DATA_DIR: "\\\\zr-evil-5.invalid@SSL\\zr" }, home: root }],
+      ["a home folder //./x", { env: {}, home: "//./x" }],
+    ] as const) {
+      spied.length = 0;
+      const e = await thrown(() => resolveDataDir(opts));
+      check(e !== null && /can't be the .* data folder: .* Set AIVE_DATA_DIR to a folder on a drive letter/.test(e.message) && spied.length === 0,
+        `resolveDataDir refuses ${label} at startup, without touching it (${e?.message.slice(0, 140)}; ${JSON.stringify(spied)})`);
+    }
+    const okDir = join(root, "data-ok");
+    const okData = await thrown(() => resolveDataDir({ env: { AIVE_DATA_DIR: okDir }, home: root }));
+    check(okData === null && resolveDataDir({ env: { AIVE_DATA_DIR: okDir }, home: root }).dir === okDir, `resolveDataDir accepts a local AIVE_DATA_DIR (${okData?.message})`);
+    const netData = await thrown(() => resolveDataDir({ env: { AIVE_DATA_DIR: "\\\\zr-evil-5.invalid\\zr" }, home: root }));
+    check(netData === null, `resolveDataDir accepts an AIVE_DATA_DIR on a network computer (the plan trusts the data folder's server) (${netData?.message})`);
     gfs.setAllowedNetworkHosts([]);
 
     const calls: [string, (p: unknown) => unknown][] = [
@@ -341,11 +394,12 @@ async function main() {
       ["readFile", (p) => gfs.readFile(p as string)],
       ["copyFile from", (p) => gfs.copyFile(p as string, LOCAL)],
       ["copyFile to", (p) => gfs.copyFile(LOCAL, p as string)],
+      ["rename from", (p) => gfs.rename(p as string, LOCAL)],
+      ["rename to", (p) => gfs.rename(LOCAL, p as string)],
       ["createReadStream", (p) => gfs.createReadStream(p as string)],
       ["readdir", (p) => gfs.readdir(p as string)],
       ["bootstrap.statSync", (p) => gfs.bootstrap.statSync(p as string)],
     ];
-    const refusedForms = [`//./UNC/zr-evil-5.invalid/s/x`, `\\??\\UNC\\zr-evil-5.invalid\\s\\x`, `\\\\zr-evil-5.invalid@SSL\\s\\x`, new URL("file:///%5C%5Czr-evil-5.invalid/s/x")];
     // Refused forms: never approvable, so refused in both modes and after any approval.
     gfs.setAllowedNetworkHosts(["zr-evil-5.invalid"]);
     for (const p of refusedForms) {
@@ -394,6 +448,36 @@ async function main() {
     gfs.setAllowedNetworkHosts([]);
     spied.length = 0;
     check((await thrown(() => gfs.stat(LOCAL))) === null && spied.length === 1, "a local path always calls through");
+
+    // R5 (Windows only): a relative path is also classified where it resolves, so a cwd on a share is covered.
+    const SHARE = "\\\\zr-evil-5c.invalid\\s";
+    const win = (cwd: string) => ({ platform: "win32" as const, cwd });
+    for (const [p, cwd, kind, why] of [
+      ["v.txt", SHARE, "network", "a relative name in a cwd on a share"],
+      ["sub\\..\\v.txt", SHARE, "network", "a relative path with .. stays on the share"],
+      ["\\v.txt", SHARE, "network", "a root-relative path takes the share's root"],
+      ["v.txt", "C:\\work", "local", "a relative name in a local cwd"],
+      ["C:\\v\\a.mp4", SHARE, "local", "a full drive-letter path never depends on the cwd"],
+      ["v.txt", "\\\\?\\C:\\work", "refused", "a relative name in a device-path cwd"],
+    ] as const) {
+      const a = gfs.fsArgPath(p, win(cwd));
+      check(a?.c.kind === kind && (kind !== "network" || (a.c.kind === "network" && a.c.host === "zr-evil-5c.invalid" && /^\\\\zr-evil-5c\.invalid\\s\\/.test(a.text))),
+        `R5: ${why}: ${JSON.stringify(p)} in ${JSON.stringify(cwd)} is ${kind} (${JSON.stringify(a)})`);
+    }
+    check(gfs.fsArgPath("v.txt", { platform: "linux", cwd: SHARE })?.c.kind === "local", "R5 is Windows only: on Linux a relative name stays local");
+    check(gfs.fsArgPath(Buffer.from("v.txt"), win(SHARE))?.c.kind === "network", "R5 covers a Buffer path too");
+    spied.length = 0;
+    const r5: { e: Error | null } = { e: null };
+    const r5Log = await logsOf(async () => void (r5.e = await thrown(() => gfs.assertReachable("v.txt", "stat", win(SHARE)))));
+    const r5e = r5.e;
+    if (enforced) {
+      check(r5e instanceof gfs.BlockedPathError && r5e.host === "zr-evil-5c.invalid" && r5Log.length === 1 && r5Log[0].includes("blocked \\\\zr-evil-5c.invalid"),
+        `enforced: R5 refuses a relative name in a cwd on a share that is not allowed (${r5e?.message}; ${JSON.stringify(r5Log)})`);
+    } else {
+      check(r5e === null && r5Log.length === 1 && r5Log[0].includes("would block \\\\zr-evil-5c.invalid"), `log mode: R5 logs a relative name in a cwd on a share that is not allowed and lets it through (${r5e?.message}; ${JSON.stringify(r5Log)})`);
+    }
+    const localLog = await logsOf(() => gfs.assertReachable("v2.txt", "stat", win("C:\\work")));
+    check(localLog.length === 0, `R5: a relative name in a local cwd is neither logged nor refused (${JSON.stringify(localLog)})`);
   } finally {
     for (const [m, k, orig] of saved) m[k] = orig;
     syncBuiltinESMExports();
@@ -404,7 +488,9 @@ async function main() {
   // MUTATION: check only the argument after -i in assertArgvReachable → the
   // output and cwd rows fail (the refused-output rows in both modes). Skip the
   // -f concat list → the list rows fail. Drop the check from ffprobeArgsLocalOnly
-  // → its rows fail.
+  // → its rows fail. Drop the Windows process-cwd check → the "no spawn cwd" R5
+  // row fails (the error names an argument). Resolve the arguments in the
+  // process's cwd instead of the spawn cwd → the "local spawn cwd" R5 row fails.
   console.log("6. G7 argv: every argument, the cwd and each concat list entry...");
   touched.length = 0;
   const g7 = (fn: () => unknown) => thrown(fn);
@@ -444,6 +530,29 @@ async function main() {
     const e = await g7(fn);
     check(e !== null && (e instanceof gfs.BlockedPathError || /concat list can't be read|its list can't be read/.test(e.message)), `${name} is refused in every mode (${e?.message.slice(0, 100)})`);
   }
+  // R5 (Windows only): relative arguments resolve in the spawn cwd, or in the process's own cwd when none is given,
+  // which is then checked as the spawn cwd (Windows opens it to start the child).
+  const share6 = (h: string) => `\\\\zr-evil-${h}.invalid\\s`;
+  for (const [label, cwd, ctx, at] of [
+    ["no spawn cwd, the process's cwd on a share", undefined, { platform: "win32" as const, cwd: share6("6c") }, share6("6c")],
+    ["a relative spawn cwd in a process cwd on a share", "work", { platform: "win32" as const, cwd: share6("6d") }, `${share6("6d")}\\work`],
+  ] as const) {
+    let e: Error | null = null;
+    const lines = await logsOf(async () => void (e = await g7(() => assertArgvReachable(["-i", "v.txt", "-c", "copy", "o.mp4"], cwd, ctx))));
+    const err = e as Error | null;
+    check(enforced ? err instanceof gfs.BlockedPathError && err.path === at && err.host !== undefined : err === null && lines.length === 1 && lines[0].includes(`spawn cwd ${JSON.stringify(at)}`),
+      `${enforced ? "enforced" : "log mode"}: R5 argv, ${label}: ${enforced ? "refused, naming the folder" : "logged once, naming the folder, and let through"} (${err?.message.slice(0, 90)}; ${JSON.stringify(lines)})`);
+  }
+  for (const [label, cwd, ctx] of [
+    ["a local spawn cwd in a process cwd on a share: the arguments resolve in the spawn cwd", "C:\\work", { platform: "win32" as const, cwd: share6("6e") }],
+    ["the process's cwd local", undefined, { platform: "win32" as const, cwd: "C:\\work" }],
+    ["R5 is Windows only", undefined, { platform: "linux" as const, cwd: share6("6f") }],
+  ] as const) {
+    let e: Error | null = null;
+    const lines = await logsOf(async () => void (e = await g7(() => assertArgvReachable(["-i", "v.txt", "-c", "copy", "o.mp4"], cwd, ctx))));
+    const err = e as Error | null;
+    check(err === null && lines.length === 0, `R5 argv, ${label}: a relative 'v.txt' passes, nothing logged (${err?.message}; ${JSON.stringify(lines)})`);
+  }
   const fine = await g7(() => ffmpegArgsLocalOnly(["-f", "concat", "-safe", "0", "-i", list("list-ok.txt", "file '/tmp/a.mp4'\nfile 'b.mp4'\n# file '//zr-evil-6.invalid/s/c.mp4'\n"), "-c", "copy", "/tmp/o.mp4"]));
   check(fine === null, `a concat list of local files (and a commented-out line) passes (${fine?.message})`);
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
@@ -466,7 +575,8 @@ async function main() {
   // ---- 11. G9 graphic bundling ------------------------------------------------------
   // MUTATION: drop the file: rule from graphicRequestRefusal (localPart returns
   // true for any classifyPath-local part) → the file:// rows pass through. Make
-  // gateInputFileSystem call the real read first → the spy rows fail.
+  // gateInputFileSystem call the real read first → the spy rows fail. Drop the
+  // no-callback throw → the "without a callback" rows fail.
   console.log("11. G9: graphic imports and webpack's file system...");
   touched.length = 0;
   const G9 = /^graphics can only import local files and installed packages: /;
@@ -512,6 +622,12 @@ async function main() {
       check(r.err !== null && G9.test(r.err.message) && syncErr !== null && G9.test(syncErr.message) && fakeCalls.length === 0,
         `wrapped ${name} / ${name}Sync(${JSON.stringify(p)}) call back / throw the G9 error, the real read is never called (${JSON.stringify(fakeCalls)})`);
     }
+  }
+  // Without a callback (a promise-style caller), the wrapper throws the G9 error rather than return undefined.
+  for (const name of ["stat", "readFile"]) {
+    fakeCalls.length = 0;
+    const noCb = await thrown(() => (fakeFs[name] as (p: string) => unknown)("//zr-evil-6.invalid/s/x"));
+    check(noCb !== null && G9.test(noCb.message) && fakeCalls.length === 0, `wrapped ${name} without a callback throws the G9 error, the real read is never called (${noCb?.message.slice(0, 80)}; ${JSON.stringify(fakeCalls)})`);
   }
   fakeCalls.length = 0;
   const localRead = await viaFs("readFile", "/tmp/x.tsx");

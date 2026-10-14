@@ -97,11 +97,16 @@ function refusedMessage(p: string, field: string, c: RefusedPath, inProject: boo
   const fix = inProject
     ? "then change this path in the project file (it is a text file) and open the project again."
     : "and use that path instead.";
+  const plainName = `Map that folder to a drive letter, or use the computer's plain name, ${fix}`;
+  if (c.form === "host" && c.host === "") {
+    return `${field} "${show(p)}" has no computer name after its leading slashes, which ${PRODUCT_NAME} can't use. ${plainName}`;
+  }
   if (c.form === "host") {
-    return `${field} "${show(p)}" names the network computer "${showHost(c.host)}", which ${PRODUCT_NAME} can't use. ${c.reason} Map that folder to a drive letter, or use the computer's plain name, ${fix}`;
+    return `${field} "${show(p)}" names the network computer "${showHost(c.host)}", which ${PRODUCT_NAME} can't use. ${c.reason} ${plainName}`;
   }
   const what = c.form === "nt" ? "an NT path (\\??\\)" : "a Windows device path (\\\\?\\ / \\\\.\\)";
-  return `${field} "${show(p)}" is ${what}, which ${PRODUCT_NAME} does not open. Use a drive-letter or \\\\server\\share path, ${fix}`;
+  const other = inProject ? "Use a drive-letter or \\\\server\\share path," : "Map that folder to a drive letter or a \\\\server\\share path,";
+  return `${field} "${show(p)}" is ${what}, which ${PRODUCT_NAME} does not open. ${other} ${fix}`;
 }
 
 /** A server name as written, with every character outside printable ASCII shown as `\u{…}` (zero-width, look-alikes). */

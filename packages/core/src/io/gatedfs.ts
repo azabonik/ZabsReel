@@ -22,6 +22,7 @@
  */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import { win32 } from "node:path";
 import { PRODUCT_NAME } from "../brand.js";
 import { classifyPath, type PathClass } from "../unc.js";
 
@@ -40,7 +41,7 @@ export function networkGateEnforced(): boolean {
 
 /** Host keys (unc.ts) the core may open paths on. */
 let allowed: ReadonlySet<string> = new Set();
-/** False until the first {@link setAllowedNetworkHosts}: {@link bootstrap} allows every path until then. */
+/** False until the first {@link setAllowedNetworkHosts}: {@link bootstrap} allows a path on any server until then. */
 let hostsSet = false;
 /** Servers already named in a log line. */
 const logged = new Set<string>();
@@ -72,15 +73,49 @@ function show(p: string): string {
 }
 
 /**
+ * Where a relative path resolves (plan rule R5): the platform (default
+ * `process.platform`) and the folder (default `process.cwd()`). Tests pass
+ * both to check the Windows rule on any host.
+ */
+export interface PathContext {
+  platform?: NodeJS.Platform;
+  cwd?: string;
+}
+
+/** A full drive-letter path (`C:\…`, `c:/…`): it never depends on the cwd. */
+const WIN_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
+
+/**
+ * {@link classifyPath} with rule R5: on Windows, a path that classifies as
+ * local but depends on the cwd (`v.txt`, `\v.txt`, `C:v.txt`) is classified
+ * again as `path.win32.resolve` gives it, so a core whose cwd is on a share
+ * opens nothing there unchecked. It only adds blocking: the result is the
+ * resolved path's class (local, or stricter) with that path as `text`.
+ */
+export function classifyFsText(text: string, ctx: PathContext = {}): { text: string; c: PathClass } {
+  const c = classifyPath(text);
+  if (c.kind !== "local" || (ctx.platform ?? process.platform) !== "win32" || WIN_DRIVE_ABSOLUTE.test(text)) return { text, c };
+  let resolved: string;
+  try {
+    resolved = ctx.cwd === undefined ? win32.resolve(text) : win32.resolve(ctx.cwd, text);
+  } catch {
+    return { text, c }; // no cwd to resolve against (it was removed): the real call can't use one either
+  }
+  const r = classifyPath(resolved);
+  return r.kind === "local" ? { text, c } : { text: resolved, c: r };
+}
+
+/**
  * The path an fs argument names, as text, and its class: a string, a Buffer
  * (any Uint8Array), or a `file:` URL (a host makes it `//host/path`, as
  * Windows opens it). Null for anything else (a file descriptor, a FileHandle).
+ * A string or Buffer goes through {@link classifyFsText} (R5) with `ctx`.
  */
-export function fsArgPath(p: unknown): { text: string; c: PathClass } | null {
+export function fsArgPath(p: unknown, ctx: PathContext = {}): { text: string; c: PathClass } | null {
   let text: string;
-  if (typeof p === "string") text = p;
-  else if (p instanceof Uint8Array) text = Buffer.from(p).toString("utf8");
-  else if (p instanceof URL) {
+  if (typeof p === "string") return classifyFsText(p, ctx);
+  if (p instanceof Uint8Array) return classifyFsText(Buffer.from(p).toString("utf8"), ctx);
+  if (p instanceof URL) {
     if (p.protocol !== "file:") return null; // fs refuses any other URL itself
     if (p.hostname !== "") text = `//${p.hostname}${p.pathname}`;
     else {
@@ -94,11 +129,13 @@ export function fsArgPath(p: unknown): { text: string; c: PathClass } | null {
   return { text, c: classifyPath(text) };
 }
 
-/** Why `p` may not be opened (`what`: the call, for the log line), or null. */
-function blocked(p: unknown, what: string, bootstrapping = false): BlockedPathError | null {
-  const a = fsArgPath(p);
-  if (!a || a.c.kind === "local" || (bootstrapping && !hostsSet)) return null;
+/** Why `p` may not be opened (`what`: the call, for the log line), or null. `ctx`: where a relative `p` resolves. */
+function blocked(p: unknown, what: string, bootstrapping = false, ctx: PathContext = {}): BlockedPathError | null {
+  const a = fsArgPath(p, ctx);
+  if (!a || a.c.kind === "local") return null;
+  // Refused forms are refused always, the bootstrap included: it only skips the trust decision on a server.
   if (a.c.kind === "refused") return new BlockedPathError(`Refusing to open ${show(a.text)}: ${a.c.reason}`, a.text);
+  if (bootstrapping && !hostsSet) return null;
   const { host, display } = a.c;
   if (allowed.has(host)) return null;
   if (!logged.has(host)) {
@@ -113,9 +150,13 @@ function blocked(p: unknown, what: string, bootstrapping = false): BlockedPathEr
   );
 }
 
-/** Throw a {@link BlockedPathError} when `p` may not be opened. `what` names the call for the log line. */
-export function assertReachable(p: unknown, what: string): void {
-  const e = blocked(p, what);
+/**
+ * Throw a {@link BlockedPathError} when `p` may not be opened. `what` names the
+ * call for the log line; `ctx` says where a relative `p` resolves (R5; the
+ * process's own cwd by default).
+ */
+export function assertReachable(p: unknown, what: string, ctx: PathContext = {}): void {
+  const e = blocked(p, what, false, ctx);
   if (e) throw e;
 }
 
@@ -174,8 +215,10 @@ export function existsSync(p: fs.PathLike): boolean {
 
 /**
  * For datadir.ts only (the lint checks it): it resolves the data folder from
- * the environment before any engine exists, so these allow every path until
- * the first {@link setAllowedNetworkHosts}, then gate like the rest.
+ * the environment before any engine exists, so these allow a path on any
+ * server until the first {@link setAllowedNetworkHosts}, then gate like the
+ * rest. A Windows device / NT path or a server name with no key is refused
+ * here too.
  */
 export const bootstrap = {
   statSync: gatedSync<typeof fs.statSync>("statSync", [0], true),

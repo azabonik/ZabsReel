@@ -47,7 +47,7 @@ const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]
 const NAME = /^[a-z0-9_$-]+(\.[a-z0-9_$-]+)*$/;
 
 /** The middle sentence of a refusal for a host with the wrong characters. */
-export const PLAIN_NAMES_ONLY = "Only plain names (`xn--…` for an international name) and a.b.c.d addresses work.";
+export const PLAIN_NAMES_ONLY = "Only plain names (xn--… for an international name) and a.b.c.d addresses work.";
 
 /**
  * The key of a server name as written in a path (the text between the two

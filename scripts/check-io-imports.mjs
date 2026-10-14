@@ -10,9 +10,11 @@
 //    type-only `import type … from` is allowed;
 //  - gatedfs.ts imports anything but fs, executor.ts anything but
 //    execa / child_process;
-//  - a file other than datadir.ts imports gatedfs's `bootstrap` (it allows
-//    every path until the engine sets the allowed servers) or imports gatedfs
-//    as a namespace (which would hide it);
+//  - a file other than datadir.ts imports or re-exports gatedfs's `bootstrap`
+//    (it allows a path on any server until the engine sets the allowed
+//    servers), or takes gatedfs as a whole, which would hide it: a namespace
+//    import, `export * from`, `export * as … from`, or a dynamic import(…) /
+//    require(…) of it;
 //  - motion/render.ts no longer passes GateNetworkFsPlugin (G9) to bundle(),
 //    or mentions disableWebSecurity (Chromium would then load file:// from the
 //    graphic) or rspack (it resolves in native code, outside G9's wrapper).
@@ -41,8 +43,12 @@ const FROM = new RegExp(String.raw`\b(import|export)\s+(?!type\b)([^;'"\`]*?)\bf
 const BARE = new RegExp(String.raw`\bimport\s*(['"])(${MODULE})\1`, "g");
 /** Any call with the module as its only argument: import("m"), require("m"), req("m"). */
 const CALL = new RegExp(String.raw`\(\s*(['"\`])(${MODULE})\1\s*\)`, "g");
-/** An import of io/gatedfs.js: its clause. */
-const GATEDFS = /\bimport\s+(?!type\b)([^;'"`]*?)\bfrom\s*(['"])[./]*(?:[\w-]+\/)*io\/gatedfs(?:\.js)?\2/g;
+/** The io/gatedfs module as a specifier: `./io/gatedfs.js`, `../io/gatedfs`, …. */
+const GATEDFS_SPEC = String.raw`[./]*(?:[\w-]+\/)*io\/gatedfs(?:\.js)?`;
+/** An `import … from` / `export … from` of io/gatedfs.js: the keyword and its clause. */
+const GATEDFS = new RegExp(String.raw`\b(import|export)\s+(?!type\b)([^;'"\`]*?)\bfrom\s*(['"])${GATEDFS_SPEC}\3`, "g");
+/** io/gatedfs.js as the only argument of a call: import("…"), require("…"). */
+const GATEDFS_CALL = new RegExp(String.raw`\(\s*(['"\`])${GATEDFS_SPEC}\1\s*\)`, "g");
 
 const bareName = (m) => m.replace(/^node:/, "");
 const lineOf = (text, index) => text.slice(0, index).split("\n").length;
@@ -84,8 +90,12 @@ export function scan(root) {
     for (const m of text.matchAll(CALL)) found(m[2], m.index);
     if (rel !== "io/gatedfs.ts" && rel !== "datadir.ts") {
       for (const m of text.matchAll(GATEDFS)) {
-        if (/\bbootstrap\b/.test(m[1])) problems.push(`${shown}:${lineOf(text, m.index)}: imports gatedfs's bootstrap, which only datadir.ts may use`);
-        if (/\*\s*as\b/.test(m[1])) problems.push(`${shown}:${lineOf(text, m.index)}: imports gatedfs as a namespace; import the functions by name`);
+        const verb = m[1] === "export" ? "re-exports" : "imports";
+        if (/\bbootstrap\b/.test(m[2])) problems.push(`${shown}:${lineOf(text, m.index)}: ${verb} gatedfs's bootstrap, which only datadir.ts may use`);
+        if (/(?:^|,)\s*\*/.test(m[2])) problems.push(`${shown}:${lineOf(text, m.index)}: ${verb} gatedfs as a namespace; ${verb === "imports" ? "import" : "re-export"} the functions by name`);
+      }
+      for (const m of text.matchAll(GATEDFS_CALL)) {
+        problems.push(`${shown}:${lineOf(text, m.index)}: loads gatedfs with a call (a dynamic import or require), which hides what it uses; import the functions by name`);
       }
     }
     if (rel === "motion/render.ts") {
@@ -154,6 +164,16 @@ function selfTest() {
     run("the executor may not import fs", { "ffmpeg/executor.ts": `import { execa } from "execa";\nimport { statSync } from "node:fs";\n` }, /ffmpeg\/executor\.ts:2: imports "node:fs"/);
     run("bootstrap outside datadir.ts fails", { "engine.ts": `import { bootstrap, stat } from "./io/gatedfs.js";\n` }, /engine\.ts:1: imports gatedfs's bootstrap/);
     run("a namespace import of gatedfs fails", { "storage.ts": `import * as g from "./io/gatedfs.js";\n` }, /storage\.ts:1: imports gatedfs as a namespace/);
+    run("a re-export of bootstrap fails", { "barrel.ts": `export { bootstrap } from "./io/gatedfs.js";\n` }, /barrel\.ts:1: re-exports gatedfs's bootstrap/);
+    run("a renamed re-export of bootstrap fails", { "barrel.ts": `export { stat, bootstrap as boot } from "../io/gatedfs";\n` }, /barrel\.ts:1: re-exports gatedfs's bootstrap/);
+    run("export * from gatedfs fails", { "barrel.ts": `export * from "./io/gatedfs.js";\n` }, /barrel\.ts:1: re-exports gatedfs as a namespace/);
+    run("export * as from gatedfs fails", { "barrel.ts": `export * as g from "./io/gatedfs.js";\n` }, /barrel\.ts:1: re-exports gatedfs as a namespace/);
+    run("a dynamic import of gatedfs fails", { "lazy.ts": `const g = await import("./io/gatedfs.js");\n` }, /lazy\.ts:1: loads gatedfs with a call/);
+    run("a require of gatedfs fails", { "lazy.ts": `const g = require('../io/gatedfs');\n` }, /lazy\.ts:1: loads gatedfs with a call/);
+    run("a default-and-namespace import of gatedfs fails", { "storage.ts": `import d, * as g from "./io/gatedfs.js";\n` }, /storage\.ts:1: imports gatedfs as a namespace/);
+    run("a comment with a star in a named import passes", { "engine.ts": `import { stat /* gated */ } from "./io/gatedfs.js";\n` }, null);
+    run("a re-export of a gated function passes", { "barrel.ts": `export { stat, readFile } from "./io/gatedfs.js";\nexport type { BlockedPathError } from "./io/gatedfs.js";\n` }, null);
+    run("datadir.ts may re-export bootstrap", { "datadir.ts": `import { bootstrap } from "./io/gatedfs.js";\nexport { bootstrap } from "./io/gatedfs.js";\n` }, null);
     run("render.ts without the G9 plugin fails", {
       "motion/render.ts": `import { bundle } from "@remotion/bundler";\nbundle({ webpackOverride: (c) => c });\n`,
     }, /motion\/render\.ts: bundle\(\) must get plugins/);
