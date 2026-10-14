@@ -7,7 +7,7 @@
 // playhead, zoom, and the preview stay in lockstep (everything laid out in
 // pixels/second derived from the project's frame-based model).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
 import type { Clip, Marker, MediaAsset, MusicSettings, Project, Track } from "./types";
 import { clipDurationFrames } from "./types";
@@ -17,6 +17,7 @@ import {
 } from "./playback";
 import { timelineDurationSec } from "./composite";
 import { usePeaks, peakRange } from "./waveform";
+import { clearLiveTrackVolume, liveTrackVolume, meterLevel, onLiveTrackVolumeChange, setLiveTrackVolume } from "./livevolume";
 import { BLEEP_MIN_WINDOW, BLEEP_SOUND_LABELS, bleepGlyph, expandBleeps, type BleepLayer } from "./bleeps";
 import {
   Captions, Eye, EyeOff, Lock, Music, Plus, Scissors, Sparkles, Type,
@@ -598,13 +599,29 @@ function TrackHeader({
   // The volume slider moves freely while dragged and commits once on release (pointer or key): one
   // set_track_properties edit and one undo entry per drag, not one per 0.05 step (up to 40 over 0..2).
   // Losing focus commits too (a key released elsewhere); a value already sent is not sent again.
+  // Meanwhile the preview and the meter follow the slider (livevolume.ts) until the committed value
+  // arrives; Escape or a pointercancel puts the slider and the sound back to the committed value.
   const volume = track.volume ?? 1;
   const commitVolume = (input: HTMLInputElement) => {
     const v = Number(input.value);
-    if (Math.abs(v - volume) < 1e-9 || input.dataset.sent === input.value) return;
+    if (Math.abs(v - volume) < 1e-9) {
+      clearLiveTrackVolume(track.index);
+      return;
+    }
+    if (input.dataset.sent === input.value) return;
     input.dataset.sent = input.value;
-    revertIfRefused(onSet({ volume: v }), () => { input.value = String(volume); delete input.dataset.sent; });
+    revertIfRefused(onSet({ volume: v }), () => { input.value = String(volume); delete input.dataset.sent; clearLiveTrackVolume(track.index); });
   };
+  const followVolume = (input: HTMLInputElement) => {
+    if (input.dataset.cancel) input.value = String(volume); // cancelled: the rest of this drag changes nothing
+    else setLiveTrackVolume({ trackIndex: track.index, volume: Number(input.value) });
+  };
+  const cancelVolume = (input: HTMLInputElement) => {
+    input.value = String(volume);
+    clearLiveTrackVolume(track.index);
+  };
+  // The committed value arrived (or the header went away): it drives the gain again.
+  useEffect(() => () => clearLiveTrackVolume(track.index), [volume, track.index]);
   const label = track.name ?? `${track.kind === "video" ? "V" : "A"}${track.index + 1}`;
   return (
     <div className={`tl-thead ${track.kind} ${track.locked ? "locked" : ""}`} style={{ height: h } as CSSProperties}>
@@ -632,12 +649,18 @@ function TrackHeader({
         <div className="tl-thead-audio">
           <input type="range" min={0} max={2} step={0.05} defaultValue={volume}
             key={`tv-${track.index}-${volume}`} aria-label="Track volume" title="Track volume"
-            onPointerUp={(e) => commitVolume(e.currentTarget)}
+            onInput={(e) => followVolume(e.currentTarget)}
+            onPointerDown={(e) => { delete e.currentTarget.dataset.cancel; }}
+            onPointerUp={(e) => { commitVolume(e.currentTarget); delete e.currentTarget.dataset.cancel; }}
+            onKeyDown={(e) => {
+              if (e.key !== "Escape") delete e.currentTarget.dataset.cancel;
+              else { e.currentTarget.dataset.cancel = "1"; cancelVolume(e.currentTarget); }
+            }}
             onKeyUp={(e) => commitVolume(e.currentTarget)}
             onBlur={(e) => commitVolume(e.currentTarget)}
-            onPointerCancel={(e) => { e.currentTarget.value = String(volume); }}
+            onPointerCancel={(e) => cancelVolume(e.currentTarget)}
             disabled={!connected || track.muted} />
-          <TrackMeter segs={segs} store={store} muted={!!track.muted} volume={volume} />
+          <TrackMeter segs={segs} store={store} muted={!!track.muted} volume={volume} trackIndex={track.index} />
         </div>
       )}
     </div>
@@ -645,9 +668,11 @@ function TrackHeader({
 }
 
 /** A compact level meter driven by waveform peaks at the playhead (no live audio tap needed). */
-function TrackMeter({ segs, store, muted, volume }: { segs: Segment[]; store: PlaybackStore; muted: boolean; volume: number }) {
+function TrackMeter({ segs, store, muted, volume, trackIndex }: { segs: Segment[]; store: PlaybackStore; muted: boolean; volume: number; trackIndex: number }) {
   const ph = usePlaybackValue(store, (s) => s.playhead);
   const playing = usePlaybackValue(store, (s) => s.playing);
+  // The slider's live value while it moves (meterLevel uses it on its own track only).
+  const live = useSyncExternalStore(onLiveTrackVolumeChange, liveTrackVolume);
   // Find the audio segment under the playhead and read its peak there (peaks are
   // decoded per-clip in ClipBlock and shared via segPeaksCache).
   const seg = segs.find((s) => ph >= s.start && ph < s.end);
@@ -655,11 +680,11 @@ function TrackMeter({ segs, store, muted, volume }: { segs: Segment[]; store: Pl
   if (seg && !muted && playing) {
     const frac = seg.tlDur > 0 ? (ph - seg.start) / seg.tlDur : 0;
     const cp = clipPeaks(seg);
-    level = cp ? peakRange(cp, frac - 0.01, frac + 0.01) * volume * (seg.clip.effects?.volume ?? 1) : 0;
+    level = cp ? meterLevel(peakRange(cp, frac - 0.01, frac + 0.01), live, trackIndex, volume, seg.clip.effects?.volume ?? 1) : 0;
   }
   return (
     <div className="tl-meter" aria-hidden="true">
-      <div className="tl-meter-fill" style={{ transform: `scaleX(${Math.min(1, level)})` } as CSSProperties} />
+      <div className="tl-meter-fill" style={{ transform: `scaleX(${level})` } as CSSProperties} />
     </div>
   );
 }

@@ -5,7 +5,11 @@
 // (but still play audio), and that muted tracks are silent. Also checks the
 // renderer's bleep expansion (src/bleeps.ts) against the core original on the
 // same inputs (speed, audio slip, trims, fps) and that the plan plays each
-// bleep's sound effect where the export does. Speed ramps: the plan's source
+// bleep's sound effect where the export does. Track volume: it multiplies the
+// preview's audio volume (above 1 kept, as the export's volume filters; the
+// same gain graph.ts builds), muted tracks stay silent, and the slider's live
+// value (livevolume.ts) wins over the committed one until cleared; a gain
+// above 1 routes the element through Web Audio. Speed ramps: the plan's source
 // time / rate follow the shared curve (@aive/core/speed), footprints agree
 // with core, "mute" ramps are silent, and the ramped bleep mirror == core.
 // Then the preview side of the
@@ -55,6 +59,7 @@ import {
 import type { AudioEffect, Bleep, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 import { audioCarrier, audioFxField } from "../src/audiofx";
 import { AudioRouter } from "../src/audiograph";
+import { clearLiveTrackVolume, liveTrackVolume, meterLevel, onLiveTrackVolumeChange, setLiveTrackVolume } from "../src/livevolume";
 import { setVoiceWorkletState, voiceWorkletState } from "../src/workletstatus";
 import {
   AUDIO_EFFECTS, audioEffectFilterSteps, audioExactOnly, audioNeedsRender, audioPreviewFidelity, audioPreviewPlan,
@@ -351,10 +356,86 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   const pre = activeLayersAt(pj, pAssets, 1 + 0.94 - 0.3).clips.find((c) => c.bleep?.bleepId === "b1");
   check("plan: preroll binds the decoder early, silent + parked at 0", !!pre?.bleep?.preroll && !pre.audio && pre.srcTime === 0);
   const quackAt = activeLayersAt(pj, pAssets, 1 + 2.94 + 0.1).clips.find((c) => c.bleep?.bleepId === "b2");
-  check("plan: quack uses the quack SFX at its own volume (clamped to 1)", !!quackAt && quackAt.path === quackWav.path && near(quackAt.audio!.volume, 1));
+  check("plan: quack uses the quack SFX at its own volume, 1.2 like the export's (not clamped to 1)", !!quackAt && quackAt.path === quackWav.path && near(quackAt.audio!.volume, 1.2, 1e-9), `got ${quackAt?.audio?.volume}`);
+  const quackLoud = activeLayersAt(mk({ volume: 1.5 }), pAssets, 1 + 2.94 + 0.1).clips.find((c) => c.bleep?.bleepId === "b2");
+  check("plan: the parent track's volume applies to its bleeps (1.2 × track 1.5), as the export's bleep layers", near(quackLoud?.audio?.volume ?? 0, 1.8, 1e-9), `got ${quackLoud?.audio?.volume}`);
   check("plan: no SFX after the beep ends", !activeLayersAt(pj, pAssets, 1 + 1.5).clips.some((c) => c.bleep?.bleepId === "b1"));
   check("plan: muted track plays no bleeps", !activeLayersAt(mk({ muted: true }), pAssets, 2.2).clips.some((c) => c.bleep));
   check("plan: clip volume 0 silences its bleeps", !activeLayersAt(mk({}, { volume: 0 }), pAssets, 2.2).clips.some((c) => c.bleep));
+}
+
+// --- track volume: the preview's gain = the export's (graph.ts audioOutputSteps) ---
+{
+  console.log("\ntrack volume (preview gain = export gain)");
+  const tv = (trackExtra: Partial<Track>, clipFx: Clip["effects"] = {}, extra: Partial<Clip> = {}): Project => ({
+    ...project,
+    assets: [aud],
+    tracks: [track("audio", 3, [clip("TV", "aud", 0, 90, { effects: clipFx, ...extra })], trackExtra), track("audio", 4, [clip("TV2", "aud", 0, 90)])],
+    music: undefined,
+  });
+  const ta = new Map([[aud.id, aud]]);
+  const volAt = (pj: Project, live?: { trackIndex: number; volume: number } | null, id = "TV") =>
+    activeLayersAt(pj, ta, 1, { liveTrackVolume: live }).clips.find((c) => c.clipId === id)?.audio?.volume;
+  check("track volume multiplies the clip's preview volume (0.5 × track 0.6)", near(volAt(tv({ volume: 0.6 }, { volume: 0.5 })) ?? -1, 0.3, 1e-9), `got ${volAt(tv({ volume: 0.6 }, { volume: 0.5 }))}`);
+  check("no track volume = 1 (the clip's own volume)", near(volAt(tv({}, { volume: 0.5 })) ?? -1, 0.5, 1e-9));
+  check("above 1 is kept, not clamped: clip 1.2 × track 1.5 = 1.8", near(volAt(tv({ volume: 1.5 }, { volume: 1.2 })) ?? -1, 1.8, 1e-9), `got ${volAt(tv({ volume: 1.5 }, { volume: 1.2 }))}`);
+  check("track 2 on a clip at 1 = 2", near(volAt(tv({ volume: 2 })) ?? -1, 2, 1e-9));
+  const kf = tv({ volume: 1.5 }, {}, { keyframes: { volume: [{ frame: 0, value: 1.6 }, { frame: 90, value: 1.6 }] } });
+  check("keyframed clip volume above 1 × track volume (1.6 × 1.5)", near(volAt(kf) ?? -1, 2.4, 1e-9), `got ${volAt(kf)}`);
+  check("a muted track stays silent at any volume", volAt(tv({ volume: 2, muted: true })) === undefined);
+  check("a muted track stays silent under a live slider value", volAt(tv({ volume: 2, muted: true }), { trackIndex: 3, volume: 1.5 }) === undefined);
+  check("track volume 0 → silent (0)", volAt(tv({ volume: 0 })) === 0);
+  check("a negative volume (a malformed project) is silent, never a negative gain", volAt(tv({ volume: -1 })) === 0 && volAt(tv({}, { volume: -0.5 })) === 0);
+  check("a NaN track or clip volume (a malformed project) plays at 1, as the export's dtNum(v, 1)",
+    volAt(tv({ volume: NaN })) === 1 && volAt(tv({}, { volume: NaN })) === 1 && near(volAt(tv({ volume: NaN }, { volume: 0.5 })) ?? -1, 0.5, 1e-9),
+    `got track ${volAt(tv({ volume: NaN }))}, clip ${volAt(tv({}, { volume: NaN }))}`);
+
+  // The live slider value (livevolume.ts) wins over the committed value, for its track only.
+  const pj = tv({ volume: 1.5 }, { volume: 1.2 });
+  check("live: the dragged slider's value replaces the committed one (1.2 × live 0.5)", near(volAt(pj, { trackIndex: 3, volume: 0.5 }) ?? -1, 0.6, 1e-9), `got ${volAt(pj, { trackIndex: 3, volume: 0.5 })}`);
+  check("live: above 1 too (1.2 × live 2)", near(volAt(pj, { trackIndex: 3, volume: 2 }) ?? -1, 2.4, 1e-9));
+  check("live: another track's slider leaves this one at its committed value", near(volAt(pj, { trackIndex: 4, volume: 0.5 }) ?? -1, 1.8, 1e-9));
+  check("live: …and moves that track's clip", near(volAt(pj, { trackIndex: 4, volume: 0.5 }, "TV2") ?? -1, 0.5, 1e-9));
+  check("live: cleared (null) → the committed value again", near(volAt(pj, null) ?? -1, 1.8, 1e-9));
+
+  // The channel itself: set, notify, clear only its own track.
+  let told = 0;
+  const off = onLiveTrackVolumeChange(() => told++);
+  setLiveTrackVolume({ trackIndex: 3, volume: 0.7 });
+  setLiveTrackVolume({ trackIndex: 3, volume: 0.7 });
+  check("channel: set → read back, listeners told once per change", liveTrackVolume()?.volume === 0.7 && told === 1, `told ${told}`);
+  clearLiveTrackVolume(4);
+  check("channel: clearing another track's value keeps this one", liveTrackVolume()?.trackIndex === 3 && told === 1);
+  clearLiveTrackVolume(3);
+  check("channel: clearing its own track drops it", liveTrackVolume() === null && told === 2);
+  off();
+  setLiveTrackVolume({ trackIndex: 3, volume: 1 });
+  setLiveTrackVolume(null);
+  check("channel: unsubscribed → not told", told === 2);
+
+  // The track meter (timeline.tsx TrackMeter) follows the slider being dragged, not the committed value.
+  check("meter: peak × committed track volume × clip volume (0.5 × 1.2 × 0.5)", near(meterLevel(0.5, null, 3, 1.2, 0.5), 0.3, 1e-9));
+  check("meter: a live value on its own track wins (0.5 × live 0.4 × 0.5)", near(meterLevel(0.5, { trackIndex: 3, volume: 0.4 }, 3, 1.2, 0.5), 0.1, 1e-9),
+    `got ${meterLevel(0.5, { trackIndex: 3, volume: 0.4 }, 3, 1.2, 0.5)}`);
+  check("meter: another track's live value leaves it at the committed one", near(meterLevel(0.5, { trackIndex: 4, volume: 0.4 }, 3, 1.2, 0.5), 0.3, 1e-9));
+  check("meter: the bar stops at 1", meterLevel(0.9, { trackIndex: 3, volume: 2 }, 3, 1, 1) === 1);
+
+  // Parity: the same clip through graph.ts. Its audio chain multiplies `volume=` filters
+  // (clip volume, then the track's); amix sums with normalize=0, as Web Audio does.
+  const exportGain = (clipVol: number | undefined, trackVolume: number | undefined) => {
+    const rc = {
+      path: "/x/a.wav", trackIndex: 0, showVideo: false, startSec: 0, sourceIn: 0, sourceSpan: 3, outDuration: 3, hasAudio: true, muted: false,
+      trackVolume, effects: clipVol === undefined ? {} : { volume: clipVol },
+    };
+    const cmd = buildRenderCommand([rc as never], { width: 320, height: 180, fps: 30 }, "/tmp/x.mp4", EXPORT_PROFILE);
+    const fcx = cmd.args[cmd.args.indexOf("-filter_complex") + 1];
+    return [...fcx.matchAll(/(?<![a-z])volume=([\d.]+)(?=[,;\[])/g)].reduce((g, m) => g * Number(m[1]), 1);
+  };
+  for (const [cv, tvol] of [[1.2, 1.5], [0.5, 0.6], [1, 2], [2, 0.25], [undefined, 1.75], [NaN, 1.5], [0.5, NaN]] as const) {
+    const preview = volAt(tv(tvol === undefined ? {} : { volume: tvol }, cv === undefined ? {} : { volume: cv }));
+    const exp = exportGain(cv, tvol);
+    check(`parity: clip ${cv ?? "(none)"} × track ${tvol} → preview ${preview} = export ${exp}`, preview !== undefined && near(preview, exp, 1e-9));
+  }
 }
 
 // --- speed ramps: the preview maps through the SHARED curve (@aive/core/speed) ---
@@ -901,6 +982,25 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   for (const f of listeners.pointerdown ?? []) f();
   check("route: any click/key unlocks too", created >= 1 && viaClick.route(el(), tel));
 
+  // A gain above 1 (clip × track volume) needs the route: el.volume stops at 1.
+  const gains: { value: number }[] = [];
+  ctxProto.createGain = () => {
+    const n = node();
+    n.gain = { value: 0, setTargetAtTime(v: number) { this.value = v; } };
+    gains.push(n.gain);
+    return n;
+  };
+  const loud = new AudioRouter();
+  loud.unlock();
+  const e2 = el();
+  check("route: no chain and no boost → the plain el.volume path (not routed)", !loud.route(e2, undefined) && !loud.isRouted(e2));
+  check("route: a gain above 1 (boost) routes an element with no audio effects", loud.route(e2, undefined, true) && loud.isRouted(e2) && gains.length === 1);
+  loud.setGain(e2, 1.8);
+  check("route: setGain keeps a gain above 1 (1.8)", gains[0]?.value === 1.8, `got ${gains[0]?.value}`);
+  check("route: once routed it stays routed below 1 (no boost asked)", loud.route(e2, undefined) && loud.isRouted(e2));
+  loud.setGain(e2, 0.4);
+  check("route: …and its gain follows down (0.4)", gains[0]?.value === 0.4);
+
   delete g.window;
   delete g.AudioContext;
 }
@@ -1205,6 +1305,25 @@ console.log("\nlive playback of a curve-speed clip (MediaPool.sync follow / resu
     sync(s6, 12, 20, { playing: false });
     // Parks 1 ms past srcTime: the paused branch's nudge, so a frame boundary shows the frame that starts there.
     check("follow, paused transport: the rate is clamped (16), the element pauses and parks on srcTime (+1 ms nudge)", s6.playbackRate === 16 && s6.pauses === 1 && s6.seeks.length === 1 && near(Number(s6.seeks[0]), 12.001, 1e-9), `${s6.playbackRate} / ${s6.pauses} / ${s6.seeks}`);
+
+    // A locked AudioContext (no gesture yet): route() fails, so a gain above 1 (clip × track
+    // volume) reaches sync unrouted. A real element throws IndexSizeError on el.volume > 1.
+    const loudEl = Object.assign(fake(3, true), { v: 1, assigned: [] as number[] });
+    Object.defineProperty(loudEl, "volume", {
+      get() { return loudEl.v; },
+      set(v: number) {
+        if (!(v >= 0 && v <= 1)) throw new RangeError(`IndexSizeError: volume ${v} outside [0, 1]`);
+        loudEl.assigned.push(v);
+        loudEl.v = v;
+      },
+    });
+    loudEl.v = 0.4;
+    let loudErr: unknown;
+    try {
+      pool.sync(loudEl as unknown as HTMLVideoElement, { srcTime: 3, playing: false, rate: 1, volume: 1.8, muted: false, routed: false });
+    } catch (err) { loudErr = err; }
+    check("unrouted (locked context) gain above 1 plays at 1, never assigns >1", !loudErr && loudEl.v === 1 && !loudEl.muted && loudEl.assigned.every((v) => v <= 1),
+      `${loudErr ?? ""} volume ${loudEl.v} muted ${loudEl.muted}`);
 
     // Re-seek throttle: at most one follow seek per FOLLOW_SEEK_GAP_MS (400 ms), none while a seek is pending.
     const e = fake(5);

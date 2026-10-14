@@ -1,12 +1,14 @@
 // Live audio-effect preview through Web Audio. A preview decoder (<video> from
-// the MediaPool) whose clip has previewable audio effects is routed:
+// the MediaPool) whose clip has previewable audio effects, or a gain above 1,
+// is routed:
 //
 //   element → MediaElementAudioSourceNode → effect chain (from the registry's
-//   AudioNodeSpec plan) → GainNode (clip volume × fades × keyframes × bleep
-//   mutes × track mute) → speakers
+//   AudioNodeSpec plan) → GainNode (clip volume × track volume × fades ×
+//   keyframes × bleep mutes × track mute) → speakers
 //
 // Rules that keep the existing preview audio intact:
-//  - Elements are routed only when needed (their clip has a live chain) and
+//  - Elements are routed only when needed (their clip has a live chain, or a
+//    gain above 1 that el.volume can't play: it stops at 1) and
 //    only once the AudioContext may run: it is created/resumed on EVERY user
 //    gesture (click/key, and Play), whether or not a clip has effects yet, so
 //    playback that runs into an effect clip finds a running context. A routed
@@ -300,15 +302,16 @@ export class AudioRouter {
 
   /**
    * Point `el`'s audio at `plan`'s chain (none = dry). Routes the element on
-   * first need; afterwards it stays routed (rebinding to another clip just
-   * swaps the chain). Returns true when the element is routed.
+   * first need (a chain, or `boost`: a gain above 1); afterwards it stays
+   * routed (rebinding to another clip just swaps the chain). Returns true
+   * when the element is routed.
    */
-  route(el: HTMLMediaElement, plan: AudioPreviewPlan | undefined): boolean {
+  route(el: HTMLMediaElement, plan: AudioPreviewPlan | undefined, boost = false): boolean {
     let r = this.routes.get(el);
     const specs = plan?.nodes.length ? plan.nodes : [];
     const sig = this.effectiveSig(specs, specs.length ? plan!.sig : "");
     if (!r) {
-      if (!sig || this.refused.has(el)) return false;
+      if ((!sig && !boost) || this.refused.has(el)) return false;
       const ctx = this.liveContext();
       if (!ctx) return false;
       try {
@@ -332,7 +335,7 @@ export class AudioRouter {
     return true;
   }
 
-  /** Set a routed element's loudness (0..1; 0 = silent), smoothed. */
+  /** Set a routed element's loudness (linear, 0 = silent, above 1 = louder than the source), smoothed. */
   setGain(el: HTMLMediaElement, value: number): void {
     const r = this.routes.get(el);
     if (!r || !this.ctx) return;

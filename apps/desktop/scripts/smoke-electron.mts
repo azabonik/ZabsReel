@@ -14,7 +14,11 @@
 //      (the split replaced the selected clip); a drag of a new audio track's
 //      volume slider sends one set_track_properties edit (one undo entry), not
 //      one per step, an arrow key sends one more, and a key released after the
-//      focus moved away is committed when the slider loses focus (once); an
+//      focus moved away is committed when the slider loses focus (once); with
+//      a clip on that track, the preview's Web Audio gain for it follows the
+//      slider while dragged (above 1 too), still with one edit on release, the
+//      committed value then drives it, and Escape or a pointercancel mid-drag
+//      puts it back to the committed value with no edit; an
 //      audio clip's waveform comes from the core's /peaks (200), and the
 //      renderer never fetches the whole file to decode it.
 //   3. Project menu: New / Open / Save / Save As / Storage…; the Storage dialog
@@ -315,6 +319,7 @@ async function main() {
     window.__trackEdits = 0;
     const send = WebSocket.prototype.send;
     WebSocket.prototype.send = function (d) {
+      window.__ws = this; // the app's socket: 2c's own RPCs go through it
       if (typeof d === "string" && d.includes('"set_track_properties"')) window.__trackEdits++;
       return send.call(this, d);
     };
@@ -353,6 +358,122 @@ async function main() {
   await vol.evaluate((el) => (el as HTMLElement).blur());
   await sleep(500);
   check((await trackEdits()) === 3, `focus and blur with nothing changed → no edit (${await trackEdits()})`);
+
+  console.log("2c'. the preview's gain follows the slider live, the edit still waits for release...");
+  // Each routed decoder's gain: the source → GainNode connect names the element, setTargetAtTime its value
+  // (audiograph.ts). A gain above 1 routes the clip (el.volume stops at 1). An RPC of our own: string ids,
+  // which the app's pending map ignores.
+  await win.evaluate(`(() => {
+    const params = new WeakMap(), targets = new WeakMap();
+    const connect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function (to, ...rest) {
+      if (this instanceof MediaElementAudioSourceNode && to instanceof GainNode && !params.has(this.mediaElement)) params.set(this.mediaElement, to.gain);
+      return connect.call(this, to, ...rest);
+    };
+    const target = AudioParam.prototype.setTargetAtTime;
+    AudioParam.prototype.setTargetAtTime = function (v, ...rest) {
+      targets.set(this, v);
+      return target.call(this, v, ...rest);
+    };
+    window.__gainOf = (clipId) => {
+      const el = [...document.querySelectorAll(".pv-pool video")].find((v) => v.dataset.clipId === clipId);
+      const p = el && params.get(el);
+      return p && targets.has(p) ? targets.get(p) : null;
+    };
+    let n = 0;
+    window.__rpc = (method, params) => new Promise((resolve, reject) => {
+      const ws = window.__ws, id = "smoke-" + ++n;
+      const on = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.type !== "rpc_result" || m.id !== id) return;
+        ws.removeEventListener("message", on);
+        if (m.ok) resolve(m.result); else reject(new Error(m.error));
+      };
+      ws.addEventListener("message", on);
+      ws.send(JSON.stringify({ type: "rpc", id, method, params }));
+    });
+  })()`);
+  type W = { __rpc: (m: string, p?: object) => Promise<any>; __gainOf: (id: string) => number | null };
+  const rpc = (method: string, params: object = {}) => win.evaluate(([m, p]) => (window as unknown as W).__rpc(m, p), [method, params] as const);
+  const gainOf = (id: string) => win.evaluate((id) => (window as unknown as W).__gainOf(id), id);
+  const state = await rpc("get_state");
+  const aTrack = state.tracks.find((t: { kind: string }) => t.kind === "audio");
+  const clipAsset = state.assets.find((a: { path: string }) => a.path === clip);
+  const { clip: aClip } = await rpc("add_clip", { assetId: clipAsset.id, trackIndex: aTrack.index, startFrame: 0 });
+  let edits0 = await trackEdits();
+  const committed = Number(await vol.inputValue());
+  const gainNear = async (want: number, what: string) => {
+    const ok = await waitFor(what, async () => Math.abs(((await gainOf(aClip.id)) ?? -1) - want) < 1e-6, 5000);
+    return { ok, got: await gainOf(aClip.id) };
+  };
+  let g = await gainNear(committed, "committed gain");
+  check(committed > 1 && g.ok, `the committed track volume ${committed} drives the clip's routed preview gain (${g.got})`);
+  const vb2 = await vol.boundingBox();
+  if (vb2) {
+    const y = vb2.y + vb2.height / 2;
+    const at = (f: number) => vb2.x + vb2.width * f;
+    await win.mouse.move(at(0.3), y);
+    await win.mouse.down();
+    const seen: string[] = [];
+    let follows = true;
+    for (const f of [0.3, 0.85, 0.65]) { // above 1 (routed), then ends away from the committed value
+      await win.mouse.move(at(f), y, { steps: 3 });
+      const v = Number(await vol.inputValue());
+      g = await gainNear(v, `gain ${v}`);
+      seen.push(`${v}→${g.got}`);
+      follows &&= g.ok;
+    }
+    check(follows && new Set(seen).size === 3, `while dragged, the preview gain follows the slider (${seen.join(", ")})`);
+    check((await trackEdits()) === edits0, "…with no edit sent");
+    await win.mouse.up();
+    const released = Number(await vol.inputValue());
+    check(Math.abs(released - committed) > 0.1 && await waitFor("one edit", async () => (await trackEdits()) === edits0 + 1, 5000),
+      `released at ${released} → one set_track_properties edit (${(await trackEdits()) - edits0})`);
+    const s2 = await rpc("get_state");
+    const stored = s2.tracks.find((t: { index: number }) => t.index === aTrack.index)?.volume;
+    g = await gainNear(released, "released gain");
+    check(Math.abs(stored - released) < 1e-9 && g.ok, `the committed value (${stored}) then drives the gain (${g.got})`);
+    // No live value is left behind: a later edit from elsewhere (an agent) is heard.
+    await rpc("set_track_properties", { trackIndex: aTrack.index, volume: 1.6 });
+    g = await gainNear(1.6, "agent gain");
+    check(g.ok, `then an agent's set_track_properties 1.6 drives the gain (${g.got})`);
+    const agentSet = await waitFor("slider 1.6", async () => Number(await vol.inputValue()) === 1.6, 5000);
+    check(agentSet, `…and the slider shows it (${await vol.inputValue()})`);
+    const committed2 = 1.6;
+    edits0 = await trackEdits();
+
+    // Escape mid-drag: back to the committed value; the rest of the drag and the release change nothing.
+    await win.mouse.move(at(0.2), y);
+    await win.mouse.down();
+    await win.mouse.move(at(0.5), y, { steps: 3 });
+    const mid = Number(await vol.inputValue());
+    g = await gainNear(mid, "drag gain");
+    check(Math.abs(mid - committed2) > 0.2 && g.ok, `dragging again: gain ${g.got} (slider ${mid})`);
+    await win.keyboard.press("Escape");
+    g = await gainNear(committed2, "escape gain");
+    check(g.ok && Number(await vol.inputValue()) === committed2, `Escape → the gain is the committed ${committed2} again (${g.got}), so is the slider (${await vol.inputValue()})`);
+    await win.mouse.move(at(0.9), y, { steps: 3 });
+    await sleep(300);
+    check((await gainOf(aClip.id)) === committed2 && Number(await vol.inputValue()) === committed2, `…moving on after Escape changes nothing (gain ${await gainOf(aClip.id)})`);
+    await win.mouse.up();
+    await sleep(500);
+    check((await trackEdits()) === edits0, `…and the release sends no edit (${(await trackEdits()) - edits0})`);
+
+    // A pointercancel (the OS took the pointer) restores too.
+    await win.mouse.move(at(0.2), y);
+    await win.mouse.down();
+    await win.mouse.move(at(0.4), y, { steps: 3 });
+    const mid2 = Number(await vol.inputValue());
+    g = await gainNear(mid2, "drag gain 2");
+    await vol.dispatchEvent("pointercancel", { bubbles: true, pointerId: 1, pointerType: "mouse" });
+    const g2 = await gainNear(committed2, "pointercancel gain");
+    check(g.ok && g2.ok && Math.abs(mid2 - committed2) > 0.2 && Number(await vol.inputValue()) === committed2,
+      `pointercancel: ${mid2} (gain ${g.got}) → back to ${committed2} (gain ${g2.got}, slider ${await vol.inputValue()})`);
+    await win.mouse.up();
+    await sleep(500);
+    check((await trackEdits()) === edits0, `…no edit (${(await trackEdits()) - edits0})`);
+  } else check(false, "volume slider has a box");
+  await rpc("remove_clip", { clipId: aClip.id });
 
   console.log("2d. an audio clip's waveform comes from /peaks...");
   await stub(app, "showOpenDialog", [{ canceled: false, filePaths: [tone] }]);

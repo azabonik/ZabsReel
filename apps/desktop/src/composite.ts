@@ -27,6 +27,7 @@ import { previewColorFix } from "@aive/core/colorspace";
 import { runBlendModes, sanitizeMask, type BlendMode, type ClipMask } from "@aive/core/compositing";
 import { audioFxField } from "./audiofx";
 import type { AudioPreviewPlan } from "@aive/core/audio-effects";
+import type { LiveTrackVolume } from "./livevolume";
 
 /** A text overlay plus its sampled animation (position/opacity) at the current frame. */
 export type RenderOverlay = TextOverlay & { anim?: { x?: number; y?: number; opacity?: number } };
@@ -130,7 +131,9 @@ export interface ActiveClip {
   };
   /**
    * Present when this clip should be HEARD (asset has audio + track not muted).
-   * `fx` = its audio effects' Web Audio plan (audiograph.ts plays it).
+   * `volume` is linear and may exceed 1, as the export's (clip volume × track
+   * volume × fades × bleep mutes). `fx` = its audio effects' Web Audio plan
+   * (audiograph.ts plays it).
    */
   audio?: { volume: number; fx?: AudioPreviewPlan };
   /** Text overlays active at this instant (drawable clips only), with sampled animation. */
@@ -161,6 +164,20 @@ export interface FramePlan {
 }
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+/**
+ * A linear gain as the export takes it: a non-finite value (NaN, a malformed project) plays at 1,
+ * as graph.ts's dtNum(v, 1) and its skipped `volume=` step do; a negative one is silent, never
+ * a negative gain.
+ */
+const gain0 = (n: number) => (Number.isFinite(n) ? Math.max(0, n) : 1);
+
+/**
+ * A track's audio gain: the slider's live value while it moves (livevolume.ts),
+ * else the committed track.volume (graph.ts audioOutputSteps' `volume=`).
+ */
+function trackGain(track: Project["tracks"][number], live: LiveTrackVolume | null | undefined): number {
+  return gain0(live && live.trackIndex === track.index ? live.volume : track.volume ?? 1);
+}
 
 /** `{ vignette: angles }` when the clip has an enabled vignette, else nothing (keeps plans lean). */
 function vignetteField(filters: Parameters<typeof vignetteAngles>[0]): { vignette?: number[] } {
@@ -266,8 +283,11 @@ export function activeLayersAt(
   project: Project | null,
   assetById: Map<string, MediaAsset>,
   playheadSec: number,
-  /** `exactFrames`: a still frame (paused / scrubbing) — each clip shows exactly the source frame the export does. */
-  opts: { exactFrames?: boolean } = {},
+  /**
+   * `exactFrames`: a still frame (paused / scrubbing) — each clip shows exactly the source frame the export does.
+   * `liveTrackVolume`: a track volume slider being dragged; its value replaces that track's committed volume.
+   */
+  opts: { exactFrames?: boolean; liveTrackVolume?: LiveTrackVolume | null } = {},
 ): FramePlan {
   const out: ActiveClip[] = [];
   if (!project) return { clips: out };
@@ -289,6 +309,7 @@ export function activeLayersAt(
     const active = segments.filter((s) => t >= s.start && t < s.end);
     if (active.length === 0) continue;
     const blendOf = track.kind === "video" ? trackBlendModes(sorted, assetById) : undefined;
+    const trackVol = trackGain(track, opts.liveTrackVolume);
 
     for (const seg of active) {
       const asset = seg.asset;
@@ -358,7 +379,8 @@ export function activeLayersAt(
       const tf = drawable
         ? effectiveTransform(seg.clip.effects?.transform, seg.clip.keyframes, seg.clip.effects?.opacity, localTL)
         : undefined;
-      const vol = effectiveValue("volume", seg.clip.keyframes?.volume, seg.clip.effects?.volume, localTL);
+      // Clip volume (keyframed or static) × track volume, unclamped like the export's volume filters.
+      const vol = gain0(effectiveValue("volume", seg.clip.keyframes?.volume, seg.clip.effects?.volume, localTL)) * trackVol;
 
       out.push({
         clipId: seg.clip.id,
@@ -390,7 +412,7 @@ export function activeLayersAt(
           : undefined,
         // A ramp with audio "mute" plays its picture silently (as the export).
         audio: audible && !(seg.map && seg.clip.effects?.speedRamp?.audio === "mute")
-          ? { volume: clamp01(vol) * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime), ...audioFxField(seg.clip.effects?.audioFilters) }
+          ? { volume: vol * gain * muteGainAt(bleepMuteSpans(seg.clip, fps), srcTime), ...audioFxField(seg.clip.effects?.audioFilters) }
           : undefined,
         overlays: drawable ? activeOverlays(seg.clip.overlays, localFrames) : [],
         graphics,
@@ -401,8 +423,11 @@ export function activeLayersAt(
 
   // Bleep sound effects: derived from every clip's bleeps (so they sit wherever
   // the clip is now), independent of the parent segment being under the playhead
-  // (an audio slip can move them past the picture's edges).
-  for (const b of bleepLayersOf(project)) {
+  // (an audio slip can move them past the picture's edges). Each is mixed on its
+  // parent's track, so the track volume applies (as the export's bleep layers).
+  const bleeps = bleepLayersOf(project);
+  const trackVolOf = bleeps.length ? new Map(project.tracks.map((tr) => [tr.index, trackGain(tr, opts.liveTrackVolume)])) : undefined;
+  for (const b of bleeps) {
     if (t >= b.layer.start - BLEEP_PREROLL_SEC && t < b.layer.start + b.layer.sfxDuration) {
       const preroll = t < b.layer.start;
       out.push({
@@ -414,7 +439,7 @@ export function activeLayersAt(
         srcTime: preroll ? 0 : t - b.layer.start,
         rate: 1,
         gain: 1,
-        audio: preroll ? undefined : { volume: clamp01(b.layer.volume) },
+        audio: preroll ? undefined : { volume: gain0(b.layer.volume) * (trackVolOf?.get(b.trackIndex) ?? 1) },
         overlays: [],
         graphics: [],
         bleep: { parentClipId: b.clipId, bleepId: b.layer.bleepId, preroll },

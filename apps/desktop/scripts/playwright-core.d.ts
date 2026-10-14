@@ -41,6 +41,7 @@ declare module "playwright-core" {
     boundingBox(): Promise<Box | null>;
     getByRole(role: string, options?: RoleOptions): Locator;
     evaluate<R>(pageFunction: (element: Element) => R | Promise<R>): Promise<R>;
+    dispatchEvent(type: string, eventInit?: Record<string, unknown>): Promise<void>;
   }
   export interface Page {
     on(event: "console", listener: (message: ConsoleMessage) => void): Page;
@@ -55,7 +56,7 @@ declare module "playwright-core" {
     evaluate<R, Arg>(pageFunction: (arg: Arg) => R | Promise<R>, arg: Arg): Promise<R>;
     locator(selector: string, options?: { hasText?: string | RegExp }): Locator;
     getByRole(role: string, options?: RoleOptions): Locator;
-    mouse: { move(x: number, y: number): Promise<void>; down(): Promise<void>; up(): Promise<void> };
+    mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void>; down(): Promise<void>; up(): Promise<void> };
     keyboard: { press(key: string): Promise<void>; down(key: string): Promise<void>; up(key: string): Promise<void> };
     isClosed(): boolean;
     close(): Promise<void>;

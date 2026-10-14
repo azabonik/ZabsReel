@@ -32,7 +32,10 @@ export interface SyncOpts {
    * window would reseek every frame and stutter).
    */
   follow?: boolean;
-  /** Linear volume 0..1 (already includes fades); 0 + muted when inaudible. */
+  /**
+   * Linear volume (already includes fades); 0 + muted when inaudible. el.volume
+   * stops at 1: a louder clip plays through its Web Audio route (`routed`).
+   */
   volume: number;
   muted: boolean;
   /**

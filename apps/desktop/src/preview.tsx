@@ -39,6 +39,7 @@ import { PlaybackGovernor } from "./gl/governor";
 import { canvasBlendOp, type ClipMask } from "@aive/core/compositing";
 import { canvasToMask, layerXform, maskStageSize, maskToCanvas, stageMasked, type LayerXform } from "./maskdraw";
 import { maskDragFor, maskEditTarget, onMaskEditChange, setMaskDrag } from "./maskedit";
+import { liveTrackVolume, onLiveTrackVolumeChange } from "./livevolume";
 import { Film, Play, Waveform } from "./icons";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
@@ -415,7 +416,8 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     const H = canvas.height;
 
     const project = projectRef.current;
-    const plan = activeLayersAt(project, assetsRef.current, phRef.current, { exactFrames: !playingRef.current });
+    // A track volume slider being dragged is heard at once (livevolume.ts), before its one edit on release.
+    const plan = activeLayersAt(project, assetsRef.current, phRef.current, { exactFrames: !playingRef.current, liveTrackVolume: liveTrackVolume() });
     const router = routerRef.current;
     const cw = project?.width ?? W;
     const ch = project?.height ?? H;
@@ -555,9 +557,10 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     for (const c of plan.clips) {
       if (c.adjust || !c.path || c.isImage) continue;
       const el = pool.acquire(c.clipId, c.path);
-      // Live audio effects play through Web Audio; the route's gain then
+      // Live audio effects play through Web Audio, and so does a gain above 1
+      // (clip × track volume; el.volume stops at 1); the route's gain then
       // carries the volume (fades, keyframes, bleep mutes, inaudible = 0).
-      const routed = !!router?.route(el, c.audio?.fx);
+      const routed = !!router?.route(el, c.audio?.fx, (c.audio?.volume ?? 0) > 1);
       // A bleep about to sound is bound + parked at 0 but kept paused.
       const playing = playingRef.current && !c.bleep?.preroll;
       if (playing) pool.resumeNear(el, c.srcTime, c.rate);
@@ -584,10 +587,12 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         }
       }
       if (next - phRef.current <= PREROLL_SEC) {
-        for (const c of activeLayersAt(project, assetsRef.current, next).clips) {
+        for (const c of activeLayersAt(project, assetsRef.current, next, { liveTrackVolume: liveTrackVolume() }).clips) {
           if (c.adjust || !c.path || c.isImage || plan.clips.some((p) => p.clipId === c.clipId)) continue;
           const el = pool.acquire(c.clipId, c.path);
-          const routed = !!router?.route(el, c.audio?.fx);
+          // Routed now, as the main binder will at the cut (a gain above 1 boosts): no route switch there.
+          // Nothing sounds early: the element stays paused, and a route's gain is parked at 0.
+          const routed = !!router?.route(el, c.audio?.fx, (c.audio?.volume ?? 0) > 1);
           pool.sync(el, { srcTime: c.srcTime, playing: false, rate: c.rate, follow: c.ramped, volume: 0, muted: true, routed });
           if (routed) router!.setGain(el, 0);
         }
@@ -846,6 +851,9 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
     drawFnRef.current();
     scheduleRedraw();
   }), [scheduleRedraw]);
+
+  // A track volume slider moved (or let go): set the routes' gains to it (playing, the next frame does).
+  useEffect(() => onLiveTrackVolumeChange(scheduleRedraw), [scheduleRedraw]);
 
   // A committed mask drag arrives as a project change: drop the live override.
   useEffect(() => {
