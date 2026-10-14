@@ -634,7 +634,7 @@ export const methods = {
 
   inspect_color: {
     description:
-      "Measure the color of the CURRENT composited timeline at `atSeconds` (defaults to the midpoint) — your color EYES. Returns numeric scopes: luma {min,avg,max,contrast}, saturation {avg,max}, hue {avg}, mean rgb {r,g,b} (all 0..255), plus plain-language `notes` (e.g. 'warm color cast', 'low contrast'), AND three rendered scope IMAGES (histogram, waveform, vectorscope) as file paths you can view. Call after color_grade/apply_color/apply_lut to verify the grade objectively instead of guessing.",
+      "Measure the color of the CURRENT composited timeline at `atSeconds` (defaults to the midpoint) — your color EYES. Returns numeric scopes: luma {min,avg,max,contrast}, saturation {avg,max}, hue {avg}, mean rgb {r,g,b} (all 0..255), plus plain-language `notes` (e.g. 'warm color cast', 'low contrast'), AND three rendered scope IMAGES (histogram, waveform, vectorscope) as file paths you can view. Call after color_grade/apply_color/apply_lut to verify the grade objectively instead of guessing. While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers.",
     schema: z.object({ atSeconds: z.number().min(0).optional() }).strict(),
     handler: async (engine, p) => engine.inspectColor(p.atSeconds),
   },
@@ -1001,7 +1001,7 @@ export const methods = {
 
   get_frame: {
     description:
-      "Render a single composited frame of the CURRENT timeline at `atSeconds` (the whole multi-track edit — layering, cuts, color, captions, overlays, transitions) and return it as an image so you can SEE the result and self-correct. Your eyes: after a visual edit, call get_frame to verify before continuing. Defaults to the timeline midpoint.",
+      "Render a single composited frame of the CURRENT timeline at `atSeconds` (the whole multi-track edit — layering, cuts, color, captions, overlays, transitions) and return it as an image so you can SEE the result and self-correct. Your eyes: after a visual edit, call get_frame to verify before continuing. Defaults to the timeline midpoint. While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers.",
     schema: z.object({ atSeconds: z.number().min(0).optional() }).strict(),
     handler: async (engine, p) => ({ path: await engine.renderFrame(p.atSeconds) }),
   },

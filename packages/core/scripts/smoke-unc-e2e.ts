@@ -50,7 +50,7 @@
  */
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createHmac, createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -514,6 +514,43 @@ async function enforcedSteps(): Promise<void> {
     const remKey = await rpc(core, "remember_projects", { paths: keyPaths });
     responses.push(remKey.text);
     check(remKey.ok && remKey.result.skipped.length === keyPaths.length && remKey.result.skipped.every((s: any) => /private settings folder|not a \.aive/.test(s.reason)), `remember_projects skips each (${JSON.stringify(remKey.result?.skipped?.map((s: any) => s.reason))})`);
+    // G2's real-path form and the ".." rule in the real core: a link in the data folder to the
+    // key, /proc/self/root/<key> (Linux), and ".." after a link (the kernel follows the link
+    // first). MUTATION: give isServablePath the lexical inTrustDir again → /file of the key link
+    // streams the key (200). Drop the hasDotDot line from HostTrust.checkPath → the ".." reads
+    // quote the key and the ".." save changes the store.
+    if (process.platform !== "win32") {
+      mkdirSync(join(dataDir, "proxies"), { recursive: true });
+      mkdirSync(join(dataDir, "projects"), { recursive: true });
+      const keyLink = join(dataDir, "proxies", "key-link.mp4");
+      symlinkSync(join(trustDir, "hosts.key"), keyLink);
+      const subLink = join(root, "projects-link");
+      symlinkSync(join(dataDir, "projects"), subLink, "dir");
+      const linux = process.platform === "linux";
+      const aliases = [keyLink, ...(linux ? [`/proc/self/root${join(trustDir, "hosts.key")}`] : [])];
+      const dotted = [`${subLink}/../trust/hosts.key`, ...(linux ? [`/proc/self/root/..${join(trustDir, "hosts.key")}`] : [])];
+      for (const [list, re, what] of [[aliases, /private settings folder/, "the private-folder message"], [dotted, /has a "\.\." segment/, "EDOTDOT"]] as const) {
+        for (const p of list) {
+          for (const [m, params] of [
+            ["load_project", { path: p }], ["import_otio", { path: p }], ["import_video", { path: p }], ["apply_lut", { clipId: "clip_l", path: p }],
+            ["save_project", { path: p }], ["export_otio", { path: p }],
+          ] as const) {
+            const r = await rpc(core, m, params);
+            responses.push(r.text);
+            check(!r.ok && re.test(r.error ?? "") && storeHash() === storeBefore, `${m} of ${p}: refused with ${what}, the store is unchanged (${r.error?.slice(0, 100)})`);
+          }
+          for (const route of ["/file", "/frames", "/peaks"]) {
+            const r = await get(core, route, { path: p, from: "0", count: "1", w: "8", h: "8", fps: "30" });
+            responses.push(r.text);
+            check(r.status === 403, `${route} of ${p}: 403 (${r.status})`);
+          }
+        }
+      }
+      const dotSave = await rpc(core, "save_project", { path: `${subLink}/../trust/hosts.json` });
+      check(!dotSave.ok && /has a "\.\." segment/.test(dotSave.error ?? "") && storeHash() === storeBefore, `save_project into <link>/../trust/hosts.json is refused; the store is unchanged (${dotSave.error?.slice(0, 100)})`);
+      rmSync(keyLink);
+      rmSync(subLink);
+    }
     for (const code of [`import k from ${JSON.stringify(join(trustDir, "hosts.key"))};\nexport default () => k;`, `import k from "../../trust/hosts.key";\nexport default () => k;`]) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       responses.push(r.text);
@@ -627,6 +664,22 @@ async function enforcedSteps(): Promise<void> {
     await rpc(core, "recheck_offline_media");
     const filled = await until(async () => [...(await assetsNow()).values()].every((x) => !x.missing && !x.awaitingServer && x.duration === 1 && x.width === 64), 5_000);
     check(filled && traces(zr(5)) > 0, `the ${H(5)} placeholders are probed and filled in (${JSON.stringify([...(await assetsNow()).values()].map((x) => [x.id, x.missing, x.duration, x.width]))})`);
+    // G5's own lazy check: a timeline whose only offline media is on a server allowed without a
+    // recheck goes through G5 to FFmpeg (the stub; the .invalid source has no data, so FFmpeg fails).
+    // MUTATION: drop the first line of assertTimelineOnline (its isAllowed loop) → get_frame is
+    // refused with media_offline naming zr-evil-10.
+    const g5 = projectFile("g5.aive", {
+      assets: [asset("asset_local", local), asset("asset_g5", `//${H(10)}/s/g5.mp4`, { hasAudio: false })],
+      tracks: [{ id: "track_v", kind: "video", index: 0, clips: [clip("clip_local", "asset_local", 0), clip("clip_g5", "asset_g5", 30)] }],
+    });
+    const g5l = await rpc(core, "load_project", { path: g5 });
+    const g5off = await rpc(core, "get_frame", {});
+    check(g5l.ok && (g5l.result.project.assets as any[]).find((x) => x.id === "asset_g5")?.awaitingServer === H(10) && g5off.code === "media_offline" && (g5off.error ?? "").includes(H(10)),
+      `a project whose only offline clip is on ${H(10)}: get_frame refuses with media_offline (${g5off.code} ${g5off.error?.slice(0, 80)})`);
+    await approveHost(dataDir, H(10), "prompt");
+    const g5on = await rpc(core, "get_frame", {});
+    check(g5on.code !== "media_offline" && stubs("ffmpeg", zr(10)) > 0,
+      `without a recheck, get_frame goes through G5 right after ${H(10)} is allowed (its lazy check); FFmpeg ran on it (${g5on.status} ${g5on.code ?? ""} ${g5on.error?.slice(0, 60)})`);
     // No recheck: the next check of the asset re-reads the changed store (lazy reload).
     check((await rpc(core, "load_project", { path: crafted })).ok, "load_project of the crafted project again");
     await approveHost(dataDir, H(2), "prompt");
@@ -635,6 +688,12 @@ async function enforcedSteps(): Promise<void> {
       `without a recheck, generate_thumbnail on ${H(2)}'s asset goes through right after the approval (${th.status} ${th.code ?? ""} ${th.error?.slice(0, 100)})`);
     // Keep (what a UI host does for an entry added outside ZabsReel): the entry is stamped, so it is approved.
     await approveHost(dataDir, H(3), "prompt");
+    // Before any recheck, inspect_clip's own lazy check: clip_e3 is no longer offline. Its frames
+    // render the whole timeline, which G5 still refuses for clip_e4 (zr-evil-4, never allowed).
+    // MUTATION: drop recheckWaiting from inspectClip → clip_e3 is described offline on zr-evil-3.
+    const ic3 = await rpc(core, "inspect_clip", { clipId: "clip_e3" });
+    check(ic3.ok ? ic3.result.offline === undefined && ic3.result.frames.length > 0 : ic3.code === "media_offline" && !(ic3.error ?? "").includes(H(3)) && (ic3.error ?? "").includes(H(4)),
+      `without a recheck, inspect_clip on ${H(3)}'s clip no longer reports it offline (${ic3.ok ? JSON.stringify(ic3.result.offline) : `${ic3.code} ${ic3.error?.slice(0, 120)}`})`);
     await rpc(core, "recheck_offline_media");
     now = await assetsNow();
     const kept = (await rpc(core, "list_media_servers")).result;
@@ -652,19 +711,34 @@ async function enforcedSteps(): Promise<void> {
 
     // ---- 6. revoke ----------------------------------------------------------------------------
     // MUTATION: keep a removed approval in HostTrust.reload → the assets stay
-    // online and the calls below open zr-evil-1.
-    console.log("6. revoke: the media is offline again and nothing opens it...");
-    check((await rpc(core, "load_project", { path: crafted })).ok, "load_project of the crafted project again");
-    // Step 5's background work (colour probes, proxies) settles first.
+    // online and the calls below open zr-evil-1. Delete a local proxyPath of a
+    // revoked server's asset in markOfflineMedia → the kept-proxy row fails.
+    // Let requireMedia pass an offline asset that has a proxy → generate_thumbnail
+    // of asset_e1 goes ahead (no media_offline) and the stub log names the proxy.
+    // The open project is still step 5's crafted one (no reload: Q2 is about what it has).
+    console.log("6. revoke: the media is offline again and nothing opens it; its local proxy is kept, unused...");
     const settled = async () => {
       const n = traces(/zr-evil/);
       await sleep(1_000);
       return (await rpc(core, "list_jobs", { activeOnly: true })).result.jobs.length === 0 && traces(/zr-evil/) === n;
     };
     check(await until(settled, 20_000), "step 5's background work finished");
+    // A local proxy for asset_e1 while zr-evil-1 is allowed. Its file is put in place first, so
+    // generate_proxy records it without an encode (the source on the .invalid host has no data).
+    const proxyFile = join(dataDir, "proxies", "asset_e1.mp4");
+    mkdirSync(dirname(proxyFile), { recursive: true });
+    writeFileSync(proxyFile, readFileSync(local));
+    const proxySha = createHash("sha256").update(readFileSync(proxyFile)).digest("hex");
+    const gp = await rpc(core, "generate_proxy", { assetId: "asset_e1" });
+    check(gp.ok && (await assetsNow()).get("asset_e1")?.proxyPath === proxyFile, `asset_e1 has a local proxy while ${H(1)} is allowed (${gp.error ?? (await assetsNow()).get("asset_e1")?.proxyPath})`);
+    const proxyLines = () => lines(stubLog).filter((l) => JSON.stringify(l.args).includes("asset_e1.mp4")).length;
     await revokeHost(dataDir, H(1));
     await rpc(core, "recheck_offline_media");
     now = await assetsNow();
+    const proxyBefore = proxyLines();
+    // Q2: revoking moves nothing to the trash and drops no local proxy; nothing uses it while offline.
+    check(now.get("asset_e1")?.proxyPath === proxyFile && existsSync(proxyFile) && createHash("sha256").update(readFileSync(proxyFile)).digest("hex") === proxySha,
+      `after the revoke, asset_e1 keeps its local proxyPath and the file is unchanged on disk (${now.get("asset_e1")?.proxyPath})`);
     check(on1.every((id) => now.get(id)?.awaitingServer === H(1)) && now.get("asset_e2")?.awaitingServer === undefined,
       `the ${H(1)} assets wait again; ${H(2)}'s stay online (${JSON.stringify(on1.map((id) => [id, now.get(id)?.awaitingServer]))})`);
     const before = [traces(/zr-evil/), stubs("ffmpeg", /zr-evil/) + stubs("ffprobe", /zr-evil/)];
@@ -673,6 +747,7 @@ async function enforcedSteps(): Promise<void> {
       check(r.code === "media_offline" && (r.error ?? "").includes(`\\\\${H(1)}`), `${m} ${JSON.stringify(p)}: media_offline again, naming ${H(1)} (${r.code} ${r.error?.slice(0, 100)})`);
     }
     const ic6 = await rpc(core, "inspect_clip", { clipId: "clip_e1" });
+    check(proxyLines() === proxyBefore, `no render, frame, thumbnail or proxy call used the kept proxy while asset_e1 is offline (stub lines naming it: ${proxyBefore} → ${proxyLines()})`);
     const sum6 = await rpc(core, "timeline_summary");
     const row6 = (sum6.result?.tracks ?? []).flatMap((t: any) => t.clips).find((c: any) => c.clipId === "clip_e1");
     check(ic6.result?.offline?.host === H(1) && ic6.result.frames.length === 0 && row6?.offline === allow(1), `inspect_clip and timeline_summary show clip_e1 offline again (${row6?.offline})`);

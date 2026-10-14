@@ -321,6 +321,7 @@ export const createReadStream = gatedSync<typeof fs.createReadStream>("createRea
 export const createWriteStream = gatedSync<typeof fs.createWriteStream>("createWriteStream", CONTENT);
 export const readFileSync = gatedSync<typeof fs.readFileSync>("readFileSync", CONTENT);
 export const rmSync = gatedSync<typeof fs.rmSync>("rmSync", CONTENT);
+export const lstatSync = gatedSync<typeof fs.lstatSync>("lstatSync");
 export const statSync = gatedSync<typeof fs.statSync>("statSync");
 export const watch = gatedSync<typeof fs.watch>("watch");
 

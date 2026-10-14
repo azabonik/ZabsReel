@@ -556,6 +556,8 @@ export class EditorEngine extends EventEmitter {
   /** remark is running / was asked again meanwhile (a store re-read inside it). */
   private trustBusy = false;
   private trustAgain = false;
+  /** A nested store re-read asked remark for the 7.5 resume. */
+  private resumeAgain = false;
 
   /** Directory where previews, thumbnails and other render artifacts are written. */
   constructor(readonly dataDir: string) {
@@ -724,14 +726,15 @@ export class EditorEngine extends EventEmitter {
    * proxies/frames/baked/thumbnails/scopes/…), is the source/proxy/preview file
    * of an imported asset, or is the .cube LUT a clip of the project uses
    * (setClipEffects only sets an existing .cube; load drops a non-.cube LUT).
-   * Everything else — including `..` traversal attempts, which
-   * path.resolve collapses before comparison — is rejected, so the server can
-   * never be used to read arbitrary files on disk.
+   * Everything else is rejected, so the server can never be used to read
+   * arbitrary files on disk.
    */
   isServablePath(p: string): boolean {
-    // Never the private trust folder (the stamp key is there), whatever else allows it,
-    // nor a file that waits for approval or whose folder could not be checked (G6).
-    if (this.trust.inTrustDir(p) || this.awaitsApproval(p)) return false;
+    // Never a file that waits for approval (G6), nor the private trust folder (the
+    // stamp key is there) under any spelling, whatever else allows it: G2's rpc
+    // check, so a link or /proc/self/root/… is resolved (one realpath) and a
+    // path with a ".." segment is refused before anything resolves it.
+    if (this.awaitsApproval(p) || !this.trust.checkPath(p).ok) return false;
     const norm = (s: string): string => {
       const r = resolve(s);
       // Windows paths are case-insensitive; compare them case-folded.
@@ -827,15 +830,51 @@ export class EditorEngine extends EventEmitter {
    * The approved servers changed (a store re-read: fs.watch, a check's lazy
    * reload, the unread retry) or recheck_offline_media asked: mark the media
    * again (G3), re-check the fields whose folder could not be checked, and
-   * tell the clients. Media that came online resumes (7.5): an offline .otio
-   * placeholder is probed, colour probes and proxies start. A revoked server's
-   * media goes offline again; its local proxies stay but are not used. The
-   * project is not reloaded and not made unsaved (I5).
+   * tell the clients. Media that came online resumes (7.5, see remark). A
+   * revoked server's media goes offline again; its local proxies stay but are
+   * not used. The project is not reloaded and not made unsaved (I5).
    */
   onTrustChanged(): void {
-    const waited = new Set(this.project.assets.filter((a) => a.awaitingServer).map((a) => a.id));
-    if (!this.remark(true)) return;
-    this.emit("change", this.project);
+    if (this.remark(true, true)) this.emit("change", this.project);
+  }
+
+  /**
+   * Every G3 marking goes through here. A check inside it can re-read the
+   * store, and that re-read calls onTrustChanged synchronously: the nested
+   * call only asks for another pass (and for the resume), so this pass's
+   * cached decisions never overwrite newer ones. `recheck` also re-checks the
+   * unchecked fields (a pass asked for by a store change always does). With
+   * `resume`, or when a nested re-read asked for it (inside undo, redo or a
+   * load), media of the open project that was offline at the start (waiting
+   * for a server, or a field whose check failed) and is online now resumes
+   * (7.5): an .otio placeholder is probed, colour probes and proxies start.
+   * False when nested.
+   */
+  private remark(recheck: boolean, resume = false): boolean {
+    if (this.trustBusy) {
+      this.trustAgain = true;
+      this.resumeAgain ||= resume;
+      return false;
+    }
+    const waited = new Set(this.project.assets.filter((a) => a.awaitingServer || (a.pathCheckFailed && a.pathCheckFailed !== "private")).map((a) => a.id));
+    this.trustBusy = true;
+    this.resumeAgain = false;
+    try {
+      do {
+        this.trustAgain = false;
+        this.markOfflineMedia();
+        if (recheck) this.recheckUncheckedFields();
+        recheck = true;
+      } while (this.trustAgain);
+    } finally {
+      this.trustBusy = false;
+    }
+    if (resume || this.resumeAgain) this.resumeOnline(waited);
+    return true;
+  }
+
+  /** 7.5: start what an asset of the open project in `waited` needs, now that it is online. */
+  private resumeOnline(waited: Set<string>): void {
     let colors = false;
     for (const a of this.project.assets) {
       if (!waited.has(a.id) || a.awaitingServer || a.pathCheckFailed) continue;
@@ -848,32 +887,6 @@ export class EditorEngine extends EventEmitter {
     if (colors) void this.probeUnrecordedColors();
   }
 
-  /**
-   * Every G3 marking goes through here. A check inside it can re-read the
-   * store, and that re-read calls onTrustChanged synchronously: the nested
-   * call only asks for another pass, so this pass's cached decisions never
-   * overwrite newer ones. `recheck` also re-checks the unchecked fields (a
-   * pass asked for by a store change always does). False when nested.
-   */
-  private remark(recheck: boolean): boolean {
-    if (this.trustBusy) {
-      this.trustAgain = true;
-      return false;
-    }
-    this.trustBusy = true;
-    try {
-      do {
-        this.trustAgain = false;
-        this.markOfflineMedia();
-        if (recheck) this.recheckUncheckedFields();
-        recheck = true;
-      } while (this.trustAgain);
-    } finally {
-      this.trustBusy = false;
-    }
-    return true;
-  }
-
   /** recheck_offline_media: re-read the store and re-evaluate the offline media now. */
   recheckOfflineMedia(): MediaServers {
     this.trust.reload();
@@ -884,7 +897,7 @@ export class EditorEngine extends EventEmitter {
   /**
    * The identity check again for each field whose folder could not be checked
    * at load (pathCheckFailed, uncheckedPaths; not "private"): a pass clears
-   * it (a placeholder is probed again), a path now found in the trust folder
+   * it (remark's resume then probes a placeholder again), a path now found in the trust folder
    * becomes "private" (offline for this session), another error keeps it.
    */
   private recheckUncheckedFields(): void {
@@ -902,7 +915,6 @@ export class EditorEngine extends EventEmitter {
           continue;
         }
         delete a.pathCheckFailed;
-        if (a.missing && project === this.project && !a.awaitingServer) void this.reprobePlaceholder(a.id, a.path);
       }
     }
     for (const [p, code] of this.uncheckedPaths) {
@@ -950,6 +962,9 @@ export class EditorEngine extends EventEmitter {
       return `its file is on the network computer ${at}, which the user has not allowed yet. You cannot allow it yourself. Tell the user what it is for; they can allow it in the ${PRODUCT_NAME} window (Project → Network computers), or remove or replace the asset.`;
     }
     if (a.pathCheckFailed === "private") return `its file is in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`;
+    if (a.pathCheckFailed === "EDOTDOT") {
+      return `its path ${JSON.stringify(examplePath(a.path))} has a ".." segment, which ${PRODUCT_NAME} doesn't follow, so it did not open it. Change it to the full path in the project file and open the project again, or import the file again.`;
+    }
     if (a.pathCheckFailed) {
       const c = classifyPath(a.path);
       const on = c.kind === "network" ? ` on ${c.display}` : "";
@@ -1001,6 +1016,7 @@ export class EditorEngine extends EventEmitter {
   private offlineText(why: { host?: string; code?: string }): string {
     const at = why.host ? `\\\\${why.host}` : "";
     if (why.code === "private") return `in ${PRODUCT_NAME}'s private settings folder`;
+    if (why.code === "EDOTDOT") return `its path has a ".." segment, which ${PRODUCT_NAME} doesn't follow`;
     if (why.code) return `couldn't check its folder${at ? ` on ${at}` : ""} (${why.code})`;
     if (this.trust.isUnread()) return `${PRODUCT_NAME} couldn't read its list of approved computers; retrying`;
     if (this.trust.isOutside(why.host!)) return `waiting for the user to keep ${at} (added outside ${PRODUCT_NAME})`;
@@ -1113,8 +1129,9 @@ export class EditorEngine extends EventEmitter {
         );
       }
     }
-    const failed = [...unchecked.keys()].filter((i) => unchecked.get(i)!.code !== "private");
+    const failed = [...unchecked.keys()].filter((i) => !["private", "EDOTDOT"].includes(unchecked.get(i)!.code));
     const priv = [...unchecked.keys()].filter((i) => unchecked.get(i)!.code === "private");
+    const dots = [...unchecked.keys()].filter((i) => unchecked.get(i)!.code === "EDOTDOT");
     if (failed.length) {
       const hosts = [...new Set(failed.map((i) => unchecked.get(i)!.host).filter((h): h is string => !!h))].map((h) => `\\\\${h}`);
       const codes = [...new Set(failed.map((i) => unchecked.get(i)!.code))].join(", ");
@@ -1124,6 +1141,9 @@ export class EditorEngine extends EventEmitter {
       );
     }
     if (priv.length) say(`${subject(priv, ["uses", "use"])} files in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`);
+    if (dots.length) {
+      say(`${subject(dots, ["uses", "use"])} files whose path has a ".." segment, which ${PRODUCT_NAME} doesn't follow. Change them to the full path in the project file and open it again.`);
+    }
     if (refused.length) {
       say(`${subject(refused, ["uses", "use"])} a LUT or font path ${PRODUCT_NAME} never opens (a device path or a computer name it can't use). Change it with apply_lut, set_text_style or set_caption_style.`);
     }

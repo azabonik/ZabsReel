@@ -23,7 +23,9 @@
  *
  * While io/gatedfs.ts NETWORK_GATE is "log", {@link HostTrust.isAllowed} only
  * logs what it would block, and nothing is pending. G2 and the load-field
- * check are always enforced.
+ * check are always enforced. Neither resolves a path with a ".." segment
+ * ({@link hasDotDot}): an rpc path with one is refused (EDOTDOT), a loaded
+ * field with one stays offline.
  */
 import { posix, win32, type PlatformPath } from "node:path";
 import { PRODUCT_NAME } from "./brand.js";
@@ -32,6 +34,7 @@ import { readTrustedHosts, trustDir, type ApprovedHost, type ReadErrorInjection,
 import {
   classifyFsText,
   isTrustPath,
+  lstatSync,
   networkGateEnforced,
   realpathNative,
   setAllowedNetworkHosts,
@@ -140,6 +143,20 @@ type PathCheck = { ok: true } | { ok: false; private: true; rule?: string } | { 
 const OK: PathCheck = { ok: true };
 const PRIVATE: PathCheck = { ok: false, private: true };
 const IDENTITY: PathCheck = { ok: false, private: true, rule: "the identity check" };
+/** A path with a ".." segment: never resolved, so a link before the ".." can't lead into the trust folder. */
+const DOTDOT: PathCheck = { ok: false, private: false, code: "EDOTDOT" };
+
+/**
+ * True when `p` has a ".." segment, split on "/" and "\\" on every platform.
+ * A segment of ".." followed only by dots or spaces, or by a ":" stream
+ * suffix, counts too (Windows may trim those). The kernel follows a link
+ * before it applies the ".." after it, but path.resolve removes the ".." as
+ * text first, so `<link>/../trust/hosts.key` (or `/proc/<pid>/cwd/../…`,
+ * `/proc/self/root/../…`) can't be checked by resolving it: G2 refuses it.
+ */
+export function hasDotDot(p: string): boolean {
+  return p.split(/[\\/]/).some((s) => /^\.\.[. ]*(?::.*)?$/.test(s));
+}
 
 /** Store file names (and their temp, .bad-* and break-claim files), refused on any network path. */
 const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/;
@@ -240,8 +257,9 @@ export class HostTrust {
     return ["hosts.json", "hosts.key"]
       .map((f) => {
         try {
-          const s = statSync(this.P.join(this.trustDir, f));
-          return `${s.size}:${s.mtimeMs}:${s.ino}`;
+          // bigint: a 64-bit file id (Windows, SMB) or a nanosecond mtime loses nothing.
+          const s = statSync(this.P.join(this.trustDir, f), { bigint: true });
+          return `${s.size}:${s.mtimeNs}:${s.ino}`;
         } catch (err) {
           return errCode(err);
         }
@@ -445,11 +463,6 @@ export class HostTrust {
     return isTrustPath(p, { platform: this.platform, realpath: this.opts.realpath, trustDir: this.trustDir, ...ctx });
   }
 
-  /** True when `p` is the trust folder or in it, as spelled (G2's quick form: G6 and the load fields). */
-  inTrustDir(p: string): boolean {
-    return this.quick(p);
-  }
-
   /**
    * The name rule: a network path whose last segment (without a `:` stream
    * suffix or trailing dots and spaces, any case) is a store file. It covers a
@@ -461,14 +474,22 @@ export class HostTrust {
     return STORE_NAME.test(last.replace(/:.*$/, "").replace(/[. ]+$/, "").toLowerCase());
   }
 
-  /** Quick form and name rule, no I/O: what a loaded project's fields are checked with. */
+  /** Quick form and name rule, no I/O: the first step of a loaded field's check. */
   private privateAsSpelled(p: string): boolean {
     const c = classifyPath(p);
     if (c.kind === "refused") return false;
     return this.quick(p) || (c.kind === "network" && this.storeName(p));
   }
 
-  /** `p` resolved with realpath at its nearest existing ancestor; throws the error code when a level can't be checked. */
+  /**
+   * `p` resolved with realpath at its nearest existing ancestor; throws the
+   * error code when a level can't be checked. Only for a path without a ".."
+   * segment ({@link hasDotDot}): path.resolve would remove a ".." as text,
+   * before the link ahead of it is followed. A level that realpath can't find
+   * but that exists is a link whose target does not exist yet; a write
+   * through it would create that target, wherever it is, so it throws
+   * "EDANGLING" (not with a test realpath: the seam stands for the whole file system).
+   */
   private realResolve(p: string): string {
     const P = this.P;
     const realpath = this.opts.realpath ?? realpathNative;
@@ -479,11 +500,48 @@ export class HostTrust {
       } catch (err) {
         const code = errCode(err);
         if (code !== "ENOENT" && code !== "ENOTDIR") throw code;
+        if (code === "ENOENT" && !this.opts.realpath && this.isLink(cur)) throw "EDANGLING";
         const parent = P.dirname(cur);
         if (parent === cur) return P.resolve(p);
         rest.unshift(P.basename(cur));
         cur = parent;
       }
+    }
+  }
+
+  private isLink(p: string): boolean {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * G2's real-path form for a local path without a ".." segment: `p` and the
+   * trust folder each resolved with {@link realResolve}, then compared with
+   * the quick form, so a link, `/proc/self/root/…` or `/proc/<pid>/cwd/…`
+   * that leads into the trust folder is caught. On Linux the same letters in
+   * another case are the trust folder on a case-insensitive mount (drvfs,
+   * ext4 casefold) when that folder has the trust folder's file id, or when
+   * neither exists yet (a write would create it). One realpath per path.
+   */
+  private realCheck(p: string, cache: Map<string, FileId | null>): PathCheck {
+    try {
+      const real = this.realResolve(p);
+      const trust = this.realResolve(this.trustDir);
+      if (this.quick(real, { trustDir: trust })) return PRIVATE;
+      if (this.platform === "win32" || this.platform === "darwin") return OK; // the quick form folds case there
+      const lower = real.toLowerCase();
+      const folder = trust.toLowerCase();
+      if (lower !== folder && !lower.startsWith(folder.endsWith("/") ? folder : `${folder}/`)) return OK;
+      const level = real.split("/").slice(0, trust.split("/").length).join("/");
+      const a = this.idOf(level, cache);
+      const b = this.idOf(trust, cache);
+      if (a && b) return a.ino !== 0n && (a.dev !== b.dev || a.ino !== b.ino) ? OK : PRIVATE;
+      return a || b ? OK : PRIVATE;
+    } catch (code) {
+      return { ok: false, private: false, code: String(code) };
     }
   }
 
@@ -530,26 +588,24 @@ export class HostTrust {
   }
 
   /**
-   * G2 for an rpc path, read or write. Local: the quick form, then the same on
-   * real paths (the nearest existing ancestor through realpath, which folds
-   * links, 8.3 names, trailing dots and case on Windows). Network: the quick
-   * form and the name rule, plus the identity check on the data folder's own
-   * server; no other server is contacted. A refused form passes (safepath's
-   * assertPathUsable refuses it with its own message).
+   * G2 for an rpc path, read or write. First the quick form (no I/O). Then a
+   * path with a ".." segment is refused (code EDOTDOT) before anything
+   * resolves it: the caller passes the full path instead. Local: the
+   * real-path form ({@link realCheck}: links, 8.3 names, trailing dots and
+   * case on Windows). Network: the name rule, plus the identity check on the
+   * data folder's own server; no other server is contacted. A refused form
+   * passes (safepath's assertPathUsable refuses it with its own message).
    */
   checkPath(p: string, cache = new Map<string, FileId | null>()): PathCheck {
     const { text, c } = classifyFsText(p, { platform: this.platform });
     if (c.kind === "refused") return OK;
     if (this.quick(text)) return PRIVATE;
+    if (hasDotDot(p) || hasDotDot(text)) return DOTDOT;
     if (c.kind === "network") {
       if (this.storeName(text)) return { ok: false, private: true, rule: "the name rule" };
       return c.host === this.dataFolderHost ? this.identity(text, c.host, cache) : OK;
     }
-    try {
-      return this.quick(this.realResolve(text), { trustDir: this.realResolve(this.trustDir) }) ? PRIVATE : OK;
-    } catch (code) {
-      return { ok: false, private: false, code: String(code) };
-    }
+    return this.realCheck(text, cache);
   }
 
   /** Why rpc path `p` may not be used, as a reason for a skipped entry (remember_projects), or null. */
@@ -557,10 +613,12 @@ export class HostTrust {
     const r = this.checkPath(p);
     if (r.ok) return null;
     if (r.private) return `in ${PRODUCT_NAME}'s private settings folder`;
+    if (r.code === "EDOTDOT") return `it has a ".." segment, which ${PRODUCT_NAME} doesn't follow; pass the full path without ".."`;
+    if (r.code === "EDANGLING") return `it goes through a link whose target does not exist; pass the path of the real file`;
     return `${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again`;
   }
 
-  /** G2: throw PrivatePathError when rpc path `p` (`field` names it) is in the trust folder or can't be checked. */
+  /** G2: throw PrivatePathError when rpc path `p` (`field` names it) is in the trust folder, has a ".." segment, or can't be checked. */
   assertNotPrivate(p: unknown, field: string): void {
     if (typeof p !== "string" || p === "") return;
     const r = this.checkPath(p);
@@ -568,21 +626,32 @@ export class HostTrust {
     // Which rule caught a network spelling (a server that gives no file ids still has the name rule).
     if (r.private && r.rule) console.error(`[aive-core] refused ${show(p)}: in the private trust folder (${r.rule})`);
     if (r.private) throw new PrivatePathError(`${field} ${show(p)} is in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`);
+    if (r.code === "EDOTDOT") {
+      throw new PrivatePathError(`${field} ${show(p)} has a ".." segment. ${PRODUCT_NAME} doesn't follow ".." in a path (a linked folder can make it lead somewhere else), so nothing was opened. Pass the full path without "..".`);
+    }
+    if (r.code === "EDANGLING") {
+      throw new PrivatePathError(`${field} ${show(p)} goes through a link whose target does not exist, so ${PRODUCT_NAME} can't tell where it leads; nothing was opened. Pass the path of the real file or folder.`);
+    }
     throw new PrivatePathError(`${field} ${show(p)}: ${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again.`);
   }
 
   /**
-   * One loaded field (no I/O except the identity check of a path on the data
-   * folder's own server): "ok", "private" (in the trust folder, by the quick
-   * form, the name rule or the identity check), or the error code of a
-   * folder that could not be checked. `cache` keeps the stats of one load.
+   * One loaded field: "ok", "private" (in the trust folder, by the quick
+   * form, the real-path form, the name rule or the identity check),
+   * "EDOTDOT" (a ".." segment, never resolved), or the error code of a
+   * folder that could not be checked. A local field gets the real-path form
+   * ({@link realCheck}, one realpath); a field on the data folder's own
+   * server the identity check; another server's field is not contacted.
+   * `cache` keeps the stats of one load.
    */
   loadFieldCheck(p: unknown, cache = new Map<string, FileId | null>()): string {
     if (typeof p !== "string" || p === "") return "ok";
     if (this.privateAsSpelled(p)) return "private";
     const c = classifyPath(p);
-    if (c.kind !== "network" || c.host !== this.dataFolderHost) return "ok";
-    const r = this.identity(p, c.host, cache);
+    if (c.kind === "refused") return "ok";
+    if (hasDotDot(p)) return "EDOTDOT";
+    if (c.kind === "network" && c.host !== this.dataFolderHost) return "ok";
+    const r = c.kind === "network" ? this.identity(p, c.host, cache) : this.realCheck(p, cache);
     return r.ok ? "ok" : r.private ? "private" : r.code;
   }
 
@@ -591,9 +660,9 @@ export class HostTrust {
    * path, LUT or text or caption font is in the trust folder does not load; a
    * proxy or preview path there is dropped. For an .otio import (`otio`), an
    * asset path there stays an offline placeholder (its import already
-   * skipped the probe), flagged "private". A field on the data folder's
-   * server whose folder can't be checked is never opened, and only it goes
-   * offline: an asset gets `pathCheckFailed` (the error code), a proxy or
+   * skipped the probe), flagged "private". A field with a ".." segment
+   * (EDOTDOT), or whose folder can't be checked, is never opened, and only
+   * it goes offline: an asset gets `pathCheckFailed` (the code), a proxy or
    * preview path is dropped, and a LUT or font is returned (path → code) for
    * the engine's uncheckedPaths. An incoming `pathCheckFailed` is dropped
    * first. Mutates `project`.

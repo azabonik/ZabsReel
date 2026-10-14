@@ -1031,6 +1031,167 @@ async function main() {
     // G6: /file, /frames and /peaks never serve the trust folder, though it is in the data folder.
     check(!engine.isServablePath(keyFile(dataDir)) && !engine.isServablePath(join(dataDir, "trust")) && engine.isServablePath(join(dataDir, "proxies", "p.mp4")),
       "isServablePath: false for the trust folder, true for the rest of the data folder");
+
+    // ".." after a link: the kernel follows the link first, path.resolve removes the ".." as
+    // text first, so no resolved form can be checked. G2 refuses any rpc path with a ".."
+    // segment (EDOTDOT); a loaded field with one stays offline. Links and /proc need POSIX.
+    // MUTATION: drop the hasDotDot line from HostTrust.checkPath → the link/.. and /proc/…/..
+    // rows fail (the read quotes the key, the write changes the store, mkdir -p makes newdir).
+    // Drop it from loadFieldCheck → the loaded link/.. asset is not offline.
+    // Make realCheck a no-op in loadFieldCheck (local fields as spelled) → the /proc/self/root
+    // and link load rows load. Give isServablePath the lexical inTrustDir again → the
+    // proxies/key-link row is servable. Drop the case-fold step from realCheck → the casefold row passes the path.
+    if (process.platform !== "win32") {
+      const DOTDOT = /has a "\.\." segment\. ZabsReel doesn't follow "\.\." in a path .*Pass the full path without "\.\."\.$/;
+      const projects = join(dataDir, "projects");
+      mkdirSync(projects, { recursive: true });
+      mkdirSync(join(dataDir, "proxies"), { recursive: true });
+      // A link to a data subfolder: <subLink>/.. is the data folder for the kernel, `root` as text.
+      const subLink = join(root, "projects-link");
+      symlinkSync(projects, subLink, "dir");
+      const kid = execFile(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { cwd: join(dataDir, "proxies") }, () => {});
+      const dots = [`${subLink}/../trust/hosts.key`, `${subLink}/../trust/hosts.json`];
+      if (process.platform === "linux") {
+        dots.push(`/proc/self/root/..${keyFile(dataDir)}`, `/proc/${kid.pid}/cwd/../trust/hosts.key`, `/proc/${kid.pid}/cwd/../trust/hosts.json`);
+        // The kernel really reaches the key through these spellings (so a pass would leak it).
+        check(readFileSync(`/proc/self/root/..${keyFile(dataDir)}`, "utf8").trim() === keyText && readFileSync(`/proc/${kid.pid}/cwd/../trust/hosts.key`, "utf8").trim() === keyText,
+          "control: /proc/self/root/..<key> and /proc/<child>/cwd/../trust/hosts.key open the key");
+      }
+      check(readFileSync(`${subLink}/../trust/hosts.key`, "utf8").trim() === keyText, "control: <link to data/projects>/../trust/hosts.key opens the key");
+      const dotErrors: string[] = [];
+      for (const p of dots) {
+        for (const [name, fn] of [
+          ["load_project", () => engine.load(p)], ["import_otio", () => engine.importOtio(p)], ["import_captions", () => engine.importCaptions("clip_none", p)],
+          ["import_video", () => engine.importVideo(p)], ["apply_lut", () => engine.setClipEffects("clip_none", { lut: p })],
+          ["add_text font", () => engine.addTextOverlay("clip_none", { text: "t", font: p })],
+          ["save", () => engine.save(p)], ["export_otio", () => engine.exportOtio(p)], ["export_captions", () => engine.exportCaptions(p)], ["export_video", () => engine.startExportJob(p)],
+        ] as const) {
+          const e = await errOf(fn);
+          dotErrors.push(e);
+          check(DOTDOT.test(e) && sha(listFile(dataDir)) === listBefore && sha(keyFile(dataDir)) === keyBefore,
+            `${name} of ${JSON.stringify(p)} is refused (EDOTDOT) and the store is unchanged (${e.slice(0, 110)})`);
+        }
+        check(!engine.isServablePath(p), `isServablePath(${JSON.stringify(p)}) is false (/file, /frames, /peaks answer 403)`);
+      }
+      check(!dotErrors.some((e) => leaks(e, keyText)), "no EDOTDOT error holds any 8 characters of the key");
+      // save / export run mkdir -p after G2: nothing may be created through the link either.
+      const viaNew = `${subLink}/../newdir/../trust/hosts.json`;
+      for (const [name, fn] of [["save", () => engine.save(viaNew)], ["export_otio", () => engine.exportOtio(viaNew)], ["export_captions", () => engine.exportCaptions(viaNew)]] as const) {
+        const e = await errOf(fn);
+        check(DOTDOT.test(e) && !existsSync(join(dataDir, "newdir")) && !existsSync(join(root, "newdir")) && sha(listFile(dataDir)) === listBefore,
+          `${name} into ${JSON.stringify(viaNew)} is refused and creates no newdir (${e.slice(0, 90)})`);
+      }
+      const remDots = await engine.storage.rememberMany(dots);
+      check(remDots.added.length === 0 && remDots.skipped.length === dots.length && remDots.skipped.every((s) => /has a "\.\." segment/.test(s.reason)),
+        `remember_projects skips each ".." path (${JSON.stringify(remDots.skipped.map((s) => s.reason).slice(0, 1))})`);
+
+      // Without "..": a link or /proc/self/root that leads into trust/ is resolved (one realpath).
+      const keyLink = join(dataDir, "proxies", "key-link.mp4");
+      symlinkSync(keyFile(dataDir), keyLink);
+      check(!engine.isServablePath(keyLink), "isServablePath: a link in the data folder that points at the key is not servable (/file 403)");
+      const lutLink = join(dataDir, "proxies", "lut-link.cube");
+      symlinkSync(keyFile(dataDir), lutLink);
+      const aliases = [join(link, "trust", "hosts.key"), keyLink, lutLink];
+      if (process.platform === "linux") aliases.push(`/proc/self/root${keyFile(dataDir)}`, `/proc/${kid.pid}/root${keyFile(dataDir)}`);
+      for (const p of aliases) {
+        const e = await errOf(() => engine.load(p));
+        check(PRIVATE.test(e) && !leaks(e, keyText), `load_project of ${JSON.stringify(p)} is refused with the private-folder message (${e.slice(0, 90)})`);
+        check(!engine.isServablePath(p), `isServablePath(${JSON.stringify(p)}) is false`);
+      }
+      // A loaded project's fields through those spellings: the real-path form refuses the load.
+      const loadAliases = [join(link, "trust", "hosts.key"), keyLink, ...(process.platform === "linux" ? [`/proc/self/root${keyFile(dataDir)}`] : [])];
+      for (const k of loadAliases) {
+        for (const [label, f, field] of [
+          ["asset.path", projectWith({ path: k }), /^asset "asset_a1" path/],
+          ["cutout colour path", projectWith({ cutout: { colorPath: k, colorStart: 0 } }), /cutout colour path/],
+          ["clip LUT", projectWith({}, { effects: { lut: k === keyLink ? lutLink : k.replace(/hosts\.key$/, "x.cube") } }), /^clip "clip_c1" LUT path/],
+          ["overlay font", projectWith({}, { overlays: [{ id: "text_t1", text: "t", font: k }] }), /^clip "clip_c1" text "text_t1" font/],
+          ["caption font", projectWith({}, { captions: { cues: [], style: { font: k } } }), /^clip "clip_c1" caption font/],
+        ] as [string, string, RegExp][]) {
+          const before = engine.getProject();
+          const e = await errOf(() => engine.load(f));
+          check(field.test(e) && PRIVATE.test(e) && engine.getProject() === before, `a project whose ${label} is ${JSON.stringify(k)} does not load (${e.slice(0, 100)})`);
+        }
+      }
+      if (process.platform === "linux") {
+        const procKey = `/proc/self/root${keyFile(dataDir)}`;
+        const proxied = await thrown(() => engine.load(projectWith({ proxyPath: procKey, previewPath: keyLink })));
+        check(proxied === null && engine.getProject().assets[0].proxyPath === undefined && engine.getProject().assets[0].previewPath === undefined,
+          `a proxyPath / previewPath through /proc/self/root or a link is dropped (${proxied?.message})`);
+        const otioProc = join(root, "proc-key.otio");
+        writeFixture(otioProc, JSON.stringify({ ...otio, tracks: { ...otio.tracks, children: [{ ...otio.tracks.children[0], children: [{ ...otio.tracks.children[0].children[0], media_references: { DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: procKey } } }] }] } }));
+        const procImport = await thrown(() => engine.importOtio(otioProc));
+        const pa = engine.getProject().assets[0];
+        check(procImport === null && pa?.missing === true && pa.pathCheckFailed === "private" && !engine.isServablePath(procKey),
+          `an .otio whose target_url is /proc/self/root<key> is an offline placeholder flagged private, never served (${procImport?.message}; ${pa?.pathCheckFailed})`);
+      }
+      // A loaded field with ".." is never resolved: that asset (or LUT) alone is offline (EDOTDOT), the load goes on.
+      const dotAsset = `${subLink}/../trust/hosts.key`;
+      const dotLut = `${subLink}/../trust/x.cube`;
+      const dotLoad = await thrown(() => engine.load(projectWith({ path: dotAsset, hasVideo: false, hasAudio: true }, { effects: { lut: dotLut } })));
+      const da = engine.getProject().assets[0];
+      check(dotLoad === null && da.pathCheckFailed === "EDOTDOT" && isOffline(da) && !engine.isServablePath(dotAsset) && !engine.isServablePath(dotLut),
+        `a loaded asset path and LUT with ".." load offline (pathCheckFailed ${da.pathCheckFailed}), never served (${dotLoad?.message})`);
+      const dotThumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
+      check(dotThumb instanceof RpcError && dotThumb.code === "media_offline" && /has a "\.\." segment, which ZabsReel doesn't follow/.test(dotThumb.message) && !leaks(dotThumb.message, keyText),
+        `generate_thumbnail refuses it with media_offline and says why (${dotThumb?.message.slice(0, 140)})`);
+      const dotRender = await thrown(() => dispatch(engine, "render_preview", {}));
+      check(dotRender instanceof RpcError && dotRender.code === "media_offline" && /path has a "\.\." segment/.test(dotRender.message),
+        `render_preview refuses: the clip's path and LUT have ".." (${dotRender?.message.slice(0, 160)})`);
+      engine.recheckOfflineMedia();
+      check(engine.getProject().assets[0].pathCheckFailed === "EDOTDOT", "recheck_offline_media keeps it offline (a \"..\" never passes)");
+      // A link whose target does not exist yet: a write through it would create the target.
+      const dangling = join(dataDir, "proxies", "new-list.json");
+      symlinkSync(join(dataDir, "trust", "made-through-link.json"), dangling);
+      for (const [name, fn] of [["save", () => engine.save(dangling)], ["export_otio", () => engine.exportOtio(dangling)], ["export_captions", () => engine.exportCaptions(dangling)]] as const) {
+        const e = await errOf(fn);
+        check(/goes through a link whose target does not exist/.test(e) && !existsSync(join(dataDir, "trust", "made-through-link.json")),
+          `${name} into a dangling link to trust/ is refused and creates nothing there (${e.slice(0, 100)})`);
+      }
+      check(!engine.isServablePath(dangling), "isServablePath: a dangling link in the data folder is not servable");
+      unlinkSync(dangling);
+      kid.kill();
+      unlinkSync(lutLink);
+      unlinkSync(keyLink);
+      unlinkSync(subLink);
+      await engine.load(projectWith({}));
+    }
+    // hasDotDot: "/" and "\" on every platform; Windows-trimmed forms count.
+    {
+      const { hasDotDot } = await import("../src/hosttrust.js");
+      for (const p of ["a/../b", "..", "a\\..\\b", "C:\\zr\\link\\..\\trust", "a/.. /b", "a/.../b", "a/..:x/b", "\\\\nas\\zr\\..\\d$\\trust", "a/../"]) check(hasDotDot(p), `hasDotDot(${JSON.stringify(p)})`);
+      for (const p of ["a/..mp4", "a/b..c/d", "a/./b", "/zr/trust/hosts.key", "a/.x"]) check(!hasDotDot(p), `not hasDotDot(${JSON.stringify(p)})`);
+      // Network paths too (before the identity check): the data folder's own server, and another.
+      const ht = new HostTrust("\\\\zr-data.invalid\\zr", { platform: "win32", stat: () => ({ dev: 1n, ino: 1n }), realpath: (p) => p });
+      for (const p of ["\\\\zr-data.invalid\\zr\\proxies\\..\\d$\\x.mp4", "\\\\zr-data.invalid\\video\\link\\..\\x.mp4", "\\\\zr-evil-3.invalid\\s\\..\\x"]) {
+        const r = ht.checkPath(p);
+        check(!r.ok && !r.private && r.code === "EDOTDOT", `checkPath(${JSON.stringify(p)}) is EDOTDOT (${JSON.stringify(r)})`);
+        check(ht.loadFieldCheck(p) === "EDOTDOT", `loadFieldCheck(${JSON.stringify(p)}) is EDOTDOT (${ht.loadFieldCheck(p)})`);
+      }
+    }
+    // Linux on a case-insensitive mount (drvfs, ext4 casefold): TRUST is trust/ when it has trust/'s file id.
+    {
+      const ids: Record<string, bigint | undefined> = { "/zr": 1n, "/zr/trust": 2n, "/zr/TRUST": 2n };
+      const exists = (p: string) => p === "/" || ids[p] !== undefined;
+      const realpath = (p: string) => {
+        if (!exists(p)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return p;
+      };
+      const stat = (p: string) => {
+        if (ids[p] === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return { dev: 9n, ino: ids[p]! };
+      };
+      const ht = new HostTrust("/zr", { platform: "linux", stat, realpath });
+      const r1 = ht.checkPath("/zr/TRUST/hosts.key");
+      check(!r1.ok && r1.private, `casefold: /zr/TRUST/hosts.key with trust/'s file id is private (${JSON.stringify(r1)})`);
+      check(ht.loadFieldCheck("/zr/Trust/hosts.json") === "ok" && ht.loadFieldCheck("/zr/TRUST/x.cube") === "private", "casefold: the load-field check uses the same rule (Trust does not exist, TRUST is trust/)");
+      ids["/zr/TRUST"] = 7n;
+      check(ht.checkPath("/zr/TRUST/hosts.key").ok, "case-sensitive mount: a separate /zr/TRUST folder passes");
+      delete ids["/zr/TRUST"];
+      delete ids["/zr/trust"];
+      const r2 = ht.checkPath("/zr/TRUST/hosts.json");
+      check(!r2.ok && r2.private, `casefold: before trust/ exists, a write to /zr/TRUST/hosts.json is refused (it would create trust/) (${JSON.stringify(r2)})`);
+    }
     unlinkSync(link);
   }
 
@@ -1478,6 +1639,29 @@ async function main() {
       engine.recheckOfflineMedia();
       check(!isOffline(engine.getProject().assets[0]) && engine.getProject().assets[0].pathCheckFailed === undefined, "once the folder answers, recheck_offline_media clears the flag and a1 is online");
       check(engine.isServablePath(LUT), "…and the LUT is no longer unchecked (the clip's .cube is servable)");
+      // 7.5 for a field whose check failed: once it passes, a video asset resumes (colour probe, proxy).
+      // MUTATION: leave pathCheckFailed out of remark's waited set → no proxy or colour probe starts.
+      {
+        const resumed: string[] = [];
+        const eng = engine as unknown as Record<string, unknown>;
+        eng.proxyInBackground = (id: string) => void resumed.push(`proxy ${id}`);
+        eng.probeUnrecordedColors = async () => void resumed.push("colors");
+        try {
+          const big = join(root, "eacces-4k.aive");
+          writeFixture(big, JSON.stringify(project("\\\\zr-data.invalid\\video\\4k.mp4", { width: 3840, height: 2160 })));
+          fake.fail["\\\\zr-data.invalid\\video"] = "EACCES";
+          await engine.load(big);
+          const failed = engine.getProject().assets[0].pathCheckFailed;
+          resumed.length = 0; // load's own colour probe
+          fake.fail = {};
+          engine.recheckOfflineMedia();
+          check(failed === "EACCES" && engine.getProject().assets[0].pathCheckFailed === undefined && resumed.includes("proxy asset_a1") && resumed.includes("colors"),
+            `a 4K asset whose folder check failed (${failed}) resumes once it passes: its proxy and colour probe start (${JSON.stringify(resumed)})`);
+        } finally {
+          delete eng.proxyInBackground;
+          delete eng.probeUnrecordedColors;
+        }
+      }
       check(spied.length === 0, `no readFile, writeFile or mkdir saw a refused or unchecked path (${JSON.stringify(spied)})`);
     } finally {
       for (const [k, orig] of saved) fspMod[k] = orig;
@@ -1514,6 +1698,11 @@ async function main() {
     check(unlisted.length === 0 && stale.length === 0, `every path-like string parameter is in RPC_PATH_PARAMS and every listed one exists (${Object.keys(methods).length} methods; unlisted ${JSON.stringify(unlisted)}; stale ${JSON.stringify(stale)})`);
     const approving = Object.keys(methods).filter((m) => /approv|trust|allow|grant/i.test(m) && m !== "list_media_servers" && m !== "recheck_offline_media");
     check(approving.length === 0 && "list_media_servers" in methods && "recheck_offline_media" in methods, `no method can allow or trust a server (${JSON.stringify(approving)})`);
+    // 7.4: each render tool says it refuses while a clip is offline.
+    // MUTATION: drop the sentence from get_frame's (or inspect_color's) description → this row fails.
+    const RENDERS = ["render_preview", "export_video", "inspect_timeline", "get_frame", "inspect_color"] as const;
+    const silent = RENDERS.filter((m) => !methods[m].description.includes("While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers."));
+    check(silent.length === 0, `every render tool's description says it refuses with media_offline while a clip is offline (missing: ${JSON.stringify(silent)})`);
     if (enforced) {
       // Each listed parameter, given a path on a server nobody allowed: refused by G1, the server is pending (origin request).
       const minimal = (schema: unknown): Record<string, unknown> => {
@@ -1692,11 +1881,41 @@ async function main() {
       await engine.load(f3);
       engine.setProjectSettings({ name: "Edited" });
       await revokeHost(engine.dataDir, OK3);
+      // The row only means something while the engine has not re-read the store yet (fs.watch's
+      // 200 ms debounce): a re-read that came first would make it pass with the mutation too.
+      // MUTATION: let HostTrust.list() re-read a changed store (a re-read before the undo) → this row fails.
+      const staleBeforeUndo = engine.mediaServers().approved.some((x) => x.host === OK3);
+      check(staleBeforeUndo, `before the undo the engine still lists ${OK3} as approved (no re-read yet)`);
       engine.undo(); // synchronous, before fs.watch's debounce
       const marks = engine.getProject().assets.map((x) => x.awaitingServer ?? "online").join();
       const p3 = engine.mediaServers().pending.find((x) => x.host === OK3);
-      check(marks === `${OK3},zr-evil-1.invalid,${OK3}` && !!p3 && p3.origins.join() === "project" && p3.files === 2,
+      check(staleBeforeUndo && marks === `${OK3},zr-evil-1.invalid,${OK3}` && !!p3 && p3.origins.join() === "project" && p3.files === 2,
         `undo right after a revoke (no re-read between): both assets on the revoked server wait and it is pending with origin project (${marks}; ${JSON.stringify(p3)})`);
+      // 7.5 inside undo: the undo's own check re-reads the store (a nested onTrustChanged); the
+      // media that came online still resumes. MUTATION: drop `|| this.resumeAgain` from remark → no proxy starts.
+      {
+        const OK5 = "zr-ok-5.invalid";
+        const f5 = join(root, "resume5.aive");
+        writeFixture(f5, JSON.stringify(project(`//${OK5}/s/4k.mp4`, { width: 3840, height: 2160 })));
+        const resumed: string[] = [];
+        const eng = engine as unknown as Record<string, unknown>;
+        eng.proxyInBackground = (id: string) => void resumed.push(`proxy ${id}`);
+        eng.probeUnrecordedColors = async () => void resumed.push("colors");
+        try {
+          await engine.load(f5);
+          const waiting = engine.getProject().assets[0].awaitingServer === OK5;
+          engine.setProjectSettings({ name: "Edited 5" });
+          await approveHost(engine.dataDir, OK5, "prompt");
+          const stale5 = !engine.mediaServers().approved.some((x) => x.host === OK5);
+          resumed.length = 0;
+          engine.undo(); // synchronous, before fs.watch's debounce
+          check(waiting && stale5 && engine.getProject().assets[0].awaitingServer === undefined && resumed.includes("proxy asset_a1") && resumed.includes("colors"),
+            `an approval picked up inside undo (nested re-read): the 4K asset resumes, its proxy and colour probe start (waiting ${waiting}, stale ${stale5}; ${JSON.stringify(resumed)})`);
+        } finally {
+          delete eng.proxyInBackground;
+          delete eng.probeUnrecordedColors;
+        }
+      }
     }
     // resolveFont's backstop (behind G5): a font it may not open is never opened, and never silently swapped for the default font.
     const resolveFont = (engine as unknown as { resolveFont(w: string, s: string, c: Map<string, string>, d: string): Promise<string> }).resolveFont.bind(engine);
