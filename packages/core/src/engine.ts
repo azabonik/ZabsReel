@@ -8,6 +8,8 @@ import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectVa
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
+import { HostTrust } from "./hosttrust.js";
+import { classifyPath } from "./unc.js";
 import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
@@ -526,6 +528,8 @@ export class EditorEngine extends EventEmitter {
   private proxyJobs = new Map<string, Promise<MediaAsset>>();
   /** Housekeeping for baked/ + proxies/: trash unused files, restore them on load (see storage.ts). */
   readonly storage: StorageJanitor;
+  /** The approved network computers and the private trust folder's guard (G2), from <dataDir>/trust. */
+  readonly trust: HostTrust;
   /** Files the last load()/importOtio() moved back out of the storage trash. */
   lastRestoredFromTrash: string[] = [];
 
@@ -534,10 +538,12 @@ export class EditorEngine extends EventEmitter {
     super();
     // Renders and bakes run FFmpeg in render/ and baked/ with files named by bare name.
     addFfmpegWorkRoot(dataDir);
+    this.trust = new HostTrust(dataDir).start();
     this.storage = new StorageJanitor(dataDir, {
       liveProjects: () => [this.project, ...this.undoStack, ...this.redoStack],
       runningJobs: () => this.jobs.list(true),
       pruneLibrary: () => this.pruneLibraryBakes(),
+      privatePath: (p) => this.trust.pathRefusal(p),
     });
     this.jobs.on("job", (job) => this.emit("job", job));
     this.jobs.on("job", (job) => this.storage.onJob(job));
@@ -689,6 +695,8 @@ export class EditorEngine extends EventEmitter {
    * never be used to read arbitrary files on disk.
    */
   isServablePath(p: string): boolean {
+    // Never the private trust folder (the stamp key is there), whatever else allows it.
+    if (this.trust.inTrustDir(p)) return false;
     const norm = (s: string): string => {
       const r = resolve(s);
       // Windows paths are case-insensitive; compare them case-folded.
@@ -891,6 +899,7 @@ export class EditorEngine extends EventEmitter {
     // A device / NT path or an unusable server name gets its teaching message
     // first (a backslash network path is not absolute on POSIX).
     assertPathUsable(path, "import path");
+    this.trust.assertNotPrivate(path, "import path");
     if (!isAbsolute(path)) {
       throw new Error(`Import path must be absolute, got "${path}"`);
     }
@@ -1743,6 +1752,7 @@ export class EditorEngine extends EventEmitter {
     // so apply_lut (and the desktop app) can never point it at the network.
     if (patch.lut !== undefined) {
       assertLocalMediaPath(patch.lut, "LUT path");
+      this.trust.assertNotPrivate(patch.lut, "LUT path");
       // /file serves a clip's LUT to the live preview (isServablePath), so only
       // an existing .cube file can be one — never an arbitrary file on disk.
       const why = !/\.cube$/i.test(patch.lut) ? "is not a .cube file"
@@ -4245,9 +4255,17 @@ export class EditorEngine extends EventEmitter {
     });
   }
 
+  /** G2 for a style.font that names a file (resolveFont opens an absolute path; a family name is looked up, never opened). */
+  private assertFontNotPrivate(font: unknown): void {
+    if (typeof font !== "string") return;
+    const f = font.trim();
+    if (isAbsolute(f) || classifyPath(f).kind === "network") this.trust.assertNotPrivate(f, "style.font");
+  }
+
   /** Add a burned-in text overlay (title / lower-third) to a clip. */
   addTextOverlay(clipId: string, overlay: Omit<TextOverlay, "id">): TextOverlay {
     assertPathUsable(overlay.font, "style.font");
+    this.assertFontNotPrivate(overlay.font);
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const ov: TextOverlay = { id: newId("text"), ...overlay };
@@ -4275,6 +4293,7 @@ export class EditorEngine extends EventEmitter {
 
   setTextStyle(clipId: string, overlayId: string | undefined, style: Partial<TextStyle>): TextOverlay[] {
     assertPathUsable(style.font, "style.font");
+    this.assertFontNotPrivate(style.font);
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       if (!clip.overlays?.length) throw new Error("This clip has no text overlays to style — add text first.");
@@ -4324,6 +4343,7 @@ export class EditorEngine extends EventEmitter {
     opts: { model?: WhisperModel; language?: string; maxLen?: number; style?: CaptionStyle } = {},
   ): Promise<{ clip: Clip; cueCount: number }> {
     assertPathUsable(opts.style?.font, "style.font");
+    this.assertFontNotPrivate(opts.style?.font);
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "caption transcription");
     if (!asset.hasAudio) throw new Error("Clip's source has no audio to transcribe");
@@ -4402,6 +4422,7 @@ export class EditorEngine extends EventEmitter {
    */
   async exportCaptions(path: string, format?: "srt" | "vtt"): Promise<{ path: string; cueCount: number; format: string }> {
     assertPathUsable(path, "export_captions path");
+    this.trust.assertNotPrivate(path, "export_captions path");
     const fps = this.project.fps;
     const fmt = format ?? (path.toLowerCase().endsWith(".vtt") ? "vtt" : "srt");
     const cues: { start: number; end: number; text: string }[] = [];
@@ -4433,6 +4454,7 @@ export class EditorEngine extends EventEmitter {
    */
   async importCaptions(clipId: string, path: string): Promise<{ clip: Clip; cueCount: number; dropped: number }> {
     assertPathUsable(path, "import_captions path");
+    this.trust.assertNotPrivate(path, "import_captions path");
     const { clip } = this.findClip(clipId);
     const raw = await readFile(path, "utf8");
     const isVtt = path.toLowerCase().endsWith(".vtt") || /^﻿?WEBVTT/.test(raw);
@@ -4466,6 +4488,7 @@ export class EditorEngine extends EventEmitter {
 
   setCaptionStyle(clipId: string, style: Record<string, unknown>): Clip {
     assertPathUsable(style.font, "style.font");
+    this.assertFontNotPrivate(style.font);
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const caps = clip.captions;
@@ -4760,6 +4783,7 @@ export class EditorEngine extends EventEmitter {
    */
   startExportJob(outputPath: string, settings?: ExportSettings): { job: Job; promise: Promise<RenderResult> } {
     assertPathUsable(outputPath, "export outputPath");
+    this.trust.assertNotPrivate(outputPath, "export outputPath");
     if (this.clipCount() === 0) throw new Error("Timeline is empty — nothing to export");
 
     return this.jobs.start("export", `Export → ${basename(outputPath)}`, async (signal, onProgress) => {
@@ -6126,6 +6150,7 @@ export class EditorEngine extends EventEmitter {
 
   async save(path: string): Promise<void> {
     assertPathUsable(path, "save path");
+    this.trust.assertNotPrivate(path, "save path");
     await mkdir(dirname(path), { recursive: true });
     // Give a still-"Untitled" project a meaningful name from its filename, so the
     // UI title and the AI both have a clear handle on which video this is.
@@ -6146,6 +6171,7 @@ export class EditorEngine extends EventEmitter {
 
   async load(path: string): Promise<Project> {
     assertPathUsable(path, "load_project path");
+    this.trust.assertNotPrivate(path, "load_project path");
     const raw = await readFile(path, "utf8");
     const loaded = JSON.parse(raw) as Project;
     if (!loaded.tracks || !Array.isArray(loaded.assets)) {
@@ -6159,6 +6185,7 @@ export class EditorEngine extends EventEmitter {
     // file must leave the open project, its path, dirty state and undo history
     // as they were (else the next autosave writes the refused file over it).
     const project = validateLoadedProject(migrateProject(loaded));
+    this.trust.checkLoadedProject(project);
     // Bring back any baked/proxy file it names that a clean-up moved to the trash.
     this.lastRestoredFromTrash = await this.storage.restore(project);
     this.undoStack = [];
@@ -6196,6 +6223,7 @@ export class EditorEngine extends EventEmitter {
    */
   async exportOtio(path: string): Promise<{ path: string; trackCount: number; clipCount: number }> {
     assertPathUsable(path, "export_otio path");
+    this.trust.assertNotPrivate(path, "export_otio path");
     const timeline = projectToOtio(this.serializableProject());
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(timeline, null, 2), "utf8");
@@ -6212,6 +6240,7 @@ export class EditorEngine extends EventEmitter {
    */
   async importOtio(path: string): Promise<{ project: Project; warnings: string[]; missing: string[] }> {
     assertPathUsable(path, "import_otio path");
+    this.trust.assertNotPrivate(path, "import_otio path");
     const raw = await readFile(path, "utf8");
     let json: unknown;
     try {
@@ -6232,7 +6261,8 @@ export class EditorEngine extends EventEmitter {
       // assertProjectMediaLocal guard below then refuses the import outright. A
       // scheme-free relative/local path is probed as before (not a network
       // vector), so a foreign OTIO with a relative target_url still imports.
-      if (isProtocolLike(mediaPath)) return null;
+      // A path in the private trust folder stays an offline placeholder, unprobed.
+      if (isProtocolLike(mediaPath) || this.trust.isPrivateMediaPath(mediaPath)) return null;
       try {
         return await probeAsset(mediaPath);
       } catch {
@@ -6245,6 +6275,7 @@ export class EditorEngine extends EventEmitter {
     // project — sanitise ids and refuse non-local media before it is used, on
     // the local copy so a refused import leaves the open project untouched.
     const project = validateLoadedProject(migrateProject(result.project));
+    this.trust.checkLoadedProject(project, { otio: true });
     this.lastRestoredFromTrash = restored;
     this.undoStack = [];
     this.redoStack = [];

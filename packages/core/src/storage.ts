@@ -586,6 +586,8 @@ export interface StorageDeps {
    * returns what it removed. Absent = the library is left alone.
    */
   pruneLibrary?: () => { assetId: string; name: string; path: string }[];
+  /** Why a path given to rememberMany may not be read (the private trust folder, G2), or null. */
+  privatePath?: (p: string) => string | null;
 }
 
 /** One running core's references (<dataDir>/run/core-<pid>-<id>.json). */
@@ -895,6 +897,11 @@ export class StorageJanitor {
         const refused = classifyPath(p);
         if (refused.kind === "refused") {
           skipped.push({ path: p, reason: refused.reason });
+          continue;
+        }
+        const privateWhy = this.deps.privatePath?.(p);
+        if (privateWhy) {
+          skipped.push({ path: p, reason: privateWhy });
           continue;
         }
         const abs = resolve(p);

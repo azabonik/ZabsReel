@@ -1,6 +1,6 @@
 import { execa, type Options, type ResultPromise } from "execa";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, assertReachable, readFileSync, rm, statSync, writeFile, type PathContext } from "../io/gatedfs.js";
+import { appendFileSync, assertNotTrustPath, assertReachable, readFileSync, rm, statSync, writeFile, type PathContext } from "../io/gatedfs.js";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { looksLikeProtocol, protocolName } from "../safepath.js";
@@ -520,7 +520,8 @@ export function guardFfprobeArgs(args: readonly string[]): void {
  * {@link assertReachable}, and so does each `file` line of a `-f concat`
  * list (read here; it names the files FFmpeg will open). A Windows device /
  * NT path or a server name with no key is always refused; a server the user
- * has not allowed is refused once the gate is enforced (logged before).
+ * has not allowed is refused once the gate is enforced (logged before). A
+ * path in the private trust folder (G2's quick form) is always refused.
  *
  * On Windows (R5) a relative argument is also checked where it resolves: in
  * `cwd`, or in the process's own cwd when `cwd` is unset, and a concat entry
@@ -538,11 +539,17 @@ export function assertArgvReachable(args: readonly string[], cwd?: string, ctx: 
   };
   for (let i = 0; i < args.length; i++) {
     assertReachable(args[i], "child process argument", inCwd);
+    assertNotTrustPath(args[i], "child process argument", inCwd);
     if (args[i] === "-i" && i + 1 < args.length && inputFormat(args, i)?.toLowerCase() === "concat") {
       assertReachable(args[i + 1], "child process argument", inCwd); // before reading it, so a blocked list gives the gate's own error
+      assertNotTrustPath(args[i + 1], "child process argument", inCwd);
       const list = resolve(cwd ?? ".", args[i + 1]);
       // FFmpeg resolves a relative entry against the list's own folder.
-      for (const file of concatListFiles(list)) assertReachable(file, "concat list entry", { platform: ctx.platform, cwd: dirname(list) });
+      for (const file of concatListFiles(list)) {
+        const inList = { platform: ctx.platform, cwd: dirname(list) };
+        assertReachable(file, "concat list entry", inList);
+        assertNotTrustPath(file, "concat list entry", inList);
+      }
     }
   }
 }

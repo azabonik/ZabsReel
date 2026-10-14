@@ -38,6 +38,10 @@
       "types": "./dist/unc.d.ts",
       "default": "./dist/unc.js"
     },
+    "./trusthosts": {
+      "types": "./dist/trusthosts.d.ts",
+      "default": "./dist/trusthosts.js"
+    },
     "./datadir": {
       "types": "./dist/datadir.d.ts",
       "default": "./dist/datadir.js"

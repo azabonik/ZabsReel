@@ -36,29 +36,61 @@
  *  11. G9                  — graphicRequestRefusal refuses network, device and
  *                            hosted file: imports; the webpack input file
  *                            system wrapper never calls the real reads for a
- *                            network path; the plugin taps both factories.
+ *                            network path, nor its content reads for a path
+ *                            in the trust folder; the plugin taps both factories.
+ *  3. the approval store   — trusthosts.ts: round trip, a corrupt or unknown
+ *                            list, hand-edited and invalid entries, atomic
+ *                            writes (a reader process never sees half a
+ *                            file), the lock (a revoke is never lost, across
+ *                            processes too; stale locks are broken through a
+ *                            claim, never under a live writer).
+ *  4. G2                   — rpc writes and reads into <dataDir>/trust (any
+ *                            spelling, a link included) are refused and no
+ *                            error quotes the key; remember_projects skips
+ *                            them; a loaded project's media, LUT or font
+ *                            there refuses the load, a cache path is dropped.
+ *  12. stamps              — only validly stamped entries are approved;
+ *                            hand-written, forged, copied or edited ones are
+ *                            "outside"; the key's lifecycle; read errors never
+ *                            rotate the key or drop an entry; the stale and
+ *                            unread states; no laundering; Keep and Remove;
+ *                            HostTrust publishes approved servers only, and
+ *                            picks up changes (lazy reload, watch, 1 s retry).
+ *  13. the trust folder    — isTrustPath's quick form (Windows streams,
+ *                            trailing dots, 8.3 names, case); gatedfs content
+ *                            calls and G7 refuse it in every mode, metadata
+ *                            calls don't; /file never serves it; on the data
+ *                            folder's own server, other share spellings are
+ *                            caught by the identity check and the name rule.
  *
  * Rows 5 and 6 check both modes: the network-path gate is "log" until the
  * user can allow a server in the app, and AIVE_NETWORK_GATE=enforce (CI) turns
- * it on. Device paths and keyless names are refused in both.
+ * it on. Device paths and keyless names are refused in both, and so is the
+ * trust folder (rows 4, 11, 13).
  *
- * Pure: no FFmpeg, no network. The only hosts are under the reserved .invalid
- * top-level domain (the 2.3 vectors only reach the pure classifier).
+ * No FFmpeg, no network. The only hosts are under the reserved .invalid
+ * top-level domain (the 2.3 vectors only reach the pure classifier; the
+ * second-spelling rows of 13 use an injected stat). Rows 3 and 12 start
+ * scripts/trust-child.ts as second processes.
  * Run: npx tsx packages/core/scripts/smoke-unc.ts
  */
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { classifyPath, normalizeHost } from "../src/unc.js";
+import { approvalDialogFor, classifyPath, normalizeHost } from "../src/unc.js";
 import { assertLocalMediaPath, assertProjectMediaLocal, isLocalMediaPath, isProtocolLike } from "../src/safepath.js";
 import { EditorEngine } from "../src/engine.js";
 import * as gfs from "../src/io/gatedfs.js";
 import { resolveDataDir } from "../src/datadir.js";
 import { assertArgvReachable, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool, spawnFfmpegStream } from "../src/ffmpeg/executor.js";
 import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
+import { approveHost, readTrustedHosts, revokeHost, TrustStoreError, withTrustLock, type ReadErrorInjection } from "../src/trusthosts.js";
+import { HostTrust } from "../src/hosttrust.js";
+import { storageUsage } from "../src/storage.js";
 import type { Project } from "../src/types.js";
 
 let failures = 0;
@@ -107,6 +139,63 @@ for (const mod of ["node:fs", "node:fs/promises", "node:child_process"]) {
 syncBuiltinESMExports();
 
 async function main() {
+  const enforced = gfs.NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
+  console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
+  /** console.error lines written while `fn` runs. */
+  const logsOf = async (fn: () => unknown): Promise<string[]> => {
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      await fn();
+    } finally {
+      console.error = real;
+    }
+    return lines;
+  };
+  /** The error `fn` throws or rejects with, or null. */
+  const thrown = async (fn: () => unknown): Promise<Error | null> => {
+    try {
+      await fn();
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  };
+  const refusedForms = [`//./UNC/zr-evil-5.invalid/s/x`, `\\??\\UNC\\zr-evil-5.invalid\\s\\x`, `\\\\zr-evil-5.invalid@SSL\\s\\x`, new URL("file:///%5C%5Czr-evil-5.invalid/s/x")];
+
+  // ---- 5a. gatedfs bootstrap, before any engine -----------------------------------
+  // Row 5's first rows, run before anything else: every EditorEngine publishes
+  // its approved servers (hosttrust.ts), so "before any setAllowedNetworkHosts"
+  // holds only until the first engine is built.
+  // MUTATION: see row 5 (let the bootstrap skip the refused check → the
+  // refused rows here fail).
+  console.log("5a. gatedfs bootstrap before any engine...");
+  {
+    const fsMod = require("node:fs") as Record<string, unknown>;
+    const realStatSync = fsMod.statSync;
+    const spied: string[] = [];
+    fsMod.statSync = (...a: unknown[]) => {
+      spied.push(`statSync(${a.map((x) => (x instanceof URL ? x.href : String(x))).join(", ")})`);
+      return { isFile: () => true };
+    };
+    syncBuiltinESMExports();
+    try {
+      // datadir.ts's bootstrap allows a path on any server until the engine first sets the allowed servers.
+      const early = await thrown(() => gfs.bootstrap.statSync("//zr-evil-5.invalid/s/x/server.json"));
+      check(early === null && spied.length === 1, `bootstrap.statSync calls through before any setAllowedNetworkHosts (${early?.message}; ${JSON.stringify(spied)})`);
+      // The bootstrap skips only the trust decision on a server: refused forms are refused before any setAllowedNetworkHosts too.
+      for (const p of refusedForms) {
+        spied.length = 0;
+        const e = await thrown(() => gfs.bootstrap.statSync(p));
+        check(e instanceof gfs.BlockedPathError && spied.length === 0, `bootstrap.statSync(${String(p)}) is refused before any setAllowedNetworkHosts, the real function is never called (${e?.message.slice(0, 90)}; ${JSON.stringify(spied)})`);
+      }
+    } finally {
+      fsMod.statSync = realStatSync;
+      syncBuiltinESMExports();
+    }
+  }
+
   // ---- 1. classifyPath: the plan's 2.3 vectors -----------------------------
   // MUTATION: make R3 require two backslashes (the old WIN_UNC) → the \/nas and
   // /\nas rows fail. Drop R2 (NT) → the \??\ rows fail. Accept non-strict IPv4
@@ -297,29 +386,6 @@ async function main() {
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
   process.chdir(cwd);
 
-  const enforced = gfs.NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
-  console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
-  /** console.error lines written while `fn` runs. */
-  const logsOf = async (fn: () => unknown): Promise<string[]> => {
-    const lines: string[] = [];
-    const real = console.error;
-    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
-    try {
-      await fn();
-    } finally {
-      console.error = real;
-    }
-    return lines;
-  };
-  /** The error `fn` throws or rejects with, or null. */
-  const thrown = async (fn: () => unknown): Promise<Error | null> => {
-    try {
-      await fn();
-      return null;
-    } catch (err) {
-      return err as Error;
-    }
-  };
 
   // ---- 5. G8 gatedfs ----------------------------------------------------------
   // MUTATION: remove the check from copyFile's or rename's second argument
@@ -357,18 +423,8 @@ async function main() {
   try {
     const NET = "//zr-evil-5.invalid/s/x";
     const LOCAL = join(root, "local-file");
-    // datadir.ts's bootstrap allows a path on any server until the engine first sets the allowed servers.
     check(gfs.networkGateEnforced() === enforced, `networkGateEnforced() is ${enforced} (NETWORK_GATE "${gfs.NETWORK_GATE}"; only the variable's "enforce" changes it)`);
-    spied.length = 0;
-    const early = await thrown(() => gfs.bootstrap.statSync(`${NET}/server.json`));
-    check(early === null && spied.length === 1, `bootstrap.statSync calls through before any setAllowedNetworkHosts (${early?.message}; ${JSON.stringify(spied)})`);
-    const refusedForms = [`//./UNC/zr-evil-5.invalid/s/x`, `\\??\\UNC\\zr-evil-5.invalid\\s\\x`, `\\\\zr-evil-5.invalid@SSL\\s\\x`, new URL("file:///%5C%5Czr-evil-5.invalid/s/x")];
-    // The bootstrap skips only the trust decision on a server: refused forms are refused before any setAllowedNetworkHosts too.
-    for (const p of refusedForms) {
-      spied.length = 0;
-      const e = await thrown(() => gfs.bootstrap.statSync(p));
-      check(e instanceof gfs.BlockedPathError && spied.length === 0, `bootstrap.statSync(${String(p)}) is refused before any setAllowedNetworkHosts, the real function is never called (${e?.message.slice(0, 90)}; ${JSON.stringify(spied)})`);
-    }
+    // (The bootstrap rows "before any setAllowedNetworkHosts" run first in main(), before any engine exists.)
     // datadir.ts refuses such a folder at startup, where the cause is, and touches nothing.
     for (const [label, opts] of [
       ["AIVE_DATA_DIR \\\\?\\C:\\zr", { env: { AIVE_DATA_DIR: "\\\\?\\C:\\zr" }, home: root }],
@@ -576,7 +632,9 @@ async function main() {
   // MUTATION: drop the file: rule from graphicRequestRefusal (localPart returns
   // true for any classifyPath-local part) → the file:// rows pass through. Make
   // gateInputFileSystem call the real read first → the spy rows fail. Drop the
-  // no-callback throw → the "without a callback" rows fail.
+  // no-callback throw → the "without a callback" rows fail. Leave the trust
+  // folder out of the wrapper (CONTENT_READS empty) → the trust rows' spy sees
+  // the read.
   console.log("11. G9: graphic imports and webpack's file system...");
   touched.length = 0;
   const G9 = /^graphics can only import local files and installed packages: /;
@@ -645,6 +703,709 @@ async function main() {
   check(taps.every((t) => t({ request: "./Graphic" }) === undefined), "a local request continues (undefined keeps the waterfall's data)");
   const compilerStat = await new Promise<Error | null>((res) => (compilerFs.stat as (p: string, cb: (e: Error | null) => void) => void)("//zr-evil-6.invalid/s/x", res));
   check(compilerStat !== null && G9.test(compilerStat.message), "the plugin wraps the compiler's input file system");
+  // The trust folder: content reads are refused in every mode, metadata reads still go through.
+  const qRoot = join(root, "q");
+  const qTrust = join(qRoot, "trust");
+  gfs.setTrustDir(qTrust);
+  for (const p of [join(qTrust, "hosts.key"), `${qRoot}/work/../trust/hosts.key`]) {
+    for (const name of ["readFile", "readJson"]) {
+      fakeCalls.length = 0;
+      const r = await viaFs(name, p);
+      const syncErr = await thrown(() => (fakeFs[`${name}Sync`] as (p: string) => unknown)(p));
+      check(r.err !== null && G9.test(r.err.message) && syncErr !== null && G9.test(syncErr.message) && fakeCalls.length === 0,
+        `trust folder: wrapped ${name} / ${name}Sync(${JSON.stringify(p)}) call back / throw the G9 error, the real read is never called (${JSON.stringify(fakeCalls)})`);
+    }
+  }
+  for (const name of ["stat", "readdir"]) {
+    fakeCalls.length = 0;
+    const r = await viaFs(name, join(qTrust, "hosts.key"));
+    check(r.err === null && fakeCalls.length === 1, `trust folder: wrapped ${name} still calls through (${r.err?.message}; ${JSON.stringify(fakeCalls)})`);
+  }
+  check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
+
+  // ---- shared by rows 3, 4, 12 and 13 ------------------------------------------------
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const trustRoot = join(root, "trust-tests");
+  mkdirSync(trustRoot, { recursive: true });
+  let dataN = 0;
+  /** A fresh data folder (this process has never read its store). */
+  const freshData = () => join(trustRoot, `d${dataN++}`);
+  const listFile = (d: string) => join(d, "trust", "hosts.json");
+  const keyFile = (d: string) => join(d, "trust", "hosts.key");
+  const lockFile = (d: string) => join(d, "trust", "hosts.lock");
+  const readList = (d: string) => JSON.parse(readFileSync(listFile(d), "utf8")) as { version: number; servers: Record<string, unknown>[] };
+  const writeList = (d: string, servers: unknown[], version = 2) => {
+    mkdirSync(join(d, "trust"), { recursive: true });
+    writeFixture(listFile(d), JSON.stringify({ version, servers }));
+  };
+  const sha = (p: string) => (existsSync(p) ? createHash("sha256").update(readFileSync(p)).digest("hex") : "(none)");
+  const names = (xs: { host: string }[]) => xs.map((x) => x.host).sort().join(",");
+  const trustFiles = (d: string, prefix: string) => (existsSync(join(d, "trust")) ? readdirSync(join(d, "trust")).filter((f) => f.startsWith(prefix)) : []);
+  const aged = (p: string) => {
+    const t = (Date.now() - 11_000) / 1000;
+    utimesSync(p, t, t);
+  };
+  /** True when any 8-character run of `secret` appears in `text`. */
+  const leaks = (text: string, secret: string) => {
+    for (let i = 0; i + 8 <= secret.length; i++) if (text.includes(secret.slice(i, i + 8))) return true;
+    return false;
+  };
+  const childScript = join(dirname(fileURLToPath(import.meta.url)), "trust-child.ts");
+  /** Run scripts/trust-child.ts in a second process (with this process's tsx loader); its JSON result. */
+  const child = (args: string[]) =>
+    new Promise<Record<string, unknown>>((res) => {
+      execFile(process.execPath, [...process.execArgv, childScript, ...args], { encoding: "utf8", timeout: 120_000 }, (err, stdout, stderr) => {
+        try {
+          res(JSON.parse(stdout.trim().split("\n").pop() ?? ""));
+        } catch {
+          res({ error: `${err?.message ?? ""} ${stderr}`.slice(0, 300) });
+        }
+      });
+    });
+
+  // ---- 3. the approval store --------------------------------------------------------
+  // MUTATION: run updateHosts' section without withTrustLock → the afterRead row
+  // loses "other" or keeps nas. In breakStaleLock, unlink the judged lock at
+  // once instead of taking a claim → the two-waiter rows' counter reaches 2
+  // (in-process and across processes). Write hosts.json in place
+  // (writeFileSync instead of writeAtomic) → the reader process sees partial
+  // JSON. Keep a corrupt list instead of moving it aside → the .bad-* row fails.
+  console.log("3. the approval store: round trip, bad files, atomic writes, the lock...");
+  {
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const r = readTrustedHosts(d);
+    check(names(r.approved) === "nas" && r.approved[0].via === "prompt" && !Number.isNaN(Date.parse(r.approved[0].added)) && r.outside.length === 0 && !r.stale && r.unread.length === 0,
+      `round trip: approveHost then readTrustedHosts lists nas as approved (${JSON.stringify(r)})`);
+    const removed = await revokeHost(d, "nas");
+    check(removed.removed && readTrustedHosts(d).approved.length === 0 && readList(d).servers.length === 0, "revokeHost removes it");
+  }
+  {
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    writeFixture(listFile(d), "{not json");
+    let r = readTrustedHosts(d);
+    const logs = await logsOf(() => void (r = readTrustedHosts(d)));
+    check(r.approved.length === 0 && r.outside.length === 0, `a list that does not parse is empty (${JSON.stringify(r)})`);
+    await approveHost(d, "other", "prompt");
+    const bad = trustFiles(d, "hosts.json.bad-");
+    check(bad.length === 1 && readFileSync(join(d, "trust", bad[0]), "utf8") === "{not json" && names(readTrustedHosts(d).approved) === "other",
+      `the next write keeps it as hosts.json.bad-* and starts a new list (${JSON.stringify(bad)}; ${JSON.stringify(logs)})`);
+  }
+  {
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const list = readList(d);
+    writeFixture(listFile(d), JSON.stringify({ ...list, version: 3 }));
+    const r = readTrustedHosts(d);
+    check(r.approved.length === 0 && r.outside.length === 0, `version 3 gives an empty list (${JSON.stringify(r)})`);
+    list.servers[0].host = "NAS";
+    (list.servers as unknown[]).push({ host: "na s" }, { host: 42 }, { via: "prompt" }, null, "nas2");
+    writeFixture(listFile(d), JSON.stringify(list));
+    const r2 = readTrustedHosts(d);
+    check(names(r2.approved) === "nas" && r2.outside.length === 0, `a stamped entry whose host was hand-edited to "NAS" is approved as nas; invalid entries are dropped (${JSON.stringify(r2)})`);
+  }
+  {
+    // A second process reads hosts.json in a loop while 200 writes replace it.
+    const d = freshData();
+    for (let i = 0; i < 40; i++) await approveHost(d, `bulk-${i}.example`, "prompt");
+    const stop = join(trustRoot, `stop-${dataN}`);
+    const reader = child(["reader", listFile(d), stop]);
+    for (let t = 0; t < 600 && !existsSync(`${stop}.ready`); t++) await sleep(50);
+    for (let i = 0; i < 100; i++) {
+      await approveHost(d, "flip", "prompt");
+      await revokeHost(d, "flip");
+    }
+    writeFixture(stop, "");
+    const r = await reader;
+    check(r.bad === 0 && Number(r.reads) > 0, `a reader process never sees a partial hosts.json while 200 writes run (${JSON.stringify(r)})`);
+  }
+  {
+    // Approve vs revoke: the revoke has read the list (nas) when the approve starts; both finish.
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    let started!: () => void;
+    const approveStarted = new Promise<void>((r) => (started = r));
+    const revoking = revokeHost(d, "nas", { afterRead: async () => {
+      await approveStarted;
+      await sleep(50);
+    } });
+    const approving = approveHost(d, "other", "prompt");
+    started();
+    const errs = await Promise.all([thrown(() => revoking), thrown(() => approving)]);
+    const r = readTrustedHosts(d);
+    check(errs.every((e) => e === null) && names(r.approved) === "other", `a revoke and an approve at once: the list ends with other and without nas (${JSON.stringify(r)}; ${errs.map((e) => e?.message)})`);
+  }
+  {
+    const d = freshData();
+    const [a, b] = await Promise.all([child(["soak", d, "soak-a", "100"]), child(["soak", d, "soak-b", "100"])]);
+    const want = [...Array(100).keys()].filter((i) => i % 2 === 0).flatMap((i) => [`soak-a-${i}`, `soak-b-${i}`]).sort().join(",");
+    const r = readTrustedHosts(d);
+    check(a.ok === true && b.ok === true && names(r.approved) === want && r.outside.length === 0,
+      `two processes, 100 rounds of approve/revoke each: every approval and every revoke counts (${JSON.stringify(a)} ${JSON.stringify(b)}; ${r.approved.length} approved)`);
+  }
+  {
+    const d = freshData();
+    mkdirSync(join(d, "trust"), { recursive: true });
+    writeFixture(lockFile(d), "{}");
+    aged(lockFile(d));
+    const e = await thrown(() => approveHost(d, "nas", "prompt"));
+    check(e === null && names(readTrustedHosts(d).approved) === "nas" && !existsSync(lockFile(d)), `a stale lock (11 s old) is broken (${e?.message})`);
+    const before = sha(listFile(d));
+    writeFixture(lockFile(d), "{}");
+    const t0 = Date.now();
+    const busy = await thrown(() => approveHost(d, "other", "prompt"));
+    const waited = Date.now() - t0;
+    check(busy instanceof TrustStoreError && /try again/i.test(busy.message) && waited >= 1_900 && waited < 3_000 && sha(listFile(d)) === before,
+      `a fresh lock held for 3 s: the write fails after 2 s with nothing changed (${busy?.message}; ${waited} ms)`);
+    unlinkSync(lockFile(d));
+  }
+  {
+    // Two waiters judge the same stale lock: A breaks it and goes in; B is let go only once A is inside.
+    const d = freshData();
+    mkdirSync(join(d, "trust"), { recursive: true });
+    writeFixture(lockFile(d), "{}");
+    aged(lockFile(d));
+    let judged = 0;
+    let bothJudged!: () => void;
+    const both = new Promise<void>((r) => (bothJudged = r));
+    let aInside!: () => void;
+    const aIn = new Promise<void>((r) => (aInside = r));
+    let inside = 0;
+    let most = 0;
+    const section = (name: string) => async () => {
+      most = Math.max(most, ++inside);
+      if (name === "A") aInside();
+      await sleep(100);
+      inside--;
+    };
+    const onStale = (name: string) => async () => {
+      if (++judged === 2) bothJudged();
+      await both;
+      if (name === "B") await aIn;
+    };
+    const errs = await Promise.all(["A", "B"].map((n) => thrown(() => withTrustLock(d, section(n), { onStale: onStale(n) }))));
+    check(errs.every((e) => e === null) && most === 1 && judged === 2 && trustFiles(d, "hosts.lock.break-").length === 0 && !existsSync(lockFile(d)),
+      `two waiters break the same stale lock: both succeed, never both inside, no claim left (most inside ${most}; ${errs.map((e) => e?.message)})`);
+  }
+  {
+    const d = freshData();
+    const barrier = join(trustRoot, `barrier-${dataN}`);
+    mkdirSync(join(d, "trust"), { recursive: true });
+    mkdirSync(barrier);
+    writeFixture(lockFile(d), "{}");
+    aged(lockFile(d));
+    const [a, b] = await Promise.all([child(["stale", d, "A", barrier]), child(["stale", d, "B", barrier])]);
+    check(a.overlap === false && b.overlap === false && trustFiles(d, "hosts.lock.break-").length === 0 && !existsSync(lockFile(d)),
+      `the same with two processes held by barrier files (${JSON.stringify(a)} ${JSON.stringify(b)})`);
+  }
+  {
+    // A claimer that crashed left claim .1 (11 s old) next to the stale lock.
+    const d = freshData();
+    mkdirSync(join(d, "trust"), { recursive: true });
+    writeFixture(lockFile(d), "{}");
+    aged(lockFile(d));
+    const t = Math.floor(statSync(lockFile(d)).mtimeMs);
+    const claim1 = join(d, "trust", `hosts.lock.break-${t}.1`);
+    writeFixture(claim1, "");
+    aged(claim1);
+    const e = await thrown(() => approveHost(d, "nas", "prompt"));
+    check(e === null && names(readTrustedHosts(d).approved) === "nas" && trustFiles(d, "hosts.lock.break-").length === 0,
+      `a crashed claimer's claim .1: the next write takes claim .2, succeeds and leaves no claim (${e?.message}; ${JSON.stringify(trustFiles(d, "hosts.lock"))})`);
+  }
+
+  // ---- 4. G2: rpc paths into <dataDir>/trust -----------------------------------------
+  // MUTATION: remove the G2 call from save → the save rows fail (the file
+  // changes, or gatedfs's own refusal answers). Remove it from load → the
+  // backstop answers instead of G2 (and through the link, the error quotes the
+  // start of the key). Drop the realpath part of HostTrust.checkPath → the
+  // link rows fail. Remove checkLoadedProject from load → the font / asset
+  // rows fail. Drop privatePath from rememberMany → its row fails.
+  console.log("4. G2: rpc reads and writes into the trust folder...");
+  {
+    const dataDir = join(root, "data");
+    await approveHost(dataDir, "nas", "prompt");
+    const keyText = readFileSync(keyFile(dataDir), "utf8").trim();
+    const listBefore = sha(listFile(dataDir));
+    const keyBefore = sha(keyFile(dataDir));
+    // A link to the data folder (made by the test: no core code makes links).
+    const link = join(root, "data-link");
+    symlinkSync(dataDir, link, process.platform === "win32" ? "junction" : "dir");
+    const PRIVATE = /private settings folder, which tools can't open/;
+    const writes = [join(dataDir, "trust", "hosts.json"), `${dataDir}/trust/../trust/hosts.json`, `${dataDir}/proxies/../trust/hosts.key`, join(link, "trust", "hosts.json")];
+    if (process.platform === "win32" || process.platform === "darwin") writes.push(join(dataDir, "TRUST", "HOSTS.JSON"));
+    for (const p of writes) {
+      for (const [name, fn] of [
+        ["save", () => engine.save(p)],
+        ["export_otio", () => engine.exportOtio(p)],
+        ["export_captions", () => engine.exportCaptions(p)],
+        ["export_video", () => engine.startExportJob(p)],
+      ] as const) {
+        const e = await errOf(fn);
+        check(PRIVATE.test(e) && sha(listFile(dataDir)) === listBefore && sha(keyFile(dataDir)) === keyBefore, `${name} into ${JSON.stringify(p)} is refused, the store is unchanged (${e.slice(0, 110)})`);
+      }
+    }
+    const reads = [keyFile(dataDir), listFile(dataDir), `${dataDir}/proxies/../trust/hosts.key`, join(link, "trust", "hosts.key")];
+    const errors: string[] = [];
+    for (const p of reads) {
+      for (const [name, fn] of [
+        ["load_project", () => engine.load(p)],
+        ["import_otio", () => engine.importOtio(p)],
+        ["import_captions", () => engine.importCaptions("clip_none", p)],
+        ["import_video", () => engine.importVideo(p)],
+        ["apply_lut", () => engine.setClipEffects("clip_none", { lut: p })],
+        ["add_text font", () => engine.addTextOverlay("clip_none", { text: "t", font: p })],
+      ] as const) {
+        const e = await errOf(fn);
+        errors.push(e);
+        check(PRIVATE.test(e) && !leaks(e, keyText), `${name} of ${JSON.stringify(p)} is refused with the private-folder message and no key text (${e.slice(0, 110)})`);
+      }
+    }
+    const remembered = await engine.storage.rememberMany(reads);
+    check(remembered.added.length === 0 && remembered.skipped.length === reads.length && remembered.skipped.every((s) => /private settings folder/.test(s.reason)),
+      `remember_projects skips each one (${JSON.stringify(remembered.skipped.map((s) => s.reason))})`);
+    check(!errors.some((e) => leaks(e, keyText)), "no error text holds any 8 characters of the key");
+
+    // A loaded project's fields (the quick form and the name rule, no I/O).
+    const projectWith = (asset: Record<string, unknown>, clip: Record<string, unknown> = {}) => {
+      const f = join(root, `fields-${dataN++}.aive`);
+      const base = project("/x/a.mp4") as unknown as { assets: Record<string, unknown>[]; tracks: { clips: Record<string, unknown>[] }[] };
+      Object.assign(base.assets[0], asset);
+      Object.assign(base.tracks[0].clips[0], clip);
+      writeFixture(f, JSON.stringify(base));
+      return f;
+    };
+    const fieldRows: [string, string, RegExp][] = [
+      ["asset.path", projectWith({ path: keyFile(dataDir) }), /^asset "asset_a1" path/],
+      ["cutout colour path", projectWith({ cutout: { colorPath: keyFile(dataDir), colorStart: 0 } }), /cutout colour path/],
+      ["clip LUT", projectWith({}, { effects: { lut: join(dataDir, "trust", "x.cube") } }), /^clip "clip_c1" LUT path/],
+      ["overlay font", projectWith({}, { overlays: [{ id: "text_t1", text: "t", font: keyFile(dataDir) }] }), /^clip "clip_c1" text "text_t1" font/],
+      ["caption font", projectWith({}, { captions: { cues: [], style: { font: keyFile(dataDir) } } }), /^clip "clip_c1" caption font/],
+      ["asset.path on a server, by name", projectWith({ path: "\\\\zr-evil-1.invalid\\zr\\trust\\hosts.key" }), /^asset "asset_a1" path/],
+    ];
+    for (const [label, f, field] of fieldRows) {
+      const e = await errOf(() => engine.load(f));
+      check(field.test(e) && PRIVATE.test(e) && /open the project again\.$/.test(e), `a project whose ${label} is in the trust folder does not load (${e.slice(0, 120)})`);
+    }
+    const cachedLoad = await thrown(() => engine.load(projectWith({ proxyPath: keyFile(dataDir), previewPath: `${dataDir}/trust/p.mp4` })));
+    check(cachedLoad === null && engine.getProject().assets[0].proxyPath === undefined && engine.getProject().assets[0].previewPath === undefined,
+      `one whose proxyPath / previewPath is there loads without them (${cachedLoad?.message})`);
+    // An .otio whose media is the key: an offline placeholder, never probed.
+    const otioKey = join(root, "key.otio");
+    writeFixture(otioKey, JSON.stringify({ ...otio, tracks: { ...otio.tracks, children: [{ ...otio.tracks.children[0], children: [{ ...otio.tracks.children[0].children[0], media_references: { DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: keyFile(dataDir) } } }] }] } }));
+    const imported = await thrown(() => engine.importOtio(otioKey));
+    check(imported === null && engine.getProject().assets.length === 1 && engine.getProject().assets[0].missing === true, `an .otio whose media is in the trust folder imports it as an offline placeholder (${imported?.message})`);
+    // G6: /file, /frames and /peaks never serve the trust folder, though it is in the data folder.
+    check(!engine.isServablePath(keyFile(dataDir)) && !engine.isServablePath(join(dataDir, "trust")) && engine.isServablePath(join(dataDir, "proxies", "p.mp4")),
+      "isServablePath: false for the trust folder, true for the rest of the data folder");
+    unlinkSync(link);
+  }
+
+  // ---- 12. stamps ---------------------------------------------------------------------
+  // MUTATION: trust every entry (skip the stamp check in sortEntries) → the
+  // hand-written rows and the HostTrust rows fail. Leave host out of the HMAC
+  // input → the copied-stamp row fails. Stamp every entry on write (written()
+  // keeps outside entries stamped with the current key) → the no-laundering
+  // rows fail. Create the key outside the lock (or with a plain writeFileSync)
+  // → the first-writers row sometimes ends with one host outside (50 rounds).
+  // Log the read error's message → the log row fails. Treat every key read
+  // error as missing → the EBUSY rows find a new key, a .bad-* file and nas
+  // outside. Drop the kept key → the stale HostTrust row loses nas. Treat an
+  // unreadable key with no copy as "no key" → the unread rows list nas and
+  // zr-evil-3.invalid as outside and approvalDialogFor gives "keep". Drop the
+  // 1 s retry timer → the unread rows are still unread after 2 s. Ignore
+  // onlyIfOutside → the remove-after-keep row removes the host. Drop the lazy
+  // reload or the watch → their HostTrust rows fail.
+  console.log("12. stamps: outside entries, the key, read errors, the unread state, HostTrust...");
+  const stampWith = (k: Buffer, host: string, via: string, added: string) => createHmac("sha256", k).update(`zabsreel-hosts-v2\n${host}\n${via}\n${added}`).digest("base64url");
+  {
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const list = readList(d);
+    const nasEntry = list.servers[0] as { host: string; via: string; added: string; stamp: string };
+    const keyText = readFileSync(keyFile(d), "utf8").trim();
+    const posixModes = process.platform === "win32" || ((statSync(keyFile(d)).mode & 0o777) === 0o600 && (statSync(join(d, "trust")).mode & 0o777) === 0o700);
+    check(list.version === 2 && /^[A-Za-z0-9_-]{43}$/.test(nasEntry.stamp) && /^[A-Za-z0-9_-]{43}$/.test(keyText) && posixModes && names(readTrustedHosts(d).approved) === "nas",
+      `approveHost writes version 2, a 43-character stamp and a 43-character key (0600 in a 0700 folder on POSIX) (${JSON.stringify(list)})`);
+    const key = Buffer.from(keyText, "base64url");
+    const E3 = "zr-evil-3.invalid";
+    const added = nasEntry.added;
+    const handWritten: [string, Record<string, unknown>][] = [
+      ["no stamp", { host: E3, via: "prompt", added }],
+      ["43 random base64url characters", { host: E3, via: "prompt", added, stamp: randomBytes(32).toString("base64url") }],
+      ["forged with a different key", { host: E3, via: "prompt", added, stamp: stampWith(randomBytes(32), E3, "prompt", added) }],
+      ["nas's stamp copied onto another host", { host: E3, via: nasEntry.via, added, stamp: nasEntry.stamp }],
+      ["nas with added changed", { host: "nas", via: nasEntry.via, added: "2020-01-01T00:00:00.000Z", stamp: nasEntry.stamp }],
+      ["nas with via changed", { host: "nas", via: "picker", added, stamp: nasEntry.stamp }],
+      ['via "agent" with a stamp computed for it', { host: E3, via: "agent", added, stamp: stampWith(key, E3, "agent", added) }],
+    ];
+    for (const [label, entry] of handWritten) {
+      writeList(d, [entry]);
+      const r = readTrustedHosts(d);
+      check(r.approved.length === 0 && names(r.outside) === entry.host, `hand-written, ${label}: outside, not approved (${JSON.stringify(r)})`);
+    }
+    // Positive control: the test's HMAC is the store's (whoever reads the key can forge: tamper-evident, not tamper-proof).
+    writeList(d, [{ host: E3, via: "prompt", added, stamp: stampWith(key, E3, "prompt", added) }]);
+    check(names(readTrustedHosts(d).approved) === E3, "control: an entry stamped with the store's own key is approved");
+    writeList(d, [{ host: "nas" }], 1);
+    check(names(readTrustedHosts(d).outside) === "nas" && readTrustedHosts(d).approved.length === 0, "a version 1 file: every entry outside");
+  }
+  {
+    // Key deleted: every entry outside; the next write makes a new key and leaves the old entries outside.
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const oldKey = readFileSync(keyFile(d), "utf8");
+    unlinkSync(keyFile(d));
+    const r = readTrustedHosts(d);
+    check(r.approved.length === 0 && names(r.outside) === "nas", `hosts.key deleted: nas is outside (${JSON.stringify(r)})`);
+    await approveHost(d, "other", "prompt");
+    const r2 = readTrustedHosts(d);
+    check(existsSync(keyFile(d)) && readFileSync(keyFile(d), "utf8") !== oldKey && names(r2.approved) === "other" && names(r2.outside) === "nas",
+      `the next approveHost(other) makes a new key, stamps other, leaves nas outside (${JSON.stringify(r2)})`);
+  }
+  {
+    // A corrupt key (10 bytes) and a corrupt list that holds the key and a stamp: no log line quotes them.
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const keyText = readFileSync(keyFile(d), "utf8").trim();
+    const stamp = String(readList(d).servers[0].stamp);
+    const goodList = readFileSync(listFile(d), "utf8");
+    writeFixture(keyFile(d), keyText.slice(0, 10));
+    let r = readTrustedHosts(d);
+    const logs = await logsOf(() => void (r = readTrustedHosts(d)));
+    check(r.approved.length === 0 && names(r.outside) === "nas", `a 10-byte hosts.key: every entry outside (${JSON.stringify(r)})`);
+    await approveHost(d, "other", "prompt");
+    const bad = trustFiles(d, "hosts.key.bad-");
+    check(bad.length === 1 && readFileSync(join(d, "trust", bad[0]), "utf8") === keyText.slice(0, 10) && /^[A-Za-z0-9_-]{43}$/.test(readFileSync(keyFile(d), "utf8").trim()) && names(readTrustedHosts(d).approved) === "other",
+      `the next write keeps it as hosts.key.bad-* and makes a new key (${JSON.stringify(bad)})`);
+    // Fresh data folders, so each problem is logged (the reader logs a problem once per data folder).
+    const logLines: string[] = [];
+    for (const [label, key, list] of [
+      ["corrupt key", keyText.slice(0, 10), goodList],
+      ["corrupt list", `${keyText}\n`, `${keyText} ${stamp}`],
+    ] as const) {
+      const d2 = freshData();
+      mkdirSync(join(d2, "trust"), { recursive: true });
+      writeFixture(keyFile(d2), key);
+      writeFixture(listFile(d2), list);
+      const lines = await logsOf(() => readTrustedHosts(d2));
+      logLines.push(...lines);
+      check(lines.length === 1, `${label}: one log line (${JSON.stringify(lines)})`);
+    }
+    const all = [...logs, ...logLines].join("\n");
+    check(!leaks(all, keyText) && !all.includes(stamp), `no log line holds any 8 characters of the key or a stamp (${JSON.stringify(logLines)})`);
+  }
+  {
+    // Read errors: a write never rotates the key, renames a file or drops an entry because a file can't be read right now.
+    for (const [file, code] of [["hosts.key", "EBUSY"], ["hosts.key", "EPERM"], ["hosts.key", "EACCES"], ["hosts.json", "EBUSY"]] as const) {
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      const before = [sha(keyFile(d)), sha(listFile(d))].join();
+      const e = await thrown(() => approveHost(d, "other", "prompt", { readError: { [file]: code } }));
+      check(e instanceof TrustStoreError && /try again/i.test(e.message) && [sha(keyFile(d)), sha(listFile(d))].join() === before
+        && trustFiles(d, "hosts.key.bad-").length === 0 && trustFiles(d, "hosts.json.bad-").length === 0 && !existsSync(lockFile(d)) && names(readTrustedHosts(d).approved) === "nas",
+        `approveHost while ${file} fails with ${code}: rejected ("try again"), both files byte-for-byte unchanged, no .bad-*, no lock left (${e?.message})`);
+    }
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const e = await thrown(() => revokeHost(d, "nas", { readError: { "hosts.key": "EBUSY" } }));
+    check(e instanceof TrustStoreError && names(readTrustedHosts(d).approved) === "nas", `revokeHost while hosts.key fails with EBUSY is rejected and nas stays (${e?.message})`);
+  }
+  const allowed = () => [...gfs.allowedNetworkHosts()].sort().join(",");
+  {
+    // HostTrust with a kept copy: an unreadable key keeps the last good one (stale), then a network check re-reads it.
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    const inject: ReadErrorInjection = {};
+    const ht = new HostTrust(d, { readError: inject }).start();
+    check(names(ht.list().approved) === "nas" && allowed() === "nas", "HostTrust lists nas as approved and publishes it");
+    inject["hosts.key"] = "EBUSY";
+    ht.reload();
+    const l = ht.list();
+    check(names(l.approved) === "nas" && l.stale && l.unread.length === 0 && allowed() === "nas", `a reload while hosts.key fails with EBUSY keeps nas approved and published (stale) (${JSON.stringify(l)})`);
+    delete inject["hosts.key"];
+    await sleep(1_050);
+    ht.isApproved("zr-evil-9.invalid");
+    check(!ht.list().stale, "once the read works again, the next network check re-reads it without an mtime change");
+    ht.close();
+  }
+  {
+    // Unread at start: no kept copy, so nothing in the list is approved or outside, and no Keep dialog.
+    const E3 = "zr-evil-3.invalid";
+    for (const file of ["hosts.key", "hosts.json"] as const) {
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      writeList(d, [...readList(d).servers, { host: E3 }]);
+      const inject: ReadErrorInjection = { [file]: "EBUSY" };
+      const r = readTrustedHosts(d, { readError: inject });
+      check(r.approved.length === 0 && r.outside.length === 0 && JSON.stringify(r.unread) === JSON.stringify([file]) && approvalDialogFor(r, "nas") === "unread" && approvalDialogFor(r, E3) === "unread",
+        `unread at start (${file} EBUSY, no good copy): nothing approved or outside, unread ${JSON.stringify(r.unread)}, approvalDialogFor gives "unread" for both (${JSON.stringify(r)})`);
+      const ht = new HostTrust(d, { readError: inject }).start();
+      const l = ht.list();
+      check(l.approved.length === 0 && l.outside.length === 0 && JSON.stringify(l.unread) === JSON.stringify([file]) && !gfs.allowedNetworkHosts().has("nas"),
+        `HostTrust started under it: unread ${JSON.stringify(l.unread)}, nas not published (${JSON.stringify(l)})`);
+      delete inject[file];
+      const t0 = Date.now();
+      while (Date.now() - t0 < 2_000 && ht.list().unread.length > 0) await sleep(50);
+      const after = ht.list();
+      check(after.unread.length === 0 && names(after.approved) === "nas" && names(after.outside) === E3 && gfs.allowedNetworkHosts().has("nas") && !gfs.allowedNetworkHosts().has(E3),
+        `the read works again: within 2 s, with no check and no mtime change (the 1 s retry), nas is approved and only now is ${E3} outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
+      ht.close();
+    }
+    const d = freshData();
+    const r = readTrustedHosts(d, { readError: { "hosts.key": "EBUSY" } });
+    check(r.unread.length === 0 && r.approved.length === 0, `an unreadable key next to a missing hosts.json is not "unread": there is no entry to check (${JSON.stringify(r)})`);
+  }
+  {
+    // No laundering, Keep, Remove, and Remove after a Keep in another UI host.
+    const E3 = "zr-evil-3.invalid";
+    const withOutside = async () => {
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      writeList(d, [...readList(d).servers, { host: E3, via: "prompt", added: "2026-10-14T10:00:00.000Z", stamp: randomBytes(32).toString("base64url") }]);
+      return d;
+    };
+    const entryOf = (d: string, host: string) => readList(d).servers.filter((s) => s.host === host);
+    const d = await withOutside();
+    await approveHost(d, "other", "prompt");
+    check(JSON.stringify(entryOf(d, E3)) === JSON.stringify([{ host: E3 }]) && names(readTrustedHosts(d).outside) === E3, `approveHost(other) writes the outside entry back as { host } only (${JSON.stringify(entryOf(d, E3))})`);
+    await revokeHost(d, "nas");
+    check(JSON.stringify(entryOf(d, E3)) === JSON.stringify([{ host: E3 }]) && names(readTrustedHosts(d).outside) === E3, "revokeHost(nas) does the same");
+    await approveHost(d, E3, "prompt");
+    check(entryOf(d, E3).length === 1 && names(readTrustedHosts(d).approved) === `other,${E3}`, "Keep: approveHost on the outside host approves it, with one entry");
+    const d2 = await withOutside();
+    await revokeHost(d2, E3);
+    check(entryOf(d2, E3).length === 0, "Remove: revokeHost on an outside host leaves no entry");
+    const d3 = await withOutside();
+    await approveHost(d3, E3, "prompt");
+    const kept = sha(listFile(d3));
+    const late = await revokeHost(d3, E3, { onlyIfOutside: true });
+    check(!late.removed && sha(listFile(d3)) === kept && names(readTrustedHosts(d3).approved) === `nas,${E3}`, `Remove after a Keep elsewhere: { removed: false }, the file is unchanged, the host stays approved (${JSON.stringify(late)})`);
+    const d4 = await withOutside();
+    const early = await revokeHost(d4, E3, { onlyIfOutside: true });
+    check(early.removed && entryOf(d4, E3).length === 0, "onlyIfOutside on a host that is still outside removes it");
+    const plain = await revokeHost(d3, E3);
+    check(plain.removed && entryOf(d3, E3).length === 0, "a plain revokeHost removes an approved host");
+  }
+  {
+    // First writers: two processes approve different hosts in a fresh data folder at the same moment, 50 times.
+    const base = join(trustRoot, "first");
+    mkdirSync(base);
+    const [a, b] = await Promise.all([
+      child(["first", base, "zr-first-a.invalid", "zr-first-b.invalid", "50"]),
+      child(["first", base, "zr-first-b.invalid", "zr-first-a.invalid", "50"]),
+    ]);
+    const wrong: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const d = join(base, `fw-${i}`);
+      const r = readTrustedHosts(d);
+      if (names(r.approved) !== "zr-first-a.invalid,zr-first-b.invalid" || r.outside.length > 0 || trustFiles(d, "hosts.key").length !== 1) wrong.push(`${i}: ${JSON.stringify(r)}`);
+    }
+    check(a.ok === true && b.ok === true && wrong.length === 0, `first writers: one hosts.key and both hosts approved in all 50 rounds (${JSON.stringify(a)} ${JSON.stringify(b)}; ${wrong.slice(0, 2).join(" ")})`);
+  }
+  {
+    // HostTrust publishes approved servers only; an outside one is listed and logged, never allowed.
+    const E3 = "zr-evil-3.invalid";
+    const d = freshData();
+    await approveHost(d, "nas", "prompt");
+    writeList(d, [...readList(d).servers, { host: E3 }]);
+    let changes = 0;
+    const ht = new HostTrust(d, { onChange: () => void changes++ }).start();
+    const changesAtStart = changes;
+    const l = ht.list();
+    check(names(l.approved) === "nas" && names(l.outside) === E3 && allowed() === "nas" && !ht.isApproved(E3) && approvalDialogFor(l, E3) === "keep" && approvalDialogFor(l, "zr-evil-9.invalid") === "allow",
+      `HostTrust: nas approved and published, ${E3} outside and never published; approvalDialogFor gives "keep" for it (${JSON.stringify(l)}; allowed ${allowed()})`);
+    const box = { decision: true };
+    const lines = await logsOf(() => void (box.decision = ht.isAllowed(E3)));
+    const decision = box.decision;
+    check(enforced ? decision === false && lines.length === 1 && lines[0].includes(`blocked \\\\${E3} (added outside ZabsReel)`) : decision === true && lines.length === 1 && lines[0].includes(`would block \\\\${E3} (added outside ZabsReel)`),
+      `${enforced ? "enforced: refused" : "log mode: let through"} and logged as added outside (${JSON.stringify(lines)})`);
+    // The lazy reload: a write the core was not told about counts on the next check of that server.
+    await approveHost(d, "zr-evil-2.invalid", "prompt");
+    check(ht.isApproved("zr-evil-2.invalid") && gfs.allowedNetworkHosts().has("zr-evil-2.invalid") && changes > changesAtStart, "an approval counts on the next check, with no re-check call (lazy reload on a miss)");
+    // The watch: a write is picked up with no check at all.
+    await approveHost(d, "zr-evil-4.invalid", "prompt");
+    const t0 = Date.now();
+    while (Date.now() - t0 < 2_000 && !gfs.allowedNetworkHosts().has("zr-evil-4.invalid")) await sleep(50);
+    check(gfs.allowedNetworkHosts().has("zr-evil-4.invalid"), `fs.watch on the trust folder picks up a write with no check (${Date.now() - t0} ms)`);
+    ht.close();
+    gfs.setAllowedNetworkHosts([]);
+  }
+
+  // ---- 13. the private trust folder ------------------------------------------------------
+  // MUTATION: drop the ":" rule from trustForm → the trust::$INDEX_ALLOCATION row fails. Drop the
+  // "~" rule → the TRUST~1 row fails. Drop the identity check (checkPath
+  // returns OK for the data folder's server) → the other.json save and the EIO
+  // load are not refused by G2 (the two hosts.key rows still pass, through the
+  // name rule). Drop the name rule → the 0n rows and the zr-evil-2 row fail
+  // (the d$ and volume1 rows still pass, through the identity check). Gate stat
+  // too (content: true on stat) → the storageUsage and stat rows fail. Make the
+  // trust-folder refusal depend on enforce mode → the rows fail without the
+  // variable. Drop the G6 line from isServablePath → row 4's isServablePath row fails.
+  console.log("13. the private trust folder: quick form, gatedfs, G7, other spellings...");
+  touched.length = 0;
+  {
+    const qRoot = join(root, "q");
+    const qTrust = join(qRoot, "trust");
+    gfs.setTrustDir(qTrust);
+    for (const p of [join(qTrust, "hosts.key"), `${qTrust}/./hosts.json`, `${qRoot}/x/../trust/hosts.key`, qTrust]) check(gfs.isTrustPath(p), `isTrustPath(${JSON.stringify(p)})`);
+    for (const p of [`${qRoot}/trustee/x`, `${qRoot}/trust2/x`, `${qRoot}/proxies/x`]) check(!gfs.isTrustPath(p), `not isTrustPath(${JSON.stringify(p)})`);
+    // Windows (through the platform seam): case, a trailing dot, an NTFS stream, an 8.3 short name.
+    const W = "C:\\Users\\a\\zr";
+    const realpath = (p: string) => {
+      const map: Record<string, string> = { "c:\\users\\a\\zr\\trust~1": `${W}\\trust`, "c:\\users\\a\\zr\\trust~2": `${W}\\trustee`, "c:\\users\\a\\zr": W };
+      const real = map[p.toLowerCase()];
+      if (real === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return real;
+    };
+    const win = { platform: "win32" as const, trustDir: `${W}\\trust`, realpath };
+    for (const p of ["C:\\USERS\\A\\ZR\\TRUST\\HOSTS.KEY", `${W}\\trust.\\hosts.key`, `${W}\\trust\\hosts.key::$DATA`, `${W}\\trust::$INDEX_ALLOCATION\\hosts.key`, `${W}\\trust\\hosts.key.`, `${W}\\TRUST~1\\hosts.key`, `${W}/x/../trust /hosts.json`]) {
+      check(gfs.isTrustPath(p, win), `win32: isTrustPath(${JSON.stringify(p)})`);
+    }
+    for (const p of [`${W}\\trustee\\x`, `${W}\\TRUST~2\\x`, `${W}\\proxies\\x`]) check(!gfs.isTrustPath(p, win), `win32: not isTrustPath(${JSON.stringify(p)})`);
+    check(gfs.isTrustPath(`${qTrust.toUpperCase()}/HOSTS.KEY`, { platform: "darwin" }) && !gfs.isTrustPath(`${qTrust.toUpperCase()}/HOSTS.KEY`, { platform: "linux" }), "darwin folds case; linux does not");
+
+    // gatedfs: content calls refuse it in every mode, without calling the real function; metadata calls go through.
+    mkdirSync(qTrust, { recursive: true });
+    writeFixture(join(qTrust, "hosts.key"), "k");
+    writeFixture(join(qTrust, "hosts.json"), "{}");
+    const usage = await storageUsage(qRoot);
+    check(usage.areas.other.files === 2, `storageUsage still counts the two files under "other" (${JSON.stringify(usage.areas.other)})`);
+    const spied: string[] = [];
+    const fsMod = require("node:fs") as Record<string, unknown>;
+    const fspMod = require("node:fs/promises") as Record<string, unknown>;
+    const spyOn: [Record<string, unknown>, string, unknown][] = [
+      [fspMod, "readFile", async () => "spy"], [fspMod, "open", async () => ({})], [fspMod, "copyFile", async () => undefined],
+      [fspMod, "writeFile", async () => undefined], [fspMod, "rename", async () => undefined], [fspMod, "rm", async () => undefined],
+      [fspMod, "mkdir", async () => undefined], [fspMod, "stat", async () => ({})], [fspMod, "lstat", async () => ({})], [fspMod, "readdir", async () => []],
+      [fsMod, "readFileSync", () => "spy"], [fsMod, "createReadStream", () => ({})], [fsMod, "writeFileSync", () => undefined],
+    ];
+    const saved = spyOn.map(([m, k]) => [m, k, m[k]] as const);
+    for (const [m, k, impl] of spyOn) {
+      m[k] = (...a: unknown[]) => {
+        spied.push(`${k}(${a.filter((x) => typeof x === "string").join(", ")})`);
+        return (impl as (...a: unknown[]) => unknown)(...a);
+      };
+    }
+    syncBuiltinESMExports();
+    try {
+      const K = join(qTrust, "hosts.key");
+      const OUT = join(qRoot, "out.bin");
+      for (const [name, fn] of [
+        ["readFile", () => gfs.readFile(K)], ["readFileSync", () => gfs.readFileSync(K)], ["createReadStream", () => gfs.createReadStream(K)],
+        ["open", () => gfs.open(K)], ["copyFile from", () => gfs.copyFile(K, OUT)], ["copyFile to", () => gfs.copyFile(OUT, K)],
+        ["writeFile", () => gfs.writeFile(K, "x")], ["rename from", () => gfs.rename(K, OUT)], ["rename to", () => gfs.rename(OUT, K)],
+        ["rm", () => gfs.rm(K)], ["mkdir", () => gfs.mkdir(join(qTrust, "sub"))],
+      ] as const) {
+        spied.length = 0;
+        const e = await thrown(fn);
+        check(e instanceof gfs.BlockedPathError && /trust folder/.test(e.message) && spied.length === 0, `gatedfs ${name} on the trust folder is refused in every mode, the real function is never called (${e?.message.slice(0, 90)}; ${JSON.stringify(spied)})`);
+      }
+      for (const [name, fn] of [["stat", () => gfs.stat(K)], ["lstat", () => gfs.lstat(K)], ["readdir", () => gfs.readdir(qTrust)]] as const) {
+        spied.length = 0;
+        const e = await thrown(fn);
+        check(e === null && spied.length === 1, `gatedfs ${name} still calls through (${e?.message}; ${JSON.stringify(spied)})`);
+      }
+    } finally {
+      for (const [m, k, orig] of saved) m[k] = orig;
+      syncBuiltinESMExports();
+    }
+    // G7: an argv string in the trust folder, in any form, in every mode.
+    const render = join(qRoot, "render");
+    mkdirSync(render, { recursive: true });
+    const listK = join(render, "list-trust.txt");
+    writeFixture(listK, "file '../trust/hosts.key'\n");
+    for (const [label, fn] of [
+      ["-i", () => ffmpegArgsLocalOnly(["-i", join(qTrust, "hosts.key"), "-f", "null", "-"])],
+      ["output", () => ffmpegArgsLocalOnly(["-i", "/tmp/a.mp4", "-c", "copy", join(qTrust, "x.mp4")])],
+      ["relative in the spawn cwd", () => assertArgvReachable(["-i", "../trust/hosts.key", "-f", "null", "-"], render)],
+      ["-f concat list entry", () => ffmpegArgsLocalOnly(["-f", "concat", "-safe", "0", "-i", listK, "-c", "copy", "/tmp/o.mp4"])],
+      ["ffprobe", () => ffprobeArgsLocalOnly(["-v", "error", join(qTrust, "hosts.key")])],
+    ] as const) {
+      const e = await thrown(fn);
+      check(e instanceof gfs.BlockedPathError && /trust folder/.test(e.message), `G7: ${label} in the trust folder is refused in every mode (${e?.message.slice(0, 90)})`);
+    }
+    check((await thrown(() => assertArgvReachable(["-i", join(qRoot, "proxies", "p.mp4"), "-f", "null", "-"], render))) === null, "G7: a path beside the trust folder passes");
+  }
+  {
+    // Other spellings of a data folder on a share (HostTrust with an injected stat; nothing is opened).
+    const ID: Record<string, bigint> = {
+      "\\\\zr-data.invalid\\zr": 1n, "\\\\zr-data.invalid\\d$\\zr": 1n, "\\\\zr-data.invalid\\volume1\\zr": 1n,
+      "\\\\zr-data.invalid\\zr\\trust": 2n, "\\\\zr-data.invalid\\d$\\zr\\trust": 2n,
+      "\\\\zr-data.invalid\\video": 3n, "\\\\zr-data.invalid\\stock": 4n,
+      "\\\\zr-data.invalid\\d$": 5n, "\\\\zr-data.invalid\\volume1": 6n,
+    };
+    const fake = { fail: {} as Record<string, string>, zeroIno: false, noTrust: false, calls: [] as string[] };
+    const stat = (p: string) => {
+      const k = p.replace(/[\\/]+$/, "").toLowerCase();
+      fake.calls.push(k);
+      const code = fake.fail[k] ?? (ID[k] === undefined || (fake.noTrust && ID[k] === 2n) ? "ENOENT" : undefined);
+      if (code) throw Object.assign(new Error(code), { code });
+      return { dev: 9n, ino: fake.zeroIno ? 0n : ID[k] };
+    };
+    const noRealpath = (p: string): string => {
+      throw Object.assign(new Error(`ENOENT ${p}`), { code: "ENOENT" });
+    };
+    const ht = new HostTrust("\\\\zr-data.invalid\\zr", { platform: "win32", stat, realpath: noRealpath });
+    // On POSIX these paths are relative names: a write that slips through (a mutation) lands in the temp dir.
+    const cwd = process.cwd();
+    process.chdir(root);
+    const PRIVATE = /private settings folder, which tools can't open/;
+    const realTrust = engine.trust;
+    (engine as unknown as { trust: HostTrust }).trust = ht;
+    const spied: string[] = [];
+    const fspMod = require("node:fs/promises") as Record<string, unknown>;
+    const saved = ["readFile", "writeFile", "mkdir"].map((k) => [k, fspMod[k]] as const);
+    for (const [k, orig] of saved) {
+      fspMod[k] = (...a: unknown[]) => {
+        if (a.some((x) => typeof x === "string" && /zr-data/i.test(x))) spied.push(`${k}(${String(a[0])})`);
+        return (orig as (...a: unknown[]) => unknown)(...a);
+      };
+    }
+    syncBuiltinESMExports();
+    const g2 = (p: string) => errOf(() => ht.assertNotPrivate(p, "path"));
+    try {
+      const D$ = "\\\\zr-data.invalid\\d$\\zr\\trust\\hosts.key";
+      const VOL = "\\\\zr-data.invalid\\volume1\\zr\\trust\\hosts.key";
+      for (const p of [D$, VOL]) {
+        for (const [name, fn] of [["load_project", () => engine.load(p)], ["import_video", () => engine.importVideo(p)], ["save", () => engine.save(p)]] as const) {
+          const e = await errOf(fn);
+          check(PRIVATE.test(e), `both rules: ${name} of ${JSON.stringify(p)} is refused (${e.slice(0, 100)})`);
+        }
+        const f = join(root, `spelling-${dataN++}.aive`);
+        writeFixture(f, JSON.stringify(project(p)));
+        const e = await errOf(() => engine.load(f));
+        check(PRIVATE.test(e) && /^asset "asset_a1" path/.test(e), `both rules: a loaded asset.path ${JSON.stringify(p)} refuses the load (${e.slice(0, 100)})`);
+      }
+      // Identity check only (the names are not hosts.*).
+      fake.noTrust = true;
+      const otherJson = await errOf(() => engine.save("\\\\zr-data.invalid\\d$\\zr\\trust\\other.json"));
+      check(PRIVATE.test(otherJson), `identity: a save to …\\d$\\zr\\trust\\other.json before trust/ exists is refused (data-folder identity, then the quick form) (${otherJson.slice(0, 100)})`);
+      fake.noTrust = false;
+      fake.fail["\\\\zr-data.invalid\\video"] = "EIO";
+      const eio = await errOf(() => engine.load("\\\\zr-data.invalid\\video\\b.aive"));
+      check(/couldn't check this path on \\\\zr-data\.invalid \(EIO\); try again\.$/.test(eio), `identity: an EIO on the folder makes load_project refuse ("couldn't check … try again") (${eio.slice(0, 120)})`);
+      fake.fail = {};
+      check((await g2("\\\\zr-data.invalid\\video\\b.aive")) === "(accepted)", "identity: once the folder answers, the same path passes");
+      // Name rule only: the server gives no file ids.
+      fake.zeroIno = true;
+      for (const p of [D$, "\\\\zr-data.invalid\\d$\\zr\\trust\\HOSTS.KEY.", "\\\\zr-data.invalid\\d$\\zr\\trust\\hosts.key.bad-1", "\\\\zr-data.invalid\\d$\\zr\\trust\\hosts.lock.break-1.1"]) {
+        check(PRIVATE.test(await g2(p)), `name rule (no file ids): ${JSON.stringify(p)} is refused`);
+      }
+      check((await g2("\\\\zr-data.invalid\\video\\a.mp4")) === "(accepted)", "name rule (no file ids): a media file passes");
+      fake.zeroIno = false;
+      fake.calls.length = 0;
+      const e2 = await g2("\\\\zr-evil-2.invalid\\zr\\trust\\hosts.key");
+      check(PRIVATE.test(e2) && fake.calls.length === 0, `name rule: another server's …\\trust\\hosts.key is refused, and that server is never stat'ed (${JSON.stringify(fake.calls)})`);
+      for (const p of ["\\\\zr-data.invalid\\video\\a.mp4", "\\\\zr-data.invalid\\d$\\zr\\proxies\\p.mp4"]) check((await g2(p)) === "(accepted)", `passes: ${JSON.stringify(p)}`);
+      check(spied.length === 0, `no readFile, writeFile or mkdir saw a refused or unchecked path (${JSON.stringify(spied)})`);
+    } finally {
+      for (const [k, orig] of saved) fspMod[k] = orig;
+      syncBuiltinESMExports();
+      (engine as unknown as { trust: HostTrust }).trust = realTrust;
+      process.chdir(cwd);
+    }
+  }
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
 
   rmSync(root, { recursive: true, force: true });

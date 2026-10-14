@@ -94,3 +94,20 @@ export function classifyPath(p: string): PathClass {
   if (!h.ok) return { kind: "refused", form: "host", host: raw, reason: h.reason };
   return { kind: "network", host: h.key, display: `\\\\${h.key}` };
 }
+
+/**
+ * Which dialog a UI host shows when the user reviews server `key`, from the
+ * approval store as read by `readTrustedHosts` (trusthosts.ts): "unread" when
+ * the store could not be read and there is no good copy yet (no dialog, only
+ * "couldn't read its list of approved computers; try again"), "keep" when the
+ * server is in the list but ZabsReel did not add it ("added outside
+ * ZabsReel": Keep / Remove), else "allow". The store decides, never the
+ * renderer or the core's pending list.
+ */
+export function approvalDialogFor(
+  list: { unread: readonly string[]; outside: readonly { host: string }[] },
+  key: string,
+): "unread" | "keep" | "allow" {
+  if (list.unread.length > 0) return "unread";
+  return list.outside.some((o) => o.host === key) ? "keep" : "allow";
+}

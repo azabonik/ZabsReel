@@ -11,12 +11,15 @@
  *      import(), require.context, new URL(…, import.meta.url)) and the loader
  *      runner read through ({@link gateInputFileSystem}), so a network path
  *      that arrives any other way (an alias, a loader's own resolve) is
- *      refused too.
+ *      refused too. Its reads of file content (readFile, readJson) also refuse
+ *      the private trust folder (G2's quick form, io/gatedfs.ts isTrustPath),
+ *      so agent TSX can't import the stamp key and get it back in a parse
+ *      error.
  * A graphic never needs a share, so nothing here is approvable and nothing is
  * added to the pending servers.
  */
 import { classifyPath } from "../unc.js";
-import { fsArgPath } from "../io/gatedfs.js";
+import { fsArgPath, isTrustPath } from "../io/gatedfs.js";
 
 const NAME = "GateNetworkFsPlugin";
 
@@ -61,19 +64,23 @@ export function graphicRequestRefusal(request: string): string | null {
 
 /** The input file system's reads that take a path first. */
 const READS = ["stat", "lstat", "readFile", "readdir", "readlink", "realpath", "readJson"] as const;
+/** The ones that return a file's content: they refuse the trust folder too. */
+const CONTENT_READS: ReadonlySet<string> = new Set(["readFile", "readJson"]);
 
 /**
  * Wrap the reads of a webpack input file system in place: a path that is not
- * local (unc.ts) never reaches the real function; the callback gets the G9
- * error (the `…Sync` forms, and a call without a callback, throw it).
+ * local (unc.ts), or for a content read a path in the trust folder, never
+ * reaches the real function; the callback gets the G9 error (the `…Sync`
+ * forms, and a call without a callback, throw it).
  */
 export function gateInputFileSystem(fs: object): void {
   const target = fs as Record<string, unknown>;
-  const notLocal = (p: unknown) => {
-    const a = fsArgPath(p);
-    return a && a.c.kind !== "local" ? refusal(a.text) : null;
-  };
   for (const name of READS) {
+    const notLocal = (p: unknown) => {
+      const a = fsArgPath(p);
+      if (!a) return null;
+      return a.c.kind !== "local" || (CONTENT_READS.has(name) && isTrustPath(p)) ? refusal(a.text) : null;
+    };
     const real = target[name];
     if (typeof real === "function") {
       target[name] = function (this: unknown, p: unknown, ...rest: unknown[]) {
