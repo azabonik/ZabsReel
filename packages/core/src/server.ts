@@ -45,6 +45,22 @@ function sendJson(res: ServerResponse, status: number, body: unknown, withCors =
   res.end(payload);
 }
 
+/** The fields an rpc error carries besides its message: G1e's code and its server(s) (rpc.ts). */
+function errorFields(err: unknown): Record<string, unknown> {
+  if (!(err instanceof RpcError) || (err.code !== "media_server_not_approved" && err.code !== "media_offline")) return {};
+  return { code: err.code, ...err.details };
+}
+
+/** The 403 body of /file, /frames or /peaks (`what`) for a path it may not open. */
+function forbidden(engine: EditorEngine, path: string, what: string): { ok: false; error: string } {
+  if (engine.awaitsApproval(path)) {
+    return { ok: false, error: `Forbidden: this file is on a network computer that is waiting for approval in the app; ${what} does not open it until the user allows it.` };
+  }
+  return { ok: false, error: what === "/file"
+    ? "Forbidden: /file only serves files under the editor data dir or files belonging to imported assets. Import the media first (import_video), then stream the asset's own path."
+    : `Forbidden: ${what} only ${what === "/frames" ? "decodes" : "reads"} files /file would serve.` };
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -101,8 +117,11 @@ export class EditorServer {
         project,
         filePath: this.engine.getCurrentPath() ?? null,
         recovery: this.engine.recoveryInfo(),
+        mediaServers: this.engine.mediaServers(),
       }),
     );
+    // Only the network computers changed (an rpc request made one pending).
+    this.engine.on("media-servers", (mediaServers) => this.broadcast({ type: "media-servers", mediaServers }));
     this.engine.on("progress", (info) => this.broadcast({ type: "progress", ...info }));
     this.engine.on("job", (job) => this.broadcast({ type: "job", job }));
   }
@@ -182,6 +201,7 @@ export class EditorServer {
         project: this.engine.getProject(),
         filePath: this.engine.getCurrentPath() ?? null,
         recovery: this.engine.recoveryInfo(),
+        mediaServers: this.engine.mediaServers(),
       }),
     );
 
@@ -204,6 +224,7 @@ export class EditorServer {
               id: msg.id,
               ok: false,
               error: err instanceof Error ? err.message : String(err),
+              ...errorFields(err),
             }),
           );
         }
@@ -264,6 +285,7 @@ export class EditorServer {
           ok: true,
           result: this.engine.getProject() satisfies Project,
           recovery: this.engine.recoveryInfo(),
+          mediaServers: this.engine.mediaServers(),
         });
         return;
       }
@@ -291,8 +313,10 @@ export class EditorServer {
           const result = await dispatch(this.engine, parsed.method, parsed.params);
           respond(200, { ok: true, result });
         } catch (err) {
-          const status = err instanceof RpcError && err.code !== "handler_error" ? 400 : 500;
-          respond(status, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          // G1e: a server not allowed or offline media is a refusal (403), not a server error.
+          const fields = errorFields(err);
+          const status = fields.code ? 403 : err instanceof RpcError && err.code !== "handler_error" ? 400 : 500;
+          respond(status, { ok: false, error: err instanceof Error ? err.message : String(err), ...fields });
         }
         return;
       }
@@ -306,7 +330,7 @@ export class EditorServer {
         // Decoded source frames for the live preview's trails / denoise (ffmpeg/frames.ts).
         const q = parseFramesQuery(url.searchParams);
         if (typeof q === "string") respond(400, { ok: false, error: q });
-        else if (!this.engine.isServablePath(q.path)) respond(403, { ok: false, error: "Forbidden: /frames only decodes files /file would serve." });
+        else if (!this.engine.isServablePath(q.path)) respond(403, forbidden(this.engine, q.path, "/frames"));
         else {
           cors(res);
           await streamFrames(q, res);
@@ -337,7 +361,7 @@ export class EditorServer {
       return;
     }
     if (!this.engine.isServablePath(p.path)) {
-      respond(403, { ok: false, error: "Forbidden: /peaks only reads files /file would serve." });
+      respond(403, forbidden(this.engine, p.path, "/peaks"));
       return;
     }
     let info;
@@ -371,11 +395,7 @@ export class EditorServer {
       return;
     }
     if (!this.engine.isServablePath(path)) {
-      sendJson(res, 403, {
-        ok: false,
-        error:
-          "Forbidden: /file only serves files under the editor data dir or files belonging to imported assets. Import the media first (import_video), then stream the asset's own path.",
-      });
+      sendJson(res, 403, forbidden(this.engine, path, "/file"));
       return;
     }
     let info;

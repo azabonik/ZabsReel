@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { EditorEngine } from "./engine.js";
 import { PRODUCT_NAME } from "./brand.js";
+import { MediaOfflineError, MediaServerNotApprovedError } from "./hosttrust.js";
 import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
@@ -22,6 +23,53 @@ import { RAMP_AUDIO_MODES, RAMP_MAX_POINTS, RAMP_MAX_SPEED, RAMP_MIN_SPEED, RAMP
  * Tracks are addressed by `trackIndex` (their stable stacking index); clips by
  * `clipId`. Among video tracks, a higher index composites ON TOP of lower.
  */
+
+/**
+ * Every rpc parameter that names a file (plan 6.1, rows R and W): its engine
+ * method refuses a network computer the user has not allowed (G1) and the
+ * private trust folder (G2) before anything opens it; remember_projects skips
+ * such a path. smoke-unc keeps this list complete: a new string parameter
+ * whose name looks like a path must be added here (and gated).
+ */
+export const RPC_PATH_PARAMS: Readonly<Record<string, readonly string[]>> = {
+  import_video: ["path"],
+  load_project: ["path"],
+  import_otio: ["path"],
+  import_captions: ["path"],
+  apply_lut: ["path"],
+  add_text: ["font"],
+  set_text_style: ["font"],
+  generate_captions: ["font"],
+  set_caption_style: ["font"],
+  save_project: ["path"],
+  export_video: ["outputPath"],
+  export_otio: ["path"],
+  export_captions: ["path"],
+  remember_projects: ["paths[]"],
+};
+
+/**
+ * The load_project / import_otio notice for the servers the opened project
+ * uses but may not open (7.4), or undefined. Enforce mode only: in log mode
+ * nothing is pending.
+ */
+function offlineNotice(engine: EditorEngine): string | undefined {
+  const servers = engine.mediaServers();
+  const used = servers.pending.filter((p) => p.origins.includes("project"));
+  if (used.length === 0) return undefined;
+  const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+  if (servers.unread.length > 0) {
+    const where = used.map((p) => `${files(p.files)} on ${p.display}`).join(", ");
+    return `${PRODUCT_NAME} couldn't read its list of approved computers; retrying. This project's ${where} ${used.length === 1 && used[0].files === 1 ? "is" : "are"} offline until it can read it. Call recheck_offline_media in a few seconds.`;
+  }
+  return used
+    .map((p) =>
+      p.origins.includes("outside")
+        ? `This project uses ${files(p.files)} on ${p.display}. ${p.display} is in ${PRODUCT_NAME}'s allowed list, but it was added outside ${PRODUCT_NAME}, so it is not used until the user keeps it in the ${PRODUCT_NAME} window (Project → Network computers).`
+        : `This project uses ${files(p.files)} on ${p.display}, which the user hasn't allowed. They are offline. Ask the user to allow it in the ${PRODUCT_NAME} window if they expect this project to use that computer.`,
+    )
+    .join(" ");
+}
 
 export interface RpcMethod<S extends z.ZodTypeAny = z.ZodTypeAny> {
   description: string;
@@ -163,9 +211,9 @@ const clipPlacement = {
 export const methods = {
   get_state: {
     description:
-      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path. All timing is in frames.",
+      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers). An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
     schema: empty,
-    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo() }),
+    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers() }),
   },
 
   timeline_summary: {
@@ -1490,7 +1538,11 @@ export const methods = {
       const autosaved = await engine.autoSaveIfDirty();
       const r = await engine.importOtio(p.path);
       const restored = engine.lastRestoredFromTrash;
-      return { project: r.project, warnings: r.warnings, missing: r.missing, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}) };
+      const notice = offlineNotice(engine);
+      return {
+        project: r.project, warnings: r.warnings, missing: r.missing, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}),
+        mediaServers: engine.mediaServers(), ...(notice ? { notice } : {}),
+      };
     },
   },
 
@@ -1517,13 +1569,14 @@ export const methods = {
   },
 
   load_project: {
-    description: "Load a project from a .aive JSON file at the given absolute path (old single-track projects are migrated to the multi-track frame model). Unsaved edits in the currently-open project are auto-saved first, so nothing is lost; the returned `autosaved` says whether/where that happened.",
+    description: "Load a project from a .aive JSON file at the given absolute path (old single-track projects are migrated to the multi-track frame model). Unsaved edits in the currently-open project are auto-saved first, so nothing is lost; the returned `autosaved` says whether/where that happened. Media on a network computer the user hasn't allowed stays offline (asset.awaitingServer); `notice` says so and `mediaServers` lists the servers.",
     schema: z.object({ path: z.string().min(1) }).strict(),
     handler: async (engine, p) => {
       const autosaved = await engine.autoSaveIfDirty();
       const project = await engine.load(p.path);
       const restored = engine.lastRestoredFromTrash;
-      return { project, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}) };
+      const notice = offlineNotice(engine);
+      return { project, autosaved, ...(restored.length ? { restoredFromTrash: restored } : {}), mediaServers: engine.mediaServers(), ...(notice ? { notice } : {}) };
     },
   },
 
@@ -1554,9 +1607,24 @@ export const methods = {
 
   remember_projects: {
     description:
-      `Record .aive/.otio project files (for example the recent-projects list, or project files the user mentions) as known projects, so the storage clean-up keeps the baked/proxy files they use. Saving, opening and exporting already record their file; use this for projects made before ${PRODUCT_NAME} tracked project files. Paths that don't exist or aren't .aive/.otio files are skipped (returned in skipped). Returns {added, skipped, knownProjects}.`,
+      `Record .aive/.otio project files (for example the recent-projects list, or project files the user mentions) as known projects, so the storage clean-up keeps the baked/proxy files they use. Saving, opening and exporting already record their file; use this for projects made before ${PRODUCT_NAME} tracked project files. Paths that don't exist, aren't .aive/.otio files or are on a network computer the user hasn't allowed are skipped (returned in skipped). Returns {added, skipped, knownProjects}.`,
     schema: z.object({ paths: z.array(z.string().min(1)).max(500) }).strict(),
     handler: async (engine, p) => engine.storage.rememberMany(p.paths),
+  },
+
+  // ---- network computers (hosttrust.ts) ----------------------------------------
+  list_media_servers: {
+    description:
+      `The network computers (\\\\server) ${PRODUCT_NAME} may open files on, as the user set them in the ${PRODUCT_NAME} window. Returns {gate ("log": nothing is blocked yet; "enforce"), approved:[{host, display, via (prompt|picker), added}], outside:[{host, display}] (in the allowed list but added outside ${PRODUCT_NAME}: not used until the user keeps it), unread (store files ${PRODUCT_NAME} couldn't read yet: no listed server is used until it can), pending:[{host, display, origins (project|request|outside), files, examples, since}] (servers waiting for the user), dataFolderHost?}. Only the user can allow a server, in the ${PRODUCT_NAME} window (Project → Network computers); no tool can, and editing ${PRODUCT_NAME}'s files does not.`,
+    schema: empty,
+    handler: (engine) => engine.mediaServers(),
+  },
+
+  recheck_offline_media: {
+    description:
+      "Re-read the list of allowed network computers and re-check offline media (clips waiting for a server, files whose folder couldn't be checked) without reloading the project. It allows nothing itself. Returns list_media_servers.",
+    schema: empty,
+    handler: (engine) => engine.recheckOfflineMedia(),
   },
 
   remove_unused_media: {
@@ -1572,7 +1640,9 @@ export type MethodName = keyof typeof methods;
 export class RpcError extends Error {
   constructor(
     message: string,
-    readonly code: "unknown_method" | "invalid_params" | "handler_error",
+    readonly code: "unknown_method" | "invalid_params" | "handler_error" | "media_server_not_approved" | "media_offline",
+    /** For media_server_not_approved: the server's key, and whether it is outside or the store is unread; for media_offline: the servers. */
+    readonly details: { host?: string; outside?: boolean; unread?: boolean; hosts?: string[] } = {},
   ) {
     super(message);
     this.name = "RpcError";
@@ -1589,5 +1659,14 @@ export async function dispatch(engine: EditorEngine, method: string, params: unk
   if (!parsed.success) {
     throw new RpcError(`Invalid params for "${method}": ${parsed.error.message}`, "invalid_params");
   }
-  return entry.handler(engine, parsed.data);
+  try {
+    return await entry.handler(engine, parsed.data);
+  } catch (err) {
+    // G1e: the network-computer refusals keep their own codes, so a client can tell them apart.
+    if (err instanceof MediaServerNotApprovedError) {
+      throw new RpcError(err.message, "media_server_not_approved", { host: err.host, ...(err.outside ? { outside: true } : {}), ...(err.unread ? { unread: true } : {}) });
+    }
+    if (err instanceof MediaOfflineError) throw new RpcError(err.message, "media_offline", { hosts: err.hosts });
+    throw err;
+  }
 }

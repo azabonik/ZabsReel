@@ -105,6 +105,18 @@ export interface MediaAsset {
    */
   missing?: boolean;
   /**
+   * Runtime only, never saved: the network computer (host key) this asset's
+   * file is on, which the user has not allowed yet. Set on load; cleared when
+   * the user allows it in the app.
+   */
+  awaitingServer?: string;
+  /**
+   * Runtime only, never saved: ZabsReel could not check whether this file is
+   * in its private settings folder (the error code, or "private" when it is),
+   * so it did not open it. Set on load; cleared by a later successful check.
+   */
+  pathCheckFailed?: string;
+  /**
    * Set on the synthesized bleep sound effects auto-bleep imports (one asset
    * per sound, reused by every bleep). Lets clients find the WAV to preview.
    */
@@ -709,6 +721,11 @@ export const PROJECT_SCHEMA_VERSION = 4;
  * max(1, round((out - in) / speed)) as always). `fps` is needed because ramp
  * points are in asset seconds.
  */
+/** True when nothing may open an asset's file: not found, on a server not allowed yet, or its folder could not be checked. */
+export function isOffline(a: Pick<MediaAsset, "missing" | "awaitingServer" | "pathCheckFailed">): boolean {
+  return !!a.missing || !!a.awaitingServer || !!a.pathCheckFailed;
+}
+
 export function clipDurationFrames(clip: Clip, fps: number): number {
   return clipFootprintFrames(clip, fps);
 }

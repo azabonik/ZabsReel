@@ -16,8 +16,14 @@
  *  - fs.watch on the trust folder re-reads it (200 ms debounce); on WSL/9p and
  *    shares the watch may not fire, so the UI hosts also ask for a re-check.
  *
+ * It also keeps the pending list: servers the open project uses but the user
+ * has not allowed (origin "project", set by the engine's G3 marking), servers
+ * an rpc call asked for (origin "request", G1: {@link HostTrust.requirePath}),
+ * and servers added outside ZabsReel (origin "outside", from the store).
+ *
  * While io/gatedfs.ts NETWORK_GATE is "log", {@link HostTrust.isAllowed} only
- * logs what it would block. G2 and the load-field check are always enforced.
+ * logs what it would block, and nothing is pending. G2 and the load-field
+ * check are always enforced.
  */
 import { posix, win32, type PlatformPath } from "node:path";
 import { PRODUCT_NAME } from "./brand.js";
@@ -36,6 +42,73 @@ import {
 } from "./io/gatedfs.js";
 import type { Project } from "./types.js";
 
+/** Why a server is pending: the open project uses it, an rpc call asked for it, or it was added outside ZabsReel. */
+export type PendingOrigin = "project" | "request" | "outside";
+
+/** A server waiting for the user (list_media_servers.pending). Examples are sanitized paths. */
+export interface PendingServer {
+  host: string;
+  display: string;
+  origins: PendingOrigin[];
+  /** Files the open project uses there. */
+  files: number;
+  examples: string[];
+  since: string;
+}
+
+/** list_media_servers: the store as the core reads it (no stamp, no key) and the pending list. */
+export interface MediaServers {
+  gate: "log" | "enforce";
+  approved: { host: string; display: string; via: ApprovedHost["via"]; added: string }[];
+  outside: { host: string; display: string }[];
+  unread: TrustFile[];
+  pending: PendingServer[];
+  dataFolderHost?: string;
+}
+
+/** G1: an rpc path on a network computer the user has not allowed (rpc code media_server_not_approved). */
+export class MediaServerNotApprovedError extends Error {
+  readonly code = "media_server_not_approved";
+  constructor(
+    message: string,
+    readonly host: string,
+    readonly display: string,
+    readonly path: string,
+    /** The server is in the store but was added outside ZabsReel. */
+    readonly outside = false,
+    /** The store could not be read yet: the server may be approved. */
+    readonly unread = false,
+  ) {
+    super(message);
+    this.name = "MediaServerNotApprovedError";
+  }
+}
+
+/** G4 / G5: media the call needs is offline (rpc code media_offline). */
+export class MediaOfflineError extends Error {
+  readonly code = "media_offline";
+  constructor(
+    message: string,
+    /** The servers it waits for (host keys). */
+    readonly hosts: string[],
+  ) {
+    super(message);
+    this.name = "MediaOfflineError";
+  }
+}
+
+/** How long an rpc request keeps its server pending. */
+const REQUEST_TTL_MS = 30 * 60_000;
+
+/**
+ * A path from untrusted data as an example in a message or the pending list:
+ * control and bidi characters removed, at most 80 characters with a middle ellipsis.
+ */
+export function examplePath(p: string): string {
+  const s = p.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "");
+  return s.length <= 80 ? s : `${s.slice(0, 39)}…${s.slice(-40)}`;
+}
+
 /** A file's identity: equal dev and ino are one file, under any spelling of its path (ino 0 means unknown). */
 interface FileId {
   dev: bigint;
@@ -45,6 +118,8 @@ interface FileId {
 export interface HostTrustOptions {
   /** Called after a re-read changed what is approved, outside or unread. */
   onChange?: () => void;
+  /** Called when an rpc request made a server pending (the project's own entries change with the project). */
+  onPending?: () => void;
   /** Test seams: store read errors (re-read at each reload), the platform, and the stat / realpath of G2. */
   readError?: ReadErrorInjection;
   platform?: NodeJS.Platform;
@@ -61,9 +136,10 @@ export class PrivatePathError extends Error {
 }
 
 /** Why a path may not be used, or ok. */
-type PathCheck = { ok: true } | { ok: false; private: true } | { ok: false; private: false; code: string; host?: string };
+type PathCheck = { ok: true } | { ok: false; private: true; rule?: string } | { ok: false; private: false; code: string; host?: string };
 const OK: PathCheck = { ok: true };
 const PRIVATE: PathCheck = { ok: false, private: true };
+const IDENTITY: PathCheck = { ok: false, private: true, rule: "the identity check" };
 
 /** Store file names (and their temp, .bad-* and break-claim files), refused on any network path. */
 const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/;
@@ -95,6 +171,12 @@ export class HostTrust {
   private debounce: NodeJS.Timeout | null = null;
   /** Servers already named in a "would block" / "blocked" line, with the reason. */
   private logged = new Set<string>();
+  /** Pending, origin "project": what the open project uses on each server it may not open (G3 sets it). */
+  private projectUse = new Map<string, { files: number; examples: string[] }>();
+  /** Pending, origin "request": servers rpc calls asked for, with example paths and when. */
+  private requests = new Map<string, { examples: string[]; at: number }>();
+  /** When each server first became pending (kept while it stays pending). */
+  private since = new Map<string, number>();
 
   constructor(
     readonly dataDir: string,
@@ -245,6 +327,118 @@ export class HostTrust {
     };
   }
 
+  // ---- the pending list and G1 ----------------------------------------------------
+
+  /** Whether the store could not be read and there is no good copy yet (3.1 "Unread state"). */
+  isUnread(): boolean {
+    return this.unread.length > 0;
+  }
+
+  /** Whether `host` is in the store but was added outside ZabsReel. */
+  isOutside(host: string): boolean {
+    return this.outside.includes(host);
+  }
+
+  /** G3: the servers the open project uses but may not open, with its file count and examples (origin "project"). */
+  setProjectUse(use: Map<string, { files: number; examples: string[] }>): void {
+    this.projectUse = use;
+  }
+
+  /** Forget the rpc requests (a new project was loaded, imported or started). */
+  clearRequests(): void {
+    if (this.requests.size === 0) return;
+    this.requests.clear();
+    this.opts.onPending?.();
+  }
+
+  /**
+   * The pending list (enforce mode only: in log mode nothing is blocked, so
+   * nothing waits). A request lasts until its server is approved, the next
+   * load, or 30 minutes; an outside entry lasts until it is kept or removed.
+   */
+  pending(): PendingServer[] {
+    if (!networkGateEnforced()) return [];
+    const now = Date.now();
+    for (const [host, r] of this.requests) if (now - r.at > REQUEST_TTL_MS || this.trusts(host)) this.requests.delete(host);
+    const hosts = new Set([...this.projectUse.keys(), ...this.requests.keys(), ...this.outside]);
+    const out: PendingServer[] = [];
+    for (const host of hosts) {
+      if (this.trusts(host)) continue;
+      const origins: PendingOrigin[] = [];
+      if (this.projectUse.has(host)) origins.push("project");
+      if (this.requests.has(host)) origins.push("request");
+      if (this.outside.includes(host)) origins.push("outside");
+      const use = this.projectUse.get(host);
+      const examples = [...new Set([...(use?.examples ?? []), ...(this.requests.get(host)?.examples ?? [])])].slice(0, 3);
+      if (!this.since.has(host)) this.since.set(host, now);
+      out.push({ host, display: `\\\\${host}`, origins, files: use?.files ?? 0, examples, since: new Date(this.since.get(host)!).toISOString() });
+    }
+    for (const host of this.since.keys()) if (!hosts.has(host) || this.trusts(host)) this.since.delete(host);
+    return out;
+  }
+
+  /** list_media_servers (and mediaServers in the state): no stamp and no key in any field. */
+  mediaServers(): MediaServers {
+    const l = this.list();
+    return {
+      gate: networkGateEnforced() ? "enforce" : "log",
+      approved: l.approved.map(({ host, display, via, added }) => ({ host, display, via, added })),
+      outside: l.outside,
+      unread: l.unread,
+      pending: this.pending(),
+      ...(l.dataFolderHost ? { dataFolderHost: l.dataFolderHost } : {}),
+    };
+  }
+
+  /**
+   * G1, at the top of every engine method that takes an rpc path (read or
+   * write): a network path on a server the user has not allowed is refused
+   * with MediaServerNotApprovedError, before anything opens it, and the server
+   * becomes pending with origin "request" (not while the store is unread: the
+   * server may be approved). Log mode only logs. `field` names the parameter.
+   */
+  requirePath(p: unknown, field: string): void {
+    if (typeof p !== "string" || p === "") return;
+    const { text, c } = classifyFsText(p, { platform: this.platform });
+    if (c.kind !== "network" || this.isAllowed(c.host)) return;
+    const { host, display } = c;
+    if (this.isUnread()) {
+      throw new MediaServerNotApprovedError(
+        `${PRODUCT_NAME} couldn't read its list of approved computers; retrying. It did not open ${show(examplePath(text))}. Try again in a few seconds.`,
+        host, display, text, false, true,
+      );
+    }
+    const r = this.requests.get(host) ?? { examples: [], at: 0 };
+    const ex = examplePath(text);
+    this.requests.set(host, { examples: [...new Set([...r.examples, ex])].slice(-3), at: Date.now() });
+    this.opts.onPending?.();
+    if (this.isOutside(host)) {
+      throw new MediaServerNotApprovedError(
+        `${field} ${show(text)} is on ${display}. ${display} was added to ${PRODUCT_NAME}'s allowed list outside ${PRODUCT_NAME}, so it is not used until the user keeps it in the ${PRODUCT_NAME} window. You cannot keep it yourself, and editing ${PRODUCT_NAME}'s files does not allow it. Nothing was opened.`,
+        host, display, text, true,
+      );
+    }
+    throw new MediaServerNotApprovedError(
+      `${field} ${show(text)} is on the network computer ${display}, which the user has not allowed in ${PRODUCT_NAME} yet. Nothing was opened. You cannot allow it yourself: tell the user what it is for; they can allow it in the ${PRODUCT_NAME} window (Project → Network computers).`,
+      host, display, text,
+    );
+  }
+
+  /** G1 for remember_projects: why `p` is skipped (a server not allowed, then G2), or null. Never throws. */
+  rememberRefusal(p: string): string | null {
+    try {
+      this.requirePath(p, "path");
+    } catch (err) {
+      if (!(err instanceof MediaServerNotApprovedError)) throw err;
+      return err.unread
+        ? `${PRODUCT_NAME} couldn't read its list of approved computers; try again`
+        : err.outside
+          ? `on ${err.display}, which was added outside ${PRODUCT_NAME} and is not used until the user keeps it`
+          : `on a network computer you haven't allowed (${err.display})`;
+    }
+    return this.pathRefusal(p);
+  }
+
   // ---- the private trust folder (G2) ------------------------------------------------
 
   private quick(p: string, ctx: TrustPathContext = {}): boolean {
@@ -326,8 +520,8 @@ export class HostTrust {
       const target = P.resolve(p);
       for (let level = target; ; level = P.dirname(level)) {
         const id = this.idOf(level, cache);
-        if (same(id, trust)) return PRIVATE;
-        if (same(id, data)) return this.quick(P.join(this.dataDir, P.relative(level, target))) ? PRIVATE : OK;
+        if (same(id, trust)) return IDENTITY;
+        if (same(id, data)) return this.quick(P.join(this.dataDir, P.relative(level, target))) ? IDENTITY : OK;
         if (P.dirname(level) === level) return OK;
       }
     } catch (code) {
@@ -348,7 +542,7 @@ export class HostTrust {
     if (c.kind === "refused") return OK;
     if (this.quick(text)) return PRIVATE;
     if (c.kind === "network") {
-      if (this.storeName(text)) return PRIVATE;
+      if (this.storeName(text)) return { ok: false, private: true, rule: "the name rule" };
       return c.host === this.dataFolderHost ? this.identity(text, c.host, cache) : OK;
     }
     try {
@@ -371,46 +565,70 @@ export class HostTrust {
     if (typeof p !== "string" || p === "") return;
     const r = this.checkPath(p);
     if (r.ok) return;
+    // Which rule caught a network spelling (a server that gives no file ids still has the name rule).
+    if (r.private && r.rule) console.error(`[aive-core] refused ${show(p)}: in the private trust folder (${r.rule})`);
     if (r.private) throw new PrivatePathError(`${field} ${show(p)} is in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`);
     throw new PrivatePathError(`${field} ${show(p)}: ${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again.`);
   }
 
   /**
-   * The load-field check (P16), quick form and name rule: a project whose
-   * asset path, cutout colour path, LUT or text or caption font is in the
-   * trust folder does not load; a proxy or preview path there is dropped. For
-   * an .otio import (`otio`), an asset path there stays an offline placeholder
-   * (its import already skipped the probe). Mutates `project`. The identity
-   * check of a field on the data folder's server (pathCheckFailed,
-   * uncheckedPaths) comes with the offline state.
+   * One loaded field (no I/O except the identity check of a path on the data
+   * folder's own server): "ok", "private" (in the trust folder, by the quick
+   * form, the name rule or the identity check), or the error code of a
+   * folder that could not be checked. `cache` keeps the stats of one load.
    */
-  checkLoadedProject(project: Project, opts: { otio?: boolean } = {}): void {
+  loadFieldCheck(p: unknown, cache = new Map<string, FileId | null>()): string {
+    if (typeof p !== "string" || p === "") return "ok";
+    if (this.privateAsSpelled(p)) return "private";
+    const c = classifyPath(p);
+    if (c.kind !== "network" || c.host !== this.dataFolderHost) return "ok";
+    const r = this.identity(p, c.host, cache);
+    return r.ok ? "ok" : r.private ? "private" : r.code;
+  }
+
+  /**
+   * The load-field check (P16): a project whose asset path, cutout colour
+   * path, LUT or text or caption font is in the trust folder does not load; a
+   * proxy or preview path there is dropped. For an .otio import (`otio`), an
+   * asset path there stays an offline placeholder (its import already
+   * skipped the probe), flagged "private". A field on the data folder's
+   * server whose folder can't be checked is never opened, and only it goes
+   * offline: an asset gets `pathCheckFailed` (the error code), a proxy or
+   * preview path is dropped, and a LUT or font is returned (path → code) for
+   * the engine's uncheckedPaths. An incoming `pathCheckFailed` is dropped
+   * first. Mutates `project`.
+   */
+  checkLoadedProject(project: Project, opts: { otio?: boolean } = {}): Map<string, string> {
     const refuse = (field: string, p: string) => {
       throw new PrivatePathError(`${field} ${show(p)} is in ${PRODUCT_NAME}'s private settings folder, which tools can't open. Change this path in the project file and open the project again.`);
     };
-    const priv = (p: unknown): p is string => typeof p === "string" && this.privateAsSpelled(p);
+    const cache = new Map<string, FileId | null>();
+    const unchecked = new Map<string, string>();
+    const check = (p: unknown) => this.loadFieldCheck(p, cache);
     for (const a of project.assets ?? []) {
-      if (priv(a.path) && !(opts.otio && a.missing)) refuse(`asset "${a.id}" path`, a.path);
-      if (priv(a.cutout?.colorPath)) refuse(`asset "${a.id}" cutout colour path`, a.cutout.colorPath);
-      if (priv(a.proxyPath)) delete a.proxyPath;
-      if (priv(a.previewPath)) delete a.previewPath;
+      delete a.pathCheckFailed;
+      const path = check(a.path);
+      if (path === "private" && !(opts.otio && a.missing)) refuse(`asset "${a.id}" path`, a.path);
+      if (path !== "ok") a.pathCheckFailed = path;
+      const color = check(a.cutout?.colorPath);
+      if (color === "private") refuse(`asset "${a.id}" cutout colour path`, a.cutout!.colorPath);
+      if (color !== "ok") a.pathCheckFailed ??= color;
+      if (check(a.proxyPath) !== "ok") delete a.proxyPath;
+      if (check(a.previewPath) !== "ok") delete a.previewPath;
     }
+    const other = (field: string, p: string | undefined) => {
+      const r = check(p);
+      if (r === "private") refuse(field, p!);
+      if (r !== "ok") unchecked.set(p!, r);
+    };
     for (const t of project.tracks ?? []) {
       for (const c of t.clips ?? []) {
-        if (priv(c.effects?.lut)) refuse(`clip "${c.id}" LUT path`, c.effects.lut);
+        other(`clip "${c.id}" LUT path`, c.effects?.lut);
         // Fonts are trimmed where they are used (resolveFont), so check them trimmed.
-        for (const ov of c.overlays ?? []) {
-          const f = ov.font?.trim();
-          if (priv(f)) refuse(`clip "${c.id}" text "${ov.id}" font`, f);
-        }
-        const cf = c.captions?.style?.font?.trim();
-        if (priv(cf)) refuse(`clip "${c.id}" caption font`, cf);
+        for (const ov of c.overlays ?? []) other(`clip "${c.id}" text "${ov.id}" font`, ov.font?.trim());
+        other(`clip "${c.id}" caption font`, c.captions?.style?.font?.trim());
       }
     }
-  }
-
-  /** True when an .otio media path must not be probed: it is in the trust folder (quick form or name rule). */
-  isPrivateMediaPath(p: string): boolean {
-    return this.privateAsSpelled(p);
+    return unchecked;
   }
 }

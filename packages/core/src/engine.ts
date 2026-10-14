@@ -4,12 +4,13 @@ import { homedir } from "node:os";
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { newId } from "./ids.js";
+import { PRODUCT_NAME } from "./brand.js";
 import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, assertPathUsable, isProtocolLike } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
-import { HostTrust } from "./hosttrust.js";
-import { classifyPath } from "./unc.js";
+import { HostTrust, MediaOfflineError, examplePath, type MediaServers } from "./hosttrust.js";
+import { bareFileName, classifyPath } from "./unc.js";
 import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
 import {
@@ -94,6 +95,7 @@ import {
   clipDurationFrames,
   clipEndFrame,
   framesToSeconds,
+  isOffline,
   secondsToFrames,
   PROJECT_SCHEMA_VERSION,
   type Canvas,
@@ -450,6 +452,8 @@ export interface EngineEvents {
   progress: (info: { job: "preview" | "export"; fraction: number }) => void;
   /** Emitted on every job state/progress change (start, progress, done/error/canceled). */
   job: (job: Job) => void;
+  /** Emitted when only the network computers changed (an rpc request made one pending). */
+  "media-servers": (servers: MediaServers) => void;
 }
 
 function defaultProject(): Project {
@@ -532,18 +536,36 @@ export class EditorEngine extends EventEmitter {
   readonly trust: HostTrust;
   /** Files the last load()/importOtio() moved back out of the storage trash. */
   lastRestoredFromTrash: string[] = [];
+  /**
+   * A loaded LUT or font path on the data folder's server whose folder could
+   * not be checked (path → error code, or "private" once a re-check found it
+   * in the trust folder): never opened (G5, G6, resolveFont). Runtime only;
+   * cleared by new_project and the next load / import_otio.
+   */
+  private uncheckedPaths = new Map<string, string>();
+  /** onTrustChanged is running / was asked again meanwhile (a store re-read inside it). */
+  private trustBusy = false;
+  private trustAgain = false;
 
   /** Directory where previews, thumbnails and other render artifacts are written. */
   constructor(readonly dataDir: string) {
     super();
     // Renders and bakes run FFmpeg in render/ and baked/ with files named by bare name.
     addFfmpegWorkRoot(dataDir);
-    this.trust = new HostTrust(dataDir).start();
+    this.trust = new HostTrust(dataDir, {
+      onChange: () => this.onTrustChanged(),
+      onPending: () => this.emit("media-servers", this.mediaServers()),
+    });
+    this.trust.start();
     this.storage = new StorageJanitor(dataDir, {
       liveProjects: () => [this.project, ...this.undoStack, ...this.redoStack],
       runningJobs: () => this.jobs.list(true),
       pruneLibrary: () => this.pruneLibraryBakes(),
-      privatePath: (p) => this.trust.pathRefusal(p),
+      privatePath: (p) => this.trust.rememberRefusal(p),
+      serverWaiting: (p) => {
+        const c = classifyPath(p);
+        return c.kind === "network" && !this.trust.isAllowed(c.host) ? c.display : undefined;
+      },
     });
     this.jobs.on("job", (job) => this.emit("job", job));
     this.jobs.on("job", (job) => this.storage.onJob(job));
@@ -585,7 +607,9 @@ export class EditorEngine extends EventEmitter {
   private serializableProject(): Project {
     return {
       ...this.project,
-      assets: this.project.assets.map((a) => {
+      assets: this.project.assets.map((live) => {
+        // The offline flags are runtime state: never saved, recovered or exported.
+        const { awaitingServer: _a, pathCheckFailed: _p, ...a } = live;
         const cache = this.assetCaches.get(a.id);
         if (!cache?.transcript && !cache?.visualSig) return a;
         return { ...a, ...(cache.transcript ? { transcript: cache.transcript } : {}), ...(cache.visualSig ? { visualSig: cache.visualSig } : {}) };
@@ -695,17 +719,23 @@ export class EditorEngine extends EventEmitter {
    * never be used to read arbitrary files on disk.
    */
   isServablePath(p: string): boolean {
-    // Never the private trust folder (the stamp key is there), whatever else allows it.
-    if (this.trust.inTrustDir(p)) return false;
+    // Never the private trust folder (the stamp key is there), whatever else allows it,
+    // nor a file that waits for approval or whose folder could not be checked (G6).
+    if (this.trust.inTrustDir(p) || this.awaitsApproval(p)) return false;
     const norm = (s: string): string => {
       const r = resolve(s);
       // Windows paths are case-insensitive; compare them case-folded.
       return process.platform === "win32" ? r.toLowerCase() : r;
     };
     const target = norm(p);
+    if ([...this.uncheckedPaths.keys()].some((u) => norm(u) === target)) return false;
+    for (const a of this.project.assets) {
+      if (a.pathCheckFailed && [a.path, a.cutout?.colorPath].some((x) => x && norm(x) === target)) return false;
+    }
     const dataRoot = norm(this.dataDir);
     if (target === dataRoot || target.startsWith(dataRoot + sep)) return true;
     for (const a of this.project.assets) {
+      if (a.awaitingServer || a.pathCheckFailed) continue;
       for (const candidate of [a.path, a.proxyPath, a.previewPath]) {
         if (candidate && norm(candidate) === target) return true;
       }
@@ -720,6 +750,283 @@ export class EditorEngine extends EventEmitter {
       }
     }
     return false;
+  }
+
+  /**
+   * True when `p` is on a network computer the user has not allowed (G6:
+   * /file, /frames and /peaks answer "waiting for approval in the app"; P13;
+   * P14). Log mode only logs. No I/O.
+   */
+  awaitsApproval(p: string): boolean {
+    const c = classifyPath(p);
+    return c.kind === "network" && !this.trust.isAllowed(c.host);
+  }
+
+  // ---- network computers: the offline state (hosttrust.ts) -------------------------
+  /** list_media_servers: the approved, outside and pending servers (no stamp, no key). */
+  mediaServers(): MediaServers {
+    return this.trust.mediaServers();
+  }
+
+  /**
+   * G3: mark what the project (and its undo / redo copies) uses on a network
+   * computer the user has not allowed. An asset whose path or cutout colour
+   * path is on one gets `awaitingServer` (an incoming value is replaced); a
+   * proxy or preview path on one is dropped (an engine cache, made again when
+   * needed; a local proxy stays). The open project's servers, with its LUTs
+   * and fonts, become pending with origin "project". In place and without a
+   * revision bump, so marking never makes the project unsaved. In log mode
+   * HostTrust.isAllowed only logs, so nothing is marked.
+   */
+  private markOfflineMedia(): void {
+    const allowed = new Map<string, boolean>();
+    const blocked = (p: string | undefined): string | undefined => {
+      if (!p) return undefined;
+      const c = classifyPath(p);
+      if (c.kind !== "network") return undefined;
+      if (!allowed.has(c.host)) allowed.set(c.host, this.trust.isAllowed(c.host));
+      return allowed.get(c.host) ? undefined : c.host;
+    };
+    for (const project of [this.project, ...this.undoStack, ...this.redoStack]) {
+      for (const a of project.assets) {
+        const host = blocked(a.path) ?? blocked(a.cutout?.colorPath);
+        if (host) a.awaitingServer = host;
+        else delete a.awaitingServer;
+        if (blocked(a.proxyPath)) delete a.proxyPath;
+        if (blocked(a.previewPath)) delete a.previewPath;
+      }
+    }
+    const use = new Map<string, Set<string>>();
+    const note = (p: string | undefined) => {
+      const host = blocked(p);
+      if (host) use.set(host, (use.get(host) ?? new Set()).add(p!));
+    };
+    for (const a of this.project.assets) {
+      note(a.path);
+      note(a.cutout?.colorPath);
+    }
+    for (const { clip } of this.allClips()) {
+      note(clip.effects?.lut);
+      for (const ov of clip.overlays ?? []) note(ov.font?.trim());
+      note(clip.captions?.style?.font?.trim());
+    }
+    this.trust.setProjectUse(new Map([...use].map(([host, files]) => [host, { files: files.size, examples: [...files].slice(0, 3).map(examplePath) }])));
+  }
+
+  /**
+   * The approved servers changed (a store re-read: fs.watch, a check's lazy
+   * reload, the unread retry) or recheck_offline_media asked: mark the media
+   * again (G3), re-check the fields whose folder could not be checked, and
+   * tell the clients. The project is not reloaded and not made unsaved (I5).
+   */
+  onTrustChanged(): void {
+    if (this.trustBusy) {
+      this.trustAgain = true;
+      return;
+    }
+    this.trustBusy = true;
+    try {
+      do {
+        this.trustAgain = false;
+        this.markOfflineMedia();
+        this.recheckUncheckedFields();
+      } while (this.trustAgain);
+    } finally {
+      this.trustBusy = false;
+    }
+    this.emit("change", this.project);
+  }
+
+  /** recheck_offline_media: re-read the store and re-evaluate the offline media now. */
+  recheckOfflineMedia(): MediaServers {
+    this.trust.reload();
+    this.onTrustChanged();
+    return this.mediaServers();
+  }
+
+  /**
+   * The identity check again for each field whose folder could not be checked
+   * at load (pathCheckFailed, uncheckedPaths; not "private"): a pass clears
+   * it (a placeholder is probed again), a path now found in the trust folder
+   * becomes "private" (offline for this session), another error keeps it.
+   */
+  private recheckUncheckedFields(): void {
+    const results = new Map<string, string>();
+    const check = (p: string): string => {
+      if (!results.has(p)) results.set(p, this.trust.loadFieldCheck(p));
+      return results.get(p)!;
+    };
+    for (const project of [this.project, ...this.undoStack, ...this.redoStack]) {
+      for (const a of project.assets) {
+        if (!a.pathCheckFailed || a.pathCheckFailed === "private") continue;
+        const r = [check(a.path), a.cutout ? check(a.cutout.colorPath) : "ok"].find((x) => x !== "ok");
+        if (r) {
+          a.pathCheckFailed = r;
+          continue;
+        }
+        delete a.pathCheckFailed;
+        if (a.missing && project === this.project && !a.awaitingServer) void this.reprobePlaceholder(a.id, a.path);
+      }
+    }
+    for (const [p, code] of this.uncheckedPaths) {
+      if (code === "private") continue;
+      const r = check(p);
+      if (r === "ok") this.uncheckedPaths.delete(p);
+      else this.uncheckedPaths.set(p, r);
+    }
+  }
+
+  /** Probe an offline placeholder (an .otio clip whose file could not be opened) once it may be opened; fills it in on success. */
+  private async reprobePlaceholder(id: string, path: string): Promise<void> {
+    let probed: MediaAsset;
+    try {
+      probed = await probeAsset(path);
+    } catch {
+      return;
+    }
+    const { duration, width, height, fps, hasVideo, hasAudio, isImage, videoCodec, audioCodec, color } = probed;
+    let changed = false;
+    for (const project of [this.project, ...this.undoStack, ...this.redoStack]) {
+      for (const a of project.assets) {
+        if (a.id !== id || a.path !== path || !a.missing || a.awaitingServer || a.pathCheckFailed) continue;
+        Object.assign(a, { duration, width, height, fps, hasVideo, hasAudio, isImage, videoCodec, audioCodec, color });
+        delete a.missing;
+        changed = true;
+      }
+    }
+    if (changed) this.emit("change", this.project);
+  }
+
+  /** Why an offline asset's file can't be used, for an error message (7.3). */
+  private offlineWhy(a: MediaAsset): string {
+    if (a.awaitingServer) {
+      const at = `\\\\${a.awaitingServer}`;
+      if (this.trust.isUnread()) {
+        return `its file is on ${at}, and ${PRODUCT_NAME} couldn't read its list of approved computers; retrying. Call recheck_offline_media in a few seconds.`;
+      }
+      if (this.trust.isOutside(a.awaitingServer)) {
+        return `its file is on ${at}. ${at} is in ${PRODUCT_NAME}'s allowed list, but it was added outside ${PRODUCT_NAME}, so it is not used until the user keeps it in the ${PRODUCT_NAME} window (Project → Network computers). You cannot keep it yourself.`;
+      }
+      return `its file is on the network computer ${at}, which the user has not allowed yet. You cannot allow it yourself. Tell the user what it is for; they can allow it in the ${PRODUCT_NAME} window (Project → Network computers), or remove or replace the asset.`;
+    }
+    if (a.pathCheckFailed === "private") return `its file is in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`;
+    if (a.pathCheckFailed) {
+      const c = classifyPath(a.path);
+      const on = c.kind === "network" ? ` on ${c.display}` : "";
+      return `${PRODUCT_NAME} couldn't check its folder${on} (${a.pathCheckFailed}), so it did not open it. Tell the user; when the folder can be read again, call recheck_offline_media.`;
+    }
+    return `its file was not found at ${JSON.stringify(a.path)}. Re-import or relink it, or remove_asset it.`;
+  }
+
+  /** G4: `asset`, or a MediaOfflineError when its file may not or can't be opened (`isOffline`). */
+  private requireMedia(asset: MediaAsset): MediaAsset {
+    if (!isOffline(asset)) return asset;
+    throw new MediaOfflineError(`Asset "${asset.name}" is offline: ${this.offlineWhy(asset)}`, asset.awaitingServer ? [asset.awaitingServer] : []);
+  }
+
+  /** G4 for a clip's source: requireClipAsset, then requireMedia. */
+  private requireClipMedia(clip: Clip, what: string): MediaAsset {
+    return this.requireMedia(this.requireClipAsset(clip, what));
+  }
+
+  /**
+   * Why a LUT or font path may not be opened now, or undefined: a server not
+   * allowed (its host), a form unc.ts refuses, or a folder that could not be
+   * checked (uncheckedPaths). A font family name is never a path.
+   */
+  private sidePathOffline(p: string | undefined): { host?: string; code?: string; refused?: boolean } | undefined {
+    if (!p) return undefined;
+    const code = this.uncheckedPaths.get(p);
+    const c = classifyPath(p);
+    if (code) return { code, ...(c.kind === "network" ? { host: c.host } : {}) };
+    if (c.kind === "refused") return { refused: true };
+    if (c.kind === "network" && !this.trust.isAllowed(c.host)) return { host: c.host };
+    return undefined;
+  }
+
+  /**
+   * G5, first thing for every render (export, preview, frame, inspect): when
+   * anything the timeline uses is offline (a clip's asset or cutout colour
+   * source, a LUT, a text or caption font, the music, an overlay graphic, a
+   * custom bleep sound) refuse with one MediaOfflineError that lists the
+   * clips and the servers. Nothing is staged or opened, and the FFmpeg graph
+   * never changes. A `missing` asset keeps today's behaviour (FFmpeg fails on it).
+   */
+  private assertTimelineOnline(): void {
+    const waiting = new Map<string, string[]>();
+    const unchecked = new Map<string, { code: string; host?: string }>();
+    const refused: string[] = [];
+    const add = (item: string, why: { host?: string; code?: string; refused?: boolean } | undefined) => {
+      if (!why) return;
+      if (why.refused) refused.push(item);
+      else if (why.code) unchecked.set(item, { code: why.code, host: why.host });
+      else if (why.host) waiting.set(why.host, [...(waiting.get(why.host) ?? []), item]);
+    };
+    const asset = (item: string, id: string | undefined) => {
+      const a = id ? this.project.assets.find((x) => x.id === id) : undefined;
+      if (a?.awaitingServer) add(item, { host: a.awaitingServer });
+      else if (a?.pathCheckFailed) {
+        const c = classifyPath(a.path);
+        add(item, { code: a.pathCheckFailed, ...(c.kind === "network" ? { host: c.host } : {}) });
+      }
+    };
+    for (const { clip } of this.allClips()) {
+      const id = clip.id;
+      if (!clip.adjustment) asset(id, clip.assetId);
+      add(id, this.sidePathOffline(clip.effects?.lut));
+      for (const ov of clip.overlays ?? []) add(id, this.sidePathOffline(ov.font?.trim()));
+      if (clip.captions?.cues.length) add(id, this.sidePathOffline(clip.captions.style?.font?.trim()));
+      for (const g of clip.graphics ?? []) asset(id, g.assetId);
+      for (const b of clip.effects?.bleeps ?? []) asset(id, b.sfxAssetId);
+    }
+    const MUSIC = "\0music";
+    if (this.project.music) asset(MUSIC, this.project.music.assetId);
+    if (waiting.size === 0 && unchecked.size === 0 && refused.length === 0) return;
+
+    /** "c12, c14 and c20" (at most 5, then "and N more"). */
+    const list = (xs: string[]) => {
+      if (xs.length > 5) return `${xs.slice(0, 5).join(", ")} and ${xs.length - 5} more`;
+      return xs.length === 1 ? xs[0] : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+    };
+    /** The subject and its verb: "clips c1 and c2 use", "clip c1 uses", "the music uses". */
+    const subject = (items: string[], verb: [string, string]) => {
+      const u = [...new Set(items)];
+      const clips = u.filter((i) => i !== MUSIC);
+      const parts = [...(clips.length ? [`clip${clips.length === 1 ? "" : "s"} ${list(clips)}`] : []), ...(u.includes(MUSIC) ? ["the music"] : [])];
+      return `${parts.join(parts[0].includes(" and ") ? ", and " : " and ")} ${u.length === 1 ? verb[0] : verb[1]}`;
+    };
+    const sentences: string[] = [];
+    /** Each sentence; the first one opens with "Can't render yet:". */
+    const say = (text: string) => sentences.push(sentences.length ? text[0].toUpperCase() + text.slice(1) : `Can't render yet: ${text}`);
+    if (waiting.size) {
+      const hosts = [...waiting.keys()].map((h) => `\\\\${h}`);
+      const items = [...waiting.values()].flat();
+      const one = hosts.length === 1;
+      if (this.trust.isUnread()) {
+        say(`${PRODUCT_NAME} couldn't read its list of approved computers; retrying.`);
+        say(`${subject(items, ["stays", "stay"])} offline on ${list(hosts)} until it can.`);
+      } else {
+        say(
+          `${subject(items, ["uses", "use"])} files on the network computer${one ? "" : "s"} ${list(hosts)}, which ${one ? "hasn't" : "haven't"} been allowed in ${PRODUCT_NAME}. ` +
+            `Allow ${one ? "it" : "them"} in Project → Network computers, or remove those clips. (An AI assistant cannot allow ${one ? "it" : "them"}.)`,
+        );
+      }
+    }
+    const failed = [...unchecked.keys()].filter((i) => unchecked.get(i)!.code !== "private");
+    const priv = [...unchecked.keys()].filter((i) => unchecked.get(i)!.code === "private");
+    if (failed.length) {
+      const hosts = [...new Set(failed.map((i) => unchecked.get(i)!.host).filter((h): h is string => !!h))].map((h) => `\\\\${h}`);
+      const codes = [...new Set(failed.map((i) => unchecked.get(i)!.code))].join(", ");
+      say(
+        `${subject(failed, ["uses", "use"])} files${hosts.length ? ` on ${list(hosts)}` : ""} whose folder ${PRODUCT_NAME} couldn't check (${codes}). ` +
+          `When that folder can be read again, use Try again in the media pool (or recheck_offline_media).`,
+      );
+    }
+    if (priv.length) say(`${subject(priv, ["uses", "use"])} files in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`);
+    if (refused.length) {
+      say(`${subject(refused, ["uses", "use"])} a LUT or font path ${PRODUCT_NAME} never opens (a device path or a computer name it can't use). Change it with apply_lut, set_text_style or set_caption_style.`);
+    }
+    throw new MediaOfflineError(sentences.join(" "), [...waiting.keys()]);
   }
 
   /** Video tracks, bottom→top (ascending stacking index). */
@@ -877,6 +1184,8 @@ export class EditorEngine extends EventEmitter {
     if (!prev) return false;
     this.redoStack.push(structuredClone(this.project));
     this.project = prev;
+    // A snapshot keeps the flags of its time; the servers allowed now decide (G3).
+    this.markOfflineMedia();
     this.project.revision += 1;
     this.project.updatedAt = Date.now();
     this.emit("change", this.project);
@@ -888,6 +1197,7 @@ export class EditorEngine extends EventEmitter {
     if (!next) return false;
     this.undoStack.push(structuredClone(this.project));
     this.project = next;
+    this.markOfflineMedia();
     this.project.revision += 1;
     this.project.updatedAt = Date.now();
     this.emit("change", this.project);
@@ -899,6 +1209,8 @@ export class EditorEngine extends EventEmitter {
     // A device / NT path or an unusable server name gets its teaching message
     // first (a backslash network path is not absolute on POSIX).
     assertPathUsable(path, "import path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "import path");
     this.trust.assertNotPrivate(path, "import path");
     if (!isAbsolute(path)) {
       throw new Error(`Import path must be absolute, got "${path}"`);
@@ -935,6 +1247,9 @@ export class EditorEngine extends EventEmitter {
 
   /** Start generateProxy without waiting for it; a failure is recorded on the asset (proxyError). */
   private proxyInBackground(assetId: string): void {
+    // An offline asset gets none (G4 would refuse it): it is made once the file may be opened.
+    const a = this.project.assets.find((x) => x.id === assetId);
+    if (!a || isOffline(a)) return;
     void this.generateProxy(assetId).catch((err) => {
       this.mutate(() => {
         const a = this.project.assets.find((x) => x.id === assetId);
@@ -953,7 +1268,7 @@ export class EditorEngine extends EventEmitter {
    * taking the file being written for the proxy.
    */
   async generateProxy(assetId: string, longEdge = PROXY_LONG_EDGE): Promise<MediaAsset> {
-    const asset = this.getAsset(assetId);
+    const asset = this.requireMedia(this.getAsset(assetId));
     if (!asset.hasVideo) throw new Error("Asset has no video to proxy");
     const running = this.proxyJobs.get(assetId);
     if (running) return running;
@@ -1105,7 +1420,8 @@ export class EditorEngine extends EventEmitter {
     removedBytes: number;
   }> {
     const { generated, imported } = unusedAssets(this.project, this.dataDir);
-    const describe = async (a: (typeof generated)[number]) => ({ assetId: a.id, name: a.name, path: a.path, bytes: await assetFileBytes(a) });
+    // An asset that waits for a server (or whose folder could not be checked) is never stat'ed: 0 bytes.
+    const describe = async (a: (typeof generated)[number]) => ({ assetId: a.id, name: a.name, path: a.path, bytes: a.awaitingServer || a.pathCheckFailed ? 0 : await assetFileBytes(a) });
     const removed = [
       ...(await Promise.all(generated.map(async (a) => ({ ...(await describe(a)), kind: "generated" as const })))),
       ...(opts.includeImported ? await Promise.all(imported.map(async (a) => ({ ...(await describe(a)), kind: "imported" as const }))) : []),
@@ -1752,6 +2068,8 @@ export class EditorEngine extends EventEmitter {
     // so apply_lut (and the desktop app) can never point it at the network.
     if (patch.lut !== undefined) {
       assertLocalMediaPath(patch.lut, "LUT path");
+      // G1: a network computer the user has not allowed; G2: the private trust folder.
+      this.trust.requirePath(patch.lut, "LUT path");
       this.trust.assertNotPrivate(patch.lut, "LUT path");
       // /file serves a clip's LUT to the live preview (isServablePath), so only
       // an existing .cube file can be one — never an arbitrary file on disk.
@@ -2407,7 +2725,7 @@ export class EditorEngine extends EventEmitter {
    */
   async detectKeyColor(clipId: string): Promise<KeyColorDetection> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "key color detection");
+    const asset = this.requireClipMedia(clip, "key color detection");
     if (!asset.hasVideo) throw new Error(`Clip "${clipId}" has no picture to detect a key color from`);
     const fps = this.project.fps;
     const last = Math.max(0, asset.duration - 0.05);
@@ -2519,7 +2837,7 @@ export class EditorEngine extends EventEmitter {
     assetId: string,
     opts: { model?: WhisperModel; language?: string } = {},
   ): Promise<{ asset: MediaAsset; segmentCount: number }> {
-    const asset = this.getAsset(assetId);
+    const asset = this.requireMedia(this.getAsset(assetId));
     if (!asset.hasAudio) throw new Error("Asset has no audio to transcribe");
 
     const { promise } = this.jobs.start("transcribe", `Transcribe ${asset.name}`, async (signal) => {
@@ -3355,6 +3673,7 @@ export class EditorEngine extends EventEmitter {
     if (!(NOISE_FLOOR_TYPES as readonly string[]).includes(type) || params?.floor !== undefined) return params;
     const asset = this.clipAsset(clip);
     if (!asset?.hasAudio) return params;
+    this.requireMedia(asset);
     const fps = this.project.fps;
     const floor = await measureNoiseFloor(asset.path, clip.sourceInFrame / fps, (clip.sourceOutFrame - clip.sourceInFrame) / fps);
     return floor === null ? params : { ...params, floor: clamp(floor, -90, -20) };
@@ -3412,7 +3731,7 @@ export class EditorEngine extends EventEmitter {
    * embedding; otherwise the perceptual fingerprint stands alone.
    */
   async indexVisual(assetId: string, count = 5): Promise<{ asset: MediaAsset; sampleCount: number; semantic: boolean }> {
-    const preAsset = this.getAsset(assetId);
+    const preAsset = this.requireMedia(this.getAsset(assetId));
     if (!preAsset.hasVideo) throw new Error("Asset has no video to fingerprint");
     const { promise } = this.jobs.start("index_visual", `Visual index ${preAsset.name}`, () =>
       this.indexVisualRun(assetId, count),
@@ -3470,6 +3789,7 @@ export class EditorEngine extends EventEmitter {
         if (!asset.hasVideo) continue;
         let sig = this.cachedVisualSig(asset.id);
         if (!sig || !sig.samples.some((s) => s.embed)) {
+          if (isOffline(asset)) continue; // its file may not be opened: not indexed, not searched
           await this.indexVisual(asset.id);
           sig = this.cachedVisualSig(asset.id)!;
         }
@@ -3499,7 +3819,7 @@ export class EditorEngine extends EventEmitter {
     } else {
       throw new Error("searchVisual needs a text `query` or a reference clipId/assetId");
     }
-    const refAsset = this.getAsset(refAssetId);
+    const refAsset = this.requireMedia(this.getAsset(refAssetId));
     const refPic = this.pictureSource(refAsset);
     const refSample = await buildReferenceSample(refPic.path, Math.min(refSrcSec, Math.max(0, refAsset.duration - 0.1)) + refPic.offset);
     const semantic = await ensureClip();
@@ -3514,6 +3834,7 @@ export class EditorEngine extends EventEmitter {
       if (!asset.hasVideo) continue;
       let sig = this.cachedVisualSig(asset.id);
       if (!sig) {
+        if (isOffline(asset)) continue;
         await this.indexVisual(asset.id);
         sig = this.cachedVisualSig(asset.id)!;
       }
@@ -3542,8 +3863,8 @@ export class EditorEngine extends EventEmitter {
     const fps = this.project.fps;
     const { clip } = this.findClip(clipId);
     const { clip: ref } = this.findClip(referenceClipId);
-    const clipAsset = this.requireClipAsset(clip, "audio sync");
-    const refAsset = this.requireClipAsset(ref, "audio sync");
+    const clipAsset = this.requireClipMedia(clip, "audio sync");
+    const refAsset = this.requireClipMedia(ref, "audio sync");
 
     const result: AudioSyncResult = await findAudioOffset(refAsset.path, clipAsset.path);
     const offsetFrames = Math.round(result.offsetSeconds * fps);
@@ -3653,6 +3974,10 @@ export class EditorEngine extends EventEmitter {
   }
 
   setProjectSettings(settings: { name?: string; width?: number; height?: number; fps?: number }): void {
+    // A name, never a path: a save dialog's default name comes from it (unc.ts bareFileName).
+    if (settings.name !== undefined && /[\\/\u0000-\u001f\u007f-\u009f]/.test(settings.name)) {
+      throw new Error(`${JSON.stringify(settings.name)} is a path, not a project name: use a name without / or \\ (and no control characters).`);
+    }
     this.mutate(() => {
       if (settings.name !== undefined) this.project.name = settings.name;
       if (settings.width !== undefined) {
@@ -3806,7 +4131,7 @@ export class EditorEngine extends EventEmitter {
   private async probeUnrecordedColors(): Promise<void> {
     // A matte-backed cutout records its COLOUR SOURCE's description (its own file is the gray matte).
     const unrecorded = (a: MediaAsset) => (a.cutout ? !a.cutout.colorTags : !a.color);
-    const todo = this.project.assets.filter((a) => a.hasVideo && !a.isImage && !a.missing && unrecorded(a));
+    const todo = this.project.assets.filter((a) => a.hasVideo && !a.isImage && !isOffline(a) && unrecorded(a));
     // One at a time: a big old project would otherwise start an ffprobe per asset at once.
     for (const { id, path, cutout } of todo) {
       const probed = await this.probeColor(cutout ? cutout.colorPath : path);
@@ -3838,6 +4163,8 @@ export class EditorEngine extends EventEmitter {
    * cancels them.
    */
   private async stageRender(canvas: Canvas, opts: { audio?: boolean; signal?: AbortSignal } = {}): Promise<{ clips: ResolvedRenderClip[]; cwd: string }> {
+    // G5: nothing is staged while the timeline uses offline media.
+    this.assertTimelineOnline();
     const work = join(this.dataDir, "render");
     await mkdir(work, { recursive: true });
     const fps = this.project.fps;
@@ -4134,6 +4461,14 @@ export class EditorEngine extends EventEmitter {
     let srcPath: string | undefined;
     if (spec?.trim()) {
       const s = spec.trim();
+      // Backstop for G5: a font on a server not allowed, in a refused form or
+      // in a folder that could not be checked is never opened, and never
+      // silently replaced by the default font either.
+      const offline = this.sidePathOffline(s);
+      if (offline) {
+        const why = offline.refused ? `is a path ${PRODUCT_NAME} never opens` : offline.code ? `is in a folder that couldn't be checked (${offline.code})` : `is on \\\\${offline.host}, which hasn't been allowed`;
+        throw new MediaOfflineError(`Font ${JSON.stringify(s)} ${why}.`, offline.host ? [offline.host] : []);
+      }
       if (isAbsolute(s) && (await fileExists(s))) srcPath = s;
       else srcPath = await findSystemFont(s);
     }
@@ -4259,6 +4594,7 @@ export class EditorEngine extends EventEmitter {
   private assertFontNotPrivate(font: unknown): void {
     if (typeof font !== "string") return;
     const f = font.trim();
+    this.trust.requirePath(f, "style.font");
     if (isAbsolute(f) || classifyPath(f).kind === "network") this.trust.assertNotPrivate(f, "style.font");
   }
 
@@ -4345,7 +4681,7 @@ export class EditorEngine extends EventEmitter {
     assertPathUsable(opts.style?.font, "style.font");
     this.assertFontNotPrivate(opts.style?.font);
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "caption transcription");
+    const asset = this.requireClipMedia(clip, "caption transcription");
     if (!asset.hasAudio) throw new Error("Clip's source has no audio to transcribe");
 
     const fps = this.project.fps;
@@ -4422,6 +4758,8 @@ export class EditorEngine extends EventEmitter {
    */
   async exportCaptions(path: string, format?: "srt" | "vtt"): Promise<{ path: string; cueCount: number; format: string }> {
     assertPathUsable(path, "export_captions path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "export_captions path");
     this.trust.assertNotPrivate(path, "export_captions path");
     const fps = this.project.fps;
     const fmt = format ?? (path.toLowerCase().endsWith(".vtt") ? "vtt" : "srt");
@@ -4454,6 +4792,8 @@ export class EditorEngine extends EventEmitter {
    */
   async importCaptions(clipId: string, path: string): Promise<{ clip: Clip; cueCount: number; dropped: number }> {
     assertPathUsable(path, "import_captions path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "import_captions path");
     this.trust.assertNotPrivate(path, "import_captions path");
     const { clip } = this.findClip(clipId);
     const raw = await readFile(path, "utf8");
@@ -4633,6 +4973,7 @@ export class EditorEngine extends EventEmitter {
 
   async renderPreview(): Promise<RenderResult> {
     if (this.clipCount() === 0) throw new Error("Timeline is empty — nothing to preview");
+    this.assertTimelineOnline();
 
     // A new preview supersedes any in-flight one (its job ends "canceled").
     if (this.previewJobId) this.jobs.cancel(this.previewJobId);
@@ -4700,6 +5041,7 @@ export class EditorEngine extends EventEmitter {
    */
   async renderFrame(atSeconds?: number): Promise<string> {
     if (this.clipCount() === 0) throw new Error("Timeline is empty — nothing to show");
+    this.assertTimelineOnline();
 
     // The frame on screen at atSeconds, as in any player and the export: frame n covers [n/fps, (n+1)/fps).
     const fps = this.project.fps;
@@ -4783,8 +5125,12 @@ export class EditorEngine extends EventEmitter {
    */
   startExportJob(outputPath: string, settings?: ExportSettings): { job: Job; promise: Promise<RenderResult> } {
     assertPathUsable(outputPath, "export outputPath");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(outputPath, "export outputPath");
     this.trust.assertNotPrivate(outputPath, "export outputPath");
     if (this.clipCount() === 0) throw new Error("Timeline is empty — nothing to export");
+    // G5 before the job starts (stageRender checks again inside it).
+    this.assertTimelineOnline();
 
     return this.jobs.start("export", `Export → ${basename(outputPath)}`, async (signal, onProgress) => {
       await mkdir(dirname(outputPath), { recursive: true });
@@ -4850,7 +5196,7 @@ export class EditorEngine extends EventEmitter {
 
   /** Generate a thumbnail JPEG for an asset at the given time. Returns its path. */
   async generateThumbnail(assetId: string, atSeconds = 0): Promise<string> {
-    const asset = this.getAsset(assetId);
+    const asset = this.requireMedia(this.getAsset(assetId));
     const dir = join(this.dataDir, "thumbnails");
     await mkdir(dir, { recursive: true });
     const outPath = join(dir, `${safeFileStem(assetId)}.jpg`);
@@ -4926,7 +5272,7 @@ export class EditorEngine extends EventEmitter {
    */
   async stabilizeClip(clipId: string, opts: StabilizeOptions = {}): Promise<Clip> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "stabilization");
+    const asset = this.requireClipMedia(clip, "stabilization");
     this.refuseCutout(asset, clipId, "stabilize_clip");
     const { promise } = this.jobs.start("stabilize", `Stabilize ${asset.name}`, (signal, onProgress) =>
       this.stabilizeClipRun(clipId, opts, signal, onProgress),
@@ -4941,7 +5287,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<Clip> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "stabilization");
+    const asset = this.requireClipMedia(clip, "stabilization");
     const fps = this.project.fps;
     const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
     const spanSec = framesToSeconds(clip.sourceOutFrame - clip.sourceInFrame, fps);
@@ -5035,7 +5381,7 @@ export class EditorEngine extends EventEmitter {
     opts: { sampleFps?: number; smoothing?: number; scoreThreshold?: number } = {},
   ): Promise<{ clip: Clip; hitRate: number; cropWidth: number; cropHeight: number; keyframes: number }> {
     const { clip: pre } = this.findClip(clipId);
-    const preAsset = this.requireClipAsset(pre, "auto-reframe");
+    const preAsset = this.requireClipMedia(pre, "auto-reframe");
     if (!preAsset.hasVideo || preAsset.width <= 0 || preAsset.height <= 0) {
       throw new Error("Auto-reframe needs a clip with a decodable video stream");
     }
@@ -5053,7 +5399,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<{ clip: Clip; hitRate: number; cropWidth: number; cropHeight: number; keyframes: number }> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "auto-reframe");
+    const asset = this.requireClipMedia(clip, "auto-reframe");
 
     const fps = this.project.fps;
     const srcW = asset.width;
@@ -5171,7 +5517,7 @@ export class EditorEngine extends EventEmitter {
     opts: { maxLongEdge?: number; stubMatte?: boolean } = {},
   ): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> } {
     const { clip: pre } = this.findClip(clipId);
-    const preAsset = this.requireClipAsset(pre, "background removal");
+    const preAsset = this.requireClipMedia(pre, "background removal");
     if (!preAsset.hasVideo || preAsset.width <= 0 || preAsset.height <= 0) {
       throw new Error("Remove background needs a clip with a decodable video stream");
     }
@@ -5195,7 +5541,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<{ clip: Clip; asset: MediaAsset } & MatteStats> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "background removal");
+    const asset = this.requireClipMedia(clip, "background removal");
     const fps = this.project.fps;
     const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame };
     const spanFrames = clip.sourceOutFrame - clip.sourceInFrame;
@@ -5324,7 +5670,7 @@ export class EditorEngine extends EventEmitter {
       clip = pic;
     }
     const targetId = clip.id;
-    const asset = this.requireClipAsset(clip, "freeze frame");
+    const asset = this.requireClipMedia(clip, "freeze frame");
     if (!asset.hasVideo) throw new Error(`Clip "${clipId}" has no picture to freeze (audio-only asset).`);
     if (!(durationSeconds > 0)) throw new Error("durationSeconds must be > 0");
     this.assertClipUnlocked(targetId);
@@ -5544,7 +5890,7 @@ export class EditorEngine extends EventEmitter {
     opts: { linked?: boolean } = {},
   ): { job?: Job; promise: Promise<ReverseResult> } {
     const { clip, track } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "reverse");
+    const asset = this.requireClipMedia(clip, "reverse");
     if (asset.isImage) throw new Error(`Clip "${clipId}" is a still image — reversing a single frame does nothing.`);
     this.assertClipUnlocked(clipId);
     const restore = !!asset.reversedFrom;
@@ -5666,7 +6012,7 @@ export class EditorEngine extends EventEmitter {
       for (let i = 0; i < members.length; i++) {
         const m = members[i];
         const { clip } = this.findClip(m.clipId);
-        const asset = this.requireClipAsset(clip, "reverse");
+        const asset = this.requireClipMedia(clip, "reverse");
         const spanFrames = clip.sourceOutFrame - clip.sourceInFrame;
         const sourceInSec = framesToSeconds(clip.sourceInFrame, fps);
         const spanSec = framesToSeconds(spanFrames, fps);
@@ -5768,7 +6114,7 @@ export class EditorEngine extends EventEmitter {
    */
   startSmoothSlowJob(clipId: string, mode: "blend" | "optical-flow" = "optical-flow"): { job: Job; promise: Promise<{ clip: Clip; asset: MediaAsset; frames: number; linked: string[] }> } {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "smooth slow motion");
+    const asset = this.requireClipMedia(clip, "smooth slow motion");
     if (hasSpeedRamp(clip)) {
       throw new Error(
         `Clip "${clipId}" plays a speed ramp (curve speed) — smooth_slow_motion only bakes a CONSTANT slow speed. Use clear_speed_ramp and set_clip_speed (e.g. 0.5) first, or keep the ramp (its slow parts repeat frames).`,
@@ -5798,7 +6144,7 @@ export class EditorEngine extends EventEmitter {
     onProgress: (fraction: number) => void,
   ): Promise<{ clip: Clip; asset: MediaAsset; frames: number; linked: string[] }> {
     const { clip } = this.findClip(clipId);
-    const asset = this.requireClipAsset(clip, "smooth slow motion");
+    const asset = this.requireClipMedia(clip, "smooth slow motion");
     const fps = this.project.fps;
     const speed = clip.effects?.speed ?? 1;
     const before = { assetId: clip.assetId, inF: clip.sourceInFrame, outF: clip.sourceOutFrame, speed };
@@ -6065,7 +6411,9 @@ export class EditorEngine extends EventEmitter {
     const startSec = framesToSeconds(clip.startFrame, fps);
     const durSec = framesToSeconds(durationFrames, fps);
 
-    const n = Math.max(1, Math.min(5, Math.round(frameCount)));
+    // An offline clip is described, not rendered: no frames, and why (7.3).
+    const offline = isOffline(asset) ? { ...(asset.awaitingServer ? { host: asset.awaitingServer } : {}), reason: this.offlineWhy(asset) } : undefined;
+    const n = offline ? 0 : Math.max(1, Math.min(5, Math.round(frameCount)));
     const frames: string[] = [];
     for (let i = 0; i < n; i++) {
       const f = n === 1 ? 0.5 : 0.04 + (i / (n - 1)) * 0.92; // avoid exact edges
@@ -6100,18 +6448,19 @@ export class EditorEngine extends EventEmitter {
         graphics: (clip.graphics ?? []).map((g) => ({ id: g.id, startFrame: g.startFrame ?? 0, endFrame: g.endFrame ?? durationFrames, props: g.props })),
         effects: clip.effects ?? {},
       },
+      ...(offline ? { offline } : {}),
       frames,
     };
   }
 
   // ---- analysis (AI "ears and eyes") ----------------------------------------
   async analyzeSilence(assetId: string, noiseDb?: number, minDur?: number): Promise<SilenceRange[]> {
-    const asset = this.getAsset(assetId);
+    const asset = this.requireMedia(this.getAsset(assetId));
     return detectSilence(asset.path, noiseDb, minDur);
   }
 
   async analyzeScenes(assetId: string, threshold?: number): Promise<SceneCut[]> {
-    const asset = this.getAsset(assetId);
+    const asset = this.requireMedia(this.getAsset(assetId));
     const pic = this.pictureSource(asset);
     return detectScenes(pic.path, threshold, asset.cutout ? { start: pic.offset, span: asset.duration } : undefined);
   }
@@ -6141,15 +6490,17 @@ export class EditorEngine extends EventEmitter {
    */
   async autoSaveIfDirty(): Promise<string | null> {
     if (!this.isDirty() || !this.hasContent()) return null;
-    const target =
-      this.currentPath ??
-      join(this.dataDir, "autosave", `Recovered-${new Date().toISOString().replace(/[:.]/g, "-")}.aive`);
+    // A project file on a network computer that is no longer allowed is not written: its work goes to the recovery folder (P13).
+    const own = this.currentPath && !this.awaitsApproval(this.currentPath) ? this.currentPath : undefined;
+    const target = own ?? join(this.dataDir, "autosave", `Recovered-${new Date().toISOString().replace(/[:.]/g, "-")}.aive`);
     await this.save(target);
     return target;
   }
 
   async save(path: string): Promise<void> {
     assertPathUsable(path, "save path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "save path");
     this.trust.assertNotPrivate(path, "save path");
     await mkdir(dirname(path), { recursive: true });
     // Give a still-"Untitled" project a meaningful name from its filename, so the
@@ -6171,6 +6522,8 @@ export class EditorEngine extends EventEmitter {
 
   async load(path: string): Promise<Project> {
     assertPathUsable(path, "load_project path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "load_project path");
     this.trust.assertNotPrivate(path, "load_project path");
     const raw = await readFile(path, "utf8");
     const loaded = JSON.parse(raw) as Project;
@@ -6185,12 +6538,16 @@ export class EditorEngine extends EventEmitter {
     // file must leave the open project, its path, dirty state and undo history
     // as they were (else the next autosave writes the refused file over it).
     const project = validateLoadedProject(migrateProject(loaded));
-    this.trust.checkLoadedProject(project);
+    const unchecked = this.trust.checkLoadedProject(project);
     // Bring back any baked/proxy file it names that a clean-up moved to the trash.
     this.lastRestoredFromTrash = await this.storage.restore(project);
     this.undoStack = [];
     this.redoStack = [];
     this.project = project;
+    // G3 before anything opens its media: what is on a server the user has not allowed stays offline.
+    this.uncheckedPaths = unchecked;
+    this.trust.clearRequests();
+    this.markOfflineMedia();
     // Pull persisted transcripts/visual fingerprints OUT of the live project
     // into the engine cache (kept outside the undo history); leave markers.
     this.assetCaches.clear();
@@ -6223,6 +6580,8 @@ export class EditorEngine extends EventEmitter {
    */
   async exportOtio(path: string): Promise<{ path: string; trackCount: number; clipCount: number }> {
     assertPathUsable(path, "export_otio path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "export_otio path");
     this.trust.assertNotPrivate(path, "export_otio path");
     const timeline = projectToOtio(this.serializableProject());
     await mkdir(dirname(path), { recursive: true });
@@ -6240,6 +6599,8 @@ export class EditorEngine extends EventEmitter {
    */
   async importOtio(path: string): Promise<{ project: Project; warnings: string[]; missing: string[] }> {
     assertPathUsable(path, "import_otio path");
+    // G1: a network computer the user has not allowed; G2: the private trust folder.
+    this.trust.requirePath(path, "import_otio path");
     this.trust.assertNotPrivate(path, "import_otio path");
     const raw = await readFile(path, "utf8");
     let json: unknown;
@@ -6261,8 +6622,10 @@ export class EditorEngine extends EventEmitter {
       // assertProjectMediaLocal guard below then refuses the import outright. A
       // scheme-free relative/local path is probed as before (not a network
       // vector), so a foreign OTIO with a relative target_url still imports.
-      // A path in the private trust folder stays an offline placeholder, unprobed.
-      if (isProtocolLike(mediaPath) || this.trust.isPrivateMediaPath(mediaPath)) return null;
+      // A path on a network computer the user has not allowed (G3 marks it), in
+      // the private trust folder, or whose folder can't be checked stays an
+      // offline placeholder, unprobed.
+      if (isProtocolLike(mediaPath) || this.awaitsApproval(mediaPath) || this.trust.loadFieldCheck(mediaPath) !== "ok") return null;
       try {
         return await probeAsset(mediaPath);
       } catch {
@@ -6275,11 +6638,14 @@ export class EditorEngine extends EventEmitter {
     // project — sanitise ids and refuse non-local media before it is used, on
     // the local copy so a refused import leaves the open project untouched.
     const project = validateLoadedProject(migrateProject(result.project));
-    this.trust.checkLoadedProject(project, { otio: true });
+    const unchecked = this.trust.checkLoadedProject(project, { otio: true });
     this.lastRestoredFromTrash = restored;
     this.undoStack = [];
     this.redoStack = [];
     this.project = project;
+    this.uncheckedPaths = unchecked;
+    this.trust.clearRequests();
+    this.markOfflineMedia();
     // Extract any transcripts/visual indexes that traveled in asset metadata.
     this.assetCaches.clear();
     for (const a of this.project.assets) {
@@ -6304,7 +6670,7 @@ export class EditorEngine extends EventEmitter {
     // Media whose colour the import probed gets its tagged proxy where a Chromium needs one, as on import_video.
     void this.probeUnrecordedColors();
     for (const a of this.project.assets) {
-      if (a.hasVideo && !a.isImage && !a.missing && !a.proxyPath && a.color && needsTaggedProxy(a)) this.proxyInBackground(a.id);
+      if (a.hasVideo && !a.isImage && !isOffline(a) && !a.proxyPath && a.color && needsTaggedProxy(a)) this.proxyInBackground(a.id);
     }
     return { project: this.project, warnings: result.warnings, missing: result.missing };
   }
@@ -6317,6 +6683,9 @@ export class EditorEngine extends EventEmitter {
     this.currentPath = undefined;
     this.assetCaches.clear();
     this.project = defaultProject();
+    this.uncheckedPaths.clear();
+    this.trust.clearRequests();
+    this.markOfflineMedia();
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
     this.storage.schedule();
@@ -6330,6 +6699,8 @@ export class EditorEngine extends EventEmitter {
  * returns `project`, which must not be live yet.
  */
 function validateLoadedProject(project: Project): Project {
+  // A name, never a path (setProjectSettings): a crafted one is cut to its last part, and the project still loads.
+  if (typeof project.name === "string" && /[\\/\u0000-\u001f\u007f-\u009f]/.test(project.name)) project.name = bareFileName(project.name);
   sanitizeProjectIds(project);
   coerceProjectNumbers(project);
   coerceProjectValues(project);

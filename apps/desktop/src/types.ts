@@ -65,6 +65,12 @@ export interface MediaAsset {
   reversedFrom?: { assetId: string; sourceInFrame: number; sourceOutFrame: number };
   /** Set on a matte-backed remove_background cutout: its colour source (core types.ts). */
   cutout?: { colorPath: string; colorStart: number; colorAssetId?: string; colorTags?: ProbedColor; colorCodec?: string };
+  /** Runtime only: the file was not found (core types.ts). */
+  missing?: boolean;
+  /** Runtime only: the network computer (host key) this asset waits for the user to allow (core types.ts). */
+  awaitingServer?: string;
+  /** Runtime only: ZabsReel couldn't check this file's folder (the error code, or "private"; core types.ts). */
+  pathCheckFailed?: string;
 }
 
 export interface ColorAdjust {

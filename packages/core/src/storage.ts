@@ -586,8 +586,14 @@ export interface StorageDeps {
    * returns what it removed. Absent = the library is left alone.
    */
   pruneLibrary?: () => { assetId: string; name: string; path: string }[];
-  /** Why a path given to rememberMany may not be read (the private trust folder, G2), or null. */
+  /** Why a path given to rememberMany may not be read (a network computer not allowed, G1; the private trust folder, G2), or null. */
   privatePath?: (p: string) => string | null;
+  /**
+   * The network computer (as `\\host`) a known project file is on when the
+   * user has not allowed it yet, else undefined: that file is not read, and
+   * it pauses clean-up without going stale (P14).
+   */
+  serverWaiting?: (p: string) => string | undefined;
 }
 
 /** One running core's references (<dataDir>/run/core-<pid>-<id>.json). */
@@ -1067,17 +1073,19 @@ export class StorageJanitor {
       ...base.knownProjects.map((p) => ({ path: p, autosave: false })),
     ];
     const timeoutMs = this.deps.readTimeoutMs ?? PROJECT_READ_TIMEOUT_MS;
-    const reads = await Promise.all(sources.map(async (s) => ({ ...s, read: await readProjectFile(s.path, timeoutMs, s.autosave) })));
+    const reads = await Promise.all(sources.map(async (s) => ({ ...s, read: await readProjectFile(s.path, timeoutMs, s.autosave, this.deps.serverWaiting?.(s.path)) })));
     const firstSeen = new Map(
       Object.entries(index.state === "ok" ? index.index.unavailable ?? {} : {}).map(([p, t]) => [fold(resolve(p)), t] as const),
     );
     const diskProjects: unknown[] = [];
     for (const { path, autosave, read } of reads) {
       if (read.kind === "ok") diskProjects.push(read.value);
-      if (read.kind !== "missing" && read.kind !== "unreadable") continue;
+      if (read.kind !== "missing" && read.kind !== "unreadable" && read.kind !== "awaiting-approval") continue;
       const firstMs = opts.forgetMissing ? 0 : firstSeen.get(fold(resolve(path))) ?? now;
+      // A file on a server not allowed yet was never checked: it pauses clean-up and never goes stale by age (only forgetMissing forgets it).
+      const stale = read.kind === "awaiting-approval" ? !!opts.forgetMissing : now - firstMs >= retention;
       base.unavailable.push({
-        path, autosave, missing: read.kind === "missing", reason: read.error, firstMs, stale: now - firstMs >= retention, sig: read.sig,
+        path, autosave, missing: read.kind === "missing", reason: read.error, firstMs, stale, sig: read.sig,
       });
     }
     const pausing = base.unavailable.filter((u) => !u.stale);
@@ -1578,8 +1586,8 @@ function inUseTrash(a: AreaListing, r: RefNames): InUseTrash[] {
 type ProjectRead =
   | { kind: "ok"; value: unknown }
   | { kind: "skip" }
-  /** sig: the file's state for log de-duplication ("missing", "<mtime>:<size>", "no answer", "error:<code>"). */
-  | { kind: "missing" | "unreadable"; error: string; sig: string };
+  /** sig: the file's state for log de-duplication ("missing", "<mtime>:<size>", "no answer", "error:<code>", "awaiting approval"). */
+  | { kind: "missing" | "unreadable" | "awaiting-approval"; error: string; sig: string };
 
 /** "<mtime ms>:<size>" of an unreadable file (or why even stat fails): it is logged again only when this changes. */
 async function fileSig(path: string): Promise<string> {
@@ -1594,9 +1602,12 @@ async function fileSig(path: string): Promise<string> {
 /**
  * Read one project file as JSON, giving up after `timeoutMs` (a hung network
  * drive; the read itself can't be cancelled and is left to finish). An
- * autosave-dir entry that isn't a plain file, or vanished, is skipped.
+ * autosave-dir entry that isn't a plain file, or vanished, is skipped. A file
+ * on a network computer the user has not allowed (`waiting`, its `\\host`)
+ * is not touched at all: "awaiting-approval".
  */
-async function readProjectFile(path: string, timeoutMs: number, autosave: boolean): Promise<ProjectRead> {
+async function readProjectFile(path: string, timeoutMs: number, autosave: boolean, waiting?: string): Promise<ProjectRead> {
+  if (waiting) return { kind: "awaiting-approval", error: `on network computer ${waiting}, not allowed yet`, sig: "awaiting approval" };
   const work = (async (): Promise<ProjectRead> => {
     try {
       if (autosave && !(await lstat(path)).isFile()) return { kind: "skip" };

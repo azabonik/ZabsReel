@@ -111,3 +111,15 @@ export function approvalDialogFor(
   if (list.unread.length > 0) return "unread";
   return list.outside.some((o) => o.host === key) ? "keep" : "allow";
 }
+
+/**
+ * A dialog's default file name from text a project or the agent can set (a
+ * project name): the text after the last `/` or `\`, with `:` and control
+ * characters removed, "Untitled" when that leaves nothing. So a save dialog
+ * never starts in a folder (or on a server) that came from project data.
+ */
+export function bareFileName(name: string): string {
+  const last = name.slice(Math.max(name.lastIndexOf("/"), name.lastIndexOf("\\")) + 1);
+  const bare = last.replace(/[:\u0000-\u001f\u007f-\u009f]/g, "");
+  return bare === "" ? "Untitled" : bare;
+}

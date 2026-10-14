@@ -31,6 +31,9 @@ export interface LibraryAsset {
   builtinSfx?: string;
   userImported?: boolean;
   cutout?: { colorPath?: string; colorAssetId?: string };
+  /** Offline (core types.ts): its files are never stat'ed. */
+  awaitingServer?: string;
+  pathCheckFailed?: string;
 }
 
 /** The project fields these rules read (structurally core's Project). */

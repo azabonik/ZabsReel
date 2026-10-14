@@ -61,12 +61,32 @@
  *                            calls and G7 refuse it in every mode, metadata
  *                            calls don't; /file never serves it; on the data
  *                            folder's own server, other share spellings are
- *                            caught by the identity check and the name rule.
+ *                            caught by the identity check and the name rule;
+ *                            a loaded field whose folder can't be checked
+ *                            stays offline alone (pathCheckFailed) until a
+ *                            re-check passes.
+ *  7. rpc surface          — every string parameter that looks like a path is
+ *                            in rpc.ts RPC_PATH_PARAMS, and (enforced) each one
+ *                            refuses an unallowed server with code
+ *                            media_server_not_approved; no method can allow
+ *                            or trust a server.
+ *  9. project name         — bareFileName; a name with a path separator is
+ *                            refused, a loaded one is cut to its last part.
+ *  10. storage             — a known project on a server not allowed is never
+ *                            read: it pauses clean-up and never goes stale.
+ *  14. log mode / enforce  — a project naming a NAS path: in log mode nothing
+ *                            is offline and a "would block" line is logged;
+ *                            enforced, the asset is offline and pending; the
+ *                            autosave of a project on such a server goes to
+ *                            the recovery folder.
  *
  * Rows 5 and 6 check both modes: the network-path gate is "log" until the
  * user can allow a server in the app, and AIVE_NETWORK_GATE=enforce (CI) turns
  * it on. Device paths and keyless names are refused in both, and so is the
  * trust folder (rows 4, 11, 13).
+ *
+ * Rows 7 (its dispatch part), 10 (the engine's part) and 14 (the autosave)
+ * need the gate enforced: in log mode they would let a test host through.
  *
  * No FFmpeg, no network. The only hosts are under the reserved .invalid
  * top-level domain (the 2.3 vectors only reach the pure classifier; the
@@ -81,7 +101,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { approvalDialogFor, classifyPath, normalizeHost } from "../src/unc.js";
+import { approvalDialogFor, bareFileName, classifyPath, normalizeHost } from "../src/unc.js";
 import { assertLocalMediaPath, assertProjectMediaLocal, isLocalMediaPath, isProtocolLike } from "../src/safepath.js";
 import { EditorEngine } from "../src/engine.js";
 import * as gfs from "../src/io/gatedfs.js";
@@ -90,8 +110,9 @@ import { assertArgvReachable, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool
 import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
 import { approveHost, readTrustedHosts, revokeHost, TrustStoreError, withTrustLock, type ReadErrorInjection } from "../src/trusthosts.js";
 import { HostTrust } from "../src/hosttrust.js";
-import { storageUsage } from "../src/storage.js";
-import type { Project } from "../src/types.js";
+import { StorageJanitor, storageUsage } from "../src/storage.js";
+import { dispatch, methods, RpcError, RPC_PATH_PARAMS } from "../src/rpc.js";
+import { isOffline, type Project } from "../src/types.js";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -1431,12 +1452,272 @@ async function main() {
       const e2 = await g2("\\\\zr-evil-2.invalid\\zr\\trust\\hosts.key");
       check(PRIVATE.test(e2) && fake.calls.length === 0, `name rule: another server's …\\trust\\hosts.key is refused, and that server is never stat'ed (${JSON.stringify(fake.calls)})`);
       for (const p of ["\\\\zr-data.invalid\\video\\a.mp4", "\\\\zr-data.invalid\\d$\\zr\\proxies\\p.mp4"]) check((await g2(p)) === "(accepted)", `passes: ${JSON.stringify(p)}`);
+      // A loaded field whose folder can't be checked (EACCES): only that asset goes offline, the load goes on.
+      // (No video in either asset, so nothing probes them after the load.)
+      const twoAssets = join(root, "eacces.aive");
+      const base = project("\\\\zr-data.invalid\\video\\c.mp4", { hasVideo: false, hasAudio: true }) as unknown as { assets: Record<string, unknown>[] };
+      base.assets.push({ ...base.assets[0], id: "asset_a2", path: "\\\\zr-data.invalid\\stock\\d.mp4" });
+      // A LUT in the same folder: the engine's uncheckedPaths (G5, G6 and resolveFont never open it).
+      const LUT = "\\\\zr-data.invalid\\video\\l.cube";
+      (base as unknown as { tracks: { clips: Record<string, unknown>[] }[] }).tracks[0].clips[0].effects = { lut: LUT };
+      writeFixture(twoAssets, JSON.stringify(base));
+      fake.fail["\\\\zr-data.invalid\\video"] = "EACCES";
+      const loadErr = await thrown(() => engine.load(twoAssets));
+      const [a1, a2] = engine.getProject().assets;
+      check(loadErr === null && a1.pathCheckFailed === "EACCES" && isOffline(a1) && !isOffline(a2),
+        `identity: an EACCES on one clip's folder: the load goes on, a1 is offline (pathCheckFailed ${a1.pathCheckFailed}), a2 is online (${loadErr?.message})`);
+      const thumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
+      check(thumb instanceof RpcError && thumb.code === "media_offline" && /couldn't check its folder on \\\\zr-data\.invalid \(EACCES\)/.test(thumb.message),
+        `generate_thumbnail on a1 refuses with media_offline before any I/O (${thumb?.message.slice(0, 120)})`);
+      check(!engine.isServablePath("\\\\zr-data.invalid\\video\\c.mp4") && !engine.isServablePath(LUT), "isServablePath is false for a1's file and for the unchecked LUT");
+      const render = await thrown(() => dispatch(engine, "render_preview", {}));
+      check(render instanceof RpcError && render.code === "media_offline" && /^Can't render yet: clip clip_c1 uses files on \\\\zr-data\.invalid whose folder ZabsReel couldn't check \(EACCES\)/.test(render.message),
+        `render_preview refuses: the clip's file and LUT are in a folder that couldn't be checked (${render?.message.slice(0, 160)})`);
+      fake.fail = {};
+      engine.recheckOfflineMedia();
+      check(!isOffline(engine.getProject().assets[0]) && engine.getProject().assets[0].pathCheckFailed === undefined, "once the folder answers, recheck_offline_media clears the flag and a1 is online");
+      check(engine.isServablePath(LUT), "…and the LUT is no longer unchecked (the clip's .cube is servable)");
       check(spied.length === 0, `no readFile, writeFile or mkdir saw a refused or unchecked path (${JSON.stringify(spied)})`);
     } finally {
       for (const [k, orig] of saved) fspMod[k] = orig;
       syncBuiltinESMExports();
       (engine as unknown as { trust: HostTrust }).trust = realTrust;
+      realTrust.reload(); // publish the engine's own servers again
       process.chdir(cwd);
+    }
+  }
+
+  // ---- 7. rpc surface completeness ------------------------------------------------------
+  // MUTATION: add a logoPath string parameter to a method (or drop a row from
+  // RPC_PATH_PARAMS) → the completeness row fails. Add an allow_media_server
+  // method → the name row fails. Remove G1 (requirePath) from an engine
+  // method → its dispatch row fails when enforced (another error, or the trace).
+  console.log("7. rpc surface: every path parameter is listed and gated...");
+  {
+    const PATHY = /path|font|lut|file|dir|url|output/i;
+    const found: string[] = [];
+    const walk = (t: unknown, at: string, method: string) => {
+      const d = (t as { _def: { typeName: string; innerType?: unknown; schema?: unknown; type?: unknown; options?: unknown[]; valueType?: unknown } })._def;
+      if (d.typeName === "ZodObject") for (const [k, v] of Object.entries((t as { shape: Record<string, unknown> }).shape)) walk(v, at ? `${at}.${k}` : k, method);
+      else if (d.typeName === "ZodOptional" || d.typeName === "ZodNullable" || d.typeName === "ZodDefault") walk(d.innerType, at, method);
+      else if (d.typeName === "ZodEffects") walk(d.schema, at, method);
+      else if (d.typeName === "ZodArray") walk(d.type, `${at}[]`, method);
+      else if (d.typeName === "ZodUnion" || d.typeName === "ZodDiscriminatedUnion") for (const o of d.options ?? []) walk(o, at, method);
+      else if (d.typeName === "ZodRecord") walk(d.valueType, `${at}{}`, method);
+      else if (d.typeName === "ZodString" && PATHY.test(at.split(".").pop() ?? "")) found.push(`${method} ${at}`);
+    };
+    for (const [name, def] of Object.entries(methods)) walk(def.schema, "", name);
+    const listed = Object.entries(RPC_PATH_PARAMS).flatMap(([m, ps]) => ps.map((p) => `${m} ${p}`));
+    const unlisted = found.filter((f) => !listed.includes(f));
+    const stale = listed.filter((l) => !found.includes(l));
+    check(unlisted.length === 0 && stale.length === 0, `every path-like string parameter is in RPC_PATH_PARAMS and every listed one exists (${Object.keys(methods).length} methods; unlisted ${JSON.stringify(unlisted)}; stale ${JSON.stringify(stale)})`);
+    const approving = Object.keys(methods).filter((m) => /approv|trust|allow|grant/i.test(m) && m !== "list_media_servers" && m !== "recheck_offline_media");
+    check(approving.length === 0 && "list_media_servers" in methods && "recheck_offline_media" in methods, `no method can allow or trust a server (${JSON.stringify(approving)})`);
+    if (enforced) {
+      // Each listed parameter, given a path on a server nobody allowed: refused by G1, the server is pending (origin request).
+      const minimal = (schema: unknown): Record<string, unknown> => {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries((schema as { shape: Record<string, { isOptional(): boolean; _def: { typeName: string } }> }).shape)) {
+          if (v.isOptional()) continue;
+          out[k] = v._def.typeName === "ZodNumber" ? 0 : v._def.typeName === "ZodArray" ? [] : k === "text" ? "t" : "clip_none";
+        }
+        return out;
+      };
+      let events = 0;
+      engine.on("media-servers", () => void events++);
+      for (const [m, ps] of Object.entries(RPC_PATH_PARAMS)) {
+        for (const p of ps) {
+          const evil = `//zr-evil-7.invalid/s/${m}.x`;
+          const params = { ...minimal(methods[m as keyof typeof methods].schema), [p.replace("[]", "")]: p.endsWith("[]") ? [evil] : evil };
+          if (m === "remember_projects") {
+            const r = (await dispatch(engine, m, params)) as { skipped: { reason: string }[] };
+            check(r.skipped.length === 1 && /network computer you haven't allowed/.test(r.skipped[0].reason), `remember_projects skips it (${JSON.stringify(r.skipped)})`);
+            continue;
+          }
+          const e = await thrown(() => dispatch(engine, m, params));
+          check(e instanceof RpcError && e.code === "media_server_not_approved" && e.details.host === "zr-evil-7.invalid" && /You cannot allow it yourself/.test(e.message),
+            `${m}.${p} on an unallowed server: media_server_not_approved (${e instanceof RpcError ? e.code : ""} ${e?.message.slice(0, 90)})`);
+        }
+      }
+      const pend = engine.mediaServers().pending.find((x) => x.host === "zr-evil-7.invalid");
+      check(!!pend && pend.origins.includes("request") && pend.examples.length > 0 && events >= Object.keys(RPC_PATH_PARAMS).length,
+        `the server is pending with origin request, and each request told the clients ("media-servers": ${events}) (${JSON.stringify(pend)})`);
+    } else {
+      console.log("  (dispatch rows need AIVE_NETWORK_GATE=enforce: in log mode G1 only logs)");
+    }
+  }
+
+  // ---- 9. project name ------------------------------------------------------------------
+  // MUTATION: drop the name rule from validateLoadedProject → the load row
+  // keeps the path. Drop it from setProjectSettings → the refusal rows pass.
+  console.log("9. a project name is never a path...");
+  {
+    const rows: [string, string][] = [["\\\\zr-evil.invalid\\s\\x", "x"], ["//h/s/x", "x"], ["x", "x"], ["C:x", "Cx"], ["\\\\h\\s\\", "Untitled"], ["a\u0007b", "ab"]];
+    for (const [input, want] of rows) check(bareFileName(input) === want, `bareFileName(${JSON.stringify(input)}) = ${JSON.stringify(bareFileName(input))}`);
+    for (const name of ["\\\\zr-evil.invalid\\s\\x", "a/b", "a\nb"]) {
+      const e = await errOf(() => engine.setProjectSettings({ name }));
+      check(/not a project name/.test(e), `setProjectSettings refuses the name ${JSON.stringify(name)} (${e.slice(0, 80)})`);
+    }
+    check((await errOf(() => engine.setProjectSettings({ name: "My Cut" }))) === "(accepted)" && engine.getProject().name === "My Cut", "a plain name passes");
+    const f = join(root, "named.aive");
+    writeFixture(f, JSON.stringify({ ...project("/x/a.mp4", { hasVideo: false, hasAudio: true }), name: "\\\\zr-evil.invalid\\s\\x" }));
+    const e = await thrown(() => engine.load(f));
+    check(e === null && engine.getProject().name === "x", `a loaded project named \\\\zr-evil.invalid\\s\\x loads with the name "x" (${e?.message}; ${engine.getProject().name})`);
+  }
+
+  // ---- 10. storage: a known project on a server not allowed -------------------------------------
+  // MUTATION: map it to "unreadable" (readProjectFile ignores `waiting`) → it
+  // goes stale, the bake is trashed and the project is forgotten (and the
+  // trace sees its read). Let updateUnavailable forget it (stale by age) →
+  // the "stays known" row fails.
+  console.log("10. storage: a known project on a server not allowed pauses clean-up, never goes stale...");
+  {
+    const DAY = 86_400_000;
+    const evil = "//zr-evil-1.invalid/p/a.aive";
+    const run = async (j: StorageJanitor, dd: string) => {
+      const bake = join(dd, "baked", "only-evil.mp4");
+      mkdirSync(dirname(bake), { recursive: true });
+      writeFixture(bake, "x");
+      const old = new Date(Date.now() - 2 * DAY);
+      utimesSync(bake, old, old);
+      writeFixture(join(dd, "projects.json"), JSON.stringify({ version: 1, since: Date.now() - 30 * DAY, projects: [evil], unavailable: { [evil]: Date.now() - 30 * DAY } }));
+      const rep = await j.report();
+      const u = rep.unavailableProjects.find((x) => x.path === evil);
+      check(!!u && /not allowed yet/.test(u.reason) && u.pausesCleanUp && rep.wouldTrash.length === 0, `report: it is unavailable ("${u?.reason}"), pausesCleanUp, and nothing would be trashed past the retention period`);
+      const r = await j.cleanUp({});
+      const idx = JSON.parse(readFileSync(join(dd, "projects.json"), "utf8")) as { projects: string[] };
+      check(r.moved.length === 0 && existsSync(bake) && idx.projects.includes(evil) && !r.forgotProjects.includes(evil), `clean-up moves nothing and it stays known (${JSON.stringify(r.moved)}; ${JSON.stringify(idx)})`);
+      const f = await j.cleanUp({ forgetMissing: true });
+      check(f.forgotProjects.includes(evil), `forgetMissing forgets it (${JSON.stringify(f.forgotProjects)})`);
+    };
+    // The janitor's own rule, in both modes: serverWaiting names the server, so the file is never read.
+    const traced = touched.length;
+    const dd = join(root, "storage-unc");
+    const waiting = (p: string) => (/zr-evil/.test(p) ? "\\\\zr-evil-1.invalid" : undefined);
+    await run(new StorageJanitor(dd, { liveProjects: () => [], runningJobs: () => [], log: () => {}, serverWaiting: waiting }), dd);
+    if (enforced) {
+      // The engine wires it to HostTrust: a server not approved.
+      const de = join(root, "storage-unc-engine");
+      const e2 = new EditorEngine(de);
+      await run(e2.storage, de);
+      e2.trust.close();
+      engine.trust.start(); // publish the engine's own servers and trust folder again
+    }
+    // The janitor writes the name into projects.json (content, not a path); nothing else may see it.
+    const seen = touched.splice(traced);
+    check(seen.every((t) => t.startsWith("node:fs/promises writeFile({")), `the file itself is never stat'ed or read; the name only reaches projects.json's content (${JSON.stringify(seen.filter((t) => !t.startsWith("node:fs/promises writeFile({")).slice(0, 3))})`);
+  }
+
+  // ---- 14. log mode changes nothing; enforced, the offline state ---------------------------------
+  // MUTATION: make HostTrust.isAllowed refuse in log mode → the log-mode row
+  // finds the asset offline. Drop markOfflineMedia from load → the enforced
+  // row finds it online and not pending. Drop the P13 redirect from
+  // autoSaveIfDirty → the autosave row's save is refused (G1).
+  console.log("14. a NAS path: log mode changes nothing; enforced it is offline...");
+  {
+    const NAS = "\\\\zr-nas.invalid\\s\\a.mp4";
+    const f = join(root, "nas.aive");
+    writeFixture(f, JSON.stringify(project(NAS, { hasVideo: false, hasAudio: true })));
+    const fsp = require("node:fs/promises") as Record<string, unknown>;
+    const realStat = fsp.stat;
+    const seen: string[] = [];
+    let a: Project["assets"][number] | undefined;
+    const lines = await logsOf(async () => {
+      await engine.load(f);
+      a = engine.getProject().assets[0];
+      // The network call itself, stubbed: what gatedfs lets through reaches this spy, never the network.
+      fsp.stat = async (p: unknown) => void seen.push(String(p));
+      syncBuiltinESMExports();
+      try {
+        await gfs.stat(NAS).catch(() => {});
+      } finally {
+        fsp.stat = realStat;
+        syncBuiltinESMExports();
+      }
+    });
+    const servers = engine.mediaServers();
+    if (!enforced) {
+      check(!!a && !isOffline(a) && a.awaitingServer === undefined && engine.isServablePath(NAS) && servers.gate === "log" && servers.pending.length === 0,
+        `log mode: the NAS asset is not offline, servable, nothing pending (${JSON.stringify(a)}; ${JSON.stringify(servers)})`);
+      check(lines.some((l) => l.includes("would block \\\\zr-nas.invalid")) && seen.length === 1,
+        `log mode: a "would block" line is logged and the (stubbed) call goes through (${JSON.stringify(lines)}; ${JSON.stringify(seen)})`);
+    } else {
+      const p = servers.pending.find((x) => x.host === "zr-nas.invalid");
+      check(!!a && a.awaitingServer === "zr-nas.invalid" && isOffline(a) && !engine.isServablePath(NAS) && servers.gate === "enforce" && !!p && p.origins.join() === "project" && p.files === 1,
+        `enforced: the NAS asset waits for its server, is not servable, and is pending with origin project (${JSON.stringify(a)}; ${JSON.stringify(p)})`);
+      check(lines.some((l) => l.includes("blocked \\\\zr-nas.invalid")) && seen.length === 0, `enforced: "blocked" is logged and the call never reaches the spy (${JSON.stringify(seen)})`);
+      // P13: a project whose own file is on a server not allowed autosaves to the recovery folder.
+      (engine as unknown as { currentPath: string }).currentPath = "//zr-evil-2.invalid/p/x.aive";
+      engine.setProjectSettings({ name: "Dirty" });
+      const saved = await thrown(async () => {
+        const to = await engine.autoSaveIfDirty();
+        check(!!to && to.startsWith(join(root, "data", "autosave", "Recovered-")) && existsSync(to), `the autosave of a project on an unallowed server goes to the recovery folder (${to})`);
+      });
+      check(saved === null, `…without refusing (${saved?.message})`);
+      // Undo after a revoke: a snapshot taken while the server was allowed is marked again (G3 runs on undo / redo).
+      // (A server that is not a traced name: approveHost writes it into hosts.json.)
+      const OK2 = "zr-ok-2.invalid";
+      await approveHost(engine.dataDir, OK2, "prompt");
+      engine.recheckOfflineMedia();
+      const f2 = join(root, "revoke.aive");
+      writeFixture(f2, JSON.stringify(project(`//${OK2}/s/a.mp4`, { hasVideo: false, hasAudio: true })));
+      await engine.load(f2);
+      const online = engine.getProject().assets[0].awaitingServer === undefined;
+      engine.setProjectSettings({ name: "Edited" });
+      await revokeHost(engine.dataDir, OK2);
+      engine.recheckOfflineMedia();
+      const offlineNow = engine.getProject().assets[0].awaitingServer === OK2;
+      engine.undo();
+      const afterUndo = engine.getProject().assets[0].awaitingServer;
+      engine.redo();
+      check(online && offlineNow && afterUndo === OK2 && engine.getProject().assets[0].awaitingServer === OK2,
+        `undo / redo after a revoke: the restored snapshot waits for its server too (online ${online}, revoked ${offlineNow}, after undo ${afterUndo})`);
+    }
+    // resolveFont's backstop (behind G5): a font it may not open is never opened, and never silently swapped for the default font.
+    const resolveFont = (engine as unknown as { resolveFont(w: string, s: string, c: Map<string, string>, d: string): Promise<string> }).resolveFont.bind(engine);
+    const fontRows: [string, string][] = [["a refused form", "\\\\zr-evil-9.invalid@SSL\\s\\f.ttf"]];
+    if (enforced) fontRows.push(["a server not allowed", "//zr-evil-9.invalid/s/f.ttf"]);
+    for (const [label, font] of fontRows) {
+      const e = await thrown(() => resolveFont(join(root, "render"), font, new Map(), "font.ttf"));
+      check(!!e && /^Font ".*" (is a path ZabsReel never opens|is on \\\\zr-evil-9\.invalid, which hasn't been allowed)\.$/.test(e.message), `resolveFont refuses ${label} (${e?.message})`);
+    }
+  }
+  if (enforced) {
+    // The unread state (3.1), with the engine: nothing listed is trusted or outside; a load goes on with the asset
+    // offline; an rpc path is refused with unread: true and no request; the first good read brings it online.
+    // MUTATION: add the request entry while unread (requirePath) → the "no request" row fails. Drop the
+    // onChange → onTrustChanged wiring → the asset stays offline after the read works.
+    const d = freshData();
+    // (The approved host is not a traced name: approveHost writes it into hosts.json.)
+    await approveHost(d, "zr-ok-1.invalid", "prompt");
+    writeList(d, [...readList(d).servers, { host: "zr-evil-3.invalid" }]);
+    const inject: ReadErrorInjection = { "hosts.key": "EBUSY" };
+    const realTrust = engine.trust;
+    const ht = new HostTrust(d, { readError: inject, onChange: () => engine.onTrustChanged() });
+    (engine as unknown as { trust: HostTrust }).trust = ht;
+    ht.start();
+    try {
+      const f = join(root, "unread.aive");
+      writeFixture(f, JSON.stringify(project("//zr-ok-1.invalid/s/a.mp4", { hasVideo: false, hasAudio: true })));
+      await engine.load(f);
+      const servers = engine.mediaServers();
+      check(engine.getProject().assets[0].awaitingServer === "zr-ok-1.invalid" && JSON.stringify(servers.unread) === '["hosts.key"]' && servers.approved.length === 0 && servers.outside.length === 0 && !servers.pending.some((x) => x.origins.includes("outside")),
+        `unread at start: the load goes on with the asset offline, nothing approved or outside, no outside origin (${JSON.stringify(servers)})`);
+      const thumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
+      check(thumb instanceof RpcError && thumb.code === "media_offline" && /couldn't read its list of approved computers/.test(thumb.message), `generate_thumbnail refuses with media_offline and the unread wording (${thumb?.message.slice(0, 140)})`);
+      const imp = await thrown(() => dispatch(engine, "import_video", { path: "//zr-ok-1.invalid/s/b.mp4" }));
+      check(imp instanceof RpcError && imp.code === "media_server_not_approved" && imp.details.unread === true && /couldn't read its list of approved computers; retrying/.test(imp.message)
+        && !engine.mediaServers().pending.some((x) => x.origins.includes("request")), `import_video refuses with unread: true and adds no request (${imp?.message.slice(0, 120)})`);
+      delete inject["hosts.key"];
+      const t0 = Date.now();
+      while (Date.now() - t0 < 2_000 && engine.getProject().assets[0].awaitingServer) await sleep(50);
+      const after = engine.mediaServers();
+      check(engine.getProject().assets[0].awaitingServer === undefined && after.unread.length === 0 && after.pending.some((x) => x.host === "zr-evil-3.invalid" && x.origins.includes("outside")),
+        `the read works again: within 2 s the asset is online, and only now is zr-evil-3.invalid pending as outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
+    } finally {
+      ht.close();
+      (engine as unknown as { trust: HostTrust }).trust = realTrust;
+      realTrust.start();
     }
   }
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
