@@ -770,6 +770,7 @@ async function main() {
   // (in-process and across processes). Write hosts.json in place
   // (writeFileSync instead of writeAtomic) → the reader process sees partial
   // JSON. Keep a corrupt list instead of moving it aside → the .bad-* row fails.
+  // Delete leftover claims only after a write → the writes-nothing claim row fails.
   console.log("3. the approval store: round trip, bad files, atomic writes, the lock...");
   {
     const d = freshData();
@@ -912,6 +913,12 @@ async function main() {
     const e = await thrown(() => approveHost(d, "nas", "prompt"));
     check(e === null && names(readTrustedHosts(d).approved) === "nas" && trustFiles(d, "hosts.lock.break-").length === 0,
       `a crashed claimer's claim .1: the next write takes claim .2, succeeds and leaves no claim (${e?.message}; ${JSON.stringify(trustFiles(d, "hosts.lock"))})`);
+    // A pass through the lock that writes nothing (Remove of a host kept by now) also deletes leftover claims.
+    writeFixture(join(d, "trust", "hosts.lock.break-1.1"), "");
+    const before = sha(listFile(d));
+    const r = await revokeHost(d, "nas", { onlyIfOutside: true });
+    check(!r.removed && sha(listFile(d)) === before && trustFiles(d, "hosts.lock.break-").length === 0,
+      `a pass that writes nothing (onlyIfOutside on an approved host) still deletes a leftover claim (${JSON.stringify(trustFiles(d, "hosts.lock"))})`);
   }
 
   // ---- 4. G2: rpc paths into <dataDir>/trust -----------------------------------------
@@ -920,7 +927,8 @@ async function main() {
   // backstop answers instead of G2 (and through the link, the error quotes the
   // start of the key). Drop the realpath part of HostTrust.checkPath → the
   // link rows fail. Remove checkLoadedProject from load → the font / asset
-  // rows fail. Drop privatePath from rememberMany → its row fails.
+  // rows fail. Drop privatePath from rememberMany → its row fails. Check
+  // fonts untrimmed in checkLoadedProject → the leading-space rows load.
   console.log("4. G2: rpc reads and writes into the trust folder...");
   {
     const dataDir = join(root, "data");
@@ -981,6 +989,9 @@ async function main() {
       ["clip LUT", projectWith({}, { effects: { lut: join(dataDir, "trust", "x.cube") } }), /^clip "clip_c1" LUT path/],
       ["overlay font", projectWith({}, { overlays: [{ id: "text_t1", text: "t", font: keyFile(dataDir) }] }), /^clip "clip_c1" text "text_t1" font/],
       ["caption font", projectWith({}, { captions: { cues: [], style: { font: keyFile(dataDir) } } }), /^clip "clip_c1" caption font/],
+      // resolveFont trims a font, so a leading space must not get it past the check.
+      ["overlay font with a leading space", projectWith({}, { overlays: [{ id: "text_t1", text: "t", font: ` ${keyFile(dataDir)}` }] }), /^clip "clip_c1" text "text_t1" font/],
+      ["caption font with a leading space", projectWith({}, { captions: { cues: [], style: { font: ` ${keyFile(dataDir)}` } } }), /^clip "clip_c1" caption font/],
       ["asset.path on a server, by name", projectWith({ path: "\\\\zr-evil-1.invalid\\zr\\trust\\hosts.key" }), /^asset "asset_a1" path/],
     ];
     for (const [label, f, field] of fieldRows) {
@@ -1015,7 +1026,9 @@ async function main() {
   // zr-evil-3.invalid as outside and approvalDialogFor gives "keep". Drop the
   // 1 s retry timer → the unread rows are still unread after 2 s. Ignore
   // onlyIfOutside → the remove-after-keep row removes the host. Drop the lazy
-  // reload or the watch → their HostTrust rows fail.
+  // reload or the watch → their HostTrust rows fail. Keep a missing or corrupt
+  // key (or list) as the last good copy → the missing/corrupt-then-EBUSY rows
+  // call nas outside (or give "allow") instead of unread.
   console.log("12. stamps: outside entries, the key, read errors, the unread state, HostTrust...");
   const stampWith = (k: Buffer, host: string, via: string, added: string) => createHmac("sha256", k).update(`zabsreel-hosts-v2\n${host}\n${via}\n${added}`).digest("base64url");
   {
@@ -1155,6 +1168,26 @@ async function main() {
     const d = freshData();
     const r = readTrustedHosts(d, { readError: { "hosts.key": "EBUSY" } });
     check(r.unread.length === 0 && r.approved.length === 0, `an unreadable key next to a missing hosts.json is not "unread": there is no entry to check (${JSON.stringify(r)})`);
+    // A missing or corrupt read is no good copy (and drops an earlier one): a
+    // file read that way, then written by another UI host (the antivirus
+    // scanner then holds the new file), then unreadable, is unread, never
+    // "every entry outside". Missing: a fresh data folder. Corrupt: after a good read.
+    for (const file of ["hosts.key", "hosts.json"] as const) {
+      for (const first of ["missing", "corrupt"] as const) {
+        const d = freshData();
+        if (first === "corrupt") {
+          await approveHost(d, "other", "prompt");
+          readTrustedHosts(d);
+          writeFixture(join(d, "trust", file), "{ not a store file");
+        }
+        let r = readTrustedHosts(d);
+        await approveHost(d, "nas", "prompt");
+        const logs = await logsOf(() => void (r = readTrustedHosts(d, { readError: { [file]: "EBUSY" } })));
+        check(r.approved.length === 0 && r.outside.length === 0 && JSON.stringify(r.unread) === JSON.stringify([file]) && approvalDialogFor(r, "nas") === "unread"
+          && logs.some((l) => l.includes(`${file} could not be read (EBUSY); no good copy yet`)) && !logs.some((l) => l.includes("last good copy")),
+          `${file} ${first} at a read, then written, then EBUSY: nothing approved or outside, unread ${JSON.stringify(r.unread)}, approvalDialogFor gives "${approvalDialogFor(r, "nas")}" (${JSON.stringify(r)}; ${JSON.stringify(logs)})`);
+      }
+    }
   }
   {
     // No laundering, Keep, Remove, and Remove after a Keep in another UI host.

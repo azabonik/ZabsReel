@@ -184,9 +184,13 @@ function sortEntries(list: List, key: Buffer | null): Sorted {
   return { order, approved, outside: order.filter((h) => !approved.has(h)) };
 }
 
-/** The last good read of each file, per data folder: `null` = read, and there was no usable one. */
+/**
+ * The last good read of each file, per data folder. Only a key or list that
+ * parsed is kept: a missing or corrupt read clears it, so a later unreadable
+ * read is in the unread state, never "every entry outside".
+ */
 interface Kept {
-  key?: Buffer | null;
+  key?: Buffer;
   list?: List;
   /** The problems the last read logged, so a re-read every second logs each once. */
   logged: Set<string>;
@@ -209,10 +213,12 @@ export function readTrustedHosts(dataDir: string, opts: ReadOptions = {}): Trust
   const k = readTrustFile(dir, KEY, opts);
   let key: Buffer | null | undefined;
   if (k.kind === "ok") {
-    key = c.key = parseKey(k.bytes);
+    key = parseKey(k.bytes);
+    c.key = key ?? undefined;
     if (!key) problems.push(`${KEY} is not 43 base64url characters for 32 bytes, so no entry counts as added by ${PRODUCT_NAME}`);
   } else if (k.kind === "missing") {
-    key = c.key = null;
+    key = null;
+    c.key = undefined;
   } else {
     stale = true;
     key = c.key;
@@ -223,9 +229,11 @@ export function readTrustedHosts(dataDir: string, opts: ReadOptions = {}): Trust
   if (j.kind === "ok") {
     const parsed = parseList(j.bytes);
     if ("why" in parsed) problems.push(`${LIST} ${parsed.why}; no server in it is used`);
-    list = c.list = "why" in parsed ? EMPTY : parsed;
+    list = "why" in parsed ? EMPTY : parsed;
+    c.list = "why" in parsed ? undefined : parsed;
   } else if (j.kind === "missing") {
-    list = c.list = EMPTY;
+    list = EMPTY;
+    c.list = undefined;
   } else {
     stale = true;
     list = c.list;
@@ -408,11 +416,11 @@ async function updateHosts(dataDir: string, change: (s: Sorted, key: Buffer) => 
       }
       const sorted = sortEntries(list, key);
       await opts.afterRead?.();
+      // Claims left by a crashed claimer: every lock they name is gone (this one holds the lock).
+      for (const f of readdirSync(dir)) if (f.startsWith(`${LOCK}.break-`)) unlinkQuiet(join(dir, f));
       const servers = change(sorted, key);
       if (!servers) return false;
       writeAtomic(dir, LIST, `${JSON.stringify({ version: 2, servers }, null, 2)}\n`);
-      // Claims left by a crashed claimer: every lock they name is gone (this one holds the lock).
-      for (const f of readdirSync(dir)) if (f.startsWith(`${LOCK}.break-`)) unlinkQuiet(join(dir, f));
       return true;
     },
     opts,

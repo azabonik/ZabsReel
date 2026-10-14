@@ -380,7 +380,9 @@ export class HostTrust {
    * asset path, cutout colour path, LUT or text or caption font is in the
    * trust folder does not load; a proxy or preview path there is dropped. For
    * an .otio import (`otio`), an asset path there stays an offline placeholder
-   * (its import already skipped the probe). Mutates `project`.
+   * (its import already skipped the probe). Mutates `project`. The identity
+   * check of a field on the data folder's server (pathCheckFailed,
+   * uncheckedPaths) comes with the offline state.
    */
   checkLoadedProject(project: Project, opts: { otio?: boolean } = {}): void {
     const refuse = (field: string, p: string) => {
@@ -396,8 +398,13 @@ export class HostTrust {
     for (const t of project.tracks ?? []) {
       for (const c of t.clips ?? []) {
         if (priv(c.effects?.lut)) refuse(`clip "${c.id}" LUT path`, c.effects.lut);
-        for (const ov of c.overlays ?? []) if (priv(ov.font)) refuse(`clip "${c.id}" text "${ov.id}" font`, ov.font);
-        if (priv(c.captions?.style?.font)) refuse(`clip "${c.id}" caption font`, c.captions.style.font);
+        // Fonts are trimmed where they are used (resolveFont), so check them trimmed.
+        for (const ov of c.overlays ?? []) {
+          const f = ov.font?.trim();
+          if (priv(f)) refuse(`clip "${c.id}" text "${ov.id}" font`, f);
+        }
+        const cf = c.captions?.style?.font?.trim();
+        if (priv(cf)) refuse(`clip "${c.id}" caption font`, cf);
       }
     }
   }
