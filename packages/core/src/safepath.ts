@@ -14,6 +14,8 @@
  *  - {@link safeFileStem} sanitises any id used IN a filename.
  *  - {@link isLocalMediaPath} / {@link assertLocalMediaPath} classify a media
  *    path as a local file (accepted) vs a URL/protocol form (rejected).
+ *  - {@link assertPathUsable} refuses, for any rpc path, a Windows device / NT
+ *    path or a network path whose server name has no key (unc.ts).
  *  - {@link sanitizeProjectIds} rewrites non-token ids on load/import.
  *  - {@link assertProjectMediaLocal} refuses a project whose media is non-local.
  *  - {@link coerceProjectNumbers} / {@link coerceProjectValues} give every
@@ -21,6 +23,7 @@
  */
 import { newId } from "./ids.js";
 import { PRODUCT_NAME } from "./brand.js";
+import { classifyPath, type RefusedPath } from "./unc.js";
 import { isTransitionType, type Project, type MediaAsset, type Clip, type Track } from "./types.js";
 import { isBlendMode } from "./effects/compositing.js";
 import { parseKeyColor } from "./effects/registry.js";
@@ -52,10 +55,6 @@ export function safeFileStem(id: unknown): string {
 
 /** A Windows drive-letter path (`C:\…` / `c:/…`). */
 const WIN_DRIVE = /^[A-Za-z]:[\\/]/;
-/** A UNC share (`\\server\share`), but NOT a `\\?\` / `\\.\` device namespace. */
-const WIN_UNC = /^\\\\[^\\?.]/;
-/** A `\\?\` or `\\.\` Windows device namespace (refused). */
-const WIN_DEVICE = /^\\\\[?.]\\/;
 /** A URL/protocol scheme (`http:`, `file:`, `data:`, `concat:`, `C` alone is NOT — see guard). */
 const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 
@@ -90,44 +89,77 @@ export function protocolName(p: string): string {
 }
 
 /**
+ * A refused path (unc.ts) for an error message: what it is, why, and how to
+ * fix it. `inProject` picks the fix: edit the project file, or pass another
+ * path.
+ */
+function refusedMessage(p: string, field: string, c: RefusedPath, inProject: boolean): string {
+  const fix = inProject
+    ? "then change this path in the project file (it is a text file) and open the project again."
+    : "and use that path instead.";
+  if (c.form === "host") {
+    return `${field} "${show(p)}" names the network computer "${showHost(c.host)}", which ${PRODUCT_NAME} can't use. ${c.reason} Map that folder to a drive letter, or use the computer's plain name, ${fix}`;
+  }
+  const what = c.form === "nt" ? "an NT path (\\??\\)" : "a Windows device path (\\\\?\\ / \\\\.\\)";
+  return `${field} "${show(p)}" is ${what}, which ${PRODUCT_NAME} does not open. Use a drive-letter or \\\\server\\share path, ${fix}`;
+}
+
+/** A server name as written, with every character outside printable ASCII shown as `\u{…}` (zero-width, look-alikes). */
+function showHost(h: string): string {
+  return h.replace(/[^\x21-\x7e]/gu, (ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
+}
+
+/** The {@link classifyPath} refusal of `p`, or undefined for a path it accepts. */
+function refusal(p: string): RefusedPath | undefined {
+  const c = classifyPath(p);
+  return c.kind === "refused" ? c : undefined;
+}
+
+/** True for an absolute path: POSIX (`/…`), a Windows drive letter, or a network path (`\\server\share`, any separators). */
+function isAbsoluteAnyOs(p: string): boolean {
+  return p.startsWith("/") || WIN_DRIVE.test(p) || classifyPath(p).kind === "network";
+}
+
+/**
  * True when `p` is an ABSOLUTE LOCAL filesystem path: POSIX (`/…`), a Windows
  * drive letter (`C:\…`, accepted on every host so a project saved on Windows
- * still opens on WSL/Linux and vice-versa) or a UNC share (`\\server\share`,
- * a normal network drive on a desktop). A URL/protocol form, a Windows device
- * namespace (`\\?\`, `\\.\`) and a bare relative path are all rejected.
+ * still opens on WSL/Linux and vice-versa) or a network share (`\\server\share`,
+ * `//server/share` or a mix of separators, a normal network drive on a
+ * desktop). A URL/protocol form, a path unc.ts refuses (a Windows device or NT
+ * path, a server name with no key) and a bare relative path are all rejected.
  *
- * Accepted risk: on a Windows host, a UNC or `//host/share` path in a loaded
- * .aive/.otio makes probe, thumbnail and render open an SMB connection to the
- * named host, which can send the user's NTLM credentials to it. This is
- * accepted deliberately so projects on a NAS keep working.
+ * Accepted risk, until the per-server approval lands: on a Windows host, a
+ * network path in a loaded .aive/.otio makes probe, thumbnail and render open
+ * an SMB connection to the named host, which can send the user's NTLM
+ * credentials to it. unc.ts already recognizes the host.
  */
 export function isLocalMediaPath(p: unknown): p is string {
   if (typeof p !== "string" || p === "") return false;
-  if (looksLikeProtocol(p)) return false;
-  if (WIN_DEVICE.test(p)) return false;
-  return p.startsWith("/") || WIN_DRIVE.test(p) || WIN_UNC.test(p);
+  if (looksLikeProtocol(p) || refusal(p)) return false;
+  return isAbsoluteAnyOs(p);
 }
 
 /**
  * True for a form that must NEVER reach FFmpeg/ffprobe as an input: a
- * URL/protocol (`scheme:…`) or a Windows device namespace (`\\?\`, `\\.\`).
- * A scheme-free relative path is NOT protocol-like (it is a plain file, which
- * FFmpeg resolves against the cwd) — this is what separates the SSRF vector
- * from a legitimately relative media reference.
+ * URL/protocol (`scheme:…`) or a path unc.ts refuses (a Windows device or NT
+ * path, a server name with no key). A scheme-free relative path is NOT
+ * protocol-like (it is a plain file, which FFmpeg resolves against the cwd) —
+ * this is what separates the SSRF vector from a legitimately relative media
+ * reference.
  */
 export function isProtocolLike(p: unknown): boolean {
-  return typeof p === "string" && (looksLikeProtocol(p) || WIN_DEVICE.test(p));
+  return typeof p === "string" && (looksLikeProtocol(p) || !!refusal(p));
 }
 
 /**
- * Refuse only the SSRF/protocol forms for a path that came from a loaded
- * project (asset.path, effects.lut). UNC and `//host/share` paths pass: on a
- * Windows host they open an SMB connection (and can send NTLM credentials) to
- * the named host, an accepted risk for NAS workflows (see isLocalMediaPath). A relative or absolute LOCAL path passes
- * unchanged — relative media references are legitimate (a foreign OTIO's
- * relative target_url, an old project saved under a relative AIVE_DATA_DIR) and
- * are not a network vector, so refusing them would stop legitimate projects
- * loading. `field` names where the path came from.
+ * Refuse the SSRF/protocol forms and the forms unc.ts refuses for a path that
+ * came from a loaded project (asset.path, effects.lut). A network path with a
+ * usable server name passes (see the accepted risk at isLocalMediaPath). A
+ * relative or absolute LOCAL path passes unchanged — relative media
+ * references are legitimate (a foreign OTIO's relative target_url, an old
+ * project saved under a relative AIVE_DATA_DIR) and are not a network vector,
+ * so refusing them would stop legitimate projects loading. `field` names
+ * where the path came from.
  */
 export function assertMediaNotProtocol(p: unknown, field: string): void {
   if (typeof p !== "string") return;
@@ -137,9 +169,20 @@ export function assertMediaNotProtocol(p: unknown, field: string): void {
       `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. ${PRODUCT_NAME} only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
     );
   }
-  if (WIN_DEVICE.test(p)) {
-    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which ${PRODUCT_NAME} does not open.`);
-  }
+  const r = refusal(p);
+  if (r) throw new Error(refusedMessage(p, field, r, true));
+}
+
+/**
+ * Refuse an rpc path (load, save, export, import, font …) that unc.ts refuses:
+ * a Windows device or NT path, or a network path whose server name has no
+ * key. Anything else passes unchanged; each caller keeps its own checks.
+ * `field` names the parameter.
+ */
+export function assertPathUsable(p: unknown, field: string): void {
+  if (typeof p !== "string") return;
+  const r = refusal(p);
+  if (r) throw new Error(refusedMessage(p, field, r, false));
 }
 
 /**
@@ -159,10 +202,8 @@ export function assertLocalMediaPath(p: unknown, field: string): string {
       `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. ${PRODUCT_NAME} only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
     );
   }
-  if (WIN_DEVICE.test(p)) {
-    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which ${PRODUCT_NAME} does not open.`);
-  }
-  if (!(p.startsWith("/") || WIN_DRIVE.test(p) || WIN_UNC.test(p))) {
+  assertPathUsable(p, field);
+  if (!isAbsoluteAnyOs(p)) {
     throw new Error(`${field} "${show(p)}" is not an absolute local path.`);
   }
   return p;
@@ -249,10 +290,11 @@ export function sanitizeProjectIds(project: Project): number {
 
 /**
  * Refuse a loaded/imported project whose media is not a local file. Asserts
- * every `asset.path`, every cutout's `colorPath` and every `effects.lut` (clip + adjustment) is an absolute
- * local path (throws a field-naming error otherwise), DROPS any
- * `proxyPath` / `previewPath` that is non-local (those are engine-regenerated
- * caches — a stale/foreign protocol value is silently discarded, not fatal)
+ * every `asset.path`, every cutout's `colorPath` and every `effects.lut` (clip
+ * + adjustment) is neither a protocol nor a path unc.ts refuses (throws a
+ * field-naming error that says how to fix the path otherwise), DROPS any
+ * `proxyPath` / `previewPath` that is either (those are engine-regenerated
+ * caches — a stale/foreign value is silently discarded, not fatal)
  * and DROPS an `effects.lut` that is not a .cube path (not checked on disk).
  * Mutates `project` (the dropped fields). Call after id sanitising.
  */

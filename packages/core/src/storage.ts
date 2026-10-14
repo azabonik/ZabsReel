@@ -5,6 +5,7 @@ import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MASK_GRACE_MS } from "./gc.js";
 import { PRODUCT_NAME } from "./brand.js";
+import { classifyPath } from "./unc.js";
 import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } from "./library.js";
 
 /**
@@ -891,6 +892,12 @@ export class StorageJanitor {
       const skipped: { path: string; reason: string }[] = [];
       const found: string[] = [];
       for (const p of paths) {
+        // Never stat a device / NT path or a network path with an unusable server name.
+        const refused = classifyPath(p);
+        if (refused.kind === "refused") {
+          skipped.push({ path: p, reason: refused.reason });
+          continue;
+        }
         const abs = resolve(p);
         if (!PROJECT_FILE.test(abs)) {
           skipped.push({ path: p, reason: "not a .aive or .otio file" });

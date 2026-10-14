@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { newId } from "./ids.js";
-import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, isProtocolLike } from "./safepath.js";
+import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, assertPathUsable, isProtocolLike } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
@@ -889,6 +889,9 @@ export class EditorEngine extends EventEmitter {
 
   // ---- media import ----------------------------------------------------------
   async importVideo(path: string): Promise<MediaAsset> {
+    // A device / NT path or an unusable server name gets its teaching message
+    // first (a backslash network path is not absolute on POSIX).
+    assertPathUsable(path, "import path");
     if (!isAbsolute(path)) {
       throw new Error(`Import path must be absolute, got "${path}"`);
     }
@@ -4245,6 +4248,7 @@ export class EditorEngine extends EventEmitter {
 
   /** Add a burned-in text overlay (title / lower-third) to a clip. */
   addTextOverlay(clipId: string, overlay: Omit<TextOverlay, "id">): TextOverlay {
+    assertPathUsable(overlay.font, "style.font");
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const ov: TextOverlay = { id: newId("text"), ...overlay };
@@ -4271,6 +4275,7 @@ export class EditorEngine extends EventEmitter {
   }
 
   setTextStyle(clipId: string, overlayId: string | undefined, style: Partial<TextStyle>): TextOverlay[] {
+    assertPathUsable(style.font, "style.font");
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       if (!clip.overlays?.length) throw new Error("This clip has no text overlays to style — add text first.");
@@ -4319,6 +4324,7 @@ export class EditorEngine extends EventEmitter {
     clipId: string,
     opts: { model?: WhisperModel; language?: string; maxLen?: number; style?: CaptionStyle } = {},
   ): Promise<{ clip: Clip; cueCount: number }> {
+    assertPathUsable(opts.style?.font, "style.font");
     const { clip } = this.findClip(clipId);
     const asset = this.requireClipAsset(clip, "caption transcription");
     if (!asset.hasAudio) throw new Error("Clip's source has no audio to transcribe");
@@ -4396,6 +4402,7 @@ export class EditorEngine extends EventEmitter {
    * seconds (speed is already baked into stored cue frames). Merged and sorted.
    */
   async exportCaptions(path: string, format?: "srt" | "vtt"): Promise<{ path: string; cueCount: number; format: string }> {
+    assertPathUsable(path, "export_captions path");
     const fps = this.project.fps;
     const fmt = format ?? (path.toLowerCase().endsWith(".vtt") ? "vtt" : "srt");
     const cues: { start: number; end: number; text: string }[] = [];
@@ -4426,6 +4433,7 @@ export class EditorEngine extends EventEmitter {
    * are converted to clip-local frames; cues outside the clip are dropped.
    */
   async importCaptions(clipId: string, path: string): Promise<{ clip: Clip; cueCount: number; dropped: number }> {
+    assertPathUsable(path, "import_captions path");
     const { clip } = this.findClip(clipId);
     const raw = await readFile(path, "utf8");
     const isVtt = path.toLowerCase().endsWith(".vtt") || /^﻿?WEBVTT/.test(raw);
@@ -4458,6 +4466,7 @@ export class EditorEngine extends EventEmitter {
   }
 
   setCaptionStyle(clipId: string, style: Record<string, unknown>): Clip {
+    assertPathUsable(style.font, "style.font");
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const caps = clip.captions;
@@ -4751,6 +4760,7 @@ export class EditorEngine extends EventEmitter {
    * canceled or failed export deletes its partial output file.
    */
   startExportJob(outputPath: string, settings?: ExportSettings): { job: Job; promise: Promise<RenderResult> } {
+    assertPathUsable(outputPath, "export outputPath");
     if (this.clipCount() === 0) throw new Error("Timeline is empty — nothing to export");
 
     return this.jobs.start("export", `Export → ${basename(outputPath)}`, async (signal, onProgress) => {
@@ -6116,6 +6126,7 @@ export class EditorEngine extends EventEmitter {
   }
 
   async save(path: string): Promise<void> {
+    assertPathUsable(path, "save path");
     await mkdir(dirname(path), { recursive: true });
     // Give a still-"Untitled" project a meaningful name from its filename, so the
     // UI title and the AI both have a clear handle on which video this is.
@@ -6135,6 +6146,7 @@ export class EditorEngine extends EventEmitter {
   }
 
   async load(path: string): Promise<Project> {
+    assertPathUsable(path, "load_project path");
     const raw = await readFile(path, "utf8");
     const loaded = JSON.parse(raw) as Project;
     if (!loaded.tracks || !Array.isArray(loaded.assets)) {
@@ -6184,6 +6196,7 @@ export class EditorEngine extends EventEmitter {
    * metadata.synthcut so re-importing here is lossless.
    */
   async exportOtio(path: string): Promise<{ path: string; trackCount: number; clipCount: number }> {
+    assertPathUsable(path, "export_otio path");
     const timeline = projectToOtio(this.serializableProject());
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(timeline, null, 2), "utf8");
@@ -6199,6 +6212,7 @@ export class EditorEngine extends EventEmitter {
    * be relinked. Returns any structural warnings + the missing paths.
    */
   async importOtio(path: string): Promise<{ project: Project; warnings: string[]; missing: string[] }> {
+    assertPathUsable(path, "import_otio path");
     const raw = await readFile(path, "utf8");
     let json: unknown;
     try {
@@ -6214,7 +6228,8 @@ export class EditorEngine extends EventEmitter {
     const restored = await this.storage.restore(json);
     const result = await otioToProject(json, async (mediaPath) => {
       // A protocol/URL target_url (http:, file:, data:, …) must NOT be probed:
-      // ffprobe would open the protocol (SSRF). Treat it as missing here; the
+      // ffprobe would open the protocol (SSRF); nor may a device / NT path or a
+      // server name unc.ts refuses. Treat it as missing here; the
       // assertProjectMediaLocal guard below then refuses the import outright. A
       // scheme-free relative/local path is probed as before (not a network
       // vector), so a foreign OTIO with a relative target_url still imports.

@@ -27,7 +27,7 @@ jobs:
       - name: Release guard self-test
         run: node scripts/release-guard.mjs --self-test
 
-      # smoke-opaque-base, smoke-security and smoke-jobs synthesize their own media with ffmpeg.
+      # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
@@ -61,3 +61,9 @@ jobs:
 
       - name: Smoke — jobs (background export, progress, cancel)
         run: npx tsx packages/core/scripts/smoke-jobs.ts
+
+      - name: Smoke — safepath (traversal, protocols, filter allowlist)
+        run: npx tsx packages/core/scripts/smoke-safepath.ts
+
+      - name: Smoke — network paths (unc.ts host keys and refusals)
+        run: npx tsx packages/core/scripts/smoke-unc.ts

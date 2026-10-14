@@ -34,6 +34,10 @@
       "types": "./dist/brand.d.ts",
       "default": "./dist/brand.js"
     },
+    "./unc": {
+      "types": "./dist/unc.d.ts",
+      "default": "./dist/unc.js"
+    },
     "./datadir": {
       "types": "./dist/datadir.d.ts",
       "default": "./dist/datadir.js"
