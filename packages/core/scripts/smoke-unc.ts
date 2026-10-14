@@ -15,18 +15,41 @@
  *                            save, export, font and LUT setters refuse such a
  *                            path, remember_projects skips it, and no fs or
  *                            child_process call ever sees it (traced).
+ *  5. G8 gatedfs           — every gated fs call refuses a device path or a
+ *                            keyless server name without calling the real
+ *                            function (spied); a server that is not allowed
+ *                            is refused when enforced (logged once and let
+ *                            through in log mode); an allowed one calls through.
+ *  6. G7 argv              — ffmpegArgsLocalOnly / ffprobeArgsLocalOnly /
+ *                            runTool check every argument, the cwd and each
+ *                            file line of a -f concat list the same way.
+ *  8. lint                 — scripts/check-io-imports.mjs --self-test, and the
+ *                            core passes it.
+ *  11. G9                  — graphicRequestRefusal refuses network, device and
+ *                            hosted file: imports; the webpack input file
+ *                            system wrapper never calls the real reads for a
+ *                            network path; the plugin taps both factories.
+ *
+ * Rows 5 and 6 check both modes: the network-path gate is "log" until the
+ * user can allow a server in the app, and AIVE_NETWORK_GATE=enforce (CI) turns
+ * it on. Device paths and keyless names are refused in both.
  *
  * Pure: no FFmpeg, no network. The only hosts are under the reserved .invalid
  * top-level domain (the 2.3 vectors only reach the pure classifier).
  * Run: npx tsx packages/core/scripts/smoke-unc.ts
  */
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { classifyPath, normalizeHost } from "../src/unc.js";
 import { assertLocalMediaPath, assertProjectMediaLocal, isLocalMediaPath, isProtocolLike } from "../src/safepath.js";
 import { EditorEngine } from "../src/engine.js";
+import * as gfs from "../src/io/gatedfs.js";
+import { ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool, spawnFfmpegStream } from "../src/ffmpeg/executor.js";
+import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
 import type { Project } from "../src/types.js";
 
 let failures = 0;
@@ -251,6 +274,263 @@ async function main() {
 
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
   process.chdir(cwd);
+
+  const enforced = gfs.NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
+  console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
+  /** console.error lines written while `fn` runs. */
+  const logsOf = async (fn: () => unknown): Promise<string[]> => {
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      await fn();
+    } finally {
+      console.error = real;
+    }
+    return lines;
+  };
+  /** The error `fn` throws or rejects with, or null. */
+  const thrown = async (fn: () => unknown): Promise<Error | null> => {
+    try {
+      await fn();
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  };
+
+  // ---- 5. G8 gatedfs ----------------------------------------------------------
+  // MUTATION: remove the check from copyFile's second argument (paths [0, 1] →
+  // [0]) → the copyFile-to rows fail (the spy sees the call). Make existsSync
+  // call through → its rows fail. Let refused forms through (return null for
+  // "refused" in blocked()) → the device / @SSL rows fail in both modes. Ignore
+  // ENFORCED → the enforce rows fail under AIVE_NETWORK_GATE=enforce.
+  console.log("5. G8 gatedfs: nothing reaches the real fs function unless allowed...");
+  const spied: string[] = [];
+  const fsMod = require("node:fs") as Record<string, unknown>;
+  const fspMod = require("node:fs/promises") as Record<string, unknown>;
+  const spies: [Record<string, unknown>, string, unknown][] = [
+    [fspMod, "stat", async () => ({ spy: true })],
+    [fspMod, "readFile", async () => "spy"],
+    [fspMod, "copyFile", async () => undefined],
+    [fspMod, "readdir", async () => []],
+    [fsMod, "createReadStream", () => ({ spy: true })],
+    [fsMod, "existsSync", () => true],
+    [fsMod, "statSync", () => ({ isFile: () => true })],
+  ];
+  const saved = spies.map(([m, k]) => [m, k, m[k]] as const);
+  for (const [m, k, impl] of spies) {
+    m[k] = (...a: unknown[]) => {
+      spied.push(`${k}(${a.map((x) => (typeof x === "string" ? x : x instanceof URL ? x.href : Buffer.isBuffer(x) ? x.toString() : typeof x)).join(", ")})`);
+      return (impl as (...a: unknown[]) => unknown)(...a);
+    };
+  }
+  syncBuiltinESMExports();
+  try {
+    const NET = "//zr-evil-5.invalid/s/x";
+    const LOCAL = join(root, "local-file");
+    // datadir.ts's bootstrap allows any path until the engine first sets the allowed servers.
+    check(gfs.networkGateEnforced() === enforced, `networkGateEnforced() is ${enforced} (NETWORK_GATE "${gfs.NETWORK_GATE}"; only the variable's "enforce" changes it)`);
+    spied.length = 0;
+    const early = await thrown(() => gfs.bootstrap.statSync(`${NET}/server.json`));
+    check(early === null && spied.length === 1, `bootstrap.statSync calls through before any setAllowedNetworkHosts (${early?.message}; ${JSON.stringify(spied)})`);
+    gfs.setAllowedNetworkHosts([]);
+
+    const calls: [string, (p: unknown) => unknown][] = [
+      ["stat", (p) => gfs.stat(p as string)],
+      ["readFile", (p) => gfs.readFile(p as string)],
+      ["copyFile from", (p) => gfs.copyFile(p as string, LOCAL)],
+      ["copyFile to", (p) => gfs.copyFile(LOCAL, p as string)],
+      ["createReadStream", (p) => gfs.createReadStream(p as string)],
+      ["readdir", (p) => gfs.readdir(p as string)],
+      ["bootstrap.statSync", (p) => gfs.bootstrap.statSync(p as string)],
+    ];
+    const refusedForms = [`//./UNC/zr-evil-5.invalid/s/x`, `\\??\\UNC\\zr-evil-5.invalid\\s\\x`, `\\\\zr-evil-5.invalid@SSL\\s\\x`, new URL("file:///%5C%5Czr-evil-5.invalid/s/x")];
+    // Refused forms: never approvable, so refused in both modes and after any approval.
+    gfs.setAllowedNetworkHosts(["zr-evil-5.invalid"]);
+    for (const p of refusedForms) {
+      for (const [name, call] of calls) {
+        spied.length = 0;
+        const e = await thrown(() => call(p));
+        check(e instanceof gfs.BlockedPathError && spied.length === 0, `${name}(${String(p)}) is refused, the real function is never called (${e?.message.slice(0, 90)}; ${JSON.stringify(spied)})`);
+      }
+      spied.length = 0;
+      check(gfs.existsSync(p as string) === false && spied.length === 0, `existsSync(${String(p)}) is false without calling the real function`);
+    }
+    gfs.setAllowedNetworkHosts([]);
+
+    // A server that is not allowed: refused when enforced; logged once and let through in log mode.
+    for (const p of [NET, `\\\\zr-evil-5.invalid\\s\\x`, Buffer.from(NET), new URL(`file:${NET}`)]) {
+      const shown = Buffer.isBuffer(p) ? `Buffer(${p})` : String(p);
+      for (const [name, call] of calls) {
+        spied.length = 0;
+        const e = await thrown(() => call(p));
+        if (enforced) {
+          check(e instanceof gfs.BlockedPathError && e.host === "zr-evil-5.invalid" && /has not been allowed/.test(e.message) && spied.length === 0,
+            `enforced: ${name}(${shown}) is refused with the typed error, the real function is never called (${e?.message.slice(0, 80)}; ${JSON.stringify(spied)})`);
+        } else {
+          check(e === null && spied.length === 1, `log mode: ${name}(${shown}) calls through (${e?.message}; ${JSON.stringify(spied)})`);
+        }
+      }
+      spied.length = 0;
+      const exists = gfs.existsSync(p as string);
+      check(enforced ? exists === false && spied.length === 0 : exists === true && spied.length === 1, `${enforced ? "enforced" : "log mode"}: existsSync(${shown}) ${enforced ? "is false without calling the real function" : "calls through"}`);
+    }
+    const logged = await logsOf(async () => {
+      await thrown(() => gfs.stat("//zr-evil-5b.invalid/s/x"));
+      await thrown(() => gfs.readFile("//ZR-EVIL-5B.invalid/s/y"));
+    });
+    check(logged.length === 1 && logged[0].includes(enforced ? "blocked \\\\zr-evil-5b.invalid" : "would block \\\\zr-evil-5b.invalid"), `one log line per server (${JSON.stringify(logged)})`);
+
+    // Allowed: every call goes through.
+    gfs.setAllowedNetworkHosts(["zr-evil-5.invalid"]);
+    for (const [name, call] of calls) {
+      spied.length = 0;
+      const e = await thrown(() => call(NET));
+      check(e === null && spied.length === 1, `allowed: ${name}(${NET}) calls through (${e?.message}; ${JSON.stringify(spied)})`);
+    }
+    spied.length = 0;
+    check(gfs.existsSync(NET) === true && spied.length === 1, "allowed: existsSync calls through");
+    gfs.setAllowedNetworkHosts([]);
+    spied.length = 0;
+    check((await thrown(() => gfs.stat(LOCAL))) === null && spied.length === 1, "a local path always calls through");
+  } finally {
+    for (const [m, k, orig] of saved) m[k] = orig;
+    syncBuiltinESMExports();
+    gfs.setAllowedNetworkHosts([]);
+  }
+
+  // ---- 6. G7 argv ---------------------------------------------------------------
+  // MUTATION: check only the argument after -i in assertArgvReachable → the
+  // output and cwd rows fail (the refused-output rows in both modes). Skip the
+  // -f concat list → the list rows fail. Drop the check from ffprobeArgsLocalOnly
+  // → its rows fail.
+  console.log("6. G7 argv: every argument, the cwd and each concat list entry...");
+  touched.length = 0;
+  const g7 = (fn: () => unknown) => thrown(fn);
+  const list = (name: string, body: string) => {
+    writeFixture(join(root, name), body);
+    return join(root, name);
+  };
+  const NET6 = "//zr-evil-6.invalid/s/a.mp4";
+  const REFUSED6 = "\\\\zr-evil-6.invalid@SSL\\s\\a.mp4";
+  const DEVICE6 = "//./UNC/zr-evil-6.invalid/s/a.mp4";
+  const netRows: [string, () => unknown][] = [
+    ["ffmpeg -i", () => ffmpegArgsLocalOnly(["-i", NET6, "-f", "null", "-"])],
+    ["ffmpeg output", () => ffmpegArgsLocalOnly(["-i", "/tmp/a.mp4", "-c", "copy", NET6])],
+    ["ffmpeg cwd", () => ffmpegArgsLocalOnly(["-i", "a.mp4", "-c", "copy", "b.mp4"], "//zr-evil-6.invalid/s")],
+    ["ffmpeg -f concat list entry", () => ffmpegArgsLocalOnly(["-f", "concat", "-safe", "0", "-i", list("list-net.txt", `ffconcat version 1.0\nfile '/tmp/ok.mp4'\nfile '${NET6}'\n`), "-c", "copy", "/tmp/o.mp4"])],
+    ["ffmpeg -f concat list by bare name in cwd", () => ffmpegArgsLocalOnly(["-f", "concat", "-safe", "0", "-i", "list-net.txt", "-c", "copy", "o.mp4"], root)],
+    ["ffprobe input", () => ffprobeArgsLocalOnly(["-v", "error", "-of", "json", NET6])],
+  ];
+  for (const [name, fn] of netRows) {
+    const e = await g7(fn);
+    check(enforced ? e instanceof gfs.BlockedPathError && e.host === "zr-evil-6.invalid" : e === null,
+      `${enforced ? "enforced" : "log mode"}: ${name} on a server that is not allowed is ${enforced ? "refused" : "let through"} (${e?.message.slice(0, 90)})`);
+  }
+  const refusedRows: [string, () => unknown][] = [
+    ["ffmpeg -i (keyless name)", () => ffmpegArgsLocalOnly(["-i", REFUSED6, "-f", "null", "-"])],
+    ["ffmpeg output (keyless name)", () => ffmpegArgsLocalOnly(["-i", "/tmp/a.mp4", "-c", "copy", REFUSED6])],
+    ["ffmpeg output (device)", () => ffmpegArgsLocalOnly(["-i", "/tmp/a.mp4", "-c", "copy", DEVICE6])],
+    ["ffmpeg cwd (device)", () => ffmpegArgsLocalOnly(["-i", "a.mp4", "b.mp4"], "//?/UNC/zr-evil-6.invalid/s")],
+    ["ffmpeg -f concat entry (keyless, quoted)", () => ffmpegArgsLocalOnly(["-f", "concat", "-i", list("list-dav.txt", `file '${REFUSED6.replace(/\\/g, "/")}'\n`), "o.mp4"])],
+    ["ffmpeg -f concat entry (device, escaped)", () => ffmpegArgsLocalOnly(["-f", "concat", "-i", list("list-dev.txt", "  file \\\\\\\\.\\\\UNC\\\\zr-evil-6.invalid\\\\s\\\\a.mp4\r\n"), "o.mp4"])],
+    ["ffmpeg -f concat list that can't be read", () => ffmpegArgsLocalOnly(["-f", "concat", "-i", join(root, "no-such-list.txt"), "o.mp4"])],
+    ["ffprobe input (device)", () => ffprobeArgsLocalOnly(["-v", "error", DEVICE6])],
+    ["spawnFfmpegStream (keyless name)", () => spawnFfmpegStream(["-i", REFUSED6, "-f", "null", "-"], { reject: false })],
+    ["runTool (whisper, keyless name)", () => runTool("zr-no-such-tool", ["-f", REFUSED6], { reject: false })],
+  ];
+  for (const [name, fn] of refusedRows) {
+    const e = await g7(fn);
+    check(e !== null && (e instanceof gfs.BlockedPathError || /concat list can't be read|its list can't be read/.test(e.message)), `${name} is refused in every mode (${e?.message.slice(0, 100)})`);
+  }
+  const fine = await g7(() => ffmpegArgsLocalOnly(["-f", "concat", "-safe", "0", "-i", list("list-ok.txt", "file '/tmp/a.mp4'\nfile 'b.mp4'\n# file '//zr-evil-6.invalid/s/c.mp4'\n"), "-c", "copy", "/tmp/o.mp4"]));
+  check(fine === null, `a concat list of local files (and a commented-out line) passes (${fine?.message})`);
+  check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
+
+  // ---- 8. the import lint ---------------------------------------------------------
+  // MUTATION: drop the dynamic-import form from check-io-imports.mjs → its
+  // self-test fails. Import node:fs in any core file → the real scan fails.
+  console.log("8. check-io-imports...");
+  const lint = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts", "check-io-imports.mjs");
+  for (const args of [["--self-test"], []]) {
+    let out: string;
+    try {
+      out = execFileSync(process.execPath, [lint, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      out = `exit ${(err as { status?: number }).status}: ${String((err as { stdout?: string }).stdout ?? "")}${String((err as { stderr?: string }).stderr ?? "")}`;
+    }
+    check(/\[check-io-imports\] (self-test )?ok/.test(out) && !/FAIL/.test(out), `check-io-imports ${args.join(" ") || "(the core)"} passes (${out.trim().split("\n").slice(-2).join(" | ").slice(0, 200)})`);
+  }
+
+  // ---- 11. G9 graphic bundling ------------------------------------------------------
+  // MUTATION: drop the file: rule from graphicRequestRefusal (localPart returns
+  // true for any classifyPath-local part) → the file:// rows pass through. Make
+  // gateInputFileSystem call the real read first → the spy rows fail.
+  console.log("11. G9: graphic imports and webpack's file system...");
+  touched.length = 0;
+  const G9 = /^graphics can only import local files and installed packages: /;
+  for (const r of [
+    "//zr-evil-6.invalid/s/x",
+    "\\\\zr-evil-6.invalid\\s\\x",
+    "file://zr-evil-6.invalid/s/x.png",
+    "FILE://zr-evil-6.invalid/s/x.png",
+    "file:\\\\zr-evil-6.invalid\\s\\x.png",
+    "file:///%5C%5Czr-evil-6.invalid/s/x.png",
+    "raw-loader!//zr-evil-6.invalid/x",
+    "file://zr-evil-6.invalid/s/x.png?q",
+    "\\??\\UNC\\zr-evil-6.invalid\\s\\x",
+    "//?/UNC/zr-evil-6.invalid/s/x",
+    "file:///%E0%A4%A",
+  ]) {
+    const why = graphicRequestRefusal(r);
+    check(why !== null && G9.test(why), `refused: ${JSON.stringify(r)} (${why})`);
+  }
+  for (const r of ["./x", "react", "/tmp/x.png", "file:///tmp/x.png", "file://localhost/tmp/x.png", "!!raw-loader!./x.txt?raw", "C:\\v\\x.png"]) {
+    check(graphicRequestRefusal(r) === null, `allowed: ${JSON.stringify(r)}`);
+  }
+  const fakeCalls: string[] = [];
+  const fakeFs: Record<string, unknown> = {};
+  for (const name of ["stat", "lstat", "readFile", "readdir", "readlink", "realpath", "readJson"]) {
+    fakeFs[name] = (p: string, ...rest: unknown[]) => {
+      fakeCalls.push(`${name}(${p})`);
+      (rest[rest.length - 1] as (e: Error | null, v?: unknown) => void)(null, "real");
+    };
+    fakeFs[`${name}Sync`] = (p: string) => {
+      fakeCalls.push(`${name}Sync(${p})`);
+      return "real";
+    };
+  }
+  gateInputFileSystem(fakeFs);
+  const viaFs = (name: string, p: string) =>
+    new Promise<{ err: Error | null; value: unknown }>((res) => (fakeFs[name] as (...a: unknown[]) => void)(p, {}, (err: Error | null, value: unknown) => res({ err, value })));
+  for (const p of ["//zr-evil-6.invalid/s/x", "\\\\zr-evil-6.invalid\\s\\x", "\\\\?\\UNC\\zr-evil-6.invalid\\s\\x"]) {
+    for (const name of ["stat", "lstat", "readFile", "readdir", "readlink", "realpath", "readJson"]) {
+      fakeCalls.length = 0;
+      const r = await viaFs(name, p);
+      const syncErr = await thrown(() => (fakeFs[`${name}Sync`] as (p: string) => unknown)(p));
+      check(r.err !== null && G9.test(r.err.message) && syncErr !== null && G9.test(syncErr.message) && fakeCalls.length === 0,
+        `wrapped ${name} / ${name}Sync(${JSON.stringify(p)}) call back / throw the G9 error, the real read is never called (${JSON.stringify(fakeCalls)})`);
+    }
+  }
+  fakeCalls.length = 0;
+  const localRead = await viaFs("readFile", "/tmp/x.tsx");
+  check(localRead.err === null && localRead.value === "real" && fakeCalls.length === 1, "a local read goes to the real file system");
+  // The plugin: wraps the compiler's input file system and taps beforeResolve of both factories.
+  const taps: ((d: { request?: unknown } | undefined) => unknown)[] = [];
+  const factory = { hooks: { beforeResolve: { tap: (_n: string, fn: (d: { request?: unknown } | undefined) => unknown) => void taps.push(fn) } } };
+  const compilerFs: Record<string, unknown> = { stat: (_p: string, cb: (e: Error | null) => void) => cb(null) };
+  new GateNetworkFsPlugin().apply({
+    inputFileSystem: compilerFs,
+    hooks: { normalModuleFactory: { tap: (_n, fn) => void fn(factory) }, contextModuleFactory: { tap: (_n, fn) => void fn(factory) } },
+  });
+  const tapErr = await Promise.all(taps.map((t) => thrown(() => t({ request: "file://zr-evil-6.invalid/s/x.png" }))));
+  check(taps.length === 2 && tapErr.every((e) => e !== null && G9.test(e.message)), `the plugin taps both factories' beforeResolve and refuses there (${tapErr.map((e) => e?.message.slice(0, 60)).join(" | ")})`);
+  check(taps.every((t) => t({ request: "./Graphic" }) === undefined), "a local request continues (undefined keeps the waterfall's data)");
+  const compilerStat = await new Promise<Error | null>((res) => (compilerFs.stat as (p: string, cb: (e: Error | null) => void) => void)("//zr-evil-6.invalid/s/x", res));
+  check(compilerStat !== null && G9.test(compilerStat.message), "the plugin wraps the compiler's input file system");
+  check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
+
   rmSync(root, { recursive: true, force: true });
 
   console.log(failures === 0 ? "\nALL UNC CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

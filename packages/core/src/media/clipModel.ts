@@ -1,5 +1,4 @@
-import { mkdir, access, rename } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { mkdir, access, rename, createWriteStream } from "../io/gatedfs.js";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { join } from "node:path";

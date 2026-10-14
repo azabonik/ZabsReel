@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { stat } from "../io/gatedfs.js";
 import type { Canvas, ResolvedRenderClip } from "../types.js";
 import type { RenderProfile } from "./graph.js";
 

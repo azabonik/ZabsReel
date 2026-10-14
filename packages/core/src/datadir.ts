@@ -15,8 +15,11 @@
  *
  * apps/desktop/electron/brand.cjs is a CommonJS copy with the same rule and the
  * same reason strings; smoke-brand checks they agree.
+ *
+ * It runs before any engine exists, on folders the environment chose, so it
+ * reads through the network-path gate's bootstrap (io/gatedfs.ts).
  */
-import { statSync } from "node:fs";
+import { bootstrap } from "./io/gatedfs.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DATA_DIR_PARTS, LEGACY } from "./brand.js";
@@ -25,7 +28,7 @@ import { DATA_DIR_PARTS, LEGACY } from "./brand.js";
 export function holdsState(dir: string): boolean {
   for (const name of ["server.json", "projects.json"]) {
     try {
-      if (statSync(join(dir, name)).isFile()) return true;
+      if (bootstrap.statSync(join(dir, name)).isFile()) return true;
     } catch {
       // Missing or unreadable: does not count.
     }

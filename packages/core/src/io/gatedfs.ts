@@ -1,0 +1,182 @@
+/**
+ * The core's only door to the file system (G8). Every `fs` / `fs/promises`
+ * function the core uses is re-exported here, wrapped so that each path
+ * argument passes {@link assertReachable} before the real function runs.
+ * scripts/check-io-imports.mjs fails the build when any other core module
+ * imports `node:fs`, `node:fs/promises`, `node:child_process` or execa
+ * (child processes go through ffmpeg/executor.ts, which checks every argv
+ * string with the same gate, G7).
+ *
+ * Why: on Windows, opening `\\server\share\…` (even a `stat`) signs in to that
+ * server and sends it an NTLM response. unc.ts recognizes such a path and keys
+ * its server; this module refuses to open one whose server is not allowed.
+ *
+ *  - A Windows device / NT path and a server name with no key (unc.ts
+ *    refuses them) are always refused.
+ *  - A network path whose server is not in {@link setAllowedNetworkHosts}:
+ *    while {@link NETWORK_GATE} is "log", one line per server says what would
+ *    be blocked and the call goes on; when enforced, the call is refused.
+ *
+ * The real function is looked up on the `node:fs` module at each call (not
+ * captured at load), so a test that replaces it sees every call.
+ */
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import { PRODUCT_NAME } from "../brand.js";
+import { classifyPath, type PathClass } from "../unc.js";
+
+/**
+ * "log" until the user can allow a server from both UI hosts; then
+ * "enforce". AIVE_NETWORK_GATE=enforce (read once, here) turns enforcement on
+ * for tests; nothing turns it off.
+ */
+export const NETWORK_GATE = "log" as "log" | "enforce";
+const ENFORCED = NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
+
+/** True when a path on a server that is not allowed is refused (not only logged). */
+export function networkGateEnforced(): boolean {
+  return ENFORCED;
+}
+
+/** Host keys (unc.ts) the core may open paths on. */
+let allowed: ReadonlySet<string> = new Set();
+/** False until the first {@link setAllowedNetworkHosts}: {@link bootstrap} allows every path until then. */
+let hostsSet = false;
+/** Servers already named in a log line. */
+const logged = new Set<string>();
+
+/** Replace the set of servers (host keys from unc.ts) whose paths may be opened. */
+export function setAllowedNetworkHosts(keys: Iterable<string>): void {
+  allowed = new Set(keys);
+  hostsSet = true;
+}
+
+/** A path the gate refused to open. */
+export class BlockedPathError extends Error {
+  readonly code = "ERR_PATH_BLOCKED";
+  constructor(
+    message: string,
+    readonly path: string,
+    /** The server's key, for a network path that is not allowed. */
+    readonly host?: string,
+  ) {
+    super(message);
+    this.name = "BlockedPathError";
+  }
+}
+
+/** Short, log-safe rendering of a path, with hidden characters shown. */
+function show(p: string): string {
+  const s = JSON.stringify(p);
+  return s.length > 160 ? `${s.slice(0, 157)}…"` : s;
+}
+
+/**
+ * The path an fs argument names, as text, and its class: a string, a Buffer
+ * (any Uint8Array), or a `file:` URL (a host makes it `//host/path`, as
+ * Windows opens it). Null for anything else (a file descriptor, a FileHandle).
+ */
+export function fsArgPath(p: unknown): { text: string; c: PathClass } | null {
+  let text: string;
+  if (typeof p === "string") text = p;
+  else if (p instanceof Uint8Array) text = Buffer.from(p).toString("utf8");
+  else if (p instanceof URL) {
+    if (p.protocol !== "file:") return null; // fs refuses any other URL itself
+    if (p.hostname !== "") text = `//${p.hostname}${p.pathname}`;
+    else {
+      try {
+        text = decodeURIComponent(p.pathname);
+      } catch {
+        return { text: p.href, c: { kind: "refused", form: "host", host: "", reason: "The file URL can't be decoded." } };
+      }
+    }
+  } else return null;
+  return { text, c: classifyPath(text) };
+}
+
+/** Why `p` may not be opened (`what`: the call, for the log line), or null. */
+function blocked(p: unknown, what: string, bootstrapping = false): BlockedPathError | null {
+  const a = fsArgPath(p);
+  if (!a || a.c.kind === "local" || (bootstrapping && !hostsSet)) return null;
+  if (a.c.kind === "refused") return new BlockedPathError(`Refusing to open ${show(a.text)}: ${a.c.reason}`, a.text);
+  const { host, display } = a.c;
+  if (allowed.has(host)) return null;
+  if (!logged.has(host)) {
+    logged.add(host);
+    console.error(`[aive-core] ${ENFORCED ? "blocked" : "would block"} ${display}: ${what} ${show(a.text)} (a network computer not allowed in ${PRODUCT_NAME})`);
+  }
+  if (!ENFORCED) return null;
+  return new BlockedPathError(
+    `Refusing to open ${show(a.text)}: it is on the network computer ${display}, which has not been allowed in ${PRODUCT_NAME}.`,
+    a.text,
+    host,
+  );
+}
+
+/** Throw a {@link BlockedPathError} when `p` may not be opened. `what` names the call for the log line. */
+export function assertReachable(p: unknown, what: string): void {
+  const e = blocked(p, what);
+  if (e) throw e;
+}
+
+type Fn = (...args: any[]) => any;
+const promises = fsp as unknown as Record<string, Fn>;
+const sync = fs as unknown as Record<string, Fn>;
+
+/** `fs/promises` `name`, gated on the arguments at `paths`: a refusal is a rejected promise. */
+function gatedAsync<F extends Fn>(name: string, paths: readonly number[] = [0]): F {
+  return ((...args: unknown[]) => {
+    for (const i of paths) {
+      const e = blocked(args[i], name);
+      if (e) return Promise.reject(e);
+    }
+    return promises[name](...args);
+  }) as F;
+}
+
+/** `fs` `name`, gated on the arguments at `paths`: a refusal throws. */
+function gatedSync<F extends Fn>(name: string, paths: readonly number[] = [0], bootstrapping = false): F {
+  return ((...args: unknown[]) => {
+    for (const i of paths) {
+      const e = blocked(args[i], name, bootstrapping);
+      if (e) throw e;
+    }
+    return sync[name](...args);
+  }) as F;
+}
+
+export const access = gatedAsync<typeof fsp.access>("access");
+export const chmod = gatedAsync<typeof fsp.chmod>("chmod");
+export const copyFile = gatedAsync<typeof fsp.copyFile>("copyFile", [0, 1]);
+export const lstat = gatedAsync<typeof fsp.lstat>("lstat");
+export const mkdir = gatedAsync<typeof fsp.mkdir>("mkdir");
+export const mkdtemp = gatedAsync<typeof fsp.mkdtemp>("mkdtemp");
+export const open = gatedAsync<typeof fsp.open>("open");
+export const readdir = gatedAsync<typeof fsp.readdir>("readdir");
+export const readFile = gatedAsync<typeof fsp.readFile>("readFile");
+export const rename = gatedAsync<typeof fsp.rename>("rename", [0, 1]);
+export const rm = gatedAsync<typeof fsp.rm>("rm");
+export const stat = gatedAsync<typeof fsp.stat>("stat");
+export const utimes = gatedAsync<typeof fsp.utimes>("utimes");
+export const writeFile = gatedAsync<typeof fsp.writeFile>("writeFile");
+
+export const appendFileSync = gatedSync<typeof fs.appendFileSync>("appendFileSync");
+export const createReadStream = gatedSync<typeof fs.createReadStream>("createReadStream");
+export const createWriteStream = gatedSync<typeof fs.createWriteStream>("createWriteStream");
+export const readFileSync = gatedSync<typeof fs.readFileSync>("readFileSync");
+export const rmSync = gatedSync<typeof fs.rmSync>("rmSync");
+export const statSync = gatedSync<typeof fs.statSync>("statSync");
+
+/** `fs.existsSync`, false for a path the gate refuses. */
+export function existsSync(p: fs.PathLike): boolean {
+  return blocked(p, "existsSync") ? false : fs.existsSync(p);
+}
+
+/**
+ * For datadir.ts only (the lint checks it): it resolves the data folder from
+ * the environment before any engine exists, so these allow every path until
+ * the first {@link setAllowedNetworkHosts}, then gate like the rest.
+ */
+export const bootstrap = {
+  statSync: gatedSync<typeof fs.statSync>("statSync", [0], true),
+};

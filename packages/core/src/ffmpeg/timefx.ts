@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { runFfmpeg, runFfprobe } from "./executor.js";
 import type { FrameClock } from "../speed.js";

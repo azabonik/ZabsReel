@@ -23,10 +23,9 @@
  * project media.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "../io/gatedfs.js";
 import { join } from "node:path";
-import { execa } from "execa";
-import { FFMPEG_BIN, ffmpegArgsLocalOnly, runFfprobe } from "../ffmpeg/executor.js";
+import { runFfprobe, spawnFfmpegStream } from "../ffmpeg/executor.js";
 
 /** Buckets when the request names none (the renderer's DEFAULT_BUCKETS). */
 export const PEAKS_BUCKETS_DEFAULT = 1600;
@@ -144,7 +143,7 @@ async function computePeaks(path: string, buckets: number): Promise<Float32Array
     "-i", path, "-map", "0:a:0",
     "-ac", String(channels), "-ar", String(SAMPLE_RATE), "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1",
   ];
-  const child = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args), { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
+  const child = spawnFfmpegStream(args, { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
   const frameBytes = channels * 4;
   let carry: Buffer = Buffer.alloc(0);
   let idx = 0;

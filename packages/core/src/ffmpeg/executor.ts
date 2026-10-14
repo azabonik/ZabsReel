@@ -1,7 +1,6 @@
-import { execa, type ResultPromise } from "execa";
+import { execa, type Options, type ResultPromise } from "execa";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync, statSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { appendFileSync, assertReachable, readFileSync, rm, statSync, writeFile } from "../io/gatedfs.js";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { looksLikeProtocol, protocolName } from "../safepath.js";
@@ -516,6 +515,45 @@ export function guardFfprobeArgs(args: readonly string[]): void {
 }
 
 /**
+ * G7, the child-process half of the network-path gate (io/gatedfs.ts):
+ * every argument, inputs and outputs alike, and the spawn's `cwd` pass
+ * {@link assertReachable}, and so does each `file` line of a `-f concat`
+ * list (read here; it names the files FFmpeg will open). A Windows device /
+ * NT path or a server name with no key is always refused; a server the user
+ * has not allowed is refused once the gate is enforced (logged before).
+ */
+export function assertArgvReachable(args: readonly string[], cwd?: string): void {
+  if (cwd !== undefined) assertReachable(cwd, "spawn cwd");
+  for (let i = 0; i < args.length; i++) {
+    assertReachable(args[i], "child process argument");
+    if (args[i] === "-i" && i + 1 < args.length && inputFormat(args, i)?.toLowerCase() === "concat") {
+      assertReachable(args[i + 1], "child process argument"); // before reading it, so a blocked list gives the gate's own error
+      for (const file of concatListFiles(resolve(cwd ?? ".", args[i + 1]))) assertReachable(file, "concat list entry");
+    }
+  }
+}
+
+/**
+ * The `file` entries of a concat demuxer list, each read as FFmpeg reads it
+ * (libavformat/concatdec.c: a keyword, then one av_get_token). Throws when the
+ * list can't be read, since FFmpeg would open its entries unchecked.
+ */
+function concatListFiles(list: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(list, "utf8");
+  } catch (err) {
+    throw new Error(`Refusing ffmpeg -f concat input "${list}": its list can't be read to check it (${(err as Error).message}).`);
+  }
+  const files: string[] = [];
+  for (const line of text.split(/\r\n?|\n/)) {
+    const m = /^[ \t]*file(?=[ \t])/.exec(line);
+    if (m) files.push(avGetToken(line, m[0].length, " \t\r\n").token);
+  }
+  return files;
+}
+
+/**
  * The only protocols FFmpeg/ffprobe may open for an input: local files and the
  * core's own pipes (`-i -` is `pipe:` in FFmpeg 4.x and `fd:` in newer builds).
  * Nested opens (a concat list's entries, an image sequence) inherit it.
@@ -532,6 +570,7 @@ export const PROTOCOL_WHITELIST = "file,pipe,fd";
  */
 export function ffmpegArgsLocalOnly(args: readonly string[], cwd?: string): string[] {
   guardFfmpegArgs(args, cwd);
+  assertArgvReachable(args, cwd);
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "-i" && i + 1 < args.length) out.push("-protocol_whitelist", PROTOCOL_WHITELIST);
@@ -543,6 +582,7 @@ export function ffmpegArgsLocalOnly(args: readonly string[], cwd?: string): stri
 /** {@link ffmpegArgsLocalOnly} for ffprobe: the whitelist goes before the input (the last argument). */
 export function ffprobeArgsLocalOnly(args: readonly string[]): string[] {
   guardFfprobeArgs(args);
+  assertArgvReachable(args);
   if (args.length === 0) return [];
   return [...args.slice(0, -1), "-protocol_whitelist", PROTOCOL_WHITELIST, args[args.length - 1]];
 }
@@ -854,6 +894,24 @@ export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
     env: CHILD_ENV,
   });
   return stdout as unknown as Buffer;
+}
+
+/**
+ * Start ffmpeg on `args` (checked and whitelisted as {@link ffmpegArgsLocalOnly}
+ * does; a string `opts.cwd` is the graph's working directory) and return the
+ * running execa child, for callers that read its output as it comes.
+ */
+export function spawnFfmpegStream<O extends Options>(args: readonly string[], opts: O) {
+  return execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args, typeof opts.cwd === "string" ? opts.cwd : undefined), opts);
+}
+
+/**
+ * Run another tool (whisper, tar) after {@link assertArgvReachable} has
+ * checked its arguments and working directory.
+ */
+export function runTool<O extends Options>(bin: string, args: readonly string[], opts?: O) {
+  assertArgvReachable(args, typeof opts?.cwd === "string" ? opts.cwd : undefined);
+  return execa(bin, args, opts);
 }
 
 /** Run ffmpeg and return combined stderr (used by analysis filters that log to stderr). */

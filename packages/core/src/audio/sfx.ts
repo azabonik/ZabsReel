@@ -3,8 +3,7 @@
  * so no licensing questions). Each is rendered once to a 48 kHz mono 16-bit
  * PCM WAV under <dataDir>/sfx/<name>-v1.wav and then imported like any asset.
  */
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, rename, writeFile, existsSync } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { safeFileStem } from "../safepath.js";
 import type { BleepSound } from "../types.js";

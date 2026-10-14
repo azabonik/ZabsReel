@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execa } from "execa";
+import { runTool } from "../ffmpeg/executor.js";
 import { ensureWhisper, DEFAULT_MODEL, type WhisperModel } from "./setup.js";
 
 /** A single transcribed caption cue. Times are seconds relative to the audio. */
@@ -88,7 +88,7 @@ export async function transcribeFull(
     else args.push("-l", "en");
     if (opts.threads) args.push("-t", String(opts.threads));
 
-    await execa(bin, args, { reject: true });
+    await runTool(bin, args, { reject: true });
 
     const raw = await readFile(`${outPrefix}.json`, "utf8");
     const data = JSON.parse(raw) as WhisperJson;

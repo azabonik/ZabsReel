@@ -1,5 +1,4 @@
-import { rmSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { rmSync, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "./io/gatedfs.js";
 import { randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";

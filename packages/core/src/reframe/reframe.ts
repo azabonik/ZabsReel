@@ -1,8 +1,7 @@
-import { mkdtemp, open, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execa } from "execa";
-import { FFMPEG_BIN, ffmpegArgsLocalOnly } from "../ffmpeg/executor.js";
+import { spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { FaceDetector } from "./detector.js";
 
 /**
@@ -85,7 +84,7 @@ export async function trackSubject(opts: TrackOptions): Promise<TrackResult> {
       "-y",
       rawPath,
     ];
-    await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args), { reject: true });
+    await spawnFfmpegStream(args, { reject: true });
 
     const detector = await FaceDetector.create();
     const frameBytes = DET * DET * 3;

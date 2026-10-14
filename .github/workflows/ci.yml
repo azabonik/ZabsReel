@@ -65,5 +65,13 @@ jobs:
       - name: Smoke — safepath (traversal, protocols, filter allowlist)
         run: npx tsx packages/core/scripts/smoke-safepath.ts
 
-      - name: Smoke — network paths (unc.ts host keys and refusals)
+      # Enforced here (the shipped default only logs until the app can allow a server).
+      - name: Smoke — network paths (host keys, refusals, gatedfs, ffmpeg argv, graphic imports)
+        env:
+          AIVE_NETWORK_GATE: enforce
         run: npx tsx packages/core/scripts/smoke-unc.ts
+
+      - name: I/O import gate (core fs and child processes go through the network-path gate)
+        run: |
+          node scripts/check-io-imports.mjs --self-test
+          node scripts/check-io-imports.mjs

@@ -1,10 +1,9 @@
-import { mkdir, access, rm, readdir, copyFile, chmod } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { mkdir, access, rm, readdir, copyFile, chmod, createWriteStream, rename } from "../io/gatedfs.js";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { join } from "node:path";
 import { homedir, platform, arch } from "node:os";
-import { execa } from "execa";
+import { runTool } from "../ffmpeg/executor.js";
 
 /**
  * Local setup for whisper.cpp (MIT). On first use we download a prebuilt
@@ -69,7 +68,6 @@ async function download(url: string, dest: string, label: string): Promise<void>
   const tmp = `${dest}.part`;
   await pipeline(Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(tmp));
   // Atomic-ish rename so a half-written file is never mistaken for complete.
-  const { rename } = await import("node:fs/promises");
   await rename(tmp, dest);
   process.stderr.write(`[whisper] saved ${label}\n`);
 }
@@ -77,7 +75,7 @@ async function download(url: string, dest: string, label: string): Promise<void>
 /** Extract a .zip or .tar.gz using the system `tar` (bsdtar handles both). */
 async function extract(archive: string, destDir: string): Promise<void> {
   await mkdir(destDir, { recursive: true });
-  await execa("tar", ["-xf", archive, "-C", destDir]);
+  await runTool("tar", ["-xf", archive, "-C", destDir]);
 }
 
 /** Recursively find the first file matching `name` under `dir`. */

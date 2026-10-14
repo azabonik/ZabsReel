@@ -1,4 +1,4 @@
-import { readdir, stat, rm } from "node:fs/promises";
+import { readdir, stat, rm } from "./io/gatedfs.js";
 import { basename, join } from "node:path";
 
 /**

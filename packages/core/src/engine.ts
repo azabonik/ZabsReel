@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, statSync } from "node:fs";
-import { mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes } from "node:fs/promises";
+import { existsSync, statSync, mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes } from "./io/gatedfs.js";
 import { homedir } from "node:os";
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";

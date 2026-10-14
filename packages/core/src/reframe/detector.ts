@@ -1,5 +1,4 @@
-import { mkdir, access } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { mkdir, access, createWriteStream, rename } from "../io/gatedfs.js";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { join } from "node:path";
@@ -63,7 +62,6 @@ export async function ensureYunetModel(): Promise<string> {
   }
   const tmp = `${dest}.part`;
   await pipeline(Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(tmp));
-  const { rename } = await import("node:fs/promises");
   await rename(tmp, dest);
   return dest;
 }

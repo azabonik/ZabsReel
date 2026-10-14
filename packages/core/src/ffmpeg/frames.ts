@@ -16,10 +16,9 @@
  * VP9 by the Chromium version). Measured on Chromium 143, mean difference
  * 0.1–0.2 levels.
  */
-import { execa } from "execa";
 import type { ServerResponse } from "node:http";
-import { stat } from "node:fs/promises";
-import { FFMPEG_BIN, FFPROBE_BIN, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly } from "./executor.js";
+import { stat } from "../io/gatedfs.js";
+import { runFfprobe, spawnFfmpegStream } from "./executor.js";
 import { chromiumSourceColor, type SourceColor } from "./colorspace.js";
 import { probedColor } from "./ffprobe.js";
 
@@ -117,8 +116,8 @@ async function sourceStream(path: string): Promise<FramesStream | null> {
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=codec_name,height,color_space,color_range,color_primaries,color_transfer,pix_fmt", "-of", "json", path,
     ];
-    p = execa(FFPROBE_BIN, ffprobeArgsLocalOnly(probeArgs))
-      .then((r) => (JSON.parse(r.stdout) as { streams?: FramesStream[] }).streams?.[0] ?? null)
+    p = runFfprobe(probeArgs)
+      .then((stdout) => (JSON.parse(stdout) as { streams?: FramesStream[] }).streams?.[0] ?? null)
       .catch(() => null);
     if (probed.size > 64) probed.clear();
     probed.set(key, p);
@@ -165,7 +164,7 @@ export async function streamFrames(q: FramesQuery, res: ServerResponse): Promise
     const stream = await sourceStream(q.path).catch(() => null);
     const color = stream ? framesColor(stream, q.chrome) : null;
     const decodeArgs = framesArgs(q, color);
-    const child = execa(FFMPEG_BIN, ffmpegArgsLocalOnly(decodeArgs), { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
+    const child = spawnFfmpegStream(decodeArgs, { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
     const stop = () => {
       if (child.exitCode === null) child.kill("SIGKILL");

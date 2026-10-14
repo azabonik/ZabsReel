@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, rename, stat, writeFile } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import {

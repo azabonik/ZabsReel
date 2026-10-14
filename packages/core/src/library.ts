@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat } from "./io/gatedfs.js";
 import { join, resolve, sep } from "node:path";
 
 /**

@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rm, rename } from "node:fs/promises";
+import { mkdir, writeFile, rm, rename } from "../io/gatedfs.js";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
@@ -6,6 +6,7 @@ import { bundle } from "@remotion/bundler";
 import { ensureBrowser, selectComposition, renderMedia } from "@remotion/renderer";
 import { colorTagArgs, FFMPEG_DEFAULT_CODING, h264RetagBsf, tagFramesStep } from "../ffmpeg/colorspace.js";
 import { runFfmpeg } from "../ffmpeg/executor.js";
+import { GateNetworkFsPlugin } from "./netgate.js";
 
 /**
  * Headless motion-graphics renderer (Remotion).
@@ -126,13 +127,15 @@ export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
       entryPoint: join(opts.workDir, "index.ts"),
       // The scaffold lives outside the repo's node_modules tree, so point
       // webpack at the installed node_modules so `react`/`remotion`/the AI's
-      // imports resolve.
+      // imports resolve. GateNetworkFsPlugin (G9): webpack reads through its
+      // own file system, so the agent's imports can't name a network path.
       webpackOverride: (config) => ({
         ...config,
         resolve: {
           ...config.resolve,
           modules: [modulesDir, ...((config.resolve && config.resolve.modules) || ["node_modules"])],
         },
+        plugins: [...(config.plugins ?? []), new GateNetworkFsPlugin()],
       }),
     });
 

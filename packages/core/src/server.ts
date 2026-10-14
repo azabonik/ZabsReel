@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { stat, mkdir, writeFile } from "node:fs/promises";
+import { createReadStream, stat, mkdir, writeFile } from "./io/gatedfs.js";
 import { extname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { join } from "node:path";

@@ -4,10 +4,8 @@
  * apply_audio_effect / remove_audio_effect / reorder_audio_effect /
  * enhance_voice, and the render-time FFmpeg capability probe (rubberband).
  */
-import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
-import { execa } from "execa";
-import { FFMPEG_BIN, anlmdnWorks, ffmpegArgsLocalOnly, ffmpegVersion } from "../ffmpeg/executor.js";
+import { stat } from "../io/gatedfs.js";
+import { FFMPEG_BIN, anlmdnWorks, ffmpegVersion, runTool, spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { hasAfftdnV2, hasAfftfiltV2 } from "../ffmpeg/version.js";
 import { newId } from "../ids.js";
 import {
@@ -40,7 +38,7 @@ export function parseFilterList(stdout: string): Set<string> {
 /** The filter names this ffmpeg build ships (`ffmpeg -filters`), probed once per process. */
 export function detectFilters(): Promise<Set<string>> {
   if (!filtersPromise) {
-    filtersPromise = execa(FFMPEG_BIN, ["-hide_banner", "-filters"], { reject: true })
+    filtersPromise = runTool(FFMPEG_BIN, ["-hide_banner", "-filters"], { reject: true })
       .then((r) => parseFilterList(r.stdout))
       .catch(() => new Set<string>());
   }
@@ -144,7 +142,7 @@ export async function measureLoudness(src: AudioFxSource, steps: string[], signa
       "-hide_banner", "-nostats", "-ss", src.sourceIn.toFixed(6), "-t", src.sourceSpan.toFixed(6), "-i", src.path,
       "-vn", "-af", chain.join(","), "-f", "null", "-",
     ];
-    const r = await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(args), { reject: true, ...(signal ? { cancelSignal: signal } : {}) });
+    const r = await spawnFfmpegStream(args, { reject: true, ...(signal ? { cancelSignal: signal } : {}) });
     const m = [...r.stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
     if (m.length) L = Number(m[m.length - 1][1]);
   } catch (err) {
@@ -185,10 +183,9 @@ export async function measureNoiseFloor(path: string, startSec: number, durSec: 
     "-hide_banner", "-v", "error", "-ss", startSec.toFixed(3), "-t", dur.toFixed(3), "-i", path,
     "-vn", "-ac", "1", "-ar", String(FLOOR_RATE), "-f", "f32le", "-",
   ];
-  const floorRun = ffmpegArgsLocalOnly(floorArgs);
   const levels = await new Promise<number[]>((resolve) => {
     const levelsOut: number[] = [];
-    const child = spawn(FFMPEG_BIN, floorRun, { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawnFfmpegStream(floorArgs, { stdin: "ignore", stderr: "ignore", buffer: false, reject: false });
     let carry: Buffer = Buffer.alloc(0);
     let sum = 0;
     let n = 0;
