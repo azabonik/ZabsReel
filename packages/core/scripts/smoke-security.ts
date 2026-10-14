@@ -129,9 +129,34 @@ async function main() {
   check((await fetch(`${base}/file?path=${encodeURIComponent(otherCube)}&token=${token}`, { method: "HEAD" })).status === 403, "HEAD /file for a path no clip uses → 403");
   const cubeOther = await fetch(`${base}/file?path=${encodeURIComponent(otherCube)}&token=${token}`);
   check(cubeOther.status === 403, `/file for another .cube → 403 (got ${cubeOther.status})`);
-  engine.setClipEffects(lutClip.id, { lut: sysPath });
+  // Only an existing .cube file can be set as a LUT: a non-.cube or missing
+  // path is refused and the clip keeps its LUT; .CUBE is a .cube; clearing works.
+  // MUTATION: drop the .cube test in setClipEffects → the non-.cube rows fail;
+  // drop the statSync test → the missing-file rows fail.
+  const lutErr = (lut: string): string => {
+    try { engine.setClipEffects(lutClip.id, { lut }); return "(accepted)"; } catch (err) { return (err as Error).message; }
+  };
+  const lutNow = () => engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === lutClip.id)?.effects?.lut;
+  const notCubeErr = lutErr(sysPath);
+  check(/is not a \.cube file/.test(notCubeErr) && notCubeErr.includes(lutClip.id) && notCubeErr.includes(sysPath),
+    `setting a non-.cube path as a LUT is refused, naming the clip and path (${notCubeErr.slice(0, 90)})`);
+  check(lutNow() === cubePath, `the refused non-.cube LUT leaves the clip's .cube LUT (${lutNow()})`);
   const notCube = await fetch(`${base}/file?path=${encodeURIComponent(sysPath)}&token=${token}`);
-  check(notCube.status === 403, `/file for a non-.cube path set as a LUT → 403 (got ${notCube.status})`);
+  check(notCube.status === 403, `/file for a non-.cube path refused as a LUT → 403 (got ${notCube.status})`);
+  const missingCube = join(dataDir, "..", `aive-sec-missing-${Date.now()}.cube`);
+  const missingErr = lutErr(missingCube);
+  check(/does not exist/.test(missingErr), `setting a .cube that does not exist is refused (${missingErr.slice(0, 90)})`);
+  check(lutNow() === cubePath, "the refused missing LUT leaves the clip's .cube LUT");
+  const upperCube = join(dataDir, "..", `aive-sec-upper-${Date.now()}.CUBE`);
+  writeFileSync(upperCube, "LUT_3D_SIZE 2\n");
+  check(lutErr(upperCube) === "(accepted)" && lutNow() === upperCube, "an existing .CUBE file is accepted as a LUT");
+  const upperOk = await fetch(`${base}/file?path=${encodeURIComponent(upperCube)}&token=${token}`);
+  check(upperOk.status === 200, `/file for the clip's .CUBE LUT → 200 (got ${upperOk.status})`);
+  engine.clearClipEffects(lutClip.id);
+  check(lutNow() === undefined, "clear_clip_effects removes the LUT");
+  const cleared = await fetch(`${base}/file?path=${encodeURIComponent(upperCube)}&token=${token}`);
+  check(cleared.status === 403, `/file for a cleared LUT → 403 (got ${cleared.status})`);
+  check(/is empty/.test(lutErr("")), "an empty LUT path is still refused (clear_clip_effects clears)");
 
   console.log("5. WebSocket upgrade auth...");
   const wsDenied = await new Promise<boolean>((resolve) => {

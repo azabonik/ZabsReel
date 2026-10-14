@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
@@ -680,10 +680,12 @@ export class EditorEngine extends EventEmitter {
   }
 
   /**
-   * Security allowlist for the HTTP /file endpoint. A path is servable only if
-   * it lives under the engine's data dir (previews/proxies/frames/baked/
-   * thumbnails/scopes/…) or is the source/proxy/preview file of an imported
-   * asset. Everything else — including `..` traversal attempts, which
+   * Security allowlist for the HTTP /file endpoint (and /frames, /peaks). A
+   * path is servable only if it lives under the engine's data dir (previews/
+   * proxies/frames/baked/thumbnails/scopes/…), is the source/proxy/preview file
+   * of an imported asset, or is the .cube LUT a clip of the project uses
+   * (setClipEffects only sets an existing .cube; load drops a non-.cube LUT).
+   * Everything else — including `..` traversal attempts, which
    * path.resolve collapses before comparison — is rejected, so the server can
    * never be used to read arbitrary files on disk.
    */
@@ -1737,7 +1739,16 @@ export class EditorEngine extends EventEmitter {
   setClipEffects(clipId: string, patch: ClipEffects): Clip {
     // A LUT path reaches FFmpeg's lut3d filter; refuse a URL/protocol form here
     // so apply_lut (and the desktop app) can never point it at the network.
-    if (patch.lut !== undefined) assertLocalMediaPath(patch.lut, "LUT path");
+    if (patch.lut !== undefined) {
+      assertLocalMediaPath(patch.lut, "LUT path");
+      // /file serves a clip's LUT to the live preview (isServablePath), so only
+      // an existing .cube file can be one — never an arbitrary file on disk.
+      const why = !/\.cube$/i.test(patch.lut) ? "is not a .cube file"
+        : !statSync(patch.lut, { throwIfNoEntry: false })?.isFile() ? "does not exist or is not a file" : "";
+      if (why) {
+        throw new Error(`Clip "${clipId}" LUT path "${patch.lut}" ${why}. A LUT must be an existing .cube file (absolute path); clear_clip_effects removes a LUT.`);
+      }
+    }
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
       const current = clip.effects ?? {};

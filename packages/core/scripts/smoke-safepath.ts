@@ -321,6 +321,28 @@ async function main() {
     const proxLoaded = await new EditorEngine(join(dataDir, "prox")).load(join(root, "proxy-url.aive")).catch(() => null);
     check(!!proxLoaded && proxLoaded.assets[0].proxyPath === undefined && proxLoaded.assets[0].previewPath === undefined,
       "load drops a URL proxyPath / previewPath (and still loads)");
+    // Only a .cube can be a LUT (the /file route serves a clip's LUT): load
+    // drops a non-.cube LUT on a clip or an adjustment layer and still loads; a
+    // .cube LUT is kept even when its file is missing (that fails at render).
+    // MUTATION: delete the .cube drop in assertProjectMediaLocal → the drop rows
+    // fail; also delete the .cube test in isServablePath → the servable row fails;
+    // drop the whole effects object (delete c.effects) → the kept-effects row fails.
+    const notCube = structuredClone(tpl);
+    const nc0 = notCube.tracks[0].clips[0];
+    nc0.effects = { ...(nc0.effects ?? {}), lut: "/etc/passwd", color: { contrast: 1.1 }, volume: 0.5 };
+    const nc1 = { ...structuredClone(nc0), id: "clip_cubekept", startFrame: nc0.startFrame + 20, effects: { lut: "/nowhere/missing-look.CUBE" } };
+    const ncAdj = { id: "clip_adjtxt", adjustment: true, startFrame: 0, sourceInFrame: 0, sourceOutFrame: 10, effects: { lut: "x.txt" } };
+    notCube.tracks[0].clips.push(nc1, ncAdj);
+    writeFileSync(join(root, "lut-not-cube.aive"), JSON.stringify(notCube));
+    const eNc = new EditorEngine(join(dataDir, "notcube"));
+    const ncLoaded = await eNc.load(join(root, "lut-not-cube.aive")).catch((err) => { console.log(`    load error: ${(err as Error).message}`); return null; });
+    const ncClip = (id: string) => ncLoaded?.tracks[0].clips.find((c) => c.id === id);
+    check(!!ncLoaded && ncClip(nc0.id)?.effects?.lut === undefined, `load drops a clip's non-.cube LUT (${JSON.stringify(ncClip(nc0.id)?.effects?.lut)})`);
+    check(ncClip(nc0.id)?.effects?.color?.contrast === 1.1 && ncClip(nc0.id)?.effects?.volume === 0.5,
+      `dropping a non-.cube LUT keeps the clip's other effects (${JSON.stringify(ncClip(nc0.id)?.effects)})`);
+    check(!!ncLoaded && !!ncClip("clip_adjtxt") && ncClip("clip_adjtxt")?.effects?.lut === undefined, `load drops an adjustment layer's non-.cube LUT (${JSON.stringify(ncClip("clip_adjtxt")?.effects?.lut)})`);
+    check(ncClip("clip_cubekept")?.effects?.lut === "/nowhere/missing-look.CUBE", "load keeps a .CUBE LUT whose file is missing");
+    check(!!ncLoaded && !eNc.isServablePath("/etc/passwd"), "a dropped non-.cube LUT path is not servable");
     // MUTATION: delete the clip loop in coerceProjectNumbers → the startFrame row
     // fails; delete the width line → the width row fails.
     const nums = structuredClone(tpl) as unknown as Record<string, unknown> & Project;

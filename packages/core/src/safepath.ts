@@ -250,10 +250,11 @@ export function sanitizeProjectIds(project: Project): number {
 /**
  * Refuse a loaded/imported project whose media is not a local file. Asserts
  * every `asset.path`, every cutout's `colorPath` and every `effects.lut` (clip + adjustment) is an absolute
- * local path (throws a field-naming error otherwise), and DROPS any
+ * local path (throws a field-naming error otherwise), DROPS any
  * `proxyPath` / `previewPath` that is non-local (those are engine-regenerated
- * caches — a stale/foreign protocol value is silently discarded, not fatal).
- * Mutates `project` (the dropped cache fields). Call after id sanitising.
+ * caches — a stale/foreign protocol value is silently discarded, not fatal)
+ * and DROPS an `effects.lut` that is not a .cube path (not checked on disk).
+ * Mutates `project` (the dropped fields). Call after id sanitising.
  */
 export function assertProjectMediaLocal(project: Project): void {
   for (const a of project.assets ?? []) {
@@ -266,7 +267,11 @@ export function assertProjectMediaLocal(project: Project): void {
   for (const t of project.tracks ?? []) {
     for (const c of t.clips ?? []) {
       const lut = c.effects?.lut;
-      if (lut !== undefined) assertMediaNotProtocol(lut, `clip "${c.id}" LUT path`);
+      if (lut === undefined) continue;
+      assertMediaNotProtocol(lut, `clip "${c.id}" LUT path`);
+      // Only a .cube can be a LUT (the /file route serves it to the preview);
+      // drop anything else, as with a foreign cache path. Existence is the render's.
+      if (!/\.cube$/i.test(lut)) delete c.effects!.lut;
     }
   }
 }
