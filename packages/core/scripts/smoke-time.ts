@@ -130,7 +130,7 @@ async function consecutiveDiffs(file: string, w: number, h: number): Promise<num
 const clipEnd = (c: Clip) => c.startFrame + Math.round((c.sourceOutFrame - c.sourceInFrame) / (c.effects?.speed ?? 1));
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-time-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-time-"));
   // 4 s / 120 frames: frame N encodes N in chroma; audio = rising chirp 200 -> 1400 Hz.
   const src = join(dir, "coded.mp4");
   await execa(FFMPEG_BIN, [

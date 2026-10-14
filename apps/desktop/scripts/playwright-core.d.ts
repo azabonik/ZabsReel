@@ -49,6 +49,7 @@ declare module "playwright-core" {
     on(event: "request", listener: (request: Request) => void): Page;
     on(event: "response", listener: (response: Response) => void): Page;
     goto(url: string): Promise<unknown>;
+    title(): Promise<string>;
     // A string is evaluated as an expression in the page; its result is unknown here.
     evaluate<R>(pageFunction: string | (() => R | Promise<R>)): Promise<R>;
     evaluate<R, Arg>(pageFunction: (arg: Arg) => R | Promise<R>, arg: Arg): Promise<R>;

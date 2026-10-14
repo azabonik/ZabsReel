@@ -138,7 +138,7 @@ const key = (e: { area: string; name: string }) => `${e.area}/${e.name}`;
 const sorted = (xs: string[]) => [...xs].sort();
 
 async function main() {
-  const root = mkdtempSync(join(tmpdir(), "synthcut-storage-"));
+  const root = mkdtempSync(join(tmpdir(), "zabsreel-storage-"));
   const dataDir = join(root, "data");
   const outside = join(root, "outside");
   const baked = join(dataDir, "baked");

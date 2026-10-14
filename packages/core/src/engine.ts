@@ -893,7 +893,7 @@ export class EditorEngine extends EventEmitter {
     // Absolute but still a protocol/URL or device path must not be probed.
     assertLocalMediaPath(path, "import path");
     const asset = await probeAsset(path);
-    // A file taken from SynthCut's own baked/ folder is the user's media now.
+    // A file taken from ZabsReel's own baked/ folder is the user's media now.
     if (isEngineBake(asset, this.dataDir)) asset.userImported = true;
     this.mutate(() => {
       this.project.assets.push(asset);
@@ -1080,7 +1080,7 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Remove library assets no clip, overlay, bleep or music bed of the open
-   * project uses. SynthCut-made ones (bakes, built-in bleep sounds) go by
+   * project uses. ZabsReel-made ones (bakes, built-in bleep sounds) go by
    * default; imported media only with `includeImported`. One undo step;
    * `dryRun` only reports. Files are not deleted: the storage clean-up trashes
    * a bake once nothing references it any more.
@@ -6169,7 +6169,7 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Write the project as an OpenTimelineIO (.otio) JSON file — the interchange
-   * handoff to Resolve/Premiere/Hiero/etc. SynthCut-specific data rides in
+   * handoff to Resolve/Premiere/Hiero/etc. ZabsReel-specific data rides in
    * metadata.synthcut so re-importing here is lossless.
    */
   async exportOtio(path: string): Promise<{ path: string; trackCount: number; clipCount: number }> {

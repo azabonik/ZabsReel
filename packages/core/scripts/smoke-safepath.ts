@@ -12,7 +12,7 @@
  *                                filter that opens its own source (movie=,
  *                                subtitles=, zmq …), whatever leaked.
  *   5b. -protocol_whitelist    — FFmpeg itself refuses any non-file input.
- *   9. filter allowlist        — the executor refuses any filter SynthCut
+ *   9. filter allowlist        — the executor refuses any filter ZabsReel
  *                                doesn't build and any file option outside
  *                                the run's directory (metadata file=, psnr,
  *                                vidstabdetect result=, drawtext textfile= …),
@@ -515,7 +515,7 @@ async function main() {
   check(drawTextStep({ ...ovBase, position: "constructor" }) === drawTextStep(ovBase), "a prototype-key position is placed as the default (bottom)");
 
   // ---- 9. strict filter allowlist + file options --------------------------
-  // Any filter SynthCut doesn't build is refused (not a denylist): the four
+  // Any filter ZabsReel doesn't build is refused (not a denylist): the four
   // payloads measured on the denylist guard, an unknown name, every file
   // option of an allowed filter pointing outside the run's directory, in
   // quoted / escaped / positional / "/key" (FFmpeg 7+ file value) spellings.
@@ -559,7 +559,7 @@ async function main() {
       check(guardThrew([flag, g]), `guardFfmpegArgs refuses ${flag} ${JSON.stringify(g)}`);
     }
     check(guardThrew(["-f", "lavfi", "-i", `sine,ametadata=mode=print:file=${pwn}`]), "…and the same in a -f lavfi -i graph");
-    // The forms SynthCut builds (graph.ts, the stabilize / reframe bakes, analysis.ts).
+    // The forms ZabsReel builds (graph.ts, the stabilize / reframe bakes, analysis.ts).
     writeFileSync(join(root, "clip_1-reframe.txt"), cropPlanToSendcmd([{ t: 0, x: 0, y: 0 }, { t: 1.25, x: 16, y: 8 }]));
     for (const g of [
       "lut3d=lut0.cube",
@@ -574,15 +574,15 @@ async function main() {
       "curves=r='0/0 1/1':g='0/0 1/1'",
       "loudnorm=I=-14.000000:TP=-1.500000:LRA=11,aresample=48000",
     ]) {
-      check(!guardThrew(["-filter_complex", g], root), `guardFfmpegArgs passes SynthCut's ${JSON.stringify(g.slice(0, 60))}`);
+      check(!guardThrew(["-filter_complex", g], root), `guardFfmpegArgs passes ZabsReel's ${JSON.stringify(g.slice(0, 60))}`);
     }
-    // A bare name opens in the spawn's cwd: only a SynthCut-owned one (the data dir, the OS temp dir) will do.
+    // A bare name opens in the spawn's cwd: only a ZabsReel-owned one (the data dir, the OS temp dir) will do.
     // MUTATION: make ownedWorkDir return true → the "no cwd" row fails.
     const text = ["-vf", "drawtext=textfile=txt_notes.txt:fontfile=font.ttf"];
-    const fakeData = join(dirname(tmpdir()), "synthcut-smoke-unused", "data"); // never created: the guard only compares paths
+    const fakeData = join(dirname(tmpdir()), "zabsreel-smoke-unused", "data"); // never created: the guard only compares paths
     addFfmpegWorkRoot(fakeData);
     check(guardThrew(text), "a drawtext textfile with no cwd (the process's own: often the user's home) is refused");
-    check(guardThrew(text, homedir()) && guardThrew(text, dirname(tmpdir())), "…and with cwd = the user's home or another directory SynthCut doesn't own");
+    check(guardThrew(text, homedir()) && guardThrew(text, dirname(tmpdir())), "…and with cwd = the user's home or another directory ZabsReel doesn't own");
     check(guardThrew(text, `${fakeData}-other`) && guardThrew(text, join(fakeData, "..")), "…and with cwd beside or above the data dir");
     check(!guardThrew(text, join(root, "render")) && !guardThrew(text, join(fakeData, "render")) && !guardThrew(text, fakeData),
       "…and passes with cwd in the OS temp dir or in a data dir the engine owns");
@@ -773,7 +773,7 @@ async function main() {
   }
 
   // ---- 11. a project using every graph-bound field round-trips unchanged ---
-  // Nothing SynthCut writes is coerced: the counters return 0 and load keeps
+  // Nothing ZabsReel writes is coerced: the counters return 0 and load keeps
   // every value. MUTATION: make coerceProjectValues treat effects.lut as a
   // number (nums instead of strs) → the counter and round-trip rows fail.
   console.log("11. a full-featured project saves and loads with nothing coerced...");

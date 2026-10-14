@@ -15,7 +15,7 @@ interface StorageReport {
   totalBytes: number;
   wouldTrashCount: number;
   wouldTrashBytes: number;
-  /** Of the unused files: made before SynthCut began tracking project files. */
+  /** Of the unused files: made before ZabsReel began tracking project files. */
   predatesTracking: { count: number; bytes: number };
   gracePeriod: { count: number; bytes: number };
   trashCount: number;
@@ -26,7 +26,7 @@ interface StorageReport {
   emptyTrash: { count: number; bytes: number };
   unavailableProjects: { path: string; pausesCleanUp: boolean }[];
   blockedBy: string | null;
-  /** Other running SynthCut cores on this data folder (their undo history counts too). */
+  /** Other running ZabsReel cores on this data folder (their undo history counts too). */
   otherCores: number;
   /** Bakes the open project's library holds that no clip uses. */
   libraryBakes: { count: number; bytes: number };
@@ -153,7 +153,7 @@ export function StorageDialog({ api, onClose }: { api: CoreApi; onClose: () => v
       <div className="scrim" onClick={onClose} />
       <div className="exact-modal storage-modal" role="dialog" aria-modal="true" aria-labelledby="storage-title">
         <div className="exact-head">
-          <span id="storage-title"><Trash size={15} /> Storage <span className="muted">— SynthCut's data folder</span></span>
+          <span id="storage-title"><Trash size={15} /> Storage <span className="muted">— ZabsReel's data folder</span></span>
           <button className="icon-btn" onClick={onClose} aria-label="Close"><X /></button>
         </div>
         <div className="storage-body">
@@ -179,7 +179,7 @@ export function StorageDialog({ api, onClose }: { api: CoreApi; onClose: () => v
                 {older.count > 0 && (
                   <span className="muted">
                     {" "}{older.count === report.wouldTrashCount ? (older.count === 1 ? "It was" : "All of them were") : `${older.count} of them (${fmtBytes(older.bytes)}) ${older.count === 1 ? "was" : "were"}`} made
-                    {" "}before SynthCut began tracking project files, so an older project you haven't opened since may still use {older.count === 1 ? "it" : "them"}.
+                    {" "}before ZabsReel began tracking project files, so an older project you haven't opened since may still use {older.count === 1 ? "it" : "them"}.
                     {" "}Automatic clean-ups leave {older.count === 1 ? "it" : "these"} alone; opening that project within {plural(report.settings.trashDays, "day")} of a clean-up brings {older.count === 1 ? "it" : "them"} back.
                   </span>
                 )}
@@ -198,7 +198,7 @@ export function StorageDialog({ api, onClose }: { api: CoreApi; onClose: () => v
               )}
               {report.otherCores > 0 && (
                 <p className="storage-line muted">
-                  {report.otherCores === 1 ? "Another SynthCut core uses" : `${report.otherCores} other SynthCut cores use`} this data folder
+                  {report.otherCores === 1 ? "Another ZabsReel core uses" : `${report.otherCores} other ZabsReel cores use`} this data folder
                   {" "}(an AI client's, for example); files {report.otherCores === 1 ? "its" : "their"} project and undo history use are kept too.
                 </p>
               )}

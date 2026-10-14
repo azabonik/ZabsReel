@@ -12,17 +12,19 @@ const fs = require("node:fs");
 const { ensureCore, browserBlocksPort } = require("./core-launcher.cjs");
 const { applyBundledAssetEnv } = require("./bundled-assets.cjs");
 const { finalSavePath: decideSavePath, closeGuard } = require("./save-rules.cjs");
+const { PRODUCT_NAME, MCP_KEY, APP_ID, APP_ID_DEV } = require("./brand.cjs");
 
 // Branding: the display name (taskbar / jump-list / dialogs) and a stable Windows
 // AppUserModelID so the taskbar shows OUR name + icon instead of "Electron" and
 // groups our windows under one taskbar button. In a DEV run (not packaged) we use
 // a distinct name + AppUserModelID so a source build is a SEPARATE taskbar entry
 // and can't be confused with an installed copy. No effect on the shipped app.
-const APP_NAME = app.isPackaged ? "SynthCut" : "SynthCut (DEV)";
+const APP_NAME = app.isPackaged ? PRODUCT_NAME : `${PRODUCT_NAME} (DEV)`;
 const APP_ICON = path.join(__dirname, "..", "build", "icon.ico");
+const AUMID = app.isPackaged ? APP_ID : APP_ID_DEV;
 app.setName(APP_NAME);
 if (process.platform === "win32") {
-  app.setAppUserModelId(app.isPackaged ? "io.github.azabonik.synthcut" : "io.github.azabonik.synthcut.dev");
+  app.setAppUserModelId(AUMID);
 }
 
 let coreChild = null;
@@ -60,7 +62,7 @@ function buildMenu() {
 // downloads only the changed chunks (via the .blockmap) in the background, then
 // installs on the next restart. Guarded by app.isPackaged so it NEVER runs during
 // a `npm start` dev session. Update source is the `publish` block in package.json
-// (the azabonik/SynthCut GitHub releases).
+// (the azabonik/ZabsReel GitHub releases).
 function setupAutoUpdate() {
   if (!app.isPackaged) return; // dev build — nothing to update against
   let autoUpdater;
@@ -91,7 +93,7 @@ function setupAutoUpdate() {
       cancelId: 1,
       noLink: true,
       title: "Update ready",
-      message: `SynthCut ${info.version} has been downloaded.`,
+      message: `${PRODUCT_NAME} ${info.version} has been downloaded.`,
       detail: "Restart to install it — the update installs on next launch if you choose Later.",
     });
     if (choice === 0) {
@@ -241,7 +243,7 @@ ipcMain.handle("dialog:openProject", async () => {
     title: "Open project",
     properties: ["openFile"],
     filters: [
-      { name: "SynthCut Project", extensions: ["aive"] },
+      { name: `${PRODUCT_NAME} Project`, extensions: ["aive"] },
       { name: "All Files", extensions: ["*"] },
     ],
   });
@@ -250,7 +252,7 @@ ipcMain.handle("dialog:openProject", async () => {
 
 ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
   const base = (defaultName && String(defaultName)) || "Untitled";
-  const filters = [{ name: "SynthCut Project", extensions: ["aive"] }];
+  const filters = [{ name: `${PRODUCT_NAME} Project`, extensions: ["aive"] }];
   const result = await dialog.showSaveDialog({
     title: "Save project as",
     defaultPath: `${base.replace(/\.aive$/i, "")}.aive`,
@@ -278,7 +280,7 @@ ipcMain.handle("mcp:config", () => {
   const server = packaged
     ? { command: process.execPath, args: [mcpEntry], env: { ELECTRON_RUN_AS_NODE: "1" } }
     : { command: "node", args: [mcpEntry] };
-  const config = { mcpServers: { synthcut: server } };
+  const config = { mcpServers: { [MCP_KEY]: server } };
   return {
     available: !!mcpEntry,
     packaged,

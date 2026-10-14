@@ -3,15 +3,16 @@
 // client (via the MCP server) share ONE live editing session: whoever starts
 // first launches the core; the other attaches to it. They must agree on the
 // data directory (where the core publishes server.json), so we use the same
-// default the core and MCP server use: ~/.synthcut/data.
+// rule the core and MCP server use (brand.cjs resolveDataDir: ~/.zabsreel/data, or
+// the old folder when only that one holds state).
 //
 // Electron-free on purpose, so it can be tested under plain Node.
 const { spawn } = require("node:child_process");
 const { createRequire } = require("node:module");
 const http = require("node:http");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
+const { resolveDataDir } = require("./brand.cjs");
 
 const require_ = createRequire(__filename);
 
@@ -31,8 +32,18 @@ function browserBlocksPort(port) {
   return BROWSER_BLOCKED_PORTS.has(Number(port));
 }
 
-function getDataDir() {
-  return path.resolve(process.env.AIVE_DATA_DIR || path.join(os.homedir(), ".synthcut", "data"));
+// The last choice that was logged, so each process prints its data dir once.
+let loggedChoice = "";
+
+/** The data folder this process uses. `opts` ({ env, home }) is for tests. */
+function getDataDir(opts) {
+  const { dir, reason } = resolveDataDir(opts);
+  const line = `[aive] data dir: ${dir} (${reason})`;
+  if (line !== loggedChoice) {
+    loggedChoice = line;
+    console.error(line);
+  }
+  return dir;
 }
 
 function coreCliPath() {

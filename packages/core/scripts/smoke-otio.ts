@@ -4,7 +4,7 @@
  *    and music exports to a valid OTIO Timeline.1 JSON.
  *  - Importing that file back restores an EQUIVALENT project (lossless
  *    round-trip through metadata.synthcut): normalized deep-equal.
- *  - A foreign-shaped OTIO (no synthcut metadata) still imports structurally.
+ *  - A foreign-shaped OTIO (no metadata.synthcut) still imports structurally.
  *  - Missing media becomes offline placeholder assets (missing: true).
  *  - An .otio whose assets carry no colour description (an older export)
  *    imports with each file's colour probed: the preview's source-colour
@@ -128,7 +128,7 @@ async function main() {
   }
   check(same, "normalized projects deep-equal after round-trip");
 
-  console.log("4. foreign OTIO (no synthcut metadata) imports structurally...");
+  console.log("4. foreign OTIO (no metadata.synthcut) imports structurally...");
   const foreign = {
     OTIO_SCHEMA: "Timeline.1",
     name: "Foreign cut",

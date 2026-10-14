@@ -22,6 +22,7 @@ import type { KeyDetection, KeyPatch } from "./keyfx";
 import { EffectStack, type EffectRequest } from "./effectstack";
 import { BlendSelect, MaskGroup, effectiveBlendModeOf, type MaskPatch } from "./maskpanel";
 import type { BlendMode } from "@aive/core/compositing";
+import { MCP_KEY, PRODUCT_NAME } from "@aive/core/brand";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 import { StorageDialog } from "./storagedialog";
@@ -655,7 +656,7 @@ export function App({ api }: { api: CoreApi }) {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><Logo size={24} /></span>
-          <span className="brand-name">SynthCut</span>
+          <span className="brand-name">{PRODUCT_NAME}</span>
         </div>
         <div className="transport">
           <button className="icon-btn" onClick={undo} disabled={!connected} aria-label="Undo" title="Undo"><Undo /></button>
@@ -2133,13 +2134,13 @@ type McpServer = { command: string; args: string[]; env?: Record<string, string>
 
 /** JSON `mcpServers` block used by Claude Desktop, Cursor, Windsurf, and Gemini CLI. */
 function jsonBlock(server: McpServer): string {
-  return JSON.stringify({ mcpServers: { "synthcut": server } }, null, 2);
+  return JSON.stringify({ mcpServers: { [MCP_KEY]: server } }, null, 2);
 }
 
 /** TOML `mcp_servers` block used by Codex CLI. */
 function tomlBlock(server: McpServer): string {
   const lines = [
-    "[mcp_servers.synthcut]",
+    `[mcp_servers.${MCP_KEY}]`,
     `command = ${JSON.stringify(server.command)}`,
     `args = ${JSON.stringify(server.args)}`,
   ];
@@ -2151,7 +2152,7 @@ function tomlBlock(server: McpServer): string {
 function claudeCodeCommand(server: McpServer): string {
   const envFlags = Object.entries(server.env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
   const quote = (s: string) => (s.includes(" ") ? `"${s}"` : s);
-  return ["claude mcp add -s user synthcut", ...envFlags, "--", quote(server.command), ...server.args.map(quote)].join(" ");
+  return [`claude mcp add -s user ${MCP_KEY}`, ...envFlags, "--", quote(server.command), ...server.args.map(quote)].join(" ");
 }
 
 interface ClientDef {
@@ -2249,7 +2250,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
   const server: McpServer = useMemo(() => {
     if (!info?.json) return FALLBACK_SERVER;
     try {
-      return JSON.parse(info.json).mcpServers["synthcut"] as McpServer;
+      return JSON.parse(info.json).mcpServers[MCP_KEY] as McpServer;
     } catch {
       return FALLBACK_SERVER;
     }

@@ -1,7 +1,7 @@
 {
   "name": "@aive/core",
-  "version": "1.0.5",
-  "description": "Headless editing engine for SynthCut: non-destructive timeline, FFmpeg pipeline, HTTP/WebSocket server.",
+  "version": "0.2.0",
+  "description": "Headless editing engine for ZabsReel: non-destructive timeline, FFmpeg pipeline, HTTP/WebSocket server.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,6 +29,14 @@
     "./colorspace": {
       "types": "./dist/ffmpeg/colorspace.d.ts",
       "default": "./dist/ffmpeg/colorspace.js"
+    },
+    "./brand": {
+      "types": "./dist/brand.d.ts",
+      "default": "./dist/brand.js"
+    },
+    "./datadir": {
+      "types": "./dist/datadir.d.ts",
+      "default": "./dist/datadir.js"
     },
     "./package.json": "./package.json"
   },

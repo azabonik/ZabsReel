@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in SynthCut! This is an open-source project and
+Thanks for your interest in ZabsReel! This is an open-source project and
 contributions are welcome.
 
 ## Project structure
@@ -10,7 +10,7 @@ packages/core    @aive/core  — headless engine: timeline (EDL), FFmpeg pipelin
                                HTTP /rpc + WebSocket server. No UI, no AI.
 packages/mcp     @aive/mcp   — MCP server: exposes core's RPC methods as tools to
                                AI clients; forwards calls to the running core.
-apps/desktop     synthcut-desktop — Electron + React UI. Connects to core over WS.
+apps/desktop     zabsreel-desktop — Electron + React UI. Connects to core over WS.
                                web/server.cjs serves the same UI to a browser tab.
 ```
 
@@ -72,7 +72,7 @@ downloads on first motion-graphics use.
 node apps/desktop/scripts/prepare-bundle.ts     # stage bundled binaries → apps/desktop/build/resources/aive
 npx tsx packages/core/scripts/smoke-bundled.ts  # verify the staged bundle renders offline
 npm run build
-npm run dist --workspace synthcut-desktop       # build the NSIS installer
+npm run dist --workspace zabsreel-desktop       # build the NSIS installer
 ```
 
 A few non-obvious things if you touch the packaging:
@@ -109,6 +109,10 @@ OSI open-source, and is a *linked* dependency. It is deliberately isolated to
 Puppeteer/Playwright renderer. Don't add new source-available/commercial deps
 without the same isolation + a clear reason. Every bundled or downloaded
 component must be listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+
+The paragraph above comes from the original project and is kept as written.
+For the ZabsReel changes, [`NOTICE`](NOTICE) adds an explicit GNU GPL section 7
+permission to link with Remotion.
 
 ## Style
 

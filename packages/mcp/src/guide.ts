@@ -12,6 +12,7 @@
 
 import { EFFECTS, isKeyType } from "@aive/core/effects";
 import { AUDIO_EFFECTS, AUDIO_EFFECT_CATEGORIES } from "@aive/core/audio-effects";
+import { PRODUCT_NAME } from "@aive/core/brand";
 
 /** The effect vocabulary, generated from the core effect registry so the guide never drifts. */
 const LOOK_EFFECTS = EFFECTS.filter((e) => !isKeyType(e.type)).map((e) => e.type).join(", ");
@@ -49,7 +50,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 - BE PRECISE WITH FRAMES. Convert seconds→frames = round(seconds × fps); never pass seconds where a *Frame param is expected.
 
 ## Interchange (OTIO)
-- export_otio hands the edit to any OTIO-capable NLE (Resolve/Hiero/RV) as plain JSON; import_otio loads one (SynthCut exports restore losslessly; foreign files map structurally, with warnings + missing-media placeholders reported). Offer this when the human mentions finishing/grading elsewhere.
+- export_otio hands the edit to any OTIO-capable NLE (Resolve/Hiero/RV) as plain JSON; import_otio loads one (${PRODUCT_NAME} exports restore losslessly; foreign files map structurally, with warnings + missing-media placeholders reported). Offer this when the human mentions finishing/grading elsewhere.
 
 ## Which project am I editing?
 - There is ONE shared project open in the editor at a time; you and the human's app window act on it together. When the human opens/creates a different project in the app, your view follows automatically — so always re-orient with timeline_summary at the start of a request rather than assuming the previous project is still loaded.
@@ -110,11 +111,11 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 ## Storage & housekeeping
 - Bakes are files in the data dir: remove_background stores only a lossless matte (~0.1 GB per minute of 1080p, plus a preview .webm; older cutouts made before this stored full colour, ~0.9 GB per minute); stabilize, auto_reframe, freeze_frame, reverse_clip, smooth_slow_motion and motion graphics bake too, and generate_proxy writes proxies. Re-running or undoing a bake leaves the old file behind.
-- SynthCut cleans up by itself (at startup, after saves, bakes and project switches): a baked/proxy file that the open project, its undo/redo history, any saved .aive / exported .otio it knows about, or an autosave no longer names is MOVED to a trash folder once it is over 1 h old, and trash older than 7 days is deleted. A bake stays while its asset is in the project library or while undo can still bring it back — so after undo + re-running remove_background, the previous cutout is trashed once the undo history drops it. A bake no clip uses (its clip was deleted, a reversed clip was flipped back) leaves the library by itself once no undo/redo step uses it either (in practice: after reopening the project); remove_unused_media {dryRun:true} lists unused library assets and removes the SynthCut-made ones on a second call (imported media only with includeImported:true, when the user asks). Imported media is never removed automatically.
+- ${PRODUCT_NAME} cleans up by itself (at startup, after saves, bakes and project switches): a baked/proxy file that the open project, its undo/redo history, any saved .aive / exported .otio it knows about, or an autosave no longer names is MOVED to a trash folder once it is over 1 h old, and trash older than 7 days is deleted. A bake stays while its asset is in the project library or while undo can still bring it back — so after undo + re-running remove_background, the previous cutout is trashed once the undo history drops it. A bake no clip uses (its clip was deleted, a reversed clip was flipped back) leaves the library by itself once no undo/redo step uses it either (in practice: after reopening the project); remove_unused_media {dryRun:true} lists unused library assets and removes the ${PRODUCT_NAME}-made ones on a second call (imported media only with includeImported:true, when the user asks). Imported media is never removed automatically.
 - Several cores on one data folder (the app's and an AI client's) see each other's open project and undo history: neither trashes a file the other still uses (storage_report.otherCores).
 - The trash is the safety net for project files it doesn't know about: load_project / import_otio automatically move back any trashed file the project names (the result lists restoredFromTrash), and each clean-up moves back a trashed file a known project names again. No restore tool is needed. While a known project file can't be read (unplugged drive, moved or deleted), nothing is moved to the trash; storage_report lists it under unavailableProjects.
 - When the user asks about disk space: storage_report (dry run — usage per area, what would move and why, trash contents). clean_up_storage moves the unused files now; pass emptyTrash:true only when the user explicitly wants the space freed immediately (deletes for good), and forgetMissing:true only when the user confirms the unreadable project files are gone. Both wait while a job is running.
-- clean_up_storage also moves files made before SynthCut tracked project files (storage_report.predatesTracking); an older project the user hasn't opened since may still use them. Tell the user first, and record such projects with remember_projects (or open them once) so their bakes are kept.
+- clean_up_storage also moves files made before ${PRODUCT_NAME} tracked project files (storage_report.predatesTracking); an older project the user hasn't opened since may still use them. Tell the user first, and record such projects with remember_projects (or open them once) so their bakes are kept.
 
 ## When something fails
 - Tool errors now carry the real cause (e.g. the FFmpeg filter that rejected a value). Read it, fix the offending input (often a color or font), and retry — don't repeat the same call.
@@ -130,7 +131,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 Full craft reference: aive://guide/editing.`;
 
-export const EDITING_GUIDE = `# SynthCut — Editing Guide
+export const EDITING_GUIDE = `# ${PRODUCT_NAME} — Editing Guide
 
 You operate a non-destructive video editor through MCP tools. Source files are
 never modified; you build an Edit Decision List (a timeline of clips that

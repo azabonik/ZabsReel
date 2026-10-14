@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolveDataDir } from "./datadir.js";
 import { EditorEngine } from "./engine.js";
 import { EditorServer } from "./server.js";
 import { checkBinaries, ffmpegVersion } from "./ffmpeg/executor.js";
@@ -14,7 +13,9 @@ import { pruneDataDir } from "./gc.js";
  */
 async function main(): Promise<void> {
   // Absolute, so every path the engine stores under it (bakes, proxies) is too.
-  const dataDir = resolve(process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data"));
+  // A spawner passes its own choice through AIVE_DATA_DIR (datadir.ts has the rule).
+  const { dir: dataDir, reason } = resolveDataDir();
+  console.error(`[aive-core] data dir: ${dataDir} (${reason})`);
   const port = process.env.AIVE_PORT ? Number(process.env.AIVE_PORT) : undefined;
 
   try {
@@ -46,7 +47,6 @@ async function main(): Promise<void> {
   void engine.storage.cleanUp({ auto: true }).catch(() => {});
 
   console.error(`[aive-core] listening on http://127.0.0.1:${boundPort}`);
-  console.error(`[aive-core] data dir: ${dataDir}`);
   // Machine-readable line for launchers that parse stdout. Includes the session
   // token (also in <dataDir>/server.json) so launchers can hand it to clients.
   console.log(JSON.stringify({ event: "ready", port: boundPort, dataDir, token: server.getToken() }));

@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide gets SynthCut running on your machine and connected to an AI client.
+This guide gets ZabsReel running on your machine and connected to an AI client.
 
 ## 1. Prerequisites
 
@@ -50,7 +50,7 @@ First build the project (`npm run build`) so `packages/mcp/dist/index.js` exists
 1. Open Claude Desktop's config file:
    - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
    - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. Merge in the `synthcut` server from
+2. Merge in the `zabsreel` server from
    [`claude_desktop_config.example.json`](../claude_desktop_config.example.json),
    setting the path to this repo's `packages/mcp/dist/index.js`.
 3. **Fully restart Claude Desktop.**
@@ -61,7 +61,7 @@ This repo already ships a project-scoped [`.mcp.json`](../.mcp.json), so the
 simplest path is:
 
 1. Run Claude Code **from the repo root** (so the relative server path resolves).
-2. Approve the `synthcut` server when prompted (project-scoped servers
+2. Approve the `zabsreel` server when prompted (project-scoped servers
    require a one-time approval), or run `/mcp` to check it's connected.
 
 Prefer an explicit command instead? Register it directly (use the **absolute**
@@ -69,7 +69,7 @@ path to `index.js`):
 
 ```bash
 # default scope = just you, this project
-claude mcp add synthcut -- node /abs/path/to/packages/mcp/dist/index.js
+claude mcp add zabsreel -- node /abs/path/to/packages/mcp/dist/index.js
 
 # or make it available everywhere:  -s user
 # verify / inspect:
@@ -112,5 +112,10 @@ Plus an `aive://guide/editing` resource (editing craft guidance) and an
 - **Claude doesn't see the tools** — make sure you fully restarted Claude
   Desktop and that the path in the config points to an existing
   `packages/mcp/dist/index.js`.
+- **The app shows a different project than the AI, or says "Core exited
+  before ready"** — the app and the MCP server chose different data folders
+  (each logs `data dir: <folder> (<reason>)` on stderr). See "The app and the
+  AI client use different data folders" in the
+  [README](../README.md#the-app-and-the-ai-client-use-different-data-folders).
 - **Preview won't play** — previews render to your data dir; ensure FFmpeg's
   `libx264` encoder is available (`ffmpeg -encoders | findstr 264`).

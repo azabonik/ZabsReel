@@ -13,7 +13,7 @@
  */
 import { createRequire } from "node:module";
 import { resolveSaveName, presetForPath, presetSwapNote } from "../src/savename.js";
-import { exportFilters, type FileFilter } from "../src/platform.js";
+import { exportFilters, PROJECT_FILTERS, type FileFilter } from "../src/platform.js";
 import { clipIsLive, splitFrameFor } from "../src/editkeys.js";
 import { PathBarEdits } from "../src/pathbar.js";
 import type { Clip, Project } from "../src/types.js";
@@ -63,10 +63,11 @@ eq(presetSwapNote(labelled, undefined, "web", "C:\\x\\a.b\\out.webm"), "Used the
 
 // Electron's native save dialog (save-rules.cjs withExtension) applies the same
 // rule as resolveSaveName with the first filter active.
+eq(PROJECT_FILTERS[0].name, "ZabsReel Project", "the project file filter carries the product name");
 const filterSets: [string, FileFilter[]][] = [
   ["export mp4", exportFilters("mp4")], ["export webm", exportFilters("webm")], ["export mov", exportFilters("mov")],
-  ["project", [{ name: "SynthCut Project", extensions: ["aive"] }]],
-  ["project + all", [{ name: "SynthCut Project", extensions: ["aive"] }, { name: "All Files", extensions: ["*"] }]],
+  ["project", PROJECT_FILTERS.slice(0, 1)],
+  ["project + all", PROJECT_FILTERS],
 ];
 const typedNames = ["/x/out", "/x/out.webm", "/x/out.MOV", "/x/out.mp4", "/x/my.clip", "/x/My Cut", "/x/My Cut.aive", "/x/.hidden", "/x/a.b/out", "/x/out.*", "/x/out."];
 for (const [fname, fs] of filterSets) {

@@ -16,6 +16,17 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Reads only: no old product name, upstream port or upstream data path
+      # outside scripts/brand-allowlist.json. Needs no install, so it runs first.
+      - name: Leftover-name gate
+        run: |
+          node scripts/check-brand.mjs --self-test
+          node scripts/check-brand.mjs
+
+      # The release.yml tag guard otherwise runs only on a real tag push.
+      - name: Release guard self-test
+        run: node scripts/release-guard.mjs --self-test
+
       # smoke-opaque-base, smoke-security and smoke-jobs synthesize their own media with ffmpeg.
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -30,6 +41,12 @@ jobs:
         run: npm run build
 
       # The media-free / self-synthesizing smoke subset (no model downloads).
+      - name: Smoke — brand constants and the data-dir rule (temp HOME)
+        run: npx tsx packages/core/scripts/smoke-brand.ts
+
+      - name: Smoke — skill installer migrate (temp HOME)
+        run: npx tsx packages/core/scripts/smoke-legacy-migrate.ts
+
       - name: Smoke — compositor plan (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-composite.ts
 

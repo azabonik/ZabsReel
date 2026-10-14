@@ -1,10 +1,10 @@
 {
-  "name": "synthcut-desktop",
-  "version": "1.0.5",
-  "description": "Electron + React desktop UI for SynthCut. Shows the timeline, clip library and preview; reflects AI edits live.",
+  "name": "zabsreel-desktop",
+  "version": "0.2.0",
+  "description": "Electron + React desktop UI for ZabsReel. Shows the timeline, clip library and preview; reflects AI edits live.",
   "license": "GPL-3.0-or-later",
   "private": true,
-  "author": "SynthCut contributors",
+  "author": "Zabs",
   "main": "electron/main.cjs",
   "scripts": {
     "build:renderer": "vite build",
@@ -34,16 +34,16 @@
     "vite": "^6.0.7"
   },
   "build": {
-    "appId": "io.github.azabonik.synthcut",
-    "productName": "SynthCut",
+    "appId": "io.github.azabonik.zabsreel",
+    "productName": "ZabsReel",
     "publish": [
       {
         "provider": "github",
         "owner": "azabonik",
-        "repo": "SynthCut"
+        "repo": "ZabsReel"
       }
     ],
-    "copyright": "Copyright © 2026 Relo and SynthCut contributors",
+    "copyright": "Copyright © 2026 Relo. Modifications copyright © 2026 Zabs and the ZabsReel contributors.",
     "electronVersion": "42.11.12",
     "npmRebuild": false,
     "asar": false,
@@ -64,6 +64,14 @@
       {
         "from": "../../THIRD_PARTY_LICENSES.md",
         "to": "THIRD_PARTY_LICENSES.md"
+      },
+      {
+        "from": "../../LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "../../NOTICE",
+        "to": "NOTICE"
       }
     ],
     "afterAllArtifactBuild": "build/afterbuild.cjs",
@@ -72,15 +80,15 @@
         "nsis",
         "zip"
       ],
-      "artifactName": "SynthCut-${version}.${ext}"
+      "artifactName": "ZabsReel-${version}.${ext}"
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "SynthCut",
-      "uninstallDisplayName": "SynthCut",
+      "shortcutName": "ZabsReel",
+      "uninstallDisplayName": "ZabsReel",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

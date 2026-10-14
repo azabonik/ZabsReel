@@ -1,9 +1,11 @@
 # Third-Party Licenses & Notices
 
-SynthCut is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
+ZabsReel is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
+It is a modified version of another GPL program; `NOTICE` names that program and its
+copyright holder, and carries the GPL section 7 permission for Remotion.
 It ships with, or downloads on first use, a number of third-party components.
 This file lists them, their licenses, and any obligations they place on
-redistribution. Packaged installers include a copy of this file.
+redistribution. Packaged installers include a copy of this file, `LICENSE` and `NOTICE`.
 
 > **TL;DR for redistributors**
 > - Everything bundled is freely redistributable **except** you should read the

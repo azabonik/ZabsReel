@@ -1,5 +1,5 @@
 /**
- * Core data model for SynthCut.
+ * Core data model for ZabsReel.
  *
  * Editing is fully **non-destructive**: source files are never modified. A
  * project is an Edit Decision List (EDL) — clips that *reference* regions of
@@ -134,7 +134,7 @@ export interface MediaAsset {
    */
   cutout?: { colorPath: string; colorStart: number; colorAssetId?: string; colorTags?: ProbedColor; colorCodec?: string };
   /**
-   * Set when the user imported a file from SynthCut's own baked/ folder: it is
+   * Set when the user imported a file from ZabsReel's own baked/ folder: it is
    * user media, so the library clean-up never treats it as an engine bake.
    */
   userImported?: boolean;

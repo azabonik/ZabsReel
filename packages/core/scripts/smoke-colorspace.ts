@@ -49,7 +49,7 @@ import {
   chromiumSourceColor, colorFixAffine, inputColorOpts, keepsChromaSamples, needsTaggedProxy, OUTPUT_YUV_STEP, previewColorFix, resolveSourceColor, SWS_CONVERT, SWS_RESIZE, type ProbedColor, type SourceColor,
 } from "../src/ffmpeg/colorspace.js";
 
-const dir = mkdtempSync(join(tmpdir(), "synthcut-colorspace-"));
+const dir = mkdtempSync(join(tmpdir(), "zabsreel-colorspace-"));
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;

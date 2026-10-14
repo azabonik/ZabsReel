@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MASK_GRACE_MS } from "./gc.js";
+import { PRODUCT_NAME } from "./brand.js";
 import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } from "./library.js";
 
 /**
@@ -24,7 +25,7 @@ import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } 
  *    history, a file in <dataDir>/autosave/ or a known project file
  *    (<dataDir>/projects.json, appended by save/load) resolves to it. Strings
  *    are scanned without knowing field names, so new bake writers are covered.
- *  - Other SynthCut cores on the same data dir (an AI client's core next to the
+ *  - Other ZabsReel cores on the same data dir (an AI client's core next to the
  *    app's) count too: each running core publishes the managed paths its open
  *    project and undo/redo history name to <dataDir>/run/core-<pid>-<id>.json
  *    (atomic rewrite, about 1 s after a change, refreshed every 30 s, removed
@@ -59,7 +60,7 @@ import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } 
  *  - Nothing runs while a job is running. Symlinks are never followed or moved,
  *    and nothing outside the two managed dirs is touched.
  *  - Files older than the known-projects list itself (`since` in projects.json)
- *    may belong to a project saved before SynthCut recorded project files, so
+ *    may belong to a project saved before ZabsReel recorded project files, so
  *    automatic runs leave them alone; an explicit clean-up (clean_up_storage,
  *    "Clean up now") moves them to the trash like any other unused file, and
  *    Empty trash keeps the ones it just moved in the trash for the retention
@@ -248,7 +249,7 @@ function referencedNames(dir: string, refs: Set<string>): RefNames {
 
 interface KnownProjects {
   version: 1;
-  /** When SynthCut started recording project files here (ms). */
+  /** When ZabsReel started recording project files here (ms). */
   since: number;
   projects: string[];
   /**
@@ -1073,7 +1074,7 @@ export class StorageJanitor {
     if (pausing.length) {
       const one = pausing.length === 1;
       base.paused =
-        `Clean-up is paused: ${plural(pausing.length, "project file")} SynthCut knows about can't be read right now — ${list(pausing)}. ` +
+        `Clean-up is paused: ${plural(pausing.length, "project file")} ${PRODUCT_NAME} knows about can't be read right now — ${list(pausing)}. ` +
         `On an unplugged drive, moved or deleted? Nothing is moved to the trash until ${one ? "it is" : "they are"} back, ` +
         `or until ${one ? "it has" : "they have"} been unreadable for ${fmtDays(retention)}. Forget ${one ? "it" : "them"} to clean up now.`;
       warnings.push(base.paused);
@@ -1096,7 +1097,7 @@ export class StorageJanitor {
 
     if (others.unreadable.length) {
       const msg =
-        `Clean-up is paused: another running SynthCut core's list of the files it uses can't be read — ${others.unreadable.slice(0, 3).join("; ")}. ` +
+        `Clean-up is paused: another running ${PRODUCT_NAME} core's list of the files it uses can't be read — ${others.unreadable.slice(0, 3).join("; ")}. ` +
         `Nothing is moved to the trash until it is readable again or that core exits.`;
       base.paused = base.paused ? `${base.paused} ${msg}` : msg;
       warnings.push(msg);
@@ -1109,7 +1110,7 @@ export class StorageJanitor {
     const refs = referencedManagedPaths(this.dataDir, [...diskProjects, ...others.files]);
     for (const r of this.liveRefs()) refs.add(r);
     const counted = base.knownProjects.length - base.unavailable.filter((u) => !u.autosave).length;
-    const cores = others.files.length ? `, ${plural(others.files.length, "other running SynthCut core")}` : "";
+    const cores = others.files.length ? `, ${plural(others.files.length, `other running ${PRODUCT_NAME} core`)}` : "";
 
     for (const a of usable) {
       const r = referencedNames(a.dir, refs);
@@ -1132,7 +1133,7 @@ export class StorageJanitor {
         const why =
           `not used by the open project, its undo history${cores}, ${counted} known project file(s) or the autosaves; ` +
           `last written ${fmtAge(age)} ago` +
-          (predatesTracking ? "; made before SynthCut began tracking project files, so an older project not opened since may still use it (only an explicit clean-up moves it)" : "");
+          (predatesTracking ? `; made before ${PRODUCT_NAME} began tracking project files, so an older project not opened since may still use it (only an explicit clean-up moves it)` : "");
         base.candidates.push({ ...e, predatesTracking, why });
       }
       const back = inUseTrash(a, r);
@@ -1183,7 +1184,7 @@ export class StorageJanitor {
     /** Known project files and autosaves that can't be read; pausesCleanUp → nothing is moved to the trash. */
     unavailableProjects: { path: string; autosave: boolean; missing: boolean; reason: string; since: string; pausesCleanUp: boolean }[];
     blockedBy: string | null;
-    /** Other running SynthCut cores on this data dir whose open project and undo history were counted. */
+    /** Other running ZabsReel cores on this data dir whose open project and undo history were counted. */
     otherCores: number;
     /**
      * Bakes the open project's library holds that no clip of it uses (deleted

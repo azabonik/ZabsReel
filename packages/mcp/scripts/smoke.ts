@@ -7,7 +7,7 @@
  */
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { EditorEngine, EditorServer } from "@aive/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -44,7 +44,13 @@ async function main() {
   });
   const client = new Client({ name: "smoke-test", version: "0.0.0" });
   await client.connect(transport);
-  console.log("2. MCP client connected");
+  // The server names itself by the MCP client key and @aive/mcp's own version.
+  const serverInfo = client.getServerVersion();
+  const mcpVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+  if (serverInfo?.name !== "zabsreel") throw new Error(`serverInfo name: expected zabsreel, got ${serverInfo?.name}`);
+  if (serverInfo.version !== mcpVersion)
+    throw new Error(`serverInfo version: expected ${mcpVersion} (@aive/mcp package.json), got ${serverInfo.version}`);
+  console.log(`2. MCP client connected (server ${serverInfo.name} ${serverInfo.version})`);
 
   // 3. List tools.
   const { tools } = await client.listTools();

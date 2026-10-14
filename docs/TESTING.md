@@ -1,7 +1,7 @@
 # Setup & Testing Guide
 
 A complete, do-it-yourself walkthrough to verify **every** feature of
-SynthCut before you make it public. It covers three layers:
+ZabsReel before you make it public. It covers three layers:
 
 1. **Automated smoke tests** — the fastest way to confirm the whole pipeline
    works (each one does a *real* FFmpeg render). Start here.
@@ -86,11 +86,30 @@ npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP te
 npx tsx apps/desktop/scripts/smoke-web.ts
 npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); S/Delete after a split; path bar vs a late listing
 
-# Skill installer: `synthcut migrate` finds and removes only what Relo's SynthCut
-# left (MCP server "ai-video-editor" that runs SynthCut's MCP server, skill
-# "video-editor-pro"), keeps formatting, backs files up, asks first; temp HOME
-# dirs, never the real one
+# Skill installer: `zabsreel migrate` handles two older generations. It finds and
+# removes only what Relo's SynthCut left (MCP server "ai-video-editor" that runs
+# Relo's SynthCut MCP server, skill "video-editor-pro"). It renames this
+# project's own pre-rename MCP key `synthcut` to `zabsreel` in place (and
+# replaces the old skill) only when the files the entry points at show that it
+# runs this app: an entry that points at Relo's SynthCut (checkout or packaged
+# app), at another monorepo or at a missing path is left alone; a packaged entry
+# needs --entry; an existing `zabsreel` entry for another program is never
+# overwritten. Also: the Claude Code CLI order (add-json before remove), Codex
+# TOML sub-tables, --from-checkout/--to-checkout, atomic writes that keep the
+# file mode and symlinks, backup folders 0700 and manifest 0600, --restore, keeps
+# formatting, asks first; temp HOME dirs, never the real one
 npx tsx packages/core/scripts/smoke-legacy-migrate.ts
+
+# Brand constants and the data-dir rule: core's brand.ts, the desktop's brand.cjs
+# and the installer's brand.mjs hold the same values; the ESM and CJS resolvers
+# give the same folder and reason for every case (temp HOME)
+npx tsx packages/core/scripts/smoke-brand.ts
+
+# Leftover-name gate: no old product name, upstream port or upstream data path
+# outside the allowlist in scripts/brand-allowlist.json (reads only);
+# --self-test checks the gate itself on temporary files
+node scripts/check-brand.mjs
+node scripts/check-brand.mjs --self-test
 
 # Security: session-token auth (HTTP/WS) + /file allowlist, HEAD /file and its ETag (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
@@ -103,8 +122,8 @@ npx tsx packages/core/scripts/smoke-security.ts
 # Graph values from a loaded project get their model type (transition type, asset
 # geometry, probed colour descriptions, effect params and colours, eq, volume,
 # speed, …) on load and again in the graph builders, and the executor accepts only
-# the filters SynthCut builds, with files only of the engine's names in a working
-# directory SynthCut owns (data dir or OS temp; no metadata file=, psnr, drawtext
+# the filters ZabsReel builds, with files only of the engine's names in a working
+# directory ZabsReel owns (data dir or OS temp; no metadata file=, psnr, drawtext
 # textfile=/etc/…), and a sendcmd file only when it holds a reframe crop plan
 # (no runtime curves plot=). AIVE_GUARD_REPORT=<file> (or 1 for stderr) logs what strict
 # mode would refuse instead of refusing it: run the matrix with it after adding
@@ -270,7 +289,7 @@ npx tsx packages/core/scripts/smoke-voice.ts
 # page: +12 st → ≈ 880 Hz with the duration unchanged, robot buzz at 187.5 Hz,
 # a strict CSP falls back to dry without errors; and the built renderer
 # carries the worklet source. Needs FFmpeg, core + renderer built, and
-# playwright-core + a Chromium (as parity-gl; SYNTHCUT_SKIP_BROWSER=1 skips).
+# playwright-core + a Chromium (as parity-gl; AIVE_SKIP_BROWSER=1 skips).
 npx tsx packages/core/scripts/smoke-voicefx.ts
 
 # FFmpeg version compatibility (self-contained; run it against every build you
@@ -389,14 +408,14 @@ extension typed → `.mp4`; `.webm` typed with an MP4 preset → VP9 WebM), and 
 unsaved-changes close guard (Save → Save As cancelled keeps the window open;
 Save → saved, then quit; the core it started exits). It fails on renderer
 console errors. The app runs with its own profile (`--user-data-dir` in the
-test folder), so your SynthCut profile and its recent projects are left alone.
+test folder), so your ZabsReel profile and its recent projects are left alone.
 
 ```bash
 node node_modules/electron/install.js        # once, if node_modules/electron/dist is missing
 xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 # a packed build instead of the source tree:
 (cd apps/desktop && npx electron-builder --dir --linux)
-SYNTHCUT_APP=$PWD/apps/desktop/build/dist/linux-unpacked/synthcut-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+AIVE_APP=$PWD/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 ```
 
 - Needs `npm run build`, FFmpeg on PATH, a display (`xvfb-run` gives one
@@ -509,12 +528,12 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-col
   resolution while playing (`gl/governor.ts`): half, and a quarter when
   frames with a look still come slower than about 16 fps; paused frames (and
   a GPU) always use full resolution. `--bench` shows all three.
-- Per-viewer switch: `localStorage["synthcut.preview.gl"] = "off"` in the
+- Per-viewer switch: `localStorage["zabsreel.preview.gl"] = "off"` in the
   app's devtools forces the CSS fallback preview (to compare).
 
 ### FFmpeg versions
 
-SynthCut supports FFmpeg **4.4, 7.1, 8.0, 8.1 and 9.0**
+ZabsReel supports FFmpeg **4.4, 7.1, 8.0, 8.1 and 9.0**
 (`TESTED_FFMPEG_VERSIONS` in `packages/core/src/ffmpeg/version.ts`). The core
 logs a warning at startup for any other version, and
 `apps/desktop/scripts/prepare-bundle.ts` refuses to stage one unless
@@ -641,13 +660,13 @@ Ensure `npm run build` has produced `packages/mcp/dist/index.js`, then connect
 **either** client (see [`GETTING_STARTED.md` §4](GETTING_STARTED.md) for full
 detail):
 
-- **Claude Desktop:** merge the `synthcut` entry from
+- **Claude Desktop:** merge the `zabsreel` entry from
   [`claude_desktop_config.example.json`](../claude_desktop_config.example.json)
   into `%APPDATA%\Claude\claude_desktop_config.json` (absolute path to
   `index.js`), then **fully quit and restart** Claude Desktop.
 - **Claude Code (CLI):** run it **from the repo root** — the shipped
   [`.mcp.json`](../.mcp.json) registers the server (approve it when prompted, or
-  check with `/mcp`). Or `claude mcp add synthcut -- node <abs path to index.js>`.
+  check with `/mcp`). Or `claude mcp add zabsreel -- node <abs path to index.js>`.
 
 Optionally open the desktop app (`npm start`) too — every AI edit appears live in
 its timeline. If the app is closed, the MCP server runs a headless core and the
@@ -728,7 +747,7 @@ This verifies the Windows installer ships a self-contained, offline app.
 node apps/desktop/scripts/prepare-bundle.ts        # stage bundled binaries/models (~430 MB)
 npx tsx packages/core/scripts/smoke-bundled.ts     # re-runs the staging (cheap), then verifies the bundle renders OFFLINE
 npm run build
-npm run dist --workspace synthcut-desktop          # -> apps/desktop/build/dist/SynthCut-<version>.exe
+npm run dist --workspace zabsreel-desktop          # -> apps/desktop/build/dist/ZabsReel-<version>.exe
 ```
 
 `smoke-bundled.ts` points the engine at *only* the staged bundle (no PATH FFmpeg,
@@ -737,7 +756,7 @@ first-run works with no network.
 
 ### 7.2 Install and run
 
-1. Run `apps/desktop/build/dist/SynthCut-<version>.exe`.
+1. Run `apps/desktop/build/dist/ZabsReel-<version>.exe`.
 2. It's **unsigned**, so SmartScreen may warn — click **More info → Run anyway**.
 3. Launch the installed app. Import a clip, add it, **Export** — it should render
    using the bundled FFmpeg with **no internet connection** (try it with Wi-Fi
@@ -759,9 +778,13 @@ first-run works with no network.
   "not a valid Remotion project", make sure you're on the current build.
 - **macOS captions** — no prebuilt whisper-cli is published; `brew install
   whisper-cpp` and set `AIVE_WHISPER_BIN`.
-- **Reset everything** — delete `~/.synthcut` (the data dir) and `~/.aive` (cached
-  models and binaries) to start from a clean slate. `~/.synthcut/data` holds your
-  shared session/project.
+- **Reset everything** — delete `~/.zabsreel` (the data dir and `migrate`'s
+  backups) to start from a clean slate. `~/.zabsreel/data` holds your shared
+  session/project. If the core logs `data dir: <folder> (legacy)`, it uses the
+  older folder it names instead (see "The app and the AI client use different
+  data folders" in the README), and that is the folder to delete. `~/.aive` holds
+  only cached models and binaries; deleting it makes the next use download them
+  again.
 
 ---
 

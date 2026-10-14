@@ -1,4 +1,4 @@
-SynthCut AI Video Editor — Full Tool List (117 tools)
+ZabsReel AI Video Editor — Full Tool List (117 tools)
 =====================================================
 
 IMPORT & PROJECT
@@ -158,4 +158,4 @@ STORAGE
 114. storage_report — Disk usage per data-dir area (bakes, proxies, trash, caches) and a dry run of which unused baked/proxy files a clean-up would move to the trash, and why.
 115. clean_up_storage — Move unused baked/proxy files to the trash now (opening a project restores what it needs) and delete expired trash; emptyTrash deletes the trash for good; forgetMissing forgets project files that are gone.
 116. remember_projects — Record existing .aive/.otio files (such as the recent projects) so the clean-up keeps the baked files they use.
-117. remove_unused_media — Remove library assets nothing in the project uses: SynthCut-made bakes by default, imported media only on request; dryRun reports first.
+117. remove_unused_media — Remove library assets nothing in the project uses: ZabsReel-made bakes by default, imported media only on request; dryRun reports first.

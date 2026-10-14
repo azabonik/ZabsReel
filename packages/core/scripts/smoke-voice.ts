@@ -345,7 +345,7 @@ const GAPS: Array<[number, number]> = [[0.2, 0.8], [4.75, 5.75], [8.25, 9.25]];
 const S_TIMES = [2.05, 3.05, 4.05];
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-voice-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-voice-"));
   console.log(`work dir ${dir}`);
 
   // ---- registry (pure) --------------------------------------------------------

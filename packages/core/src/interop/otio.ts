@@ -1,5 +1,6 @@
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { newId } from "../ids.js";
+import { PRODUCT_NAME } from "../brand.js";
 import {
   clipDurationFrames,
   PROJECT_SCHEMA_VERSION,
@@ -12,7 +13,7 @@ import {
 import { averageSpeed, hasSpeedRamp } from "../speed.js";
 
 /**
- * OpenTimelineIO interop — "start the edit with AI in SynthCut, finish
+ * OpenTimelineIO interop — "start the edit with AI in ZabsReel, finish
  * anywhere". OTIO (Apache-2.0) is plain JSON, so this is careful serialization
  * with no dependency:
  *
@@ -24,7 +25,7 @@ import { averageSpeed, hasSpeedRamp } from "../speed.js";
  *    LinearTimeWarp.1 (a speed RAMP becomes its average speed + a note — OTIO
  *    has no standard curve warp). Everything OTIO can't express (effects stack, keyframes,
  *    captions, graphics, adjustment layers, exact overlap frames) rides under
- *    `metadata.synthcut.*`, so a SynthCut→SynthCut round-trip is LOSSLESS.
+ *    `metadata.synthcut.*`, so a ZabsReel→ZabsReel round-trip is LOSSLESS.
  *
  *  - otioToProject: maps tracks/clips/gaps/transitions back. When
  *    metadata.synthcut is present the original objects are restored verbatim;
@@ -145,7 +146,7 @@ export function projectToOtio(project: Project): OtioTimeline {
         // A speed RAMP has no OTIO equivalent (only LinearTimeWarp is standard):
         // other NLEs get its AVERAGE speed (source span / timeline span, so the
         // cut lengths match) and a note; the curve itself rides in the clip
-        // metadata, so SynthCut→SynthCut stays lossless.
+        // metadata, so ZabsReel→ZabsReel stays lossless.
         const ramped = hasSpeedRamp(clip);
         const speed = ramped ? Number(averageSpeed(clip, fps).toFixed(6)) : clip.effects?.speed ?? 1;
         // In the OTIO sequence, a transition doesn't consume time — the item
@@ -184,7 +185,7 @@ export function projectToOtio(project: Project): OtioTimeline {
               time_scalar: speed,
               metadata: {
                 synthcut: {
-                  note: "SynthCut speed ramp (curve speed) approximated by its average speed; the exact curve is in metadata.synthcut.clip.effects.speedRamp.",
+                  note: `${PRODUCT_NAME} speed ramp (curve speed) approximated by its average speed; the exact curve is in metadata.synthcut.clip.effects.speedRamp.`,
                   speedRamp: structuredClone(clip.effects!.speedRamp),
                 },
               },
@@ -261,7 +262,7 @@ export async function otioToProject(
   const t = json as OtioTimeline;
   if (t?.OTIO_SCHEMA !== "Timeline.1" || t.tracks?.OTIO_SCHEMA !== "Stack.1") {
     throw new Error(
-      "Not an OpenTimelineIO file: expected a JSON Timeline.1 with a Stack.1 `tracks`. Export one from SynthCut with export_otio, or from any OTIO-capable NLE.",
+      "Not an OpenTimelineIO file: expected a JSON Timeline.1 with a Stack.1 `tracks`. Export one from " + PRODUCT_NAME + " with export_otio, or from any OTIO-capable NLE.",
     );
   }
   const warnings: string[] = [];
@@ -289,7 +290,7 @@ export async function otioToProject(
   const assetsByPath = new Map<string, MediaAsset>();
   const tracks: Track[] = [];
 
-  // Seed the library from the traveled SynthCut asset list (keeps asset ids and
+  // Seed the library from the traveled ZabsReel asset list (keeps asset ids and
   // unplaced assets like the music bed); probe refreshes reality on this disk,
   // the colour description and codec too (the preview's source-colour
   // correction reads them; an older export carries none). Not a matte-backed
@@ -393,7 +394,7 @@ export async function otioToProject(
               missing: true,
             } as MediaAsset;
           }
-          // Prefer the original SynthCut asset identity when it traveled along.
+          // Prefer the original ZabsReel asset identity when it traveled along.
           if (refMeta.asset) asset = { ...refMeta.asset, ...asset, id: refMeta.asset.id };
           assetsByPath.set(path, asset);
         }
@@ -401,7 +402,7 @@ export async function otioToProject(
       }
 
       if (clipMeta.clip) {
-        // SynthCut round-trip: restore the exact original clip.
+        // ZabsReel round-trip: restore the exact original clip.
         const restored = structuredClone(clipMeta.clip);
         if (assetId && restored.assetId) restored.assetId = assetId;
         track.clips.push(restored);
@@ -464,10 +465,10 @@ export async function otioToProject(
     music: sc.music,
     markers: sc.markers,
     revision: 0,
-    // The schema the SynthCut clips in the metadata were written with, so the
+    // The schema the ZabsReel clips in the metadata were written with, so the
     // engine's migrateProject upgrades them (e.g. pre-v4 vignette amounts). An
     // OTIO timeline is always frame-based, so never below v2; foreign OTIO
-    // carries no SynthCut clips and is current.
+    // carries no ZabsReel clips and is current.
     schemaVersion:
       typeof sc.schemaVersion === "number" && Number.isFinite(sc.schemaVersion)
         ? Math.max(2, Math.min(PROJECT_SCHEMA_VERSION, Math.floor(sc.schemaVersion)))

@@ -96,7 +96,7 @@ async function layered(dir: string, name: string, W: number, H: number, blue: st
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-key-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-key-"));
 
   // ---- media ----------------------------------------------------------------
   // Gray screen 1080×1920: white / black / red boxes (≥ 200 px so x264 chroma

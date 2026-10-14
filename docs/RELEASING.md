@@ -1,6 +1,6 @@
 # Releasing & Auto-Update
 
-How to ship a new version of SynthCut so that installed (Windows) users receive it
+How to ship a new version of ZabsReel so that installed (Windows) users receive it
 **automatically**. This is the operator's guide to the auto-update pipeline wired
 via `electron-updater` + GitHub Releases.
 
@@ -13,16 +13,18 @@ Releases are triggered by **pushing a git tag** — *not* by pushing code to `ma
 ```bash
 # 1. Bump the version in ALL FIVE package.json files (see list below) to X.Y.Z
 # 2. Commit the bump
-git commit -am "Release v0.1.2"
+git commit -am "Release v0.2.1"
 
-# 3. Tag that commit and push the tag
-git tag v0.1.2
-git push --tags        # (also `git push` your commit)
+# 3. Tag that commit and push the commit, then that one tag
+git tag v0.2.1
+git push origin main
+git push origin v0.2.1     # never `git push --tags` (see "The release guard")
 ```
 
 Pushing the `v*` tag starts the **Release** workflow, which builds the Windows
 installer + the update feed and publishes a GitHub Release. Installed apps pick it
-up on their next launch.
+up on their next launch. The first ZabsReel version is **0.2.0**; version numbers
+restarted there at the rename.
 
 ---
 
@@ -30,7 +32,7 @@ up on their next launch.
 
 Three things must line up or users get nothing:
 
-1. **The tag matches `v*`** — e.g. `v0.1.2`. That's the CI trigger.
+1. **The tag matches `v*`** — e.g. `v0.2.1`. That's the CI trigger.
 2. **The `package.json` version equals the tag** (minus the `v`) and is **higher
    than what users have installed.** `electron-updater` compares the version in the
    published `latest.yml` against the running app's version. Same version → no
@@ -47,13 +49,13 @@ Keep these in lockstep — the app's version is `apps/desktop/package.json`:
 | `package.json` | repo root |
 | `packages/core/package.json` | `@aive/core` |
 | `packages/mcp/package.json` | `@aive/mcp` |
-| `packages/skill-installer/package.json` | `@azabonik/synthcut` (the `npx @azabonik/synthcut` skill installer) |
-| `apps/desktop/package.json` | `synthcut-desktop` ← **the one the updater compares** |
+| `packages/skill-installer/package.json` | `@azabonik/zabsreel` (the `npx @azabonik/zabsreel` skill installer) |
+| `apps/desktop/package.json` | `zabsreel-desktop` ← **the one the updater compares** |
 
 > Only `apps/desktop/package.json` strictly drives the update check, but bump all
-> five together so versions never diverge. The `@azabonik/synthcut` package additionally
-> ships to npm — after tagging, run `npm publish --workspace @azabonik/synthcut`
-> (that's what makes `npx @azabonik/synthcut add` work for users). It's a scoped
+> five together so versions never diverge. The `@azabonik/zabsreel` package additionally
+> ships to npm — after tagging, run `npm publish --workspace @azabonik/zabsreel`
+> (that's what makes `npx @azabonik/zabsreel add` work for users). It's a scoped
 > package: publishing requires owning the npm `azabonik` scope (an npm org or the
 > username), and `publishConfig.access: public` is already set in its package.json.
 
@@ -63,17 +65,38 @@ Keep these in lockstep — the app's version is `apps/desktop/package.json`:
 
 Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-1. Checks out **the exact commit the tag points to**.
+1. Checks out **the exact commit the tag points to**, then runs the release
+   guard (below).
 2. `npm ci` → `npm run build` (core + mcp + renderer).
 3. `npm run dist -- --publish never` — electron-builder produces:
-   - `SynthCut-<ver>.exe` — the installer
-   - `SynthCut-<ver>.exe.blockmap` — the differential-download map
+   - `ZabsReel-<ver>.exe` — the installer
+   - `ZabsReel-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
 4. Attaches **all** of those to a **published** GitHub Release.
 
 > All three of `.exe`, `.exe.blockmap`, and `latest.yml` must be on the Release,
 > or auto-update breaks. The workflow globs them explicitly.
+
+### The release guard
+
+The first step of the workflow runs `node scripts/release-guard.mjs`. When the
+workflow runs on a tag, the tag must be `v<semver>`, the version must be at least
+**0.2.0**, and it must equal `version` in `apps/desktop/package.json`; any other
+tag stops the job before anything is built. A run on a branch passes. To check a
+tag before you push it:
+
+```bash
+node scripts/release-guard.mjs --ref refs/tags/v0.2.1
+```
+
+The guard protects only tags cut from `main` after the rename. A tag push, and a
+re-run on a tag, use the workflow file **in the tag's own commit**. The four tags
+inherited from upstream (v0.1.2, v0.1.3, v0.1.4 and v1.0.5) point at commits
+whose workflow has no guard, and a 1.0.5 release would rank above every 0.2.x
+release in the updater. Delete those tags (locally and on GitHub) before you push
+`main`, never run `git push --tags`, and never start the workflow on one of
+them.
 
 ---
 
@@ -96,12 +119,14 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 
 - Runs **only in the installed/packaged app** (guarded by `app.isPackaged`) — never
   during `npm start`.
-- The stable `appId` (`io.github.azabonik.synthcut`) means updates upgrade in
-  place — no uninstall.
-- This fork changed the `appId` from Relo's (`com.relo.synthcut`), and
-  `build.publish` in `apps/desktop/package.json` points at **azabonik/SynthCut**.
-  So installs of this fork read only this fork's `latest.yml`: they never upgrade
-  or replace Relo's SynthCut, and Relo's releases never replace them.
+- The stable `appId` (`io.github.azabonik.zabsreel`) means updates upgrade in
+  place — no uninstall. Never change it after the first release.
+- `build.publish` in `apps/desktop/package.json` points at **azabonik/ZabsReel**,
+  so installs read only this repository's `latest.yml`.
+- Relo's SynthCut uses the appId `com.relo.synthcut`, and an install of this fork
+  made before the rename uses `io.github.azabonik.synthcut`; ZabsReel upgrades
+  neither, so such a pre-rename fork install is not upgraded and is uninstalled
+  by hand (after `zabsreel migrate` has moved its MCP entries).
 - Unsigned is fine on Windows; SmartScreen only nags on the very first manual
   install, not on self-updates.
 - **macOS/Linux:** no packaged build or auto-update yet. Those users run from source
@@ -111,20 +136,20 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 
 ## Testing an update end-to-end
 
-1. Build + install an **older** version locally (e.g. v0.1.1):
-   `npm run dist --workspace synthcut-desktop`, then run the installer.
-2. Bump to a **higher** version (v0.1.2), tag, and push → let CI publish the Release.
+1. Build + install an **older** version locally (e.g. v0.2.0):
+   `npm run dist --workspace zabsreel-desktop`, then run the installer.
+2. Bump to a **higher** version (v0.2.1), tag, and push that tag → let CI publish the Release.
 3. Launch the installed **older** app → within a moment it downloads in the
    background → the "Update ready" dialog appears.
 4. To watch the process, add `electron-log` and check the log at
-   `%APPDATA%\SynthCut\logs`.
+   `%APPDATA%\ZabsReel\logs`.
 
 ---
 
 ## Rolling back
 
 There's no "un-ship." To recover from a bad release: publish a **higher** version
-with the fix (e.g. `v0.1.3`). Users move forward to it on next launch. (Deleting the
+with the fix (e.g. `v0.2.2`). Users move forward to it on next launch. (Deleting the
 bad Release stops *new* downloads but doesn't downgrade anyone already updated.)
 
 ---
@@ -132,6 +157,6 @@ bad Release stops *new* downloads but doesn't downgrade anyone already updated.)
 ## Who can trigger a release — and branches
 
 The trigger is the **tag**, not the branch, and only people with **push access to
-azabonik/SynthCut** can publish to this fork's users. A tag pushed to another fork
+azabonik/ZabsReel** can publish to this fork's users. A tag pushed to another fork
 publishes to that fork only; its installs do not see it, because they update from
-azabonik/SynthCut.
+azabonik/ZabsReel.

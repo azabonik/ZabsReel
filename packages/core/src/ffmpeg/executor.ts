@@ -5,6 +5,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { looksLikeProtocol, protocolName } from "../safepath.js";
+import { PRODUCT_NAME } from "../brand.js";
 import {
   FILTERGRAPH_OPTIONS, acrossfadeUnreliable, adaptFilterGraph, parseFfmpegVersion, preferredFilterScriptFlag, usesPremultiply,
   type FfmpegVersion,
@@ -53,14 +54,14 @@ function ffmpegOption(a: string): { base: string; fromFile: boolean } | null {
  * Filters that open media, sockets or shared libraries on their own (outside
  * the `-i` inputs and so outside `-protocol_whitelist`): movie/amovie and
  * subtitles/ass open any URL through libavformat, zmq/azmq bind a socket, and
- * frei0r/ladspa/lv2 load a plugin library by path. SynthCut never builds any
+ * frei0r/ladspa/lv2 load a plugin library by path. ZabsReel never builds any
  * of them (it does use sendcmd, lut3d and vidstab, which read its own local
  * files). Matched at a filter-name position, with an optional `@instance`.
  */
 const FORBIDDEN_FILTERS: ReadonlySet<string> = new Set(["movie", "amovie", "subtitles", "ass", "zmq", "azmq", "frei0r", "frei0r_src", "ladspa", "lv2"]);
 
 /**
- * Every filter SynthCut builds (ffmpeg/graph.ts with the effect, audio-effect
+ * Every filter ZabsReel builds (ffmpeg/graph.ts with the effect, audio-effect
  * and blend registries, the bakes, timefx, analysis, matting, reframe, the
  * FFmpeg 8.1 alpha-mode adaptation and the colour pipeline), then the
  * generators and meters its smokes run through runFfmpeg. A graph that names
@@ -68,7 +69,7 @@ const FORBIDDEN_FILTERS: ReadonlySet<string> = new Set(["movie", "amovie", "subt
  * places, and FFmpeg has too many filters that read or write files by option
  * (metadata, ametadata, psnr, ssim, vidstabdetect, libvmaf, deshake,
  * signature, sr/dnn_*, arnndn, removelogo, …, more in every release) to deny
- * them one by one. A filter that SynthCut uses and that takes a file is only
+ * them one by one. A filter that ZabsReel uses and that takes a file is only
  * accepted with a file in its working directory (see {@link FILE_OPTIONS}).
  * Inventory: a static scan of the source plus a full test-matrix run with
  * AIVE_GUARD_REPORT set (every filter a run builds is logged), on FFmpeg 4.4
@@ -98,15 +99,15 @@ const ALLOWED_FILTERS: ReadonlySet<string> = new Set([
 /** How the guard treats the options of an allowed filter that can open a file. */
 interface FileOptionRule {
   /**
-   * Options (with every alias) naming a file SynthCut stages, each with the
+   * Options (with every alias) naming a file ZabsReel stages, each with the
    * name the engine gives that file: only such a bare name, in an owned
    * working directory. A write option can then never overwrite another kind
    * of file (a bake, a project) in that directory.
    */
   files?: Readonly<Record<string, RegExp>>;
-  /** Options SynthCut never sets that read or write a file (or run commands): refused. */
+  /** Options ZabsReel never sets that read or write a file (or run commands): refused. */
   refused?: readonly string[];
-  /** The positional (unnamed) values SynthCut passes, in order ("file": the `file` option's); a further one is refused (it could reach a file option). */
+  /** The positional (unnamed) values ZabsReel passes, in order ("file": the `file` option's); a further one is refused (it could reach a file option). */
   positional: readonly ("value" | "file")[];
   /** What a file the filter reads may hold; checked before the run (sendcmd: the commands it sends to other filters). */
   content?: RegExp;
@@ -124,7 +125,7 @@ const TRF_FILE = /\.trf$/;
 const REFRAME_FILE = /-reframe\.txt$/;
 
 /**
- * The only sendcmd file SynthCut writes: the auto-reframe crop plan, exactly
+ * The only sendcmd file ZabsReel writes: the auto-reframe crop plan, exactly
  * as reframe.ts cropPlanToSendcmd writes it (`<seconds> crop x|y <integer>;`
  * per line). sendcmd applies its commands at run time to any filter in the
  * graph, past every option check here (curves plot= writes any file, drawtext
@@ -137,7 +138,7 @@ const SENDCMD_MAX_BYTES = 1024 * 1024;
 
 /**
  * The allowed filters with an option that opens a file (from `ffmpeg -h
- * filter=<name>` on FFmpeg 4.4 – 9.0). SynthCut stages every file such a
+ * filter=<name>` on FFmpeg 4.4 – 9.0). ZabsReel stages every file such a
  * filter reads or writes in the run's working directory and names it there
  * (lut0.cube, font_0.ttf, txt_….txt, …-stab-….trf, …-reframe.txt); a path, a
  * protocol, a name outside that directory or a name of another shape can only
@@ -170,7 +171,7 @@ const RUNTIME_FILE_FILTERS: ReadonlySet<string> = new Set(["curves", "drawtext"]
  */
 const BARE_FILE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 
-/** Directories whose subtrees SynthCut owns as FFmpeg working directories, besides the OS temp dir (see {@link addFfmpegWorkRoot}). */
+/** Directories whose subtrees ZabsReel owns as FFmpeg working directories, besides the OS temp dir (see {@link addFfmpegWorkRoot}). */
 const workRoots = new Set<string>();
 
 /**
@@ -183,7 +184,7 @@ export function addFfmpegWorkRoot(dir: string): void {
 }
 
 /**
- * True when `cwd` is set and inside a SynthCut-owned directory. A bare file
+ * True when `cwd` is set and inside a ZabsReel-owned directory. A bare file
  * name resolves against the spawn's cwd: without one it is the process's own
  * (the launch directory, often the user's home), where an injected
  * textfile= would read the user's files and result= would write there.
@@ -344,24 +345,24 @@ function assertGraphSafe(g: string, flag: string, cwd: string | undefined): void
   try {
     filters = filterGraphFilters(g);
   } catch (err) {
-    throw new Error(`Refusing an ffmpeg ${flag} graph SynthCut can't read safely: ${(err as Error).message}.`);
+    throw new Error(`Refusing an ffmpeg ${flag} graph ${PRODUCT_NAME} can't read safely: ${(err as Error).message}.`);
   }
   const bad = filters.find((f) => FORBIDDEN_FILTERS.has(f.name));
   if (bad) {
     throw new Error(
-      `Refusing an ffmpeg ${flag} graph that uses the ${bad.name} filter — SynthCut never builds one (it opens files, URLs or sockets by itself), so this came from an injected project field.`,
+      `Refusing an ffmpeg ${flag} graph that uses the ${bad.name} filter — ${PRODUCT_NAME} never builds one (it opens files, URLs or sockets by itself), so this came from an injected project field.`,
     );
   }
   const commanded = filters.some((f) => f.name === "sendcmd") && filters.find((f) => RUNTIME_FILE_FILTERS.has(f.name));
   if (commanded) {
     refuseOrReport(
-      `Refusing an ffmpeg ${flag} graph with both sendcmd and ${commanded.name} (a run-time command could make ${commanded.name} open a file) — SynthCut never builds that, so this came from an injected project field.`,
+      `Refusing an ffmpeg ${flag} graph with both sendcmd and ${commanded.name} (a run-time command could make ${commanded.name} open a file) — ${PRODUCT_NAME} never builds that, so this came from an injected project field.`,
     );
   }
   for (const f of filters) {
     if (!ALLOWED_FILTERS.has(f.name)) {
       refuseOrReport(
-        `Refusing an ffmpeg ${flag} graph that uses the unknown filter "${f.name}" — SynthCut never builds it, so this came from an injected project field.`,
+        `Refusing an ffmpeg ${flag} graph that uses the unknown filter "${f.name}" — ${PRODUCT_NAME} never builds it, so this came from an injected project field.`,
       );
     } else if (f.args !== undefined) {
       assertOptionsSafe(f.name, f.args, flag, cwd);
@@ -369,23 +370,23 @@ function assertGraphSafe(g: string, flag: string, cwd: string | undefined): void
   }
 }
 
-/** Refuse (or report) a `name=args` filter whose options could open a file SynthCut did not stage. */
+/** Refuse (or report) a `name=args` filter whose options could open a file ZabsReel did not stage. */
 function assertOptionsSafe(name: string, args: string, flag: string, cwd: string | undefined): void {
   let options: FilterOption[];
   try {
     options = filterOptions(args);
   } catch (err) {
-    throw new Error(`Refusing an ffmpeg ${flag} graph SynthCut can't read safely: ${(err as Error).message}.`);
+    throw new Error(`Refusing an ffmpeg ${flag} graph ${PRODUCT_NAME} can't read safely: ${(err as Error).message}.`);
   }
   const rule = FILE_OPTIONS[name];
   const refuse = (what: string) =>
-    refuseOrReport(`Refusing an ffmpeg ${flag} graph: ${name} ${what} — SynthCut never builds that, so this came from an injected project field.`);
-  /** A file option's bare name, opened in `cwd`: only of the engine's `shape`, in a SynthCut-owned working directory, and holding what the rule allows. */
+    refuseOrReport(`Refusing an ffmpeg ${flag} graph: ${name} ${what} — ${PRODUCT_NAME} never builds that, so this came from an injected project field.`);
+  /** A file option's bare name, opened in `cwd`: only of the engine's `shape`, in a ZabsReel-owned working directory, and holding what the rule allows. */
   const fileOk = (value: string, shape: RegExp | undefined, what: string) => {
     if (!BARE_FILE.test(value)) refuse(`${what} "${value}" outside its working directory`);
-    else if (!shape?.test(value)) refuse(`${what} "${value}", a name SynthCut never gives that file`);
-    else if (!ownedWorkDir(cwd)) refuse(`${what} "${value}" in ${cwd ? `"${cwd}", which is not a SynthCut working directory` : "the process's working directory"}`);
-    else if (rule?.content && !fileHolds(join(cwd!, value), rule.content)) refuse(`${what} "${value}", which holds more than SynthCut ever writes to it`);
+    else if (!shape?.test(value)) refuse(`${what} "${value}", a name ${PRODUCT_NAME} never gives that file`);
+    else if (!ownedWorkDir(cwd)) refuse(`${what} "${value}" in ${cwd ? `"${cwd}", which is not a ${PRODUCT_NAME} working directory` : "the process's working directory"}`);
+    else if (rule?.content && !fileHolds(join(cwd!, value), rule.content)) refuse(`${what} "${value}", which holds more than ${PRODUCT_NAME} ever writes to it`);
   };
   const shapeOf = (key: string) => (rule?.files && Object.hasOwn(rule.files, key) ? rule.files[key] : undefined);
   let positional = 0;
@@ -435,10 +436,10 @@ function inputFormat(args: readonly string[], i: number): string | undefined {
  * for every graph option (`-vf`, `-af`, `-filter_complex`, `-filter:v:0`, a
  * `-f lavfi` input …):
  * - no filter that opens its own source (movie=, subtitles=, zmq …, see
- *   {@link FORBIDDEN_FILTERS}) and no filter SynthCut does not build
+ *   {@link FORBIDDEN_FILTERS}) and no filter ZabsReel does not build
  *   ({@link ALLOWED_FILTERS}: metadata's file=, psnr, ssim, asendcmd …);
  * - a filter option opens a file only by a bare name of the shape the engine
- *   gives that file ({@link FILE_OPTIONS}), in a `cwd` SynthCut owns (the data
+ *   gives that file ({@link FILE_OPTIONS}), in a `cwd` ZabsReel owns (the data
  *   dir or the OS temp dir, {@link addFfmpegWorkRoot}); with `cwd` unset any
  *   such name is refused, since it would open in the process's own directory;
  * - the options that write or read other files (curves plot / psfile,
@@ -485,7 +486,7 @@ export function guardFfmpegArgs(args: readonly string[], cwd?: string): void {
       // graphs inline (runFfmpeg moves a long one into its own file only after
       // this check), so a file-reading graph option can only be injected.
       if (FILTERGRAPH_FILE_OPTIONS.has(opt.base) || (opt.fromFile && FILTERGRAPH_OPTION_BASES.has(opt.base))) {
-        throw new Error(`Refusing ffmpeg option ${a}: it reads a filtergraph from a file, which SynthCut never passes itself.`);
+        throw new Error(`Refusing ffmpeg option ${a}: it reads a filtergraph from a file, which ${PRODUCT_NAME} never passes itself.`);
       }
       if (FILTERGRAPH_OPTION_BASES.has(opt.base)) {
         const g = args[i + 1];
@@ -502,7 +503,7 @@ function assertFfmpegInputLocal(input: string, where: string): void {
     const scheme = protocolName(input);
     const shown = input.length > 120 ? `${input.slice(0, 117)}…` : input;
     throw new Error(
-      `Refusing ${where} "${shown}": "${scheme}:" is a protocol/URL, not a local file. SynthCut only reads local media (relink the file to this machine).`,
+      `Refusing ${where} "${shown}": "${scheme}:" is a protocol/URL, not a local file. ${PRODUCT_NAME} only reads local media (relink the file to this machine).`,
     );
   }
   // Has a colon but is not a protocol (a Windows drive path C:\…) — allowed.

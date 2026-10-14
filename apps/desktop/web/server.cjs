@@ -21,6 +21,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { ensureCore, browserBlocksPort } = require("../electron/core-launcher.cjs");
+const { PRODUCT_NAME, MCP_KEY } = require("../electron/brand.cjs");
 
 const RENDERER_DIR = path.join(__dirname, "..", "dist", "renderer");
 const DEFAULT_PORT = 4790;
@@ -250,7 +251,7 @@ function mcpConfig() {
   } catch {
     mcpEntry = null;
   }
-  const config = { mcpServers: { synthcut: { command: "node", args: [mcpEntry] } } };
+  const config = { mcpServers: { [MCP_KEY]: { command: "node", args: [mcpEntry] } } };
   return { available: !!mcpEntry, packaged: false, mcpEntry, json: JSON.stringify(config, null, 2) };
 }
 
@@ -391,7 +392,7 @@ async function main() {
   const url = `http://127.0.0.1:${port}/?port=${core.port}&token=${encodeURIComponent(core.token)}`;
   // Machine-readable line for scripts/tests (mirrors the core's own ready event).
   console.log(JSON.stringify({ event: "ready", url, port, corePort: core.port, coreOwned: core.owned }));
-  console.error(`\n  SynthCut is running at:\n\n    ${url}\n\n  Press Ctrl+C to stop.\n`);
+  console.error(`\n  ${PRODUCT_NAME} is running at:\n\n    ${url}\n\n  Press Ctrl+C to stop.\n`);
   if (opts.open) openBrowser(url);
 
   let stopping = false;

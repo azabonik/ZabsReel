@@ -132,7 +132,7 @@ export function prunableLibraryBakes(open: LibraryProject, history: readonly Lib
 }
 
 /**
- * Assets nothing in `project` uses, split into what SynthCut generated (bakes
+ * Assets nothing in `project` uses, split into what ZabsReel generated (bakes
  * and built-in bleep sounds: made again on demand) and what the user imported.
  */
 export function unusedAssets(project: LibraryProject, dataDir: string): { generated: LibraryAsset[]; imported: LibraryAsset[] } {

@@ -20,6 +20,7 @@
  *    value that reaches an FFmpeg graph the type the model says it has.
  */
 import { newId } from "./ids.js";
+import { PRODUCT_NAME } from "./brand.js";
 import { isTransitionType, type Project, type MediaAsset, type Clip, type Track } from "./types.js";
 import { isBlendMode } from "./effects/compositing.js";
 import { parseKeyColor } from "./effects/registry.js";
@@ -133,11 +134,11 @@ export function assertMediaNotProtocol(p: unknown, field: string): void {
   if (looksLikeProtocol(p)) {
     const scheme = protocolName(p);
     throw new Error(
-      `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. SynthCut only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
+      `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. ${PRODUCT_NAME} only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
     );
   }
   if (WIN_DEVICE.test(p)) {
-    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which SynthCut does not open.`);
+    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which ${PRODUCT_NAME} does not open.`);
   }
 }
 
@@ -155,11 +156,11 @@ export function assertLocalMediaPath(p: unknown, field: string): string {
   if (looksLikeProtocol(p)) {
     const scheme = protocolName(p);
     throw new Error(
-      `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. SynthCut only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
+      `${field} "${show(p)}" is a "${scheme}:" URL/protocol path. ${PRODUCT_NAME} only opens local files (it never fetches over the network); relink the media to a file on this machine.`,
     );
   }
   if (WIN_DEVICE.test(p)) {
-    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which SynthCut does not open.`);
+    throw new Error(`${field} "${show(p)}" is a Windows device path (\\\\?\\ / \\\\.\\), which ${PRODUCT_NAME} does not open.`);
   }
   if (!(p.startsWith("/") || WIN_DRIVE.test(p) || WIN_UNC.test(p))) {
     throw new Error(`${field} "${show(p)}" is not an absolute local path.`);
@@ -276,7 +277,7 @@ export function assertProjectMediaLocal(project: Project): void {
  * a file name (previews/preview-<revision>-…mp4 → a path outside the data dir),
  * and string geometry or clip timing would be spliced into filtergraphs. A value
  * that is not a finite number falls back to a safe default. Returns how many
- * fields were coerced (0 for any project SynthCut wrote).
+ * fields were coerced (0 for any project ZabsReel wrote).
  */
 export function coerceProjectNumbers(project: Project): number {
   let fixed = 0;
@@ -320,7 +321,7 @@ type Rec = Record<string, unknown>;
  * unknown transition type becomes "fade". Ranges are not clamped here: the
  * graph builders clamp (effects/registry.ts paramValue …), and a value a
  * valid project holds is never changed. Mutates `project`; returns how many
- * fields were changed (0 for any project SynthCut wrote).
+ * fields were changed (0 for any project ZabsReel wrote).
  */
 export function coerceProjectValues(project: Project): number {
   let fixed = 0;

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "synthcut": {
+    "zabsreel": {
       "command": "node",
       "args": ["packages/mcp/dist/index.js"]
     }

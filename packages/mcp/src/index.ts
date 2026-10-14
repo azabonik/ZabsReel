@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { extname } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { methods } from "@aive/core/rpc";
+import { MCP_KEY, PRODUCT_NAME } from "@aive/core/brand";
 import { CoreClient } from "./core-client.js";
 import { EDITING_GUIDE, PLATFORM_INSTRUCTIONS, PLATFORM_PRESETS } from "./guide.js";
 
@@ -78,14 +80,17 @@ async function imageResult(name: string, result: unknown) {
   }
 }
 
+// The server's version is @aive/mcp's own (src/ and dist/ both sit next to package.json).
+const { version: MCP_VERSION } = createRequire(import.meta.url)("../package.json") as { version: string };
+
 async function main(): Promise<void> {
   const core = new CoreClient();
   await core.connect();
 
   const server = new McpServer(
     {
-      name: "synthcut",
-      version: "0.1.0",
+      name: MCP_KEY,
+      version: MCP_VERSION,
     },
     {
       // Handed to the client as the server's instructions so the model learns
@@ -179,7 +184,7 @@ async function main(): Promise<void> {
             content: {
               type: "text" as const,
               text:
-                `You are operating the SynthCut video editor via its MCP tools. ` +
+                `You are operating the ${PRODUCT_NAME} video editor via its MCP tools. ` +
                 `First read the resource aive://guide/editing for editing craft. ` +
                 `Then accomplish this brief:\n\n${goal}${presetLine}\n\n` +
                 `Import the user's footage, analyze it, build and refine the timeline, render a preview for review, then export when approved.`,

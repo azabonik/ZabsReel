@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   delete process.env.AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG;
 
   console.log("2. staging the running FFmpeg into a scratch directory...");
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-bundle-ffmpeg-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-bundle-ffmpeg-"));
   console.log(`   work dir ${dir}`);
   try {
     const [srcFf, srcProbe] = [resolveBin(FFMPEG_BIN), resolveBin(FFPROBE_BIN)];

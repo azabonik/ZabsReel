@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="logo.png" alt="SynthCut" width="132" height="132" />
+<img src="logo.png" alt="ZabsReel" width="132" height="132" />
 
-<h1>SynthCut</h1>
+<h1>ZabsReel</h1>
 
 <h3>An open-source video editor built to be operated by&nbsp;<em>AI,&nbsp;not&nbsp;humans</em></h3>
 
@@ -22,10 +22,10 @@ any MCP-compatible AI client drives real, local FFmpeg edits, fully offline.
 
 </div>
 
-> This is a modified fork of [SynthCut by Relo](https://github.com/Relo-video/SynthCut), licensed under GPL-3.0-or-later. Changes in this fork date from October 2026. It is not affiliated with or endorsed by Relo.
+> ZabsReel is a modified version of [SynthCut](https://github.com/Relo-video/SynthCut) by Relo, used under the GNU General Public License v3.0 or later. ZabsReel is an independent project. It is not affiliated with, sponsored by or endorsed by Relo. The name "SynthCut" is used here only to identify the original work.
 
 <div align="center">
-  <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" alt="SynthCut demo: import three clips, place them on the timeline, split one and ripple-delete a piece, add a vignette, scrub the preview, open the export presets" width="100%" /></a>
+  <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" alt="ZabsReel demo: import three clips, place them on the timeline, split one and ripple-delete a piece, add a vignette, scrub the preview, open the export presets" width="100%" /></a>
 </div>
 
 ---
@@ -38,14 +38,14 @@ The editor exposes itself as an **MCP (Model Context Protocol) server**, so any 
 
 ## Download & install (Windows)
 
-Installers for this fork go on its [**Releases**](https://github.com/azabonik/SynthCut/releases) page. **No installer has been published from this fork yet.** For now, the way in is to [build from source](#build-from-source), or to [run it in your browser](#run-in-your-browser).
+Installers for this fork go on its [**Releases**](https://github.com/azabonik/ZabsReel/releases) page. **No installer has been published from this fork yet.** For now, the way in is to [build from source](#build-from-source), or to [run it in your browser](#run-in-your-browser).
 
 Once a release is out:
 
-1. Open the [**Releases**](https://github.com/azabonik/SynthCut/releases) page and grab the latest build.
+1. Open the [**Releases**](https://github.com/azabonik/ZabsReel/releases) page and grab the latest build.
 2. Download **one** of:
-   - **`SynthCut-<version>.exe`** — installer (adds a Desktop + Start‑menu shortcut), or
-   - **`SynthCut-<version>.zip`** — portable: unzip anywhere and run `SynthCut.exe` (no install).
+   - **`ZabsReel-<version>.exe`** — installer (adds a Desktop + Start‑menu shortcut), or
+   - **`ZabsReel-<version>.zip`** — portable: unzip anywhere and run `ZabsReel.exe` (no install).
 3. **Windows SmartScreen** may show *"Windows protected your PC."* This app is open‑source and **not code‑signed** (trusted certificates cost money). It is safe — click **More info → Run anyway**.
 
 Everything (FFmpeg, Whisper, etc.) is bundled, so it runs fully offline. To drive it with AI, connect an MCP client (e.g. Claude Desktop) — see the **Connect AI** button in the app.
@@ -55,7 +55,7 @@ Everything (FFmpeg, Whisper, etc.) is bundled, so it runs fully offline. To driv
 Each release includes `SHA256SUMS.txt`. Confirm your file is intact — in PowerShell:
 
 ```powershell
-Get-FileHash ".\SynthCut-<version>.exe" -Algorithm SHA256
+Get-FileHash ".\ZabsReel-<version>.exe" -Algorithm SHA256
 ```
 
 Compare the hash to the matching line in `SHA256SUMS.txt`. (This is the no‑cost stand‑in for a code signature.)
@@ -95,8 +95,8 @@ A single persistent **core** owns all editing state. The AI mutates a non-destru
 ```
 packages/core             @aive/core — headless editing engine + WebSocket server
 packages/mcp              @aive/mcp  — MCP server exposing editor tools to AI clients
-packages/skill-installer  @azabonik/synthcut — `npx @azabonik/synthcut add`: installs the pro-editor AI skill
-apps/desktop              synthcut-desktop — Electron + React desktop UI, and the web shell for a browser tab
+packages/skill-installer  @azabonik/zabsreel — `npx @azabonik/zabsreel add`: installs the pro-editor AI skill
+apps/desktop              zabsreel-desktop — Electron + React desktop UI, and the web shell for a browser tab
 ```
 
 ## Features
@@ -120,12 +120,12 @@ A full multi-track, frame-based editing workstation. Every capability is exposed
 
 ## Interchange (OpenTimelineIO)
 
-Start the edit with AI in SynthCut, finish anywhere: `export_otio` writes the timeline as an [OpenTimelineIO](https://opentimeline.io) `.otio` file that DaVinci Resolve, Hiero, RV and other OTIO-capable tools read — tracks, clips, gaps, dissolves and speed all map natively, and everything OTIO can't express (effect stacks, keyframes, captions, motion graphics, adjustment layers) rides in `metadata.synthcut`, so `import_otio` restores a SynthCut export **losslessly**. Importing foreign OTIO works too: referenced media is probed from disk and anything missing becomes an offline placeholder asset ready for relinking.
+Start the edit with AI in ZabsReel, finish anywhere: `export_otio` writes the timeline as an [OpenTimelineIO](https://opentimeline.io) `.otio` file that DaVinci Resolve, Hiero, RV and other OTIO-capable tools read — tracks, clips, gaps, dissolves and speed all map natively, and everything OTIO can't express (effect stacks, keyframes, captions, motion graphics, adjustment layers) rides in `metadata.synthcut`, so `import_otio` restores a ZabsReel export **losslessly**. Importing foreign OTIO works too: referenced media is probed from disk and anything missing becomes an offline placeholder asset ready for relinking.
 
-## Make your AI a professional editor — the `synthcut-editor` skill
+## Make your AI a professional editor — the `zabsreel-editor` skill
 
 Connecting an AI client to the MCP server teaches it to *operate* the editor
-(the server injects its own operating manual). The **synthcut-editor skill**
+(the server injects its own operating manual). The **zabsreel-editor skill**
 is the layer above that: the professional craft — the inspect → plan → edit →
 **verify with rendered frames** → export workflow, hook/pacing/caption/color/
 motion-design rules, and exact tool recipes (punch-in zooms, vertical reframes,
@@ -135,12 +135,12 @@ AI edits like someone who does it for a living.
 Install it into your AI client with one command:
 
 ```bash
-npx @azabonik/synthcut add        # interactive: pick your AI client, then project/global
+npx @azabonik/zabsreel add        # interactive: pick your AI client, then project/global
 ```
 
-Or non-interactive: `npx @azabonik/synthcut add --client claude --scope project`.
+Or non-interactive: `npx @azabonik/zabsreel add --client claude --scope project`.
 Re-run the same command later to update to the latest skill
-(`npx @azabonik/synthcut@latest add` to bypass a stale npx cache).
+(`npx @azabonik/zabsreel@latest add` to bypass a stale npx cache).
 Supported clients: **Claude Code** (`.claude/skills/`), **Cursor**
 (`.cursor/rules/*.mdc`), **Codex CLI** and generic agents (`AGENTS.md`),
 **Gemini CLI** (`GEMINI.md`), **Windsurf** (`.windsurf/rules/`) — each gets the
@@ -149,10 +149,10 @@ in place; details in
 [`packages/skill-installer/README.md`](packages/skill-installer/README.md).
 
 From a checkout of this repo (without npm):
-`node packages/skill-installer/bin/synthcut.mjs`.
+`node packages/skill-installer/bin/zabsreel.mjs`.
 
-> Maintainers: `npx @azabonik/synthcut` resolves once the package is published
-> (`npm publish --workspace @azabonik/synthcut` — scoped, so `publishConfig.access`
+> Maintainers: `npx @azabonik/zabsreel` resolves once the package is published
+> (`npm publish --workspace @azabonik/zabsreel` — scoped, so `publishConfig.access`
 > is already set to public); bump its version in lockstep with the other
 > packages (see `docs/RELEASING.md`).
 
@@ -160,7 +160,7 @@ From a checkout of this repo (without npm):
 
 The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, and auto-reframe all work on first launch with **no downloads**. Motion graphics (Remotion) downloads its headless Chrome the first time you use it.
 
-1. Run **`SynthCut-<version>.exe`** and follow the installer.
+1. Run **`ZabsReel-<version>.exe`** and follow the installer.
 2. Because the build is **unsigned**, Windows SmartScreen may warn ("Windows protected your PC"). Click **More info → Run anyway**. (We can drop in an Authenticode certificate later — the config has a hook for it.)
 3. To drive it with AI, connect an MCP client — see **Connect your AI client** below.
 
@@ -175,11 +175,11 @@ If you'd rather do it by hand, or you're running from a source checkout without 
 | Client | Where it goes | Format |
 | --- | --- | --- |
 | **Claude Desktop** | `claude_desktop_config.json` (Windows: `%APPDATA%\Claude\`, macOS: `~/Library/Application Support/Claude/`) | JSON `mcpServers` |
-| **Claude Code (CLI)** | `claude mcp add -s user synthcut -- node "<path>/packages/mcp/dist/index.js"` (or use this repo's shipped [`.mcp.json`](.mcp.json) directly) | CLI command / JSON |
+| **Claude Code (CLI)** | `claude mcp add -s user zabsreel -- node "<path>/packages/mcp/dist/index.js"` (or use this repo's shipped [`.mcp.json`](.mcp.json) directly) | CLI command / JSON |
 | **Cursor** | `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project) | JSON `mcpServers` |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | JSON `mcpServers` |
 | **Gemini CLI** | `~/.gemini/settings.json` | JSON `mcpServers` |
-| **Codex CLI** | `~/.codex/config.toml` | TOML `[mcp_servers.synthcut]` |
+| **Codex CLI** | `~/.codex/config.toml` | TOML `[mcp_servers.zabsreel]` |
 | **Other** | Check your client's docs — most accept the same JSON `mcpServers` shape | JSON `mcpServers` |
 
 All of them, in the JSON case, look like:
@@ -187,7 +187,7 @@ All of them, in the JSON case, look like:
 ```json
 {
   "mcpServers": {
-    "synthcut": {
+    "zabsreel": {
       "command": "node",
       "args": ["<absolute path to this repo>/packages/mcp/dist/index.js"]
     }
@@ -197,7 +197,15 @@ All of them, in the JSON case, look like:
 
 Fully restart your client after editing its config (Claude Code needs no restart — `claude mcp list` confirms it's registered). For a from-source build, see [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) and [`claude_desktop_config.example.json`](claude_desktop_config.example.json) for a worked example.
 
-If you used Relo's SynthCut before, your client may still have its entry, named `ai-video-editor`, and its `video-editor-pro` skill. Run `npx @azabonik/synthcut migrate` (from a checkout: `node packages/skill-installer/bin/synthcut.mjs migrate`) in your project folder: it lists those entries, removes them only after you confirm, and backs up every file it changes to `~/.synthcut/backups/`. It leaves an `ai-video-editor` entry alone if that entry runs another program. Otherwise the client also starts the other editor's server.
+If you used Relo's SynthCut before, your client may still have its entry, named `ai-video-editor`, and its `video-editor-pro` skill. Run `npx @azabonik/zabsreel migrate` (from a checkout: `node packages/skill-installer/bin/zabsreel.mjs migrate`) in your project folder: it lists those entries, removes them only after you confirm, and backs up every file it changes to `~/.zabsreel/backups/`. It leaves an `ai-video-editor` entry alone if that entry runs another program. Otherwise the client also starts the other editor's server.
+
+Before it was renamed ZabsReel, this project registered its MCP server under the key `synthcut` and installed the skill as `synthcut-editor`. The same `migrate` command renames such an entry to `zabsreel` in place, with its command, arguments and settings kept, but only when the files the entry points at show that it runs this app; it lists an entry it cannot confirm and leaves it alone. It also removes the old skill copies (run `npx @azabonik/zabsreel add` afterwards to install the `zabsreel-editor` skill) and replaces their marked sections in `AGENTS.md` / `GEMINI.md` with the `zabsreel-editor` section.
+
+- Close Claude Code and your other AI clients first. A running Claude Code writes its own copy of `~/.claude.json` back and undoes the change. Run `migrate --dry-run` first to see the list.
+- An entry that starts an installed app is not carried over, because ZabsReel installs beside the old app instead of replacing it. Open ZabsReel → **Connect AI**, save the JSON it shows to a file and run `migrate --entry <file>`. Or add that entry to your client yourself and run `migrate` again to remove the old one.
+- If you renamed or moved your checkout folder, run `migrate --from-checkout <old folder> --to-checkout <new folder>`. Entries that name `packages/mcp/dist/index.js` in the old folder then point at the new one.
+- The renamed desktop app starts with a new app profile, so its Recent list and the file picker's folders start empty, and the WebGL preview opt-out is reset. Your projects, bakes and the data folder are not affected.
+- `migrate --restore ~/.zabsreel/backups/<stamp>` copies every file in that backup back to where it came from. It backs up the current files first, so a restore can be undone too.
 
 ## Build from source
 
@@ -242,8 +250,8 @@ There is **no packaged installer for macOS or Linux yet** — the current releas
 #         Linux:  sudo apt install ffmpeg          # Debian / Ubuntu
 
 # 2. Clone, build, run
-git clone https://github.com/azabonik/SynthCut.git
-cd SynthCut
+git clone https://github.com/azabonik/ZabsReel.git
+cd ZabsReel
 npm install
 npm run build      # builds core + mcp + renderer
 npm start          # launches the Electron desktop app
@@ -265,7 +273,7 @@ node apps/desktop/scripts/prepare-bundle.ts
 
 # 2. Build the renderer + the NSIS installer  (output: apps/desktop/build/dist)
 npm run build
-npm run dist --workspace synthcut-desktop
+npm run dist --workspace zabsreel-desktop
 ```
 
 The bundled binaries are reused from the engine's own `~/.aive` cache when present, so the slow downloads happen at most once. The packaged app points the engine at the bundled copies via env overrides (`AIVE_FFMPEG`, `AIVE_WHISPER_BIN`, …) — the same variables you can set by hand for a source checkout.
@@ -283,7 +291,7 @@ The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run 
 
 ### Supported FFmpeg versions
 
-SynthCut runs FFmpeg as a separate program, so the version matters. The full test suite runs against these releases:
+ZabsReel runs FFmpeg as a separate program, so the version matters. The full test suite runs against these releases:
 
 | FFmpeg | Status | Notes |
 |---|---|---|
@@ -304,34 +312,49 @@ The desktop UI talks to the `core` backend (`127.0.0.1:4791` by default) over a 
 
 **Fix, in order:**
 
-1. **Relaunch the desktop app.** This resolves the vast majority of cases — on startup the app re-reads `~/.synthcut/data/server.json`, health-checks the core, and opens a fresh window with the current port + token.
-2. **Check whether the core is actually running.** Open `~/.synthcut/data/server.json` — it contains `{ port, pid, startedAt, token }`. If that `pid` isn't a live process, the core died; relaunching will spawn a new one.
+1. **Relaunch the desktop app.** This resolves the vast majority of cases — on startup the app re-reads `server.json` in the data folder (`~/.zabsreel/data`, or the folder the app logs; see [below](#the-app-and-the-ai-client-use-different-data-folders)), health-checks the core, and opens a fresh window with the current port + token.
+2. **Check whether the core is actually running.** Open `~/.zabsreel/data/server.json` — it contains `{ port, pid, startedAt, token }`. If that `pid` isn't a live process, the core died; relaunching will spawn a new one.
 3. **Kill a wedged core.** If the `pid` is alive but not responding (e.g. `/health` times out), kill that process, then relaunch the app to spawn a fresh core.
-4. **Delete a stale `server.json`.** If it points at a dead core, remove `~/.synthcut/data/server.json` and relaunch for a clean respawn.
+4. **Delete a stale `server.json`.** If it points at a dead core, remove `~/.zabsreel/data/server.json` and relaunch for a clean respawn.
 5. **Port 4791 already in use by something else.** The core will fail to bind and exit before reporting "ready". Free the port, or set the `AIVE_PORT` environment variable to run the core on a different port. Avoid the ports that Chromium-based browsers and Electron refuse to connect to (for example 5060, 5061, 6000 or 10080): the app and the web shell stop with a message that says so.
 6. **Check the logs.** The core has no log file — it writes to stdout/stderr only. Running from source (`npm start`), these appear in the terminal (look for `[aive-core] listening on …`, `{"event":"ready"}`, or `[aive-core] fatal:`). In the packaged app, a failed core startup shows an error dialog ("Could not start the editor core").
 
 This most commonly happens when a **second core process** (e.g. one spawned by an MCP client) starts up and rotates the auth token while the desktop window is still open with the old one — every reconnect attempt then gets rejected. Closing and reopening the app picks up the live token again.
 
+### The app and the AI client use different data folders
+
+The core keeps its session file (`server.json`), the list of known project files (`projects.json`), bakes, proxies and autosaves in one data folder. The desktop app, the web shell, the MCP server and the core choose that folder with the same rule:
+
+1. `AIVE_DATA_DIR`, when it is set.
+2. Otherwise `~/.zabsreel/data`, when it already holds a `server.json` or a `projects.json`.
+3. Otherwise `~/.synthcut/data`, the folder this project used before the rename, when it holds one of those files (nothing is moved or copied out of it).
+4. Otherwise `~/.zabsreel/data`, which the core creates on first use.
+
+Each process prints its choice once on stderr: `[aive-core] data dir: <folder> (<reason>)` from the core, `[aive-mcp] data dir: …` from the MCP server (in your AI client's MCP log) and `[aive] data dir: …` from the desktop app. The reason is `AIVE_DATA_DIR`, `new`, `legacy` (rule 3) or `default`. When two of them name different folders, they start two cores, and the second one cannot bind port 4791 (the app says "Core exited before ready"). The usual cause is `AIVE_DATA_DIR` set for only one of them, for example in the `env` block of the AI client's MCP entry: set the same value for all of them, or for none. The reason `new (old folder also has data: <folder>)` only tells you that the old folder still holds files; the core does not use them.
+
 ### The data folder uses a lot of disk space
 
-Bakes are stored in `~/.synthcut/data/baked/` (a remove-background cutout is lossless, about 0.9 GB per minute of 1080p; stabilize, auto-reframe, freeze frame, reverse, smooth slow motion and motion graphics bake there too) and preview proxies in `~/.synthcut/data/proxies/`. SynthCut cleans these up by itself, at startup, after saves and bakes, and when you open or start a project:
+Bakes are stored in `~/.zabsreel/data/baked/` (a remove-background cutout is lossless, about 0.9 GB per minute of 1080p; stabilize, auto-reframe, freeze frame, reverse, smooth slow motion and motion graphics bake there too) and preview proxies in `~/.zabsreel/data/proxies/`. ZabsReel cleans these up by itself, at startup, after saves and bakes, and when you open or start a project:
 
-- A file that the open project, its undo history, a project file SynthCut has saved or opened (listed in `~/.synthcut/data/projects.json`) or an autosave still uses is kept.
+- A file that the open project, its undo history, a project file ZabsReel has saved or opened (listed in `~/.zabsreel/data/projects.json`) or an autosave still uses is kept.
 - Any other file older than 1 hour is **moved** to a `.trash` folder next to it, not deleted. It keeps its own date, so a file that comes back out of the trash renders from the preview cache again. A bake stays while its asset is in the project's library or undo can still bring it back. For example, when you undo remove background and run it again, the previous cutout moves to the trash once the undo history no longer holds it; removing a baked asset from the library frees its file the same way.
 - A bake that no clip uses any more (you deleted its clip, or reversed a clip back) leaves the library by itself once no undo or redo step uses it either — in practice when you open the project again. Media you imported is never removed automatically. **Remove unused media** in the Library panel (or the `remove_unused_media` tool) removes unused bakes at once, and your own unused media only when you tick it.
-- When two SynthCut cores use the same data folder (the app's and one an AI client started), neither moves a file that the other's open project or undo history still uses. Each running core lists those files in `~/.synthcut/data/run/`; a core that crashed stops counting at once, and one that stopped answering for 10 minutes stops counting then.
-- While a project file SynthCut knows about can't be read (for example, it is on an unplugged drive, or it was moved or deleted), nothing is moved to the trash. After 7 days without it, SynthCut forgets that file; **Storage…** can also forget it at once.
+- When two ZabsReel cores use the same data folder (the app's and one an AI client started), neither moves a file that the other's open project or undo history still uses. Each running core lists those files in `~/.zabsreel/data/run/`; a core that crashed stops counting at once, and one that stopped answering for 10 minutes stops counting then.
+- While a project file ZabsReel knows about can't be read (for example, it is on an unplugged drive, or it was moved or deleted), nothing is moved to the trash. After 7 days without it, ZabsReel forgets that file; **Storage…** can also forget it at once.
 - Opening a project moves any file it needs back out of the trash, so a `.aive` you copied or moved elsewhere still works. Each clean-up also moves back a trashed file that a known project still uses.
 - Trash older than 7 days is deleted (`AIVE_BAKED_TRASH_DAYS` changes this).
 - Automatic clean-ups start 3 seconds after a save, bake or project switch and run at most once a minute. `AIVE_STORAGE_GC_DELAY_MS` sets that delay in milliseconds (default `3000`); a negative value turns automatic clean-ups off (**Storage…** and `clean_up_storage` still work).
-- Files that were already there before SynthCut started keeping `projects.json` are only moved when you ask for a clean-up, because an older project could still use them. SynthCut records the projects in your Recent list, so their files are kept. **Empty trash** puts such older files in the trash for 7 days instead of deleting them.
+- Files that were already there before ZabsReel started keeping `projects.json` are only moved when you ask for a clean-up, because an older project could still use them. ZabsReel records the projects in your Recent list, so their files are kept. **Empty trash** puts such older files in the trash for 7 days instead of deleting them.
 
 **Project → Storage…** shows the space each area uses, the unused files, bakes that only the library holds, and the trash, with **Clean up now** and **Empty trash**. An AI client can do the same with the `storage_report`, `clean_up_storage` and `remove_unused_media` tools.
 
 ## License
 
-**GNU General Public License v3.0 (or later)** — see [LICENSE](LICENSE). This fork is a modified version of [SynthCut by Relo](https://github.com/Relo-video/SynthCut) and keeps its copyright and license notices. You are free to use, study, share, and modify this software; derivative works that you distribute must also be released under the GPL-3.0 and include their source. Only permissively licensed (MIT/Apache/BSD) **models** are bundled; AGPL and non-commercial models are intentionally excluded.
+**GNU General Public License v3.0 (or later)** — see [LICENSE](LICENSE) and [NOTICE](NOTICE). You are free to use, study, share, and modify this software; derivative works that you distribute must also be released under the GPL-3.0 and include their source. Only permissively licensed (MIT/Apache/BSD) **models** are bundled; AGPL and non-commercial models are intentionally excluded.
+
+This program is a modified version of SynthCut, Copyright © 2026 Relo (https://github.com/Relo-video/SynthCut), which is licensed under the GNU General Public License, version 3 or (at your option) any later version. Zabs and the ZabsReel contributors modified it, starting on 11 October 2026. The modified version is also licensed under the GNU GPL, version 3 or any later version. The changes are recorded in the git history after upstream commit 96b1ca0 (SynthCut v1.0.5, 21 July 2026).
+
+**Additional permission under GNU GPL version 3 section 7.** If you modify this Program, or any covered work, by linking or combining it with Remotion (or a modified version of that library), containing parts covered by the terms of the Remotion License, the licensors of these modifications grant you additional permission to convey the resulting work. Zabs and the ZabsReel contributors grant this permission only for the material they hold copyright in, that is, their modifications. Relo's code relies on Relo's own published statement that accepts Remotion as a linked dependency (the "One accepted exception" in CONTRIBUTING.md), not on this permission.
 
 Bundled and downloaded third-party components, and their license obligations, are documented in **[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)**. Two points worth calling out:
 

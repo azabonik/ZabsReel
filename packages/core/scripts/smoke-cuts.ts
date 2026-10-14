@@ -84,7 +84,7 @@ async function codedMedia(dir: string, name: string, rate: string, secs: number,
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4];
 
 async function main(): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-cuts-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-cuts-"));
   const FPS = 30;
   const src = await codedMedia(dir, "coded.mp4", "30", 16);
   const engine = new EditorEngine(dir);

@@ -410,7 +410,7 @@ function colourAgnostic(cmd: { args: string[]; totalDuration: number }): { args:
 async function main(): Promise<void> {
   mappingProperties();
 
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-ramps-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-ramps-"));
   // 8 s / 240 frames: frame N encodes N in 8 stripes; audio = 440 Hz tone.
   const src = join(dir, "coded.mp4");
   await execa(FFMPEG_BIN, [
@@ -983,7 +983,7 @@ async function main(): Promise<void> {
     const back = clipById(clip.id);
     check(JSON.stringify(back.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])) === JSON.stringify(pre.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])), "un-reverse restores the original curve");
 
-    // OTIO: average speed + note; SynthCut round trip keeps the curve.
+    // OTIO: average speed + note; ZabsReel round trip keeps the curve.
     const otioPath = join(dir, "t.otio");
     await call("export_otio", { path: otioPath });
     const otio = JSON.parse((await import("node:fs")).readFileSync(otioPath, "utf8"));

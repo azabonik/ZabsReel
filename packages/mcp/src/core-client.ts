@@ -1,20 +1,32 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname } from "node:path";
 import WebSocket from "ws";
+import { resolveDataDir } from "@aive/core/datadir";
 
 const require = createRequire(import.meta.url);
-
-/** Resolve the data dir the core uses (must match @aive/core's default). */
-export function getDataDir(): string {
-  return resolve(process.env.AIVE_DATA_DIR || join(homedir(), ".synthcut", "data"));
-}
 
 /** All diagnostic logging MUST go to stderr — stdout is the MCP stdio channel. */
 function log(...args: unknown[]): void {
   console.error("[aive-mcp]", ...args);
+}
+
+// The last choice that was logged, so the process prints its data dir once.
+let loggedChoice = "";
+
+/**
+ * The data dir the core uses: the same rule as the core and the desktop
+ * launcher (@aive/core/datadir). `opts` ({ env, home }) is for tests.
+ */
+export function getDataDir(opts?: { env?: Record<string, string | undefined>; home?: string }): string {
+  const { dir, reason } = resolveDataDir(opts);
+  const line = `data dir: ${dir} (${reason})`;
+  if (line !== loggedChoice) {
+    loggedChoice = line;
+    log(line);
+  }
+  return dir;
 }
 
 interface ServerInfo {

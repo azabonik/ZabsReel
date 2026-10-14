@@ -17,6 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Reads GITHUB_REF. A tag must be v<semver> >= 0.2.0 and equal
+      # apps/desktop/package.json's version; a branch ref passes. This guards
+      # only tags cut from main: the inherited v0.1.x / v1.0.5 tags run their
+      # own commit's workflow, which has no guard.
+      - name: Check the release tag
+        run: node scripts/release-guard.mjs
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -32,13 +39,13 @@ jobs:
         run: choco install ffmpeg -y --no-progress
 
       - name: Stage bundled FFmpeg/whisper/YuNet/font resources
-        run: npm run prepare:bundle --workspace synthcut-desktop
+        run: npm run prepare:bundle --workspace zabsreel-desktop
 
       - name: Package Windows installer + portable ZIP (+ SHA256SUMS)
         # `--publish never` = build the installer AND emit the update feed
         # (latest.yml + .blockmap) into build/dist, but let the release step below
         # do the actual upload. Avoids electron-builder needing its own token here.
-        run: npm run dist --workspace synthcut-desktop -- --publish never
+        run: npm run dist --workspace zabsreel-desktop -- --publish never
 
       # --- Free code signing for open source (optional) -----------------------
       # Once approved by SignPath Foundation (https://signpath.org), uncomment and
@@ -50,7 +57,7 @@ jobs:
       #   with:
       #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
       #     organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
-      #     project-slug: synthcut
+      #     project-slug: zabsreel
       #     signing-policy-slug: release-signing
       #     artifact-configuration-slug: installer
       #     github-artifact-id: ${{ ... }}
@@ -77,7 +84,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: synthcut-windows
+          name: zabsreel-windows
           path: |
             apps/desktop/build/dist/*.exe
             apps/desktop/build/dist/*.zip

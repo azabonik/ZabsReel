@@ -1,6 +1,6 @@
 /**
  * FFmpeg version-compatibility smoke (no downloads; synthesizes its inputs).
- * SynthCut supports FFmpeg 4.4 and 7.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
+ * ZabsReel supports FFmpeg 4.4 and 7.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
  * run this against every build you ship or test:
  *
  *   npx tsx packages/core/scripts/smoke-ffcompat.ts
@@ -244,7 +244,7 @@ const BANNERS: Array<[string, string, Want]> = [
 ];
 
 async function main(): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-ffcompat-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-ffcompat-"));
   console.log(`work dir ${dir}`);
 
   // ---- version ------------------------------------------------------------------

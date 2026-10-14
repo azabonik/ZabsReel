@@ -69,7 +69,8 @@ async function main() {
     env: { ...process.env, AIVE_DATA_DIR: dataDir, AIVE_PORT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  shell.stderr.on("data", (d) => { if (process.env.SMOKE_VERBOSE) process.stderr.write(d); });
+  let shellLog = "";
+  shell.stderr.on("data", (d) => { shellLog += d.toString(); if (process.env.SMOKE_VERBOSE) process.stderr.write(d); });
   const shellExit = new Promise<number | null>((resolve) => shell.on("exit", (code) => resolve(code)));
 
   const ready = await new Promise<{ url: string; port: number; corePort: number; coreOwned: boolean }>((resolve, reject) => {
@@ -116,7 +117,10 @@ async function main() {
     const c = json(cfg);
     check("config ok", cfg.status === 200 && c.ok === true && typeof c.home === "string");
     check("places include Home", Array.isArray(c.places) && c.places.some((p: { label: string }) => p.label === "Home"));
-    check("MCP config resolved", c.mcp?.available === true && !!JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers?.synthcut);
+    check("MCP config resolved", c.mcp?.available === true && !!JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers?.zabsreel);
+    check("MCP config has the one key zabsreel", JSON.stringify(Object.keys(JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers ?? {})) === '["zabsreel"]');
+    check("startup text names ZabsReel", shellLog.includes("ZabsReel is running at:"), shellLog);
+    check("launcher logs the data dir it chose", shellLog.includes(`[aive] data dir: ${dataDir} (AIVE_DATA_DIR)`), shellLog);
 
     console.log("4. /api/fs/list");
     const list = await request(port, `/api/fs/list?path=${encodeURIComponent(mediaDir)}`, { headers: auth });

@@ -105,7 +105,7 @@ async function main() {
   }
 
   // ---- engine ---------------------------------------------------------------
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-bleep-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-bleep-"));
   const src = join(dir, "tone.mp4");
   await execa(FFMPEG_BIN, [
     "-hide_banner", "-y", "-f", "lavfi", "-i", `color=c=gray:s=320x180:r=${FPS}:d=6`,

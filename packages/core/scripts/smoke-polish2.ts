@@ -219,7 +219,7 @@ function docs() {
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-polish2-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-polish2-"));
   mkdirSync(dir, { recursive: true });
   await partialUpdates(dir);
   await alphaGrade(dir);

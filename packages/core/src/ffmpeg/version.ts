@@ -1,6 +1,6 @@
 /**
  * FFmpeg versions and the few behaviours that differ between the releases
- * SynthCut supports (4.4 and 7.1 – 9.0). Pure: executor.ts runs the probes
+ * ZabsReel supports (4.4 and 7.1 – 9.0). Pure: executor.ts runs the probes
  * (`ffmpeg -version` once per process, plus two lazy feature probes) and
  * applies what is decided here.
  *
@@ -25,6 +25,7 @@
  *  - xfade drops the outgoing clip's last frame before 7.0 ({@link xfadeNeedsEofPad}).
  *  - `ffmpeg -filters` prints 2 flag columns from 8.0 (3 before; audio/fx.ts).
  */
+import { PRODUCT_NAME } from "../brand.js";
 
 /**
  * FFmpeg releases the full test matrix ran against (docs/TESTING.md). Bundles
@@ -77,7 +78,7 @@ export function parseFfmpegVersion(output: string): FfmpegVersion {
 export function untestedFfmpegWarning(v: FfmpegVersion): string | null {
   if (v.tested) return null;
   return (
-    `WARNING: FFmpeg ${v.label} is not a version SynthCut is tested with ` +
+    `WARNING: FFmpeg ${v.label} is not a version ${PRODUCT_NAME} is tested with ` +
     `(tested: ${TESTED_FFMPEG_VERSIONS.join(", ")}). Renders may fail or look different; ` +
     `install one of those releases or point AIVE_FFMPEG / AIVE_FFPROBE at one.`
   );

@@ -32,7 +32,7 @@
  */
 
 /** The name the processor registers under. */
-export const VOICE_WORKLET_PROCESSOR = "synthcut-voicefx";
+export const VOICE_WORKLET_PROCESSOR = "aive-voicefx";
 
 /** processorOptions for one node (the "pitch" / "robot" AudioNodeSpec). */
 export type VoiceWorkletOptions = { kind: "pitch"; ratio: number } | { kind: "robot"; win: number };
@@ -250,7 +250,7 @@ function pitchStream(n, ratio) {
   }, 1);
 }
 
-class SynthCutVoiceFx extends AudioWorkletProcessor {
+class AiveVoiceFx extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const o = (options && options.processorOptions) || {};
@@ -278,5 +278,5 @@ class SynthCutVoiceFx extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor(${JSON.stringify(VOICE_WORKLET_PROCESSOR)}, SynthCutVoiceFx);
+registerProcessor(${JSON.stringify(VOICE_WORKLET_PROCESSOR)}, AiveVoiceFx);
 `;

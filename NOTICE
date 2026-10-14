@@ -1,0 +1,42 @@
+ZabsReel
+
+Copyright © 2026 Relo. Modifications copyright © 2026 Zabs and the ZabsReel contributors.
+
+ZabsReel is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It comes with ABSOLUTELY NO WARRANTY. The full license text is in the
+file LICENSE.
+
+
+Modified-work notice (GNU GPL version 3, section 5(a))
+
+This program is a modified version of SynthCut, Copyright © 2026 Relo
+(https://github.com/Relo-video/SynthCut), which is licensed under the GNU
+General Public License, version 3 or (at your option) any later version. Zabs
+and the ZabsReel contributors modified it, starting on 11 October 2026. The
+modified version is also licensed under the GNU GPL, version 3 or any later
+version. The changes are recorded in the git history after upstream commit
+96b1ca0 (SynthCut v1.0.5, 21 July 2026).
+
+ZabsReel is an independent project. It is not affiliated with, sponsored by or
+endorsed by Relo. The name "SynthCut" is used here only to identify the
+original work.
+
+
+Additional permission under GNU GPL version 3 section 7
+
+If you modify this Program, or any covered work, by linking or combining it
+with Remotion (or a modified version of that library), containing parts
+covered by the terms of the Remotion License, the licensors of these
+modifications grant you additional permission to convey the resulting work.
+
+Zabs and the ZabsReel contributors grant this permission only for the material
+they hold copyright in, that is, their modifications. It does not cover the
+code written by Relo. For that code, ZabsReel relies on Relo's own published
+statement, which accepts Remotion as a linked dependency (the "One accepted
+exception" paragraph of CONTRIBUTING.md, which this repository keeps
+unchanged).
+
+Remotion itself is licensed under its own terms, not under the GPL. See
+THIRD_PARTY_LICENSES.md.

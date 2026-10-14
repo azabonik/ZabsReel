@@ -6,6 +6,8 @@
 //   bare     — a plain Vite page with no shell; window.prompt for paths
 // App code calls `platform.*` and never needs to know which one it got.
 
+import { PRODUCT_NAME } from "@aive/core/brand";
+
 export type McpConfig = { available: boolean; packaged: boolean; mcpEntry: string | null; json: string };
 export type FileFilter = { name: string; extensions: string[] }; // extensions without the dot; "*" = any
 export type Place = { label: string; path: string };
@@ -26,8 +28,8 @@ const MEDIA_FILTERS: FileFilter[] = [
   { name: "Media", extensions: ["mp4", "mov", "mkv", "webm", "avi", "m4v", "wav", "mp3", "aac", "png", "jpg", "jpeg", "webp", "gif", "bmp"] },
   { name: "All Files", extensions: ["*"] },
 ];
-const PROJECT_FILTERS: FileFilter[] = [
-  { name: "SynthCut Project", extensions: ["aive"] },
+export const PROJECT_FILTERS: FileFilter[] = [
+  { name: `${PRODUCT_NAME} Project`, extensions: ["aive"] },
   { name: "All Files", extensions: ["*"] },
 ];
 // One filter per container the export presets produce (core EXPORT_PRESETS:

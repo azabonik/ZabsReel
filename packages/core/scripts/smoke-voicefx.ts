@@ -29,7 +29,7 @@
  * playwright-core + a Chromium: PLAYWRIGHT_CORE=<dir of playwright-core> and
  * PLAYWRIGHT_CHROMIUM=<chrome binary> override the search (npx caches,
  * ~/.cache/ms-playwright), as for apps/desktop/scripts/parity-gl.mts.
- * SYNTHCUT_SKIP_BROWSER=1 skips part 2.
+ * AIVE_SKIP_BROWSER=1 skips part 2.
  *
  * Run: npx tsx packages/core/scripts/smoke-voicefx.ts
  */
@@ -332,14 +332,14 @@ window.runVoiceTests = async () => {
 
 async function browserChecks(dir: string): Promise<void> {
   console.log("2. the real preview chain in headless Chromium (OfflineAudioContext)...");
-  if (process.env.SYNTHCUT_SKIP_BROWSER === "1") {
-    console.log("  note SYNTHCUT_SKIP_BROWSER=1: skipped");
+  if (process.env.AIVE_SKIP_BROWSER === "1") {
+    console.log("  note AIVE_SKIP_BROWSER=1: skipped");
     return;
   }
   const pw = await loadPlaywright();
   const exe = chromiumPath();
   if (!pw || !exe) {
-    check(false, "playwright-core and a Chromium are needed (set PLAYWRIGHT_CORE / PLAYWRIGHT_CHROMIUM, or SYNTHCUT_SKIP_BROWSER=1)");
+    check(false, "playwright-core and a Chromium are needed (set PLAYWRIGHT_CORE / PLAYWRIGHT_CHROMIUM, or AIVE_SKIP_BROWSER=1)");
     return;
   }
   writeFileSync(join(dir, "entry.ts"), PAGE_ENTRY);
@@ -435,11 +435,11 @@ function bundleCheck(): void {
     return;
   }
   const js = readdirSync(assets).filter((f) => f.endsWith(".js")).map((f) => readFileSync(join(assets, f), "utf8")).join("\n");
-  check(js.includes("synthcut-voicefx") && js.includes("registerProcessor(") && js.includes("hypot"), "dist/renderer includes the voice worklet module source");
+  check(js.includes("aive-voicefx") && js.includes("registerProcessor(") && js.includes("hypot"), "dist/renderer includes the voice worklet module source");
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "synthcut-voicefx-"));
+  const dir = mkdtempSync(join(tmpdir(), "zabsreel-voicefx-"));
   try {
     nodeChecks(dir);
     await browserChecks(dir);

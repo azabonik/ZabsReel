@@ -35,7 +35,7 @@
 //      <name>.aive, then the app quits.
 //   No renderer console errors or page errors in either run.
 //   The app runs with its own profile (--user-data-dir) in the test folder, so
-//   the user's SynthCut profile and its recent projects are left alone.
+//   the user's ZabsReel profile and its recent projects are left alone.
 //
 // Run (needs a display; xvfb-run provides one without showing a window):
 //   xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
@@ -44,9 +44,9 @@
 // (PLAYWRIGHT_CORE=<dir> overrides the search, as in parity-gl.mts). AIVE_PORT
 // picks the core's port (default: any free port; note that Chromium refuses
 // some ports, e.g. 5060/5061, with ERR_UNSAFE_PORT).
-// SYNTHCUT_APP=<packaged executable> runs a packed build instead of the source
+// AIVE_APP=<packaged executable> runs a packed build instead of the source
 // tree, e.g. after `npx electron-builder --dir --linux` in apps/desktop:
-//   SYNTHCUT_APP=apps/desktop/build/dist/linux-unpacked/synthcut-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+//   AIVE_APP=apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -126,11 +126,11 @@ async function launch(pw: PW, cwd: string, dataDir: string): Promise<Run> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("ELECTRON_")) env[k] = v;
   Object.assign(env, { AIVE_DATA_DIR: dataDir, AIVE_PORT: process.env.AIVE_PORT ?? "0" });
-  const packaged = process.env.SYNTHCUT_APP;
+  const packaged = process.env.AIVE_APP;
   const app = await pw._electron.launch({
     executablePath: packaged || electronBinary(),
     // SwiftShader gives the renderer WebGL2 without a GPU, as on a plain VM.
-    // A profile under the test folder: the user's own (~/.config/SynthCut…,
+    // A profile under the test folder: the user's own (~/.config/ZabsReel…,
     // with its recent projects) is neither read nor changed.
     args: [...(packaged ? [] : [APP_DIR]), `--user-data-dir=${join(cwd, "..", "profile")}`, "--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
     cwd,
@@ -173,7 +173,7 @@ async function stub(app: ElectronApp, fn: "showOpenDialog" | "showSaveDialog" | 
 }
 const calls = (app: ElectronApp, fn: string) =>
   app.evaluate((_e, fn) => ((globalThis as unknown as { __calls: Record<string, unknown[]> }).__calls?.[fn] ?? []), fn) as Promise<
-    { defaultPath?: string; filters?: { extensions: string[] }[]; message?: string }[]
+    { defaultPath?: string; filters?: { name?: string; extensions: string[] }[]; message?: string }[]
   >;
 const saveResult = (filePath: string | null) => (filePath ? { canceled: false, filePath } : { canceled: true, filePath: undefined });
 
@@ -228,7 +228,7 @@ async function main() {
     const environ = readFileSync(`/proc/${info.pid}/environ`, "utf8").split("\0");
     const dd = environ.find((l) => l.startsWith("AIVE_DATA_DIR="));
     check(dd === `AIVE_DATA_DIR=${join(cwd1, "data-rel")}`, `core got the absolute data dir (${dd})`);
-    if (process.env.SYNTHCUT_APP) {
+    if (process.env.AIVE_APP) {
       const ff = environ.find((l) => l.startsWith("AIVE_FFMPEG=")) ?? "";
       check(ff.includes(`${join("resources", "aive", "ffmpeg")}`), `packaged: the core uses the bundled FFmpeg (${ff})`);
     }
@@ -236,6 +236,17 @@ async function main() {
   check(/started core on port/.test(r1.mainLog()), "main process started its own core");
   const userData = await app.evaluate(({ app }) => app.getPath("userData"));
   check(userData === join(work, "profile"), `app profile is the test's own (${userData})`);
+  // The brand: the app's name (taskbar, dialogs), the Windows AUMID and the window title.
+  const appName = await app.evaluate(({ app }) => app.getName());
+  const wantName = process.env.AIVE_APP ? "ZabsReel" : "ZabsReel (DEV)";
+  check(appName === wantName, `app.getName() is "${wantName}" (${appName})`);
+  const brand = require("../electron/brand.cjs") as { APP_ID: string; APP_ID_DEV: string };
+  check(brand.APP_ID === "io.github.azabonik.zabsreel" && brand.APP_ID_DEV === `${brand.APP_ID}.dev`, `AUMIDs are ${brand.APP_ID} and ${brand.APP_ID_DEV}`);
+  // setAppUserModelId has no getter and does nothing off Windows, so check what main.cjs passes it.
+  const mainSrc = readFileSync(join(APP_DIR, "electron", "main.cjs"), "utf8");
+  check(/const AUMID = app\.isPackaged \? APP_ID : APP_ID_DEV;/.test(mainSrc) && /setAppUserModelId\(AUMID\)/.test(mainSrc), "main.cjs sets the AUMID: APP_ID when packaged, APP_ID_DEV in a dev run");
+  const title = await win.title();
+  check(title.includes("ZabsReel"), `window title shows ZabsReel (${title})`);
 
 
   console.log("2. import → add to timeline → play...");
@@ -400,6 +411,11 @@ async function main() {
   check((await win.evaluate(() => window.aive!.saveProjectAs("My Cut"))) === join(work, "My Cut.aive"), "Save project as: typed 'My Cut' → My Cut.aive");
   const [popts] = await calls(app, "showSaveDialog");
   check(popts?.defaultPath === "My Cut.aive", `project dialog default ${popts?.defaultPath}`);
+  check(popts?.filters?.[0]?.name === "ZabsReel Project", `project save filter is named "${popts?.filters?.[0]?.name}"`);
+  await stub(app, "showOpenDialog", [{ canceled: true, filePaths: [] }]);
+  await win.evaluate(() => window.aive!.openProject());
+  const [oopts] = await calls(app, "showOpenDialog");
+  check(oopts?.filters?.[0]?.name === "ZabsReel Project", `project open filter is named "${oopts?.filters?.[0]?.name}"`);
 
   console.log("5. export from the Export menu...");
   const exportWith = async (label: RegExp, typedPath: string) => {
