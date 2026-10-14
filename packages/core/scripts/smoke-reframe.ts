@@ -118,7 +118,7 @@ async function main() {
 
   console.log("2. export the reframed 9:16 video...");
   const out = join(dataDir, "reframed.mp4");
-  const result = await engine.exportVideo(out);
+  await engine.exportVideo(out);
   const probed = await probeAsset(out);
   console.log(`   exported: ${probed.width}x${probed.height} ${probed.duration.toFixed(2)}s`);
   if (probed.width !== 1080 || probed.height !== 1920) throw new Error(`expected 1080x1920, got ${probed.width}x${probed.height}`);

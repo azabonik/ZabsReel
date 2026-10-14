@@ -1,5 +1,5 @@
 /**
- * Smoke test: the bundle's FFmpeg gate (apps/desktop/scripts/bundle-ffmpeg.ts,
+ * Smoke test: the bundle's FFmpeg gate (apps/desktop/scripts/bundle-ffmpeg.mts,
  * run by prepare-bundle.ts). Needs `npm run build` (it reads core's dist).
  *
  *  1. With recorded `-version` banners (no binaries): a tested release (4.4,
@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
-import { checkFfmpegBuild, stageFfmpeg } from "../../../apps/desktop/scripts/bundle-ffmpeg.ts";
+import { checkFfmpegBuild, stageFfmpeg } from "../../../apps/desktop/scripts/bundle-ffmpeg.mts";
 import { FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
 
 let failures = 0;

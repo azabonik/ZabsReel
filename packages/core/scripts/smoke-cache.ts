@@ -115,6 +115,47 @@ async function main() {
     check(key("ffmpeg version 4.4.2", false) !== key("ffmpeg version 7.1", false), "another FFmpeg version: different key");
   }
 
+  console.log("N. the opaque-base flag: staged for alpha-free sources only, never part of the segment key...");
+  {
+    const rc = (startSec: number, outDuration: number, extra: object = {}) => ({ path: "/x.mp4", startSec, outDuration, ...extra }) as never;
+    const clips = [rc(0, 4), rc(4, 4)];
+    const seg = { start: 0, end: 8 };
+    const canvas = { width: 640, height: 360, fps: 30 };
+    const key = (cs: never[]) => segmentKey(cs, seg, canvas, PREVIEW_PROFILE, {}, null, { ffmpeg: "ffmpeg version 4.4.2", xfadeEofPad: false });
+    check(key(clips.map((c) => ({ ...(c as object), opaque: true }) as never)) === key(clips), "opaque: true hashes as unset (the shortcut renders the same pixels; cached segments stay valid)");
+
+    const oDir = join(dataDir, "opaque");
+    const oEngine = new EditorEngine(oDir);
+    oEngine.setProjectSettings({ width: 640, height: 360, fps: 30 });
+    const synth = (out: string, pixFmt: string, codec: string[]) =>
+      runFfmpeg(["-f", "lavfi", "-i", `testsrc2=s=640x360:d=1:r=30,format=${pixFmt}`, ...codec, "-y", out]);
+    const h264 = join(dataDir, "plain.mp4");
+    const ffv1 = join(dataDir, "alpha.mkv");
+    // QuickTime 4:4:4:4: FFmpeg 4.4.2 decodes it as yuva444p, 8.1 as uyva (a format hasAlpha's list misses).
+    const v408 = join(dataDir, "alpha-v408.mov");
+    const swap = join(dataDir, "swap.mkv");
+    await synth(h264, "yuv420p", ["-c:v", "libx264", "-preset", "veryfast"]);
+    await synth(ffv1, "yuva420p", ["-c:v", "ffv1"]);
+    await synth(v408, "yuva444p", ["-c:v", "v408"]);
+    await synth(swap, "yuv420p", ["-c:v", "libx264", "-preset", "veryfast"]);
+    for (const p of [h264, ffv1, v408, swap]) oEngine.appendClip((await oEngine.importVideo(p)).id);
+    type Staging = { stageRender(c: typeof oEngine.canvas): Promise<{ clips: { path: string; opaque?: boolean }[] }> };
+    const staged = async () => {
+      const { clips } = await (oEngine as unknown as Staging).stageRender(oEngine.canvas);
+      return (p: string) => clips.find((c) => c.path === p)?.opaque;
+    };
+    const first = await staged();
+    check(first(h264) === true, `H.264 yuv420p: staged opaque (${first(h264)})`);
+    check(first(ffv1) === undefined, `FFV1 yuva420p: not opaque (${first(ffv1)})`);
+    check(first(v408) === undefined, `v408 (yuva444p / uyva): not opaque (${first(v408)})`);
+    check(first(swap) === true, `swap.mkv as H.264: opaque (${first(swap)})`);
+    // Replaced in place (as a re-rendered overlay is) by a file with alpha: probed again, no restart.
+    await synth(swap, "yuva420p", ["-c:v", "ffv1"]);
+    const second = await staged();
+    check(second(swap) === undefined, `swap.mkv replaced by FFV1 yuva420p: no longer opaque (${second(swap)})`);
+    check(second(h264) === true, `the unchanged H.264 file stays opaque (${second(h264)})`);
+  }
+
   console.log(failures === 0 ? "\nCACHE SMOKE TEST PASSED" : `\nCACHE SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);
 }

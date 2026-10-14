@@ -742,6 +742,8 @@ export interface ResolvedRenderClip {
   isImage?: boolean;
   /** How to read the source's YUV (matrix + range, ffmpeg/colorspace.ts); absent = FFmpeg's default. */
   colorIn?: SourceColor;
+  /** The decoded picture has no alpha channel (probed pix_fmt; the engine sets it): lets an opaque bottom layer skip the black base. */
+  opaque?: boolean;
   /** The decoded picture's size (display orientation): a picture already at the fitted size is only converted, not resampled. */
   size?: { w: number; h: number };
   /** Output (timeline) duration of the clip in seconds (after speed). */

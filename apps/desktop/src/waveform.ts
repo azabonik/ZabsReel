@@ -1,8 +1,11 @@
-// Renderer-side audio waveform peaks for the timeline. We decode an asset's
-// audio once via WebAudio, downsample it to a compact peak array (0..1), and
-// cache it by URL. Audio clips draw their slice of these peaks; the per-track
-// level meter reads the peak at the playhead. No core/FFmpeg involvement — this
-// is purely a renderer convenience (MIT, offline).
+// Audio waveform peaks for the timeline: a compact peak array (0..1) per
+// asset, cached by URL. Audio clips draw their slice of these peaks; the
+// per-track level meter reads the peak at the playhead. The core computes them
+// with FFmpeg (GET /peaks, packages/core/src/media/peaks.ts) and the renderer
+// fetches 4 bytes a bucket. Decoding the whole file here instead cost +2259 MB
+// of renderer memory and a 659 ms main-thread stall for a 10-min 1080p video,
+// so WebAudio is only the fallback when the core can't answer, one decode at a
+// time.
 
 import { useEffect, useState } from "react";
 
@@ -41,7 +44,41 @@ function toPeaks(buf: AudioBuffer, buckets: number): Float32Array {
   return out;
 }
 
-/** Decode + cache an asset's peaks. Returns null if the audio can't be decoded. */
+/**
+ * The core's peaks of the file `url` (/file?path=…&token=…) serves; null when
+ * the core found no audio it can decode (422), undefined when it couldn't answer.
+ */
+async function corePeaks(url: string, buckets: number): Promise<Float32Array | null | undefined> {
+  try {
+    const u = new URL(url);
+    if (u.pathname !== "/file") return undefined;
+    u.pathname = "/peaks";
+    u.searchParams.set("buckets", String(buckets));
+    const res = await fetch(u.toString());
+    if (res.status === 422) return null;
+    if (!res.ok) return undefined;
+    const raw = await res.arrayBuffer();
+    return raw.byteLength === buckets * 4 ? new Float32Array(raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The WebAudio fallback decodes one file at a time (each holds the whole file and its PCM). */
+let decodeQueue: Promise<unknown> = Promise.resolve();
+
+async function decodedPeaks(url: string, buckets: number): Promise<Float32Array> {
+  const run = decodeQueue.then(async () => {
+    const res = await fetch(url);
+    const raw = await res.arrayBuffer();
+    const buf = await audioCtx().decodeAudioData(raw);
+    return toPeaks(buf, buckets);
+  });
+  decodeQueue = run.catch(() => {});
+  return run;
+}
+
+/** Fetch (or decode) + cache an asset's peaks. Returns null if the audio can't be read. */
 export async function loadPeaks(url: string, buckets = DEFAULT_BUCKETS): Promise<Float32Array | null> {
   const hit = cache.get(url);
   if (hit) return hit;
@@ -51,15 +88,14 @@ export async function loadPeaks(url: string, buckets = DEFAULT_BUCKETS): Promise
 
   const job = (async () => {
     try {
-      const res = await fetch(url);
-      const raw = await res.arrayBuffer();
-      const buf = await audioCtx().decodeAudioData(raw);
-      const peaks = toPeaks(buf, buckets);
+      const core = await corePeaks(url, buckets);
+      if (core === null) throw new Error("no audio");
+      const peaks = core ?? (await decodedPeaks(url, buckets));
       cache.set(url, peaks);
       return peaks;
     } catch {
-      // Some video containers won't decode through WebAudio — that's fine, the
-      // clip just renders without a waveform.
+      // No audio stream, or one neither FFmpeg nor WebAudio decodes — that's
+      // fine, the clip just renders without a waveform.
       failed.add(url);
       return null;
     } finally {

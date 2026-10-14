@@ -67,7 +67,7 @@ const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;
   console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
 };
-const threw = async (fn: () => unknown, label: string): Promise<boolean> => {
+const threw = async (fn: () => unknown, _label: string): Promise<boolean> => {
   try {
     await fn();
     return false;

@@ -37,7 +37,6 @@
 import { activeLayersAt, timelineDurationSec } from "../src/composite";
 import { bleepMuteSpans, expandBleeps } from "../src/bleeps";
 import { muteGainAt } from "../src/mutes";
-import type { Bleep, Clip, MediaAsset, Project, Track } from "../src/types";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
 import { bleepMuteSpans as coreMuteSpans, expandBleeps as coreExpand } from "../../../packages/core/src/audio/bleeps";
 import { muteGainAt as coreMuteGainAt } from "../../../packages/core/src/audio/mutes";
@@ -53,7 +52,7 @@ import {
   EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, exactOnly, gblurParams, hqdn3dCoefs, lensFillScale, posterizeTable, previewFidelity,
   previewScaleFor, vignetteAngle, vignetteFactor,
 } from "@aive/core/effects";
-import type { AudioEffect, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
+import type { AudioEffect, Bleep, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
 import { audioCarrier, audioFxField } from "../src/audiofx";
 import { AudioRouter } from "../src/audiograph";
 import { setVoiceWorkletState, voiceWorkletState } from "../src/workletstatus";
@@ -1108,12 +1107,14 @@ check("duration = 5.0s (C ends @150)", near(timelineDurationSec(project), 150 / 
   // Playback resolution of the looks (gl/governor.ts).
   const gov = (base: number, max = 4) => new PlaybackGovernor(() => base, () => max);
   const play = (gv: PlaybackGovernor, n: number, dt: number, gl = true) => { for (let i = 0; i < n; i++) gv.frame(dt, gl); return gv.div; };
+  // Read through a call: TS keeps `sw.div === 4` narrowed across sw.start(), which changes it.
+  const divOf = (gv: PlaybackGovernor) => gv.div;
   const sw = gov(2);
   sw.start("p1");
   check("governor: software playback starts at half resolution and holds it at 30 fps", sw.div === 2 && play(sw, 60, 33) === 2);
   check("governor: frames slower than the budget (8 fps) drop the looks to a quarter, no further", play(sw, 30, 125) === 4 && play(sw, 60, 125) === 4);
   sw.start("p1");
-  check("governor: the next play of the same project keeps the quarter; a changed project starts at half again", sw.div === 4 && (sw.start("p2"), sw.div === 2));
+  check("governor: the next play of the same project keeps the quarter; a changed project starts at half again", sw.div === 4 && (sw.start("p2"), divOf(sw) === 2));
   const hw = gov(1, 1);
   hw.start("p");
   check("governor: a GPU (base 1, max 1, as preview.tsx sets it) stays at full resolution, even with slow frames",
@@ -1245,6 +1246,25 @@ console.log("\nlive playback of a curve-speed clip (MediaPool.sync follow / resu
     const r5 = r(5, 5, 2, { seeking: true });
     const r6 = r(5, 5, 2, { readyState: 1 });
     check("resumeNear: seeking, or no frame decoded yet (readyState < 2) → untouched", r5.plays === 0 && r6.plays === 0 && r5.seeks.length === 0 && r6.seeks.length === 0);
+
+    // Constant speed with a real audio sink: after a seek the element plays 30-50 ms, then currentTime freezes
+    // 80-130 ms while the audio output restarts (measured: WSLg Pulse). Judging the drift at the first motion
+    // re-seeked into the stall again and again (13-15 seeks in 2 s live; 16 here without the settle wait).
+    // Replay that timeline at 60 Hz: it settles, then plays on.
+    {
+      const el = fake(0);
+      const stall = (ms: number) => ms > 40 && ms < 150; // the audio-restart stall, 40..150 ms after each landing
+      let landedAt = -1;
+      for (let f = 0; f <= 120; f++) {
+        const t = f * (1000 / 60);
+        clock = 50_000 + t;
+        const n = el.seeks.length;
+        pool.sync(el as unknown as HTMLVideoElement, { srcTime: 0.2 + t / 1000, playing: true, rate: 1, volume: 1, muted: false });
+        if (el.seeks.length > n) landedAt = t; // a seek lands at once (fake); the stall follows it
+        else if (landedAt >= 0 && !stall(t - landedAt)) el.t += 1 / 60; // plays in real time except during the stall
+      }
+      check("constant speed, audio-restart stall after each seek: ≤ 2 seeks in 2 s (no seek thrash)", el.seeks.length <= 2, `${el.seeks.length} seeks: ${el.seeks.map((s) => s.toFixed(2))}`);
+    }
   } finally {
     perf.now = realNow;
   }

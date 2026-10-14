@@ -44,10 +44,10 @@ async function load(): Promise<Loaded | null> {
       if (!pack) return null;
       try {
         const ort = await import("onnxruntime-node");
-        const [vision, text] = await Promise.all([
-          ort.InferenceSession.create(pack.visionOnnx),
-          ort.InferenceSession.create(pack.textOnnx),
-        ]);
+        // One after the other: each create is a synchronous native model load on this thread, and two
+        // started together run back to back in one event-loop turn (cold max lag 452 ms; 246 ms in sequence).
+        const vision = await ort.InferenceSession.create(pack.visionOnnx);
+        const text = await ort.InferenceSession.create(pack.textOnnx);
         const tok = await ClipTokenizer.load(pack.vocab, pack.merges);
         return { pack, vision: vision as unknown as OrtSession, text: text as unknown as OrtSession, tok };
       } catch (err) {

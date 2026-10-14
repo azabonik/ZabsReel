@@ -15,6 +15,8 @@ const PAUSED_SEEK_NUDGE = 0.001;
 const FOLLOW_SEEK_GAP_MS = 400;
 /** How far (s) a paused element may be from where it should be and still just play on (see resumeNear). */
 const RESUME_TOLERANCE = 0.06;
+/** How long (ms) a landed constant-speed element must play on without a stall before its drift is judged (see sync). */
+const SETTLE_MS = 250;
 
 export interface SyncOpts {
   /** Source time (seconds) this clip should be at. */
@@ -50,8 +52,11 @@ export class MediaPool {
   private readonly lru: string[] = [];
   /** clipIds acquired in the current frame (protected from eviction/pause). */
   private used = new Set<string>();
-  /** A playing element's last resync: where it landed, when (0 = it moves again) and the start lag learned (s). */
-  private readonly landing = new WeakMap<HTMLVideoElement, { at: number; since: number; lead: number }>();
+  /**
+   * A playing element's last resync: where it landed, when (0 = it has settled), the start lag learned (s),
+   * when it last started advancing without a stall (0 = not advancing) and its currentTime at the last sync.
+   */
+  private readonly landing = new WeakMap<HTMLVideoElement, { at: number; since: number; lead: number; moved: number; last: number }>();
   /** When each element last seeked to follow a speed curve (performance.now()). */
   private readonly lastFollowSeek = new WeakMap<HTMLVideoElement, number>();
 
@@ -126,16 +131,21 @@ export class MediaPool {
         return;
       }
       // A seek takes a while to play again (decoding from a keyframe, the
-      // audio output restarting: ~120 ms for a clip with sound in headless
-      // Chromium, more on Bluetooth). Judging the drift before it moves again
-      // would seek again and again and never show a frame (seek thrash), so a
-      // landing seek is left alone until the element moves (or 1 s passes),
-      // and the next one lands ahead by the start lag that one showed.
+      // audio output restarting). With a real audio sink the element plays
+      // 30-50 ms after a seek lands, then currentTime freezes 80-130 ms while
+      // the audio output restarts (measured on WSLg Pulse; longer on
+      // Bluetooth). Judging the drift at that first motion seeks into the
+      // stall again and again (seek thrash: 13-15 seeks in 2 s in 24% of
+      // runs), so a landing seek is left alone until the element has played
+      // on WITHOUT a stall for SETTLE_MS (a stall restarts the wait), or 1 s
+      // passes, and the next one lands ahead by the start lag that one showed.
       const now = performance.now();
-      const r = this.landing.get(el) ?? { at: NaN, since: 0, lead: 0 };
+      const r = this.landing.get(el) ?? { at: NaN, since: 0, lead: 0, moved: 0, last: NaN };
       const seekAhead = () => {
         r.at = o.srcTime + r.lead * rate;
         r.since = now;
+        r.moved = 0;
+        r.last = NaN;
         this.landing.set(el, r);
         this.safeSeek(el, r.at);
       };
@@ -145,10 +155,16 @@ export class MediaPool {
         return;
       }
       if (r.since) {
-        const moved = !el.seeking && el.currentTime > r.at + 1e-3;
-        if (!moved && now - r.since < 1000) return;
-        if (moved) r.lead = Math.min(0.5, Math.max(0, r.lead + (o.srcTime - el.currentTime) / rate));
+        const t = el.currentTime;
+        const moved = !el.seeking && t > r.at + 1e-3;
+        const advancing = moved && t > r.last + 1e-4;
+        r.last = t;
+        if (!advancing) r.moved = 0;
+        else if (!r.moved) r.moved = now;
+        if ((!r.moved || now - r.moved < SETTLE_MS) && now - r.since < 1000) return;
+        if (moved) r.lead = Math.min(0.5, Math.max(0, r.lead + (o.srcTime - t) / rate));
         r.since = 0;
+        r.moved = 0;
       }
       // Re-sync only on meaningful drift — constant reseeking would stutter.
       if (Math.abs(el.currentTime - o.srcTime) > 0.08) seekAhead();

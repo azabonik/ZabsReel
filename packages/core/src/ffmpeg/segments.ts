@@ -140,6 +140,8 @@ export function segmentKey(
         ? { ...c.effects, audioFilters: undefined, pitchFallback: undefined, loudness: undefined, audioCaps: undefined }
         : c.effects,
     startSec: Number((c.startSec - seg.start).toFixed(6)),
+    // The opaque-base shortcut renders the same pixels (graph.ts fillsCanvasOpaque): cached segments stay valid.
+    opaque: undefined,
     mtime: mtimes[c.path] ?? -1,
     graphicMtimes: (c.graphics ?? []).map((g) => mtimes[g.path] ?? -1),
     // A matte-backed cutout's colour is a second file (only cutout clips carry the key).

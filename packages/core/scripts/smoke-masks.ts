@@ -197,7 +197,7 @@ async function blendModes(dir: string) {
   engine.addClip(a1.id, { startFrame: 0, sourceInFrame: 0, sourceOutFrame: SEG * cases.length });
   const v2t = engine.addTrack("video", { name: "V2" });
   const ids: string[] = [];
-  cases.forEach((c, k) => {
+  cases.forEach((_c, k) => {
     const clip = engine.addClip(a2.id, { trackIndex: v2t.index, startFrame: k * SEG, sourceInFrame: 0, sourceOutFrame: SEG });
     ids.push(clip.id);
   });

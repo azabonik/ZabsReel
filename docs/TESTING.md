@@ -71,7 +71,7 @@ you don't need to prepare anything for those.
 Each command runs a real render end-to-end and prints `... SMOKE TEST PASSED` (or
 fails loudly). Run them from the repo root. **Paths must be absolute or relative
 to the repo root**, and smoke args must be absolute — the examples below resolve
-from `scratch/`.
+from `scratch/`. `npm run typecheck` also type-checks these scripts (`typecheck:scripts`).
 
 ```powershell
 # Fast — no media, no FFmpeg, pure logic. Run these first (instant).
@@ -120,6 +120,11 @@ npx tsx packages/core/scripts/smoke-safepath.ts
 # cropped and scaled, with the token, the /file allowlist and its number checks (self-synthesizes)
 npx tsx packages/core/scripts/smoke-frames.ts
 
+# Waveform peaks: GET /peaks with the token and the /file allowlist (401/403/400 checks), peaks equal to a
+# reference reduction of the decoded samples, the on-disk cache (hit, invalidated by a new mtime), joined
+# concurrent requests and storage accounting (self-synthesizes)
+npx tsx packages/core/scripts/smoke-peaks.ts
+
 # Jobs: background export with progress, cancel_job (partial file deleted), crash-recovery surfacing
 npx tsx packages/core/scripts/smoke-jobs.ts
 
@@ -149,8 +154,17 @@ npx tsx packages/core/scripts/smoke-jobs.ts
 npx tsx packages/core/scripts/smoke-storage.ts
 
 # Segment render cache: incremental previews (tail edit re-renders only the tail),
-# single-segment get_frame, single-pass fallback (self-synthesizes media)
+# single-segment get_frame, single-pass fallback; the opaque-base flag is staged
+# for alpha-free pixel formats only (not FFV1 yuva, not v408), probed again when a
+# file is replaced in place, and never part of a segment key (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-cache.ts
+
+# Opaque-base shortcut: an opaque, untransformed, canvas-filling bottom clip is its
+# own base (no black base + overlay); alpha sources, transforms, transitions, fades,
+# opacity, masks, stills, crops and other aspects keep the black base. A rendered
+# clip, as an export and as a segment, gives framemd5-identical frames with the
+# shortcut and without it (self-synthesizes media)
+npx tsx packages/core/scripts/smoke-opaque-base.ts
 
 # Loudness normalization on export (ebur128 verification), adjustment layers,
 # and the pro-polish set (SRT/VTT round-trip, named markers, drawtext word wrap)
@@ -213,7 +227,8 @@ npx tsx packages/core/scripts/smoke-jlcut.ts
 # paths, matte-only bake (FFV1 gray + the span's audio), VP8/alpha preview proxy,
 # inference in a worker thread (event-loop lateness vs the same job forced onto the
 # main thread with AIVE_RVM_INLINE=1), generate_proxy keeps alpha, storage GC sees the
-# matte + proxy, undo, prompt cancel (downloads a portrait + the 15 MB model; pass a
+# matte + proxy, undo, prompt cancel (also of a worker blocked mid-frame: the grace
+# period kills its ffmpeg children) (downloads a portrait + the 15 MB model; pass a
 # local photo/clip with a person to skip the portrait download)
 npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
 # Matte-backed cutouts, offline (no model: remove_background's internal stub matte):
@@ -349,7 +364,7 @@ npx tsx packages/core/scripts/smoke-toolsurface.ts scratch/a.mp4 scratch/b.mp4
 
 # Export presets (containers / H.264-H.265-VP9 / quality) and proxy media (fast preview)
 npx tsx packages/core/scripts/smoke-export.ts      scratch/a.mp4
-npx tsx packages/core/scripts/smoke-proxy.ts                           # self-synthesizes a "4K-ish" source
+npx tsx packages/core/scripts/smoke-proxy.ts                           # self-synthesizes a "4K-ish" source; a proxy has a keyframe every second
 
 # Remotion motion graphics
 npx tsx packages/core/scripts/smoke-motion.ts
@@ -363,7 +378,9 @@ Playwright's `_electron` and drives it: a relative and an absolute
 native dialog stubbed, Add to timeline, Play (the preview's decoder pool seeks
 only a few times and has a frame to draw on most animation frames: no seek
 thrash, no black preview while playing), split then Delete with no piece picked
-(no stale clip id),
+(no stale clip id), a track volume slider (one edit per drag or key press, and
+one on blur when the key comes up after the focus moved), an audio clip's
+waveform from the core's `/peaks` (no fetch of the whole file in the renderer),
 the Project menu and **Storage…**, the native save dialogs (the same extension
 rule as the web picker in `src/savename.ts`, a second overwrite question when
 an extension was added, the preset's container listed first), exports (no

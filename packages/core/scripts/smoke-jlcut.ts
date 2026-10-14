@@ -62,7 +62,7 @@ async function main() {
   const b = await engine.importVideo(bPath);
   if (a.hasAudio) throw new Error("test setup: clip A should have no audio");
   const fps = engine.fps;
-  const ca = engine.appendClip(a.id);
+  engine.appendClip(a.id);
   const cb = engine.appendClip(b.id);
   console.log(`   A hasAudio=${a.hasAudio}, B hasAudio=${b.hasAudio}; cut at t=${clipADur}s`);
 

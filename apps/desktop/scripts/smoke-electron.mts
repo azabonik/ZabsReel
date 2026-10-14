@@ -11,7 +11,12 @@
 //      playhead used to start the next one at once: seek thrash, a black
 //      preview while playing);
 //      split at the playhead, then Delete with no piece picked does nothing
-//      (the split replaced the selected clip).
+//      (the split replaced the selected clip); a drag of a new audio track's
+//      volume slider sends one set_track_properties edit (one undo entry), not
+//      one per step, an arrow key sends one more, and a key released after the
+//      focus moved away is committed when the slider loses focus (once); an
+//      audio clip's waveform comes from the core's /peaks (200), and the
+//      renderer never fetches the whole file to decode it.
 //   3. Project menu: New / Open / Save / Save As / Storage…; the Storage dialog
 //      opens, loads its report and closes.
 //   4. Native save dialogs (stubbed in the main process): the path the user
@@ -190,6 +195,9 @@ async function main() {
     "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=6",
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", clip]);
   check(existsSync(clip), "synthesized a 6 s test clip");
+  const tone = join(work, "tone.wav");
+  spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=6", tone]);
+  check(existsSync(tone), "synthesized a 6 s audio-only file");
 
   // ---------------------------------------------------------------- run 1
   console.log("1. start with a relative AIVE_DATA_DIR...");
@@ -197,6 +205,20 @@ async function main() {
   mkdirSync(cwd1);
   const r1 = await launch(pw, cwd1, "data-rel");
   const { app, win } = r1;
+  // Waveform traffic for tone.wav: /peaks answers, and /file requests made by fetch/XHR (the WebAudio
+  // fallback reads the whole file that way; a media element's own /file requests are "media").
+  const peaksStatus: number[] = [];
+  const toneFetches: string[] = [];
+  const toneQuery = (url: string) => {
+    const u = new URL(url);
+    return u.searchParams.get("path") === tone ? u.pathname : "";
+  };
+  win.on("response", (r) => {
+    if (toneQuery(r.url()) === "/peaks") peaksStatus.push(r.status());
+  });
+  win.on("request", (r) => {
+    if (toneQuery(r.url()) === "/file" && ["fetch", "xhr"].includes(r.resourceType())) toneFetches.push(r.resourceType());
+  });
   const serverJson = join(cwd1, "data-rel", "server.json");
   check(await waitFor("server.json", () => existsSync(serverJson)), "server.json written under <cwd>/data-rel");
   const info = existsSync(serverJson) ? JSON.parse(readFileSync(serverJson, "utf8")) : {};
@@ -276,6 +298,67 @@ async function main() {
   await sleep(1000);
   check((await win.locator(".error-bar").count()) === 0, `Delete does not act on the replaced clip (${(await win.locator(".error-bar").innerText().catch(() => "no error")).split("\n")[0]})`);
   check((await win.locator(".tl-clip").count()) === 2, "both pieces are still there");
+
+  console.log("2c. drag a track volume slider: one edit on release...");
+  await win.evaluate(`(() => {
+    window.__trackEdits = 0;
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (d) {
+      if (typeof d === "string" && d.includes('"set_track_properties"')) window.__trackEdits++;
+      return send.call(this, d);
+    };
+  })()`);
+  const trackEdits = () => win.evaluate(() => (window as unknown as { __trackEdits: number }).__trackEdits);
+  await win.getByRole("button", { name: "Add audio track" }).click();
+  const vol = win.getByRole("slider", { name: "Track volume" }).first();
+  check(await waitFor("volume slider", async () => (await vol.count()) > 0, 10000), "an added audio track shows its volume slider");
+  const vb = await vol.boundingBox();
+  if (vb) {
+    const y = vb.y + vb.height / 2;
+    await win.mouse.move(vb.x + vb.width / 2, y);
+    await win.mouse.down();
+    for (let i = 1; i <= 12; i++) await win.mouse.move(vb.x + vb.width / 2 + (vb.width * 0.4 * i) / 12, y);
+    check((await trackEdits()) === 0, "no edit while the slider is dragged");
+    await win.mouse.up();
+  }
+  check(await waitFor("volume committed", async () => Number(await vol.inputValue().catch(() => "1")) > 1.3, 5000), `released: the track volume is ${await vol.inputValue().catch(() => "?")}`);
+  await sleep(500);
+  check((await trackEdits()) === 1, `one drag → one set_track_properties edit (${await trackEdits()})`);
+  const before = Number(await vol.inputValue());
+  await vol.focus();
+  await win.keyboard.press("ArrowLeft");
+  check(await waitFor("arrow committed", async () => Math.abs(Number(await vol.inputValue().catch(() => "0")) - (before - 0.05)) < 1e-6, 5000), `ArrowLeft → ${await vol.inputValue().catch(() => "?")}`);
+  await sleep(500);
+  check((await trackEdits()) === 2, `one key press → one more edit (${await trackEdits()})`);
+  // The key goes down on the slider and comes up after the focus moved away: no keyup reaches the slider.
+  const before2 = Number(await vol.inputValue());
+  await vol.focus();
+  await win.keyboard.down("ArrowLeft");
+  await vol.evaluate((el) => (el as HTMLElement).blur());
+  await win.keyboard.up("ArrowLeft");
+  check(await waitFor("blur committed", async () => (await trackEdits()) === 3, 5000), `focus lost before the keyup → committed on blur (${await trackEdits()} edits)`);
+  check(await waitFor("blur value", async () => Math.abs(Number(await vol.inputValue().catch(() => "0")) - (before2 - 0.05)) < 1e-6, 5000), `…the track volume is ${await vol.inputValue().catch(() => "?")}`);
+  await vol.focus();
+  await vol.evaluate((el) => (el as HTMLElement).blur());
+  await sleep(500);
+  check((await trackEdits()) === 3, `focus and blur with nothing changed → no edit (${await trackEdits()})`);
+
+  console.log("2d. an audio clip's waveform comes from /peaks...");
+  await stub(app, "showOpenDialog", [{ canceled: false, filePaths: [tone] }]);
+  await win.getByRole("button", { name: "Import", exact: true }).click();
+  const toneCard = win.locator(".asset-card", { hasText: "tone" });
+  check(await waitFor("tone asset", async () => (await toneCard.count()) > 0), "tone.wav is in the library");
+  const clipsBefore = await win.locator(".tl-clip").count();
+  await toneCard.getByRole("button", { name: "Add to timeline" }).click();
+  check(await waitFor("peaks", () => peaksStatus.length > 0, 15000), `the timeline asked /peaks for tone.wav (${peaksStatus.join(", ") || "no request"})`);
+  check(peaksStatus.length > 0 && peaksStatus.every((s) => s === 200), `/peaks answered 200 (${peaksStatus.join(", ")})`);
+  await sleep(1500);
+  check(toneFetches.length === 0, `no fetch of the whole file for a WebAudio decode (${toneFetches.length})`);
+  const toneClip = win.locator(".tl-clip", { hasText: "tone" });
+  check(await waitFor("tone clip", async () => (await toneClip.count()) === 1, 5000), "tone.wav is on the timeline");
+  await toneClip.click();
+  await toneClip.getByRole("button", { name: "Remove clip" }).click();
+  check(await waitFor("tone removed", async () => (await win.locator(".tl-clip").count()) === clipsBefore, 10000), `tone clip removed again (${await win.locator(".tl-clip").count()} clips)`);
 
   console.log("3. Project menu and Storage…...");
   await win.getByRole("button", { name: /Project/ }).click();

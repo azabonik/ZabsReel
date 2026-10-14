@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace synthcut-desktop",
-    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace synthcut-desktop",
+    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace synthcut-desktop && npm run typecheck:scripts",
+    "typecheck:scripts": "tsc -p packages/core/scripts && tsc -p packages/mcp/scripts && tsc -p apps/desktop/scripts",
     "start": "npm run start --workspace synthcut-desktop",
     "web": "npm run build && npm run web --workspace synthcut-desktop --",
     "core": "npm run start --workspace @aive/core",

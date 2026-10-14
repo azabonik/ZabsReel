@@ -29,6 +29,22 @@ export interface VideoFormat {
   pixFmt: string;
   /** True when the pixel format carries an alpha plane. */
   hasAlpha: boolean;
+  /** True only when ffprobe reported a known alpha-free pixel format (isAlphaFreePixFmt). */
+  opaque?: boolean;
+}
+
+/**
+ * Pixel formats known to carry no alpha: planar/semi-planar/packed YUV without an
+ * A plane, gray, RGB/BGR/GBR without A, and the padded (X/0) layouts. An allowlist,
+ * unlike hasAlpha's list of alpha formats: a format missing here (pal8, uyva, vuya,
+ * ayuv*, yaf*, bayer, one a later FFmpeg adds) is never taken for opaque.
+ */
+const ALPHA_FREE_PIX_FMT =
+  /^(yuvj?\d|nv\d|p\d{3}|gray|mono[wb]$|(rgb|bgr)(24|48|565|555|444|8|4|f16|f32|96)|(0rgb|rgb0|0bgr|bgr0)$|gbrp|x2(rgb|bgr)10|y2\d\d|xv\d\d|v30x|vuyx|vyu444|uyvy422|yuyv422|yvyu422|uyyvyy411|xyz12)/;
+
+/** True when an ffmpeg pix_fmt name is a known alpha-free format (ALPHA_FREE_PIX_FMT). */
+export function isAlphaFreePixFmt(pixFmt: string): boolean {
+  return ALPHA_FREE_PIX_FMT.test(pixFmt);
 }
 
 /** Approximate bytes per pixel of an ffmpeg pix_fmt name (subsampling, bit depth, alpha). */
@@ -60,7 +76,8 @@ export async function probeVideoFormat(file: string): Promise<VideoFormat | unde
     const st = (JSON.parse(out) as { streams?: { width?: number; height?: number; pix_fmt?: string }[] }).streams?.[0];
     if (!st) return undefined;
     const pixFmt = st.pix_fmt ?? "yuv420p";
-    return { width: st.width ?? 0, height: st.height ?? 0, pixFmt, hasAlpha: /^(yuva|gbrap|rgba|bgra|argb|abgr|ya\d)/.test(pixFmt) };
+    const hasAlpha = /^(yuva|gbrap|rgba|bgra|argb|abgr|ya\d)/.test(pixFmt);
+    return { width: st.width ?? 0, height: st.height ?? 0, pixFmt, hasAlpha, opaque: !!st.pix_fmt && isAlphaFreePixFmt(st.pix_fmt) };
   } catch {
     return undefined;
   }
@@ -326,7 +343,7 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   const [vN, vD] = ratio(String(o.speed));
   const target = atEnd ? `${(Math.max(2, o.outFrames) - 1) * sN}/${(spanFrames - 1) * sD}` : `${pN * vD}/${pD * vN}`;
   // Cloned frames after the input let the interpolators run up to its real last frame (they come after the
-  // frames written; -frames:v cuts them).
+  // frames written; the trim at the end of the chain cuts them).
   const interp = `tpad=stop_mode=clone:stop=${INTERP_LOOKAHEAD_FRAMES},${
     o.mode === "optical-flow" && !o.alpha
       ? `minterpolate=fps=${target}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`
@@ -334,8 +351,11 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
   }`;
   const outDur = o.outFrames / o.projectFps;
   // Pin the count: setpts stamps every interpolated frame at the project rate; a clone pad only guards a short
-  // read and is cut off by -frames:v.
+  // read and is cut off by the trim. The cap is in the graph, not -frames:v: on FFmpeg 4.4, -frames:v ends
+  // every stream of the output when the video count is reached, which cut the audio short (19.78 s of a
+  // 20 s bake, 19.94 s on 8.1).
   const tail = `setpts=N/(${pfps})/TB,fps=${pfps},tpad=stop_mode=clone:stop=4`;
+  const cap = `trim=end_frame=${o.outFrames}`;
   const readSec = o.spanSec + (atEnd ? 0 : extraSec);
   const args = ["-hide_banner", "-y", "-ss", o.startSec.toFixed(6), "-t", readSec.toFixed(6), "-i", o.input];
   if (o.cutout) args.push(...cutoutColorInputArgs(o.cutout, o.startSec, readSec));
@@ -343,14 +363,14 @@ export async function bakeSmoothSlow(o: SmoothSlowOptions): Promise<void> {
     // The interpolation filters drop the alpha plane: blend colour and alpha separately, then merge them back.
     args.push(
       "-filter_complex",
-      `${o.cutout ? `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", o.cutout)};[m]` : "[0:v]"}format=yuva420p,split[c0][a0];[c0]format=yuv420p,${interp}[c1];[a0]alphaextract,${interp}[a1];[c1][a1]alphamerge,${tail},${keepColorSteps(o.color, "yuva420p")}[v]`,
-      "-map", "[v]", "-frames:v", String(o.outFrames), "-c:v", "ffv1", "-pix_fmt", "yuva420p", ...keepColorArgs(o.color),
+      `${o.cutout ? `${cutoutMergeFilter("[1:v]", "[0:v]", "[m]", o.cutout)};[m]` : "[0:v]"}format=yuva420p,split[c0][a0];[c0]format=yuv420p,${interp}[c1];[a0]alphaextract,${interp}[a1];[c1][a1]alphamerge,${tail},${keepColorSteps(o.color, "yuva420p")},${cap}[v]`,
+      "-map", "[v]", "-c:v", "ffv1", "-pix_fmt", "yuva420p", ...keepColorArgs(o.color),
     );
     if (o.hasAudio) args.push("-map", "0:a:0");
   } else {
     args.push(
-      "-vf", `${interp},${tail},${keepColorSteps(o.color, "yuv420p")}`,
-      "-frames:v", String(o.outFrames), "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", ...keepColorArgs(o.color),
+      "-vf", `${interp},${tail},${keepColorSteps(o.color, "yuv420p")},${cap}`,
+      "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", ...keepColorArgs(o.color),
     );
   }
   if (o.hasAudio) args.push("-af", `atrim=0:${o.spanSec.toFixed(6)},${atempoChain(o.speed)}`, "-c:a", "aac", "-b:a", "192k");

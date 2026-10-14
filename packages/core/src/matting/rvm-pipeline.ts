@@ -40,6 +40,8 @@ export interface PipelineOptions {
   modelPath: string;
   /** Tests: a deterministic stand-in matte (a soft luma key of each frame) instead of RVM. */
   stubMatte?: boolean;
+  /** Tests: with `stubMatte`, block the thread this long on each frame (rvm.ts MatteOptions.stubStallMs). */
+  stubStallMs?: number;
 }
 
 export interface PipelineStats {
@@ -202,6 +204,13 @@ function rvmSession(modelPath: string): Promise<{ ort: OrtModule; session: OrtSe
   return session.promise;
 }
 
+/**
+ * The RVM outputs the pipeline reads: the alpha and the recurrent state. Not the foreground `fgr`, a
+ * 1x3xHxW float tensor (24.9 MB per 1080p frame): copying it out and collecting it cost ~13% of a
+ * job's throughput (9.7 -> 11.0 fps measured, identical mattes).
+ */
+const FETCHES = ["pha", "r1o", "r2o", "r3o", "r4o"];
+
 async function rvmMatter(modelPath: string, w: number, h: number): Promise<Matter> {
   const { ort, session: s } = await rvmSession(modelPath);
   const n = w * h;
@@ -216,7 +225,7 @@ async function rvmMatter(modelPath: string, w: number, h: number): Promise<Matte
       src[n + i] = rgb[j + 1] * INV255;
       src[2 * n + i] = rgb[j + 2] * INV255;
     }
-    const out = await s.run({ src: srcTensor, ...rec, downsample_ratio: ratio });
+    const out = await s.run({ src: srcTensor, ...rec, downsample_ratio: ratio }, FETCHES);
     rec = { r1i: out.r1o, r2i: out.r2o, r3i: out.r3o, r4i: out.r4o };
     const pha = out.pha.data as Float32Array;
     const alpha = Buffer.allocUnsafe(n);
@@ -227,9 +236,10 @@ async function rvmMatter(modelPath: string, w: number, h: number): Promise<Matte
 }
 
 /** Tests: a soft luma key (deterministic, follows the picture frame by frame, with partial alpha at edges). */
-function stubMatter(w: number, h: number): Matter {
+function stubMatter(w: number, h: number, stallMs = 0): Matter {
   const n = w * h;
   return async (rgb) => {
+    if (stallMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, stallMs);
     const alpha = Buffer.allocUnsafe(n);
     for (let i = 0, j = 0; i < n; i++, j += 3) {
       const y = (77 * rgb[j] + 150 * rgb[j + 1] + 29 * rgb[j + 2]) >> 8;
@@ -264,8 +274,11 @@ export async function runMattePipeline(o: PipelineOptions, signal: AbortSignal, 
   const span = o.span.toFixed(6);
   const expected = Math.max(1, Math.round(o.span * o.fps));
 
-  const matter = o.stubMatte ? stubMatter(w, h) : await rvmMatter(o.modelPath, w, h);
+  const matter = o.stubMatte ? stubMatter(w, h, o.stubStallMs) : await rvmMatter(o.modelPath, w, h);
   hooks.onReady?.();
+  // Let a cancel that arrived during the model load be delivered before any ffmpeg starts
+  // (rvm.ts answers such a cancel at once and expects no output from this run).
+  await new Promise<void>((r) => setImmediate(r));
   if (signal.aborted) throw canceled();
 
   // Decode at the asset's own fps to a fixed-size RGB stream (BT.709, as RVM was trained on).

@@ -15,8 +15,10 @@
  *     unchanged, baked frame count == the clip's footprint, NO duplicated
  *     consecutive frames — not even at the very end (known issue A9; unlike
  *     plain speed 0.5, measured as the control) — on a span inside the file
- *     every other baked frame IS the source frame and 0.25x keeps its count,
- *     pitch preserved, refuses at speed 1, cancel leaves no files, undo restores;
+ *     every other baked frame IS the source frame and 0.25x keeps its count
+ *     and its sound runs to the end (FFmpeg 4.4 cut it short when -frames:v
+ *     capped the video), pitch preserved, refuses at speed 1, cancel leaves no
+ *     files, undo restores;
  *   - freeze_frame ripple modes (A11): 'all' also moves other tracks' later
  *     clips and the markers, refuses to break a transition; 'none' overwrites
  *     the clip (nothing moves, the timeline keeps its length, linked audio is
@@ -73,6 +75,12 @@ async function frameIndexes(file: string): Promise<number[]> {
 
 async function frameCount(file: string): Promise<number> {
   const { stdout } = await execa(FFPROBE_BIN, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file]);
+  return Number(stdout.trim());
+}
+
+/** The duration of a file's first audio stream, seconds. */
+async function audioDuration(file: string): Promise<number> {
+  const { stdout } = await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0", file]);
   return Number(stdout.trim());
 }
 
@@ -551,6 +559,9 @@ async function main() {
           }
         }
         assert(n === want && dupAt.length === 0 && srcOff === 0, `${speed}x ${mode}: ${n} frames (footprint ${want}), no repeated frame${mode === "blend" ? ", every " + Math.round(1 / speed) + "th frame is the source frame" : ""} (repeats at ${JSON.stringify(dupAt)}, ${srcOff} source frames off)`);
+        // atempo's own edges leave the sound ~60 ms short at 0.25x on every FFmpeg; -frames:v on 4.4 cut ~240 ms.
+        const aDur = await audioDuration(baked.path);
+        assert(aDur > want / FPS - 0.1, `${speed}x ${mode}: the sound runs to the end (${aDur.toFixed(3)} s of ${(want / FPS).toFixed(3)} s)`);
         engine.undo();
         engine.removeClip(clip.id);
       }

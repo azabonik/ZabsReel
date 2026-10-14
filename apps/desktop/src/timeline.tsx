@@ -12,7 +12,7 @@ import type { CSSProperties, MutableRefObject, PointerEvent as ReactPointerEvent
 import type { Clip, Marker, MediaAsset, MusicSettings, Project, Track } from "./types";
 import { clipDurationFrames } from "./types";
 import {
-  buildSegments, fmtTime, tickInterval, usePlaybackValue,
+  buildSegments, fmtTime, revertIfRefused, tickInterval, usePlaybackValue,
   type PlaybackStore, type Segment,
 } from "./playback";
 import { timelineDurationSec } from "./composite";
@@ -66,7 +66,7 @@ interface Props {
   onTrimClip: (clipId: string, sourceInFrame: number | undefined, sourceOutFrame: number | undefined) => void;
   onRemove: (clipId: string) => void;
   onRippleDelete: (trackIndex: number, startFrame: number, endFrame: number) => void;
-  onSetTrack: (trackIndex: number, patch: Record<string, unknown>) => void;
+  onSetTrack: (trackIndex: number, patch: Record<string, unknown>) => unknown;
   onAddTrack: (kind: "video" | "audio") => void;
   onRemoveTrack: (trackIndex: number) => void;
   /** Persist the timeline markers — saved with the project. */
@@ -592,9 +592,19 @@ function TrackHeader({
   track, connected, segs, store, onSet, onRemove,
 }: {
   track: Track; connected: boolean; segs: Segment[]; store: PlaybackStore;
-  onSet: (patch: Record<string, unknown>) => void; onRemove: () => void;
+  onSet: (patch: Record<string, unknown>) => unknown; onRemove: () => void;
 }) {
   const h = trackHeight(track);
+  // The volume slider moves freely while dragged and commits once on release (pointer or key): one
+  // set_track_properties edit and one undo entry per drag, not one per 0.05 step (up to 40 over 0..2).
+  // Losing focus commits too (a key released elsewhere); a value already sent is not sent again.
+  const volume = track.volume ?? 1;
+  const commitVolume = (input: HTMLInputElement) => {
+    const v = Number(input.value);
+    if (Math.abs(v - volume) < 1e-9 || input.dataset.sent === input.value) return;
+    input.dataset.sent = input.value;
+    revertIfRefused(onSet({ volume: v }), () => { input.value = String(volume); delete input.dataset.sent; });
+  };
   const label = track.name ?? `${track.kind === "video" ? "V" : "A"}${track.index + 1}`;
   return (
     <div className={`tl-thead ${track.kind} ${track.locked ? "locked" : ""}`} style={{ height: h } as CSSProperties}>
@@ -620,10 +630,14 @@ function TrackHeader({
       </div>
       {track.kind === "audio" && h >= AUDIO_H && (
         <div className="tl-thead-audio">
-          <input type="range" min={0} max={2} step={0.05} defaultValue={track.volume ?? 1}
-            key={`tv-${track.index}-${track.volume ?? 1}`} aria-label="Track volume" title="Track volume"
-            onChange={(e) => onSet({ volume: Number(e.target.value) })} disabled={!connected || track.muted} />
-          <TrackMeter segs={segs} store={store} muted={!!track.muted} volume={track.volume ?? 1} />
+          <input type="range" min={0} max={2} step={0.05} defaultValue={volume}
+            key={`tv-${track.index}-${volume}`} aria-label="Track volume" title="Track volume"
+            onPointerUp={(e) => commitVolume(e.currentTarget)}
+            onKeyUp={(e) => commitVolume(e.currentTarget)}
+            onBlur={(e) => commitVolume(e.currentTarget)}
+            onPointerCancel={(e) => { e.currentTarget.value = String(volume); }}
+            disabled={!connected || track.muted} />
+          <TrackMeter segs={segs} store={store} muted={!!track.muted} volume={volume} />
         </div>
       )}
     </div>

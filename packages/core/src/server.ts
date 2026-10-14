@@ -9,6 +9,7 @@ import { EditorEngine } from "./engine.js";
 import { dispatch, RpcError, methods } from "./rpc.js";
 import { checkBinaries } from "./ffmpeg/executor.js";
 import { parseFramesQuery, streamFrames } from "./ffmpeg/frames.js";
+import { NoAudioError, parsePeaksQuery, peaksFor } from "./media/peaks.js";
 import type { Project } from "./types.js";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -57,6 +58,8 @@ async function readBody(req: IncomingMessage): Promise<string> {
  *  - WebSocket            — used by the desktop UI for live state + commands.
  *  - HTTP GET /frames     — decoded source frames (raw RGBA) for the live
  *    preview's temporal effects after a seek (ffmpeg/frames.ts).
+ *  - HTTP GET /peaks      — an asset's waveform peaks (raw Float32, 4 bytes a
+ *    bucket) for the timeline, computed by FFmpeg and cached (media/peaks.ts).
  *  - HTTP GET /file       — streams local media/preview files (Range-enabled);
  *    HEAD /file answers with the headers only (ETag = size + mtime, which the
  *    live preview uses to notice a .cube LUT rewritten in place)
@@ -312,10 +315,54 @@ export class EditorServer {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/peaks") {
+        await this.servePeaks(url.searchParams, res, respond);
+        return;
+      }
+
       respond(404, { ok: false, error: "Not found" });
     } catch (err) {
       respond(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  /**
+   * Waveform peaks of a file /file would serve (media/peaks.ts). The path only
+   * reaches FFmpeg as its -i input, after the same isServablePath check, and
+   * no error body names it.
+   */
+  private async servePeaks(q: URLSearchParams, res: ServerResponse, respond: (status: number, body: unknown) => void): Promise<void> {
+    const p = parsePeaksQuery(q);
+    if (typeof p === "string") {
+      respond(400, { ok: false, error: p });
+      return;
+    }
+    if (!this.engine.isServablePath(p.path)) {
+      respond(403, { ok: false, error: "Forbidden: /peaks only reads files /file would serve." });
+      return;
+    }
+    let info;
+    try {
+      info = await stat(p.path);
+    } catch {
+      respond(404, { ok: false, error: "File not found" });
+      return;
+    }
+    if (!info.isFile()) {
+      respond(400, { ok: false, error: "Not a file" });
+      return;
+    }
+    let body: Buffer;
+    try {
+      body = await peaksFor(p.path, p.buckets, this.options.dataDir);
+    } catch (err) {
+      if (err instanceof NoAudioError) respond(422, { ok: false, error: err.message });
+      else respond(500, { ok: false, error: "Computing the peaks failed" });
+      return;
+    }
+    cors(res);
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": body.length, "Cache-Control": "no-store" });
+    res.end(body);
   }
 
   /** Stream a local file with HTTP Range support (needed for video seeking). */

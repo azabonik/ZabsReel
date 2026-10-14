@@ -56,7 +56,8 @@ async function main() {
 
   // 4. Read the editorial guide resource.
   const guide = await client.readResource({ uri: "aive://guide/editing" });
-  console.log(`4. editing-guide resource: ${(guide.contents[0]!.text as string).length} chars`);
+  // A resource content is text or blob; the guide is served as text.
+  console.log(`4. editing-guide resource: ${(guide.contents[0] as { text: string }).text.length} chars`);
 
   // 5. Drive an edit through MCP tools.
   const a = parse((await client.callTool({ name: "import_video", arguments: { path: clipA } })) as ToolText);

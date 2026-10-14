@@ -482,7 +482,8 @@ async function main() {
   let failures = 0;
   const pw = await loadPlaywright();
   const exe = chromiumPath();
-  // Media plays without a click, through a fake audio sink (a real-time clock: WSL's sound server runs slow).
+  // Media plays without a click, through a fake audio sink: a real sink restarts its output after every seek
+  // (currentTime froze 80-130 ms on WSLg Pulse), which these timing checks should not depend on.
   const browser = await pw.chromium.launch({
     ...(exe ? { executablePath: exe } : {}),
     args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist", "--allow-file-access-from-files",

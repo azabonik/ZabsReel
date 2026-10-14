@@ -117,7 +117,7 @@ async function main() {
   console.log("4. confirm the BUNDLED YuNet model loads as a valid ONNX graph...");
   const yunet = await ensureYunetModel(); // honors AIVE_YUNET_MODEL → bundled file
   const ortMod = await import("onnxruntime-node");
-  const ort = (ortMod as { default?: typeof ortMod }).default ?? ortMod;
+  const ort = ortMod.default ?? ortMod; // CJS interop: tsx may or may not put the module on `default`
   const session = await ort.InferenceSession.create(yunet);
   if (!session.inputNames.length || !session.outputNames.length) {
     throw new Error("bundled YuNet ONNX has no inputs/outputs");

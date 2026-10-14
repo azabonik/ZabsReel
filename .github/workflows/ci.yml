@@ -16,7 +16,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      # smoke-security and smoke-jobs synthesize their own media with ffmpeg.
+      # smoke-opaque-base, smoke-security and smoke-jobs synthesize their own media with ffmpeg.
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
@@ -32,6 +32,9 @@ jobs:
       # The media-free / self-synthesizing smoke subset (no model downloads).
       - name: Smoke — compositor plan (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-composite.ts
+
+      - name: Smoke — opaque base (render graph + pixel A/B)
+        run: npx tsx packages/core/scripts/smoke-opaque-base.ts
 
       - name: Smoke — CLIP tokenizer (pure logic)
         run: npx tsx packages/core/scripts/smoke-clip-tokenizer.ts

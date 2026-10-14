@@ -4,13 +4,14 @@
  * smaller than the original, and that EXPORT still renders at the project
  * canvas (i.e. proxies never degrade the final output). Calls while an encode
  * runs join it (one encode, a whole file for each), and a cancelled encode
- * leaves no file behind: the next call encodes the whole proxy. Real FFmpeg.
+ * leaves no file behind: the next call encodes the whole proxy. A proxy has a
+ * keyframe at least every second (a preview seek decodes at most 1 s). Real FFmpeg.
  *
  * Run: npx tsx packages/core/scripts/smoke-proxy.ts
  */
 import { EditorEngine } from "../src/engine.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
-import { runFfmpeg } from "../src/ffmpeg/executor.js";
+import { runFfmpeg, runFfprobe } from "../src/ffmpeg/executor.js";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,6 +25,17 @@ async function main() {
   const check = (ok: boolean, msg: string) => {
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
+  };
+  /** The longest run of video frames from a keyframe up to (not including) the next one, or to the end. */
+  const longestGop = async (file: string) => {
+    const flags = (await runFfprobe(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags", "-of", "csv=p=0", file])).split("\n").filter(Boolean);
+    let run = 0;
+    let longest = 0;
+    for (const f of flags) {
+      run = f.includes("K") ? 1 : run + 1;
+      longest = Math.max(longest, run);
+    }
+    return { longest, frames: flags.length };
   };
 
   // 1. Synthesize a large (3840-wide) source.
@@ -46,6 +58,8 @@ async function main() {
   console.log(`   proxy ${proxyMeta.width}x${proxyMeta.height} (original 3840x2160)`);
   check(proxyMeta.width <= 1280 && proxyMeta.width < a.width, "proxy is low-res (≤1280 long edge)");
   check(Math.abs(proxyMeta.duration - a.duration) < 0.25, `…and whole when the calls return (${proxyMeta.duration} s of ${a.duration} s)`);
+  const bigGop = await longestGop(proxied.proxyPath!);
+  check(bigGop.longest <= Math.round(a.fps), `a keyframe every second: longest GOP ${bigGop.longest} of ${bigGop.frames} frames (≤ ${Math.round(a.fps)})`);
 
   // 3. Export still uses the FULL-RES original (canvas = source here).
   console.log("3. export uses full resolution...");
@@ -80,6 +94,8 @@ async function main() {
   const redone = await engine.generateProxy(b.id);
   const redoneMeta = await probeAsset(redone.proxyPath!);
   check(Math.abs(redoneMeta.duration - b.duration) < 0.25, `the next call encodes the whole proxy (${redoneMeta.duration} s of ${b.duration} s)`);
+  const longGop = await longestGop(redone.proxyPath!);
+  check(longGop.longest <= Math.round(b.fps), `a keyframe every second: longest GOP ${longGop.longest} of ${longGop.frames} frames (≤ ${Math.round(b.fps)})`);
 
   console.log(failures === 0 ? "\nPROXY SMOKE TEST PASSED" : `\nPROXY SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);

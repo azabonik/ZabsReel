@@ -576,11 +576,23 @@ export function ffmpegStderrDetail(stderr: string, maxLines = 5, maxChars = 600)
   return tail.length > maxChars ? `…${tail.slice(-maxChars)}` : tail;
 }
 
+/**
+ * Environment additions for the children of the runFfprobe / runFfmpeg*
+ * helpers below (execa merges them into process.env); vidstab runs through
+ * runFfmpeg. Children spawned elsewhere with execa, and the -version / -h
+ * capability probes, do not get them. A system FFmpeg that links libvidstab
+ * with libgomp (Ubuntu's 4.4.2) spins its OpenMP threads while they wait:
+ * vidstabdetect burned 88.7 CPU-seconds for 4.5 s of wall time on 10 s of
+ * 1080p, and 28.4 with OMP_WAIT_POLICY=passive. Builds without OpenMP (the
+ * bundled one) ignore it; a value the user set is kept.
+ */
+const CHILD_ENV = { OMP_WAIT_POLICY: process.env.OMP_WAIT_POLICY ?? "passive" };
+
 /** Run ffprobe and return its stdout (typically JSON). */
 export async function runFfprobe(args: string[]): Promise<string> {
   const run = ffprobeArgsLocalOnly(args);
   try {
-    const { stdout } = await execa(FFPROBE_BIN, run, { reject: true });
+    const { stdout } = await execa(FFPROBE_BIN, run, { reject: true, env: CHILD_ENV });
     return stdout;
   } catch (err: unknown) {
     const e = err as { stderr?: string; shortMessage?: string; message?: string };
@@ -788,6 +800,7 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
     buffer: { stdout: false, stderr: true },
     cancelSignal: opts.signal,
     cwd: opts.cwd,
+    env: CHILD_ENV,
   });
 
   if (opts.onProgress && opts.totalDuration && opts.totalDuration > 0 && child.stdout) {
@@ -837,6 +850,7 @@ export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
   const { stdout } = await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(await adaptFfmpegArgs(args)), {
     reject: true,
     encoding: "buffer",
+    env: CHILD_ENV,
   });
   return stdout as unknown as Buffer;
 }
@@ -845,7 +859,7 @@ export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
 export async function runFfmpegCaptureStderr(args: string[]): Promise<string> {
   const run = ffmpegArgsLocalOnly(await adaptFfmpegArgs(args));
   try {
-    const result = await execa(FFMPEG_BIN, run, { reject: false, all: false });
+    const result = await execa(FFMPEG_BIN, run, { reject: false, all: false, env: CHILD_ENV });
     return result.stderr ?? "";
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string };

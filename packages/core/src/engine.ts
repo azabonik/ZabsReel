@@ -521,6 +521,8 @@ export class EditorEngine extends EventEmitter {
   private assetCaches = new Map<string, { transcript?: AssetTranscript; visualSig?: VisualSignature }>();
   /** Colour descriptions (and codecs) probed again for assets imported before probeAsset recorded them (by path; outside the undo history). */
   private colorProbes = new Map<string, Promise<ColorProbe | undefined>>();
+  /** Whether a file's decoded picture has no alpha channel (probed pix_fmt, by path, for one size+mtime; see isOpaqueVideo). */
+  private opaqueProbes = new Map<string, { stamp: string; opaque: Promise<boolean> }>();
   /** The running generateProxy job per asset id: a second call joins it (see generateProxy). */
   private proxyJobs = new Map<string, Promise<MediaAsset>>();
   /** Housekeeping for baked/ + proxies/: trash unused files, restore them on load (see storage.ts). */
@@ -981,6 +983,9 @@ export class EditorEngine extends EventEmitter {
           ? `scale=${longEdge}:-2${conv}`
           : `scale=-2:${longEdge}${conv}`;
         const args = ["-hide_banner", "-i", asset.path, "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", ...colorTagArgs({ matrix: c.matrix, range: "tv" })];
+        // A keyframe every second: a preview seek decodes at most 1 s of frames (x264's default 250-frame
+        // GOP made a random seek take 76 ms median in Chromium, 17 ms with this; the proxy grows ~29%).
+        args.push("-g", String(Math.max(1, Math.round(asset.fps || 30))));
         if (asset.hasAudio) args.push("-c:a", "aac", "-b:a", "128k");
         else args.push("-an");
         // Written under a temporary name: a file at `out` is always a whole proxy.
@@ -3744,6 +3749,22 @@ export class EditorEngine extends EventEmitter {
     return p;
   }
 
+  /**
+   * True when a file's first video stream decodes to a known alpha-free pixel format
+   * (ResolvedRenderClip.opaque, VideoFormat.opaque); false when it may have alpha or can't be probed.
+   * Probed again when the file's size or mtime changes: a file replaced in place may have gained alpha.
+   */
+  private async isOpaqueVideo(path: string): Promise<boolean> {
+    const st = await stat(path).catch(() => undefined);
+    if (!st) return false;
+    const stamp = `${st.size}:${st.mtimeMs}`;
+    const hit = this.opaqueProbes.get(path);
+    if (hit?.stamp === stamp) return hit.opaque;
+    const opaque = probeVideoFormat(path).then((f) => f?.opaque === true);
+    this.opaqueProbes.set(path, { stamp, opaque });
+    return opaque;
+  }
+
   /** What a cutout records of its colour source (MediaAsset.cutout colorTags / colorCodec). */
   private async cutoutColorRecord(source: MediaAsset): Promise<{ colorTags?: ProbedColor; colorCodec?: string }> {
     const color = source.color ?? (await this.probeColor(source.path))?.color;
@@ -4018,6 +4039,9 @@ export class EditorEngine extends EventEmitter {
         outDuration: framesToSeconds(clipDurationFrames(clip, this.project.fps), fps),
         isImage: asset.isImage,
         ...(asset.hasVideo ? { colorIn: await this.sourceColor(asset), size: { w: asset.width, h: asset.height } } : {}),
+        // Lets an opaque bottom layer skip the render's black base (graph.ts fillsCanvasOpaque). A matte-backed
+        // cutout's file is its gray matte, and a still is looped: neither is ever opaque here.
+        ...(asset.hasVideo && !asset.isImage && !asset.cutout && (await this.isOpaqueVideo(asset.path)) ? { opaque: true } : {}),
         hasAudio: asset.hasAudio,
         muted: !!track.muted,
         trackVolume: track.volume,

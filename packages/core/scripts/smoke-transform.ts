@@ -39,13 +39,12 @@ async function main() {
   // Small vertical canvas: geq is a per-pixel expression, so keep the smoke quick
   // while still exercising the exact transform/keyframe filtergraph.
   engine.setProjectSettings({ width: 360, height: 640, fps: 30 });
-  const fps = engine.fps;
 
   const base = await engine.importVideo(clipA);
   const over = await engine.importVideo(clipB);
 
   // Base layer on V1, a shorter overlay clip on V2 (composites on top).
-  const baseClip = engine.appendClip(base.id);
+  engine.appendClip(base.id);
   const vTop = engine.addTrack("video");
   const ovClip = engine.addClip(over.id, { trackIndex: vTop.index, startFrame: 0 });
   // Phase 4: per-track audio gain — exercises the trackVolume bake in the mix.

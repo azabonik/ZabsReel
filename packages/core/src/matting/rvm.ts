@@ -163,6 +163,19 @@ export interface MatteOptions {
    * frame) instead of RVM, so the whole pipeline runs without the model.
    */
   stubMatte?: boolean;
+  /**
+   * Internal (tests): how long a canceled worker gets before the job is
+   * answered without it (default {@link CANCEL_GRACE_MS}). Tests shorten it to
+   * make the grace period run out while the worker is inside an ORT call.
+   */
+  cancelGraceMs?: number;
+  /**
+   * Internal (tests): with `stubMatte`, each frame's matte blocks its thread
+   * this long, as a native call that never yields would. A canceled worker then
+   * cannot stop its ffmpeg children itself before the frame ends: only the
+   * grace period's kill can.
+   */
+  stubStallMs?: number;
 }
 
 export interface MatteStats extends PipelineStats {
@@ -170,7 +183,7 @@ export interface MatteStats extends PipelineStats {
   runner: "worker" | "inline";
 }
 
-/** How long a canceled worker gets to stop its ffmpeg children and clean up before it is terminated. */
+/** How long a canceled worker gets to stop its ffmpeg children and clean up before the job is answered without it. */
 const CANCEL_GRACE_MS = 5000;
 
 /** The worker entry next to this module (.ts when running from source under tsx, .js from dist). */
@@ -202,8 +215,16 @@ type WorkerOutcome = { kind: "done"; stats: PipelineStats } | { kind: "unavailab
  * worker failed before the model was loaded (no ORT in a worker on this
  * platform), so the caller can fall back to the calling thread; every later
  * failure rejects. Cancel asks the worker to stop (it kills its ffmpeg
- * children and deletes the partial output); a worker that doesn't answer in
- * time is terminated and its children killed here.
+ * children and deletes the partial output). A cancel before the model is
+ * loaded is answered at once; a worker that doesn't answer in time has its
+ * children killed here and the job is answered without it.
+ *
+ * The worker is terminated only once it has reported (done or error) or
+ * stopped, never while it may be inside an onnxruntime-node native call
+ * (InferenceSession.create or session.run): terminating it there aborts the
+ * WHOLE process (SIGABRT, "terminate called after throwing an instance of
+ * 'Napi::Error'"; reproduced 5 of 5 times). A canceled worker therefore winds
+ * down by itself after its answer, and its output is removed when it reports.
  */
 function runInWorker(data: PipelineOptions, opts: MatteOptions): Promise<WorkerOutcome> {
   return new Promise((resolve, reject) => {
@@ -215,31 +236,50 @@ function runInWorker(data: PipelineOptions, opts: MatteOptions): Promise<WorkerO
       return;
     }
     let ready = false;
+    /** The caller has its answer: a cancel answered before the worker reported. */
+    let answered = false;
+    /** The worker has reported or stopped: it is in no native call, so terminate() is safe. */
     let settled = false;
     let pids: number[] = [];
     let graceTimer: NodeJS.Timeout | undefined;
+    const answerCanceled = () => {
+      if (answered) return;
+      answered = true;
+      reject(new Error("Background removal canceled"));
+    };
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       if (graceTimer) clearTimeout(graceTimer);
       opts.signal.removeEventListener("abort", onAbort);
       void worker.terminate().catch(() => {});
-      fn();
+      // Already answered (canceled): whatever the worker made is not wanted.
+      if (answered) void rm(data.outPath, { force: true }).catch(() => {});
+      else fn();
     };
     const onAbort = () => {
       worker.postMessage({ type: "cancel" } satisfies MainToWorker);
+      if (!ready) {
+        // Still loading (module, ORT, session create: 150-280 ms idle, 5 s and more under load) and no
+        // ffmpeg started yet: answer now. The worker sees the cancel once its model is loaded, before it
+        // starts ffmpeg, and reports; finish() then stops it.
+        answerCanceled();
+        return;
+      }
       graceTimer = setTimeout(() => {
+        // The worker has not stopped, so it may be inside session.run: kill its ffmpeg children (its frame
+        // loop fails as soon as the call returns) and answer without it.
         killAll(pids);
         void rm(data.outPath, { force: true }).catch(() => {});
-        finish(() => reject(new Error("Background removal canceled")));
-      }, CANCEL_GRACE_MS);
+        answerCanceled();
+      }, opts.cancelGraceMs ?? CANCEL_GRACE_MS);
     };
     if (opts.signal.aborted) onAbort();
     else opts.signal.addEventListener("abort", onAbort, { once: true });
     worker.on("message", (m: WorkerToMain) => {
       if (m.type === "ready") ready = true;
       else if (m.type === "pids") pids = m.pids;
-      else if (m.type === "progress") opts.onProgress?.(m.fraction);
+      else if (m.type === "progress" && !answered) opts.onProgress?.(m.fraction);
       else if (m.type === "done") finish(() => resolve({ kind: "done", stats: m.stats }));
       else if (m.type === "error") {
         const err = opts.signal.aborted ? new Error("Background removal canceled") : fromWorkerError(m.error);
@@ -288,6 +328,7 @@ export async function matteVideo(opts: MatteOptions): Promise<MatteStats> {
     maxLongEdge: opts.maxLongEdge ?? RVM_MAX_LONG_EDGE,
     modelPath,
     ...(opts.stubMatte ? { stubMatte: true } : {}),
+    ...(opts.stubMatte && opts.stubStallMs ? { stubStallMs: opts.stubStallMs } : {}),
   };
   if (process.env.AIVE_RVM_INLINE !== "1") {
     const outcome = await runInWorker(data, opts);

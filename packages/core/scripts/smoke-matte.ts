@@ -18,6 +18,12 @@
  *   - the downscaled path (forced with a small processing cap) gives a
  *     full-resolution matte that passes the same pixel checks,
  *   - cancel_job stops a run promptly and leaves no partial files behind,
+ *     also a cancel before the worker has loaded the model (answered at once,
+ *     not after the load) and one whose grace period runs out while the
+ *     worker is inside an ORT call (answered without terminating the worker
+ *     mid-call, which would abort this whole process), and one whose worker
+ *     never yields (a stub matte that blocks its thread): the grace period's
+ *     kill stops the ffmpeg children while the worker is still blocked,
  *   - the remove_background RPC works in background mode and refuses a re-run.
  *
  * Run: npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
@@ -35,6 +41,7 @@ import { dispatch } from "../src/rpc.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg, FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
 import { referencedManagedPaths } from "../src/storage.js";
+import { matteVideo } from "../src/matting/rvm.js";
 
 const W = 1280;
 const H = 720;
@@ -262,6 +269,105 @@ async function main() {
   check(JSON.stringify(cutouts()) === JSON.stringify(filesBefore), "no partial cutout files left behind");
   const untouched = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)!;
   check(untouched.assetId === aPerson.id, "clip untouched by the canceled run");
+
+  console.log("6b. a cancel before the worker has loaded the model is answered at once...");
+  const ffmpegChildren = async () =>
+    (await execa("pgrep", ["-P", String(process.pid), "-x", "ffmpeg"], { reject: false })).stdout.split("\n").filter(Boolean).length;
+  const { job: j4, promise: p4 } = engine.startRemoveBackgroundJob(clip.id);
+  await new Promise((res) => setTimeout(res, 50));
+  engine.jobs.cancel(j4.id);
+  const early = await p4.then(() => "resolved", (err: Error) => err.message);
+  check(early !== "resolved", `job canceled while loading rejects (${early})`);
+  check(engine.jobs.get(j4.id)?.status === "canceled", "job status is canceled");
+  // matteVideo directly: the worker exists but is still loading when the abort lands (a job also probes first).
+  const earlyOut = join(dir, "early.mkv");
+  const ac = new AbortController();
+  const pEarly = matteVideo({ input: person, sourceIn: 0, span: DUR, srcW: W, srcH: H, fps: FPS, withAudio: true, outPath: earlyOut, signal: ac.signal });
+  await new Promise((res) => setTimeout(res, 0));
+  const tEarly = performance.now();
+  ac.abort();
+  const earlyOutcome = await pEarly.then(() => "resolved", (err: Error) => err.message);
+  const earlyMs = performance.now() - tEarly;
+  check(earlyOutcome === "Background removal canceled", `canceled load rejects (${earlyOutcome})`);
+  // The old wait for the load took 150-280 ms here (5 s under load); the answer is now synchronous.
+  check(earlyMs < 50, `answered without waiting for the model load (${earlyMs.toFixed(1)} ms)`);
+  await new Promise((res) => setTimeout(res, 1500));
+  check(!existsSync(earlyOut) && (await ffmpegChildren()) === 0, "the canceled load starts no ffmpeg and leaves no output");
+  check(JSON.stringify(cutouts()) === JSON.stringify(filesBefore), "no partial cutout files left behind");
+
+  console.log("6c. a grace period that runs out while the worker is inside session.run...");
+  // Grace shortened to 1 ms: it runs out mid-frame, mostly inside session.run (most of each frame's time).
+  // terminate() there aborts this whole process (SIGABRT); the job must answer and let the worker finish.
+  for (let i = 0; i < 5; i++) {
+    const out = join(dir, `grace-${i}.mkv`);
+    const g = new AbortController();
+    let tAbort = 0;
+    const pg = matteVideo({
+      input: person, sourceIn: 0, span: DUR, srcW: W, srcH: H, fps: FPS, withAudio: true, outPath: out, signal: g.signal, cancelGraceMs: 1,
+      onProgress: () => {
+        if (!tAbort) {
+          tAbort = -1;
+          setTimeout(() => {
+            tAbort = performance.now();
+            g.abort();
+          }, 10 + i * 13);
+        }
+      },
+    });
+    const outcome = await pg.then(() => "resolved", (err: Error) => err.message);
+    const answeredAt = performance.now();
+    check(outcome === "Background removal canceled", `round ${i + 1}: rejects (${outcome})`);
+    check(answeredAt - tAbort < 1000, `round ${i + 1}: answered promptly (${(answeredAt - tAbort).toFixed(0)} ms)`);
+    // The worker winds down by itself (its ffmpeg children were killed); then nothing of the run is left.
+    let left = true;
+    for (let t = 0; t < 100 && left; t++) {
+      await new Promise((res) => setTimeout(res, 100));
+      left = existsSync(out) || (await ffmpegChildren()) > 0;
+    }
+    check(!left, `round ${i + 1}: no output and no ffmpeg left once the worker has stopped`);
+  }
+
+  console.log("6d. a worker that never yields: the grace period's kill stops its ffmpeg children...");
+  {
+    // The stub matte blocks the worker's thread for STALL ms on each frame: it cannot see the cancel, so its
+    // children stop before the frame ends only if the grace period (1 ms) kills them (rvm.ts killAll).
+    const STALL = 4000;
+    // A killed child stays a zombie until the thread that spawned it (the blocked worker) reaps it: count live ones.
+    const liveFfmpegChildren = async () =>
+      (await execa("ps", ["--ppid", String(process.pid), "-o", "stat=,comm="], { reject: false })).stdout
+        .split("\n").map((l) => l.trim().split(/\s+/)).filter(([stat, comm]) => comm === "ffmpeg" && !stat.startsWith("Z")).length;
+    const out = join(dir, "stall.mkv");
+    const g = new AbortController();
+    const pg = matteVideo({
+      input: person, sourceIn: 0, span: DUR, srcW: W, srcH: H, fps: FPS, withAudio: true, outPath: out, signal: g.signal,
+      stubMatte: true, stubStallMs: STALL, cancelGraceMs: 1,
+    });
+    let started = false;
+    for (let t = 0; t < 200 && !started; t++) {
+      await new Promise((res) => setTimeout(res, 50));
+      started = (await ffmpegChildren()) > 0;
+    }
+    check(started, "the stalled run started its ffmpeg children");
+    // Its first frame decodes in well under a second; the worker is then blocked in that frame's matte.
+    await new Promise((res) => setTimeout(res, 1000));
+    const tAbort = performance.now();
+    g.abort();
+    const outcome = await pg.then(() => "resolved", (err: Error) => err.message);
+    check(outcome === "Background removal canceled", `rejects (${outcome})`);
+    let gone = false;
+    while (!gone && performance.now() - tAbort < STALL) {
+      gone = (await liveFfmpegChildren()) === 0;
+      if (!gone) await new Promise((res) => setTimeout(res, 20));
+    }
+    const goneMs = performance.now() - tAbort;
+    check(gone && goneMs < 1000, `the ffmpeg children are gone ${goneMs.toFixed(0)} ms after the cancel, while the worker is still blocked (${STALL} ms per frame)`);
+    let left = true;
+    for (let t = 0; t < 100 && left; t++) {
+      await new Promise((res) => setTimeout(res, 100));
+      left = existsSync(out) || (await ffmpegChildren()) > 0;
+    }
+    check(!left, "no output and no ffmpeg left once the worker has stopped");
+  }
 
   console.log("7. the remove_background RPC (background:true → jobId, then the blocking form refuses a re-run)...");
   const started = (await dispatch(engine, "remove_background", { clipId: clip.id, background: true })) as { jobId: string };

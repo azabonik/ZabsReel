@@ -25,7 +25,7 @@
  * else staging stops. AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG=1 ships another build
  * anyway (it is then marked untested in the manifest). Point AIVE_FFMPEG /
  * AIVE_FFPROBE at the build to ship; its version and the sha256 of the staged
- * binaries go into bundle-manifest.json (scripts/bundle-ffmpeg.ts).
+ * binaries go into bundle-manifest.json (scripts/bundle-ffmpeg.mts).
  *
  * We deliberately REUSE the engine's own download/setup code (ensureWhisper,
  * ensureYunetModel, ensureRvmModel) so the bundled binaries are byte-identical to what the
@@ -46,7 +46,7 @@ import { delimiter } from "node:path";
 import { ensureWhisper, DEFAULT_MODEL } from "../../../packages/core/dist/whisper/setup.js";
 import { ensureYunetModel } from "../../../packages/core/dist/reframe/detector.js";
 import { ensureRvmModel } from "../../../packages/core/dist/matting/rvm.js";
-import { stageFfmpeg } from "./bundle-ffmpeg.ts";
+import { stageFfmpeg } from "./bundle-ffmpeg.mts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** apps/desktop/build/resources/aive */

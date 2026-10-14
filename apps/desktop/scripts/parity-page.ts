@@ -57,7 +57,7 @@ interface RunArgs {
   ph?: number;
 }
 
-const b64ToBytes = (b64: string): Uint8ClampedArray => {
+const b64ToBytes = (b64: string): Uint8ClampedArray<ArrayBuffer> => {
   const bin = atob(b64);
   const out = new Uint8ClampedArray(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -99,7 +99,7 @@ function loadLuts(luts?: Record<string, string>) {
 }
 
 type WarmMode = "ok" | "fail" | "short" | "hang";
-const warmStore = new Map<string, { frames: Uint8Array[]; mode: WarmMode }>();
+const warmStore = new Map<string, { frames: Uint8ClampedArray[]; mode: WarmMode }>();
 const warmRequests: { path: string; from: number; count: number; signal?: AbortSignal | null }[] = [];
 let warmRepaints = 0;
 setWarmup((path, q) => `mock-frames:${encodeURIComponent(JSON.stringify({ path, ...q }))}`, () => warmRepaints++);
