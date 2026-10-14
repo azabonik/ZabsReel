@@ -543,7 +543,7 @@ export class EditorEngine extends EventEmitter {
    * cleared by new_project and the next load / import_otio.
    */
   private uncheckedPaths = new Map<string, string>();
-  /** onTrustChanged is running / was asked again meanwhile (a store re-read inside it). */
+  /** remark is running / was asked again meanwhile (a store re-read inside it). */
   private trustBusy = false;
   private trustAgain = false;
 
@@ -820,21 +820,33 @@ export class EditorEngine extends EventEmitter {
    * tell the clients. The project is not reloaded and not made unsaved (I5).
    */
   onTrustChanged(): void {
+    if (this.remark(true)) this.emit("change", this.project);
+  }
+
+  /**
+   * Every G3 marking goes through here. A check inside it can re-read the
+   * store, and that re-read calls onTrustChanged synchronously: the nested
+   * call only asks for another pass, so this pass's cached decisions never
+   * overwrite newer ones. `recheck` also re-checks the unchecked fields (a
+   * pass asked for by a store change always does). False when nested.
+   */
+  private remark(recheck: boolean): boolean {
     if (this.trustBusy) {
       this.trustAgain = true;
-      return;
+      return false;
     }
     this.trustBusy = true;
     try {
       do {
         this.trustAgain = false;
         this.markOfflineMedia();
-        this.recheckUncheckedFields();
+        if (recheck) this.recheckUncheckedFields();
+        recheck = true;
       } while (this.trustAgain);
     } finally {
       this.trustBusy = false;
     }
-    this.emit("change", this.project);
+    return true;
   }
 
   /** recheck_offline_media: re-read the store and re-evaluate the offline media now. */
@@ -1185,7 +1197,7 @@ export class EditorEngine extends EventEmitter {
     this.redoStack.push(structuredClone(this.project));
     this.project = prev;
     // A snapshot keeps the flags of its time; the servers allowed now decide (G3).
-    this.markOfflineMedia();
+    this.remark(false);
     this.project.revision += 1;
     this.project.updatedAt = Date.now();
     this.emit("change", this.project);
@@ -1197,7 +1209,7 @@ export class EditorEngine extends EventEmitter {
     if (!next) return false;
     this.undoStack.push(structuredClone(this.project));
     this.project = next;
-    this.markOfflineMedia();
+    this.remark(false);
     this.project.revision += 1;
     this.project.updatedAt = Date.now();
     this.emit("change", this.project);
@@ -6506,7 +6518,7 @@ export class EditorEngine extends EventEmitter {
     // Give a still-"Untitled" project a meaningful name from its filename, so the
     // UI title and the AI both have a clear handle on which video this is.
     if (!this.project.name || this.project.name === "Untitled Project") {
-      this.mutate(() => { this.project.name = basename(path).replace(/\.aive$/i, ""); });
+      this.mutate(() => { this.project.name = bareFileName(path).replace(/\.aive$/i, ""); });
     }
     await writeFile(path, JSON.stringify(this.serializableProject(), null, 2), "utf8");
     this.currentPath = path;
@@ -6547,7 +6559,7 @@ export class EditorEngine extends EventEmitter {
     // G3 before anything opens its media: what is on a server the user has not allowed stays offline.
     this.uncheckedPaths = unchecked;
     this.trust.clearRequests();
-    this.markOfflineMedia();
+    this.remark(false);
     // Pull persisted transcripts/visual fingerprints OUT of the live project
     // into the engine cache (kept outside the undo history); leave markers.
     this.assetCaches.clear();
@@ -6645,7 +6657,7 @@ export class EditorEngine extends EventEmitter {
     this.project = project;
     this.uncheckedPaths = unchecked;
     this.trust.clearRequests();
-    this.markOfflineMedia();
+    this.remark(false);
     // Extract any transcripts/visual indexes that traveled in asset metadata.
     this.assetCaches.clear();
     for (const a of this.project.assets) {
@@ -6685,7 +6697,7 @@ export class EditorEngine extends EventEmitter {
     this.project = defaultProject();
     this.uncheckedPaths.clear();
     this.trust.clearRequests();
-    this.markOfflineMedia();
+    this.remark(false);
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
     this.storage.schedule();

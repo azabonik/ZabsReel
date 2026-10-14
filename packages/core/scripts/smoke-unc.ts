@@ -1563,6 +1563,11 @@ async function main() {
     writeFixture(f, JSON.stringify({ ...project("/x/a.mp4", { hasVideo: false, hasAudio: true }), name: "\\\\zr-evil.invalid\\s\\x" }));
     const e = await thrown(() => engine.load(f));
     check(e === null && engine.getProject().name === "x", `a loaded project named \\\\zr-evil.invalid\\s\\x loads with the name "x" (${e?.message}; ${engine.getProject().name})`);
+    // An untitled project is named after the file it is saved to by the same rule (a POSIX file name may hold a "\").
+    // MUTATION: name it after basename(path) again → the name keeps "a\b" on POSIX.
+    engine.reset();
+    const se = await thrown(() => engine.save(join(root, "a\\b.aive")));
+    check(se === null && engine.getProject().name === "b", `a save to a\\b.aive names the untitled project "b" (${se?.message}; ${engine.getProject().name})`);
   }
 
   // ---- 10. storage: a known project on a server not allowed -------------------------------------
@@ -1672,6 +1677,25 @@ async function main() {
       engine.redo();
       check(online && offlineNow && afterUndo === OK2 && engine.getProject().assets[0].awaitingServer === OK2,
         `undo / redo after a revoke: the restored snapshot waits for its server too (online ${online}, revoked ${offlineNow}, after undo ${afterUndo})`);
+      // The same with no re-read between the revoke and the undo: the undo's own check re-reads the store, which
+      // asks for G3 again inside G3. The pass that asked must not finish with its older decisions (a3 online).
+      // MUTATION: call markOfflineMedia directly from undo again → a3 stays online and OK3 is not pending.
+      const OK3 = "zr-ok-3.invalid";
+      await approveHost(engine.dataDir, OK3, "prompt");
+      engine.recheckOfflineMedia();
+      const three = project(`//${OK3}/s/1.mp4`, { id: "asset_a1", hasVideo: false, hasAudio: true });
+      const [a1] = three.assets;
+      three.assets.push({ ...a1, id: "asset_a2", path: "//zr-evil-1.invalid/s/2.mp4" }, { ...a1, id: "asset_a3", path: `//${OK3}/s/3.mp4` });
+      const f3 = join(root, "revoke3.aive");
+      writeFixture(f3, JSON.stringify(three));
+      await engine.load(f3);
+      engine.setProjectSettings({ name: "Edited" });
+      await revokeHost(engine.dataDir, OK3);
+      engine.undo(); // synchronous, before fs.watch's debounce
+      const marks = engine.getProject().assets.map((x) => x.awaitingServer ?? "online").join();
+      const p3 = engine.mediaServers().pending.find((x) => x.host === OK3);
+      check(marks === `${OK3},zr-evil-1.invalid,${OK3}` && !!p3 && p3.origins.join() === "project" && p3.files === 2,
+        `undo right after a revoke (no re-read between): both assets on the revoked server wait and it is pending with origin project (${marks}; ${JSON.stringify(p3)})`);
     }
     // resolveFont's backstop (behind G5): a font it may not open is never opened, and never silently swapped for the default font.
     const resolveFont = (engine as unknown as { resolveFont(w: string, s: string, c: Map<string, string>, d: string): Promise<string> }).resolveFont.bind(engine);

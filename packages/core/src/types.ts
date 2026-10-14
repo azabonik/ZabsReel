@@ -715,17 +715,17 @@ export interface Marker {
  */
 export const PROJECT_SCHEMA_VERSION = 4;
 
+/** True when nothing may open an asset's file: not found, on a server not allowed yet, or its folder could not be checked. */
+export function isOffline(a: Pick<MediaAsset, "missing" | "awaitingServer" | "pathCheckFailed">): boolean {
+  return !!a.missing || !!a.awaitingServer || !!a.pathCheckFailed;
+}
+
 /**
  * Timeline footprint of a clip in project frames (accounts for speed and speed
  * ramps — speed.ts clipFootprintFrames; a constant-speed clip is exactly
  * max(1, round((out - in) / speed)) as always). `fps` is needed because ramp
  * points are in asset seconds.
  */
-/** True when nothing may open an asset's file: not found, on a server not allowed yet, or its folder could not be checked. */
-export function isOffline(a: Pick<MediaAsset, "missing" | "awaitingServer" | "pathCheckFailed">): boolean {
-  return !!a.missing || !!a.awaitingServer || !!a.pathCheckFailed;
-}
-
 export function clipDurationFrames(clip: Clip, fps: number): number {
   return clipFootprintFrames(clip, fps);
 }
