@@ -29,13 +29,23 @@
  *  4. The MCP route cannot approve (the store is unchanged after saves aimed at
  *     it, and after calling every method) and cannot read the key (no response
  *     holds 8 characters of it; only trusthosts.ts reads it).
+ *     9.4: the MCP server (packages/mcp/dist/index.js) over stdio has no tool
+ *     that approves, reports the offline media in load_project's notice, and
+ *     tells the agent not to edit the store.
+ *  5. The UI route works (approveHost, as main.cjs and server.cjs call it):
+ *     after recheck_offline_media the server's media is online without a
+ *     reload, its colour probe and proxy start, an .otio placeholder is probed;
+ *     without a recheck the next check re-reads the store (lazy reload); Keep
+ *     of an outside entry brings it online; look-alike spellings of an approved
+ *     server still refuse the load and are never opened.
+ *  6. Revoke: the media is offline again and nothing opens it any more.
  *  7. (win32 only) A second share spelling of a data folder on \\localhost is
  *     refused by the identity check or the name rule; skipped elsewhere.
  * Log mode (no AIVE_NETWORK_GATE): a project naming \\zr-nas.invalid\s\a.mp4
  * loads unchanged (not offline, nothing pending), a "would block" line is
  * logged, and the probe goes through (to the stub, which answers for it).
  *
- * Needs the build (npm run build) and FFmpeg. Temp dirs only.
+ * Needs the build (npm run build: the core and the MCP server) and FFmpeg. Temp dirs only.
  * Run: AIVE_NETWORK_GATE=enforce npx tsx packages/core/scripts/smoke-unc-e2e.ts
  */
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -44,7 +54,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { approveHost } from "../src/trusthosts.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { approveHost, revokeHost } from "../src/trusthosts.js";
 import { projectToOtio } from "../src/interop/otio.js";
 import type { Project } from "../src/types.js";
 
@@ -56,6 +68,7 @@ const check = (ok: boolean, msg: string) => {
 const enforced = process.env.AIVE_NETWORK_GATE === "enforce";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cli = join(repo, "packages/core/dist/cli.js");
+const mcpCli = join(repo, "packages/mcp/dist/index.js");
 const which = (bin: string) => execFileSync(process.platform === "win32" ? "where" : "which", [bin], { encoding: "utf8" }).split(/\r?\n/)[0].trim();
 
 // ---- the trace preload and the FFmpeg stub ---------------------------------------
@@ -65,7 +78,8 @@ const require = createRequire(import.meta.url);
 const fs = require("node:fs");
 const append = fs.appendFileSync;
 const out = process.env.ZR_TRACE;
-const WATCH = /zr-evil|hosts\\.key/i;
+// Also the look-alike spellings of zr-evil-1.invalid that step 5 loads (fullwidth ｚｒ, a zero-width space).
+const WATCH = /zr-evil|\uff5a\uff52-evil|zr\u200b-evil|hosts\\.key/i;
 const hit = (v, d = 0) =>
   typeof v === "string" ? WATCH.test(v)
   : v instanceof Uint8Array ? WATCH.test(Buffer.from(v).toString("utf8"))
@@ -270,7 +284,9 @@ async function enforcedSteps(): Promise<void> {
   const local = join(root, "local.mp4");
   execFileSync(which("ffmpeg"), ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=30", "-f", "lavfi", "-i", "sine=frequency=440", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y", local]);
 
-  const core = await startCore(dataDir);
+  // The stub answers ffprobe for a test host with a canned 1 s 64x64 clip: only once its server is allowed (step 5)
+  // may anything probe one (step 3 checks that nothing did before).
+  const core = await startCore(dataDir, { ZR_STUB_CANNED: "zr-evil" });
   try {
     // ---- 1. load ----------------------------------------------------------------------
     // MUTATION: drop markOfflineMedia from load() → the assets are online, the
@@ -281,7 +297,8 @@ async function enforcedSteps(): Promise<void> {
     const crafted = projectFile("crafted.aive", {
       assets: [
         asset("asset_local", local),
-        asset("asset_e1", `//${H(1)}/s/a1.mp4`, { proxyPath: `\\\\${H(1)}\\s\\p1.mp4`, previewPath: `\\/${H(1)}/s/pv1.webm` }),
+        // 4K, so it gets a background proxy once its server is allowed (step 5).
+        asset("asset_e1", `//${H(1)}/s/a1.mp4`, { width: 3840, height: 2160, proxyPath: `\\\\${H(1)}\\s\\p1.mp4`, previewPath: `\\/${H(1)}/s/pv1.webm` }),
         asset("asset_e2", `\\\\${H(2)}\\s\\a2.mp4`),
         asset("asset_cut", join(root, "matte.mkv"), { cutout: { colorPath: `/\\${H(1)}\\s\\color.mp4`, colorStart: 0 } }),
         asset("asset_music", `//${H(2)}/s/music.wav`, { hasVideo: false }),
@@ -342,7 +359,17 @@ async function enforcedSteps(): Promise<void> {
     console.log("2. every tool on it refuses before any I/O, or works without the media...");
     const OFFLINE = /^Can't render yet: clips? .*use files on the network computers? .*\\\\zr-evil-\d\.invalid.*An AI assistant cannot allow/;
     check((await rpc(core, "get_state")).result?.mediaServers?.gate === "enforce", "get_state carries mediaServers");
-    check((await rpc(core, "timeline_summary")).ok, "timeline_summary works");
+    // MUTATION: drop `offline` from summarizeTimeline's clip rows → this row fails.
+    const sum = await rpc(core, "timeline_summary");
+    const rows = new Map<string, any>((sum.result?.tracks ?? []).flatMap((t: any) => t.clips).map((c: any) => [c.clipId, c]));
+    const allow = (n: number) => `waiting for the user to allow \\\\${H(n)}`;
+    const want: [string, string | undefined][] = [
+      ["clip_local", undefined], ["clip_e1", allow(1)], ["clip_cut", allow(1)], ["clip_e2", allow(2)], ["clip_adj", `LUT: ${allow(2)}`],
+      ["clip_e3", `waiting for the user to keep \\\\${H(3)} (added outside ZabsReel)`], ["clip_e4", `waiting for the user to keep \\\\${H(4)} (added outside ZabsReel)`],
+    ];
+    const om = sum.result?.offlineMedia;
+    check(sum.ok && want.every(([id, text]) => rows.get(id)?.offline === text) && om?.count === 6 && [1, 2, 3, 4].every((n) => om.servers.includes(`\\\\${H(n)}`)) && om.music === allow(2),
+      `timeline_summary works and marks each offline clip with why, plus offlineMedia (${JSON.stringify([...rows.values()].map((c) => [c.clipId, c.offline]))}; ${JSON.stringify(om)})`);
     for (const [m, p] of [["render_preview", {}], ["inspect_timeline", {}], ["get_frame", {}], ["inspect_color", {}], ["export_video", { outputPath: join(root, "out.mp4") }]] as const) {
       const r = await rpc(core, m, p);
       const all = [1, 2, 3, 4].every((n) => r.error?.includes(`\\\\${H(n)}`)) && ["clip_e1", "clip_e2", "clip_cut"].every((c) => r.error?.includes(c));
@@ -518,6 +545,145 @@ async function enforcedSteps(): Promise<void> {
       `calling all ${called} methods with {} approves nothing, ${H(3)} and ${H(4)} stay outside, the store is unchanged (${JSON.stringify(after.approved)})`);
     const late = lines(traceFile).filter((l) => /zr-evil/i.test(JSON.stringify(l.args)));
     check(late.length === 0, `still no fs / child_process call named a test host (${JSON.stringify(late.slice(0, 2).map((l) => [l.fn, l.args]))})`);
+
+    // ---- 9.4 the MCP layer -------------------------------------------------------------------
+    // MUTATION: name a tool approve_media_server (or add one with "allow" in
+    // its name) → the tool-list row fails. Drop the "Offline media" paragraph
+    // from guide.ts → the instructions row fails. Drop the outside wording from
+    // rpc.ts offlineNotice → the notice row fails.
+    console.log("9.4 the MCP server: no tool can allow a server; load_project reports the offline media...");
+    const mcp = new Client({ name: "smoke-unc-e2e", version: "0.0.0" });
+    await mcp.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [mcpCli],
+        env: { ...(process.env as Record<string, string>), AIVE_CORE_URL: core.base, AIVE_CORE_TOKEN: core.token, AIVE_DATA_DIR: dataDir },
+        stderr: "ignore",
+      }),
+    );
+    try {
+      const { tools } = await mcp.listTools();
+      const tool = (n: string) => tools.find((t) => t.name === n);
+      const named = tools.filter((t) => /approv|trust|allow|grant/i.test(t.name)).map((t) => t.name);
+      check(tool("list_media_servers")?.annotations?.readOnlyHint === true && !!tool("recheck_offline_media") && named.length === 0,
+        `tools/list (${tools.length} tools): list_media_servers (read-only) and recheck_offline_media, no tool named like approve / trust / allow / grant (${JSON.stringify(named)})`);
+      const instructions = mcp.getInstructions() ?? "";
+      check(/## Offline media\n/.test(instructions) && instructions.includes("You cannot allow a server; no tool can.")
+        && instructions.includes("Never edit files in ZabsReel's data folder (such as trust/hosts.json) to allow a server"),
+        "the server's instructions carry the Offline media paragraph, with the do-not-edit sentence");
+      const text = (r: Awaited<ReturnType<typeof mcp.callTool>>) => (r.content as { text?: string }[]).map((c) => c.text ?? "").join("\n");
+      const lp = await mcp.callTool({ name: "load_project", arguments: { path: crafted } });
+      const lpNotice = lp.isError ? "" : String(JSON.parse(text(lp)).notice ?? "");
+      check(lpNotice.includes(`on \\\\${H(1)}, which the user hasn't allowed. They are offline.`) && lpNotice.includes(`\\\\${H(3)} is in ZabsReel's allowed list, but it was added outside ZabsReel`),
+        `load_project through MCP: the pending notice, and the outside notice for ${H(3)} (${lpNotice.slice(0, 200)})`);
+      const ms = await mcp.callTool({ name: "list_media_servers", arguments: {} });
+      const msText = text(ms);
+      const fields = (v: unknown): string[] => (v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...fields(x)]) : []);
+      const parsed = ms.isError ? {} : JSON.parse(msText);
+      check(Array.isArray(parsed.outside) && parsed.outside.length === 2 && !fields(parsed).some((k) => /^(stamp|key)$/i.test(k)) && !leaks(msText),
+        `list_media_servers through MCP: an outside array, no field named stamp or key, nothing of the key (${msText.replace(/\s+/g, " ").slice(0, 160)})`);
+      const sv = await mcp.callTool({ name: "save_project", arguments: { path: join(trustDir, "hosts.json") } });
+      check(sv.isError === true && /private settings folder/.test(text(sv)) && storeHash() === storeBefore, `save_project into trust/ through MCP is refused; the store is unchanged (${text(sv).slice(0, 100)})`);
+    } finally {
+      await mcp.close();
+    }
+
+    // ---- 5. the UI route works -------------------------------------------------------------
+    // MUTATION: drop the resume loop from onTrustChanged → zr-evil-1's colour
+    // probe and proxy never start, and the .otio placeholders keep `missing`.
+    // Drop the lazy check from requireMedia → generate_thumbnail on zr-evil-2's
+    // asset is refused with media_offline (fs.watch's 200 ms debounce has not
+    // run yet). Skip the stamp check → zr-evil-4 comes online with the Keep.
+    console.log("5. the UI route: approveHost (as the app calls it); the media comes online without a reload...");
+    const zr = (n: number) => new RegExp(`zr-evil-${n}\\.invalid`, "i");
+    const traces = (re: RegExp) => lines(traceFile).filter((l) => re.test(JSON.stringify(l.args))).length;
+    const stubs = (tool: string, re: RegExp) => lines(stubLog).filter((l) => l.tool === tool && re.test(JSON.stringify(l.args))).length;
+    const until = async (ok: () => boolean | Promise<boolean>, ms: number) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (await ok()) return true;
+        await sleep(50);
+      }
+      return ok();
+    };
+    const assetsNow = async () => new Map<string, any>(((await rpc(core, "get_state")).result.assets as any[]).map((a) => [a.id, a]));
+    const others = (...ns: number[]) => [2, 3, 4, 5, 6, 7, 8, 9].filter((n) => !ns.includes(n));
+    check((await rpc(core, "load_project", { path: crafted })).ok, "load_project of the crafted project again");
+    await approveHost(dataDir, H(1), "prompt");
+    const rc = await rpc(core, "recheck_offline_media");
+    let now = await assetsNow();
+    const on1 = ["asset_e1", "asset_cut", "asset_sfx"];
+    check(rc.ok && rc.result.approved.some((x: any) => x.host === H(1)) && on1.every((id) => now.get(id)?.awaitingServer === undefined)
+      && [["asset_e2", 2], ["asset_e3", 3], ["asset_e4", 4]].every(([id, n]) => now.get(id as string)?.awaitingServer === H(n as number)),
+      `recheck_offline_media: the ${H(1)} assets are online at once, the others still wait (${JSON.stringify([...now.values()].map((x) => [x.id, x.awaitingServer]))})`);
+    const resumed = await until(async () => (await assetsNow()).get("asset_e1")?.color !== undefined && stubs("ffmpeg", /a1\.mp4/) > 0, 5_000);
+    check(resumed && stubs("ffprobe", /a1\.mp4/) > 0, `its colour probe ran and its 4K proxy started (ffprobe ${stubs("ffprobe", /a1\.mp4/)}, ffmpeg ${stubs("ffmpeg", /a1\.mp4/)})`);
+    check(traces(zr(1)) > 0 && others().every((n) => traces(zr(n)) === 0),
+      `the trace now has ${H(1)} lines (${traces(zr(1))}: the trace works) and none for the other hosts (${JSON.stringify(others().map((n) => [n, traces(zr(n))]))})`);
+    // An .otio placeholder on a server allowed later is probed (the stub's canned 1 s 64x64) and loses `missing`.
+    const io5 = await rpc(core, "import_otio", { path: otio });
+    check(io5.ok && (io5.result.project.assets as any[]).every((x) => x.missing && x.awaitingServer === H(5)), `import_otio again: placeholders waiting for ${H(5)}`);
+    await approveHost(dataDir, H(5), "prompt");
+    await rpc(core, "recheck_offline_media");
+    const filled = await until(async () => [...(await assetsNow()).values()].every((x) => !x.missing && !x.awaitingServer && x.duration === 1 && x.width === 64), 5_000);
+    check(filled && traces(zr(5)) > 0, `the ${H(5)} placeholders are probed and filled in (${JSON.stringify([...(await assetsNow()).values()].map((x) => [x.id, x.missing, x.duration, x.width]))})`);
+    // No recheck: the next check of the asset re-reads the changed store (lazy reload).
+    check((await rpc(core, "load_project", { path: crafted })).ok, "load_project of the crafted project again");
+    await approveHost(dataDir, H(2), "prompt");
+    const th = await rpc(core, "generate_thumbnail", { assetId: "asset_e2" });
+    check(th.code !== "media_offline" && (await until(() => traces(zr(2)) > 0, 2_000)),
+      `without a recheck, generate_thumbnail on ${H(2)}'s asset goes through right after the approval (${th.status} ${th.code ?? ""} ${th.error?.slice(0, 100)})`);
+    // Keep (what a UI host does for an entry added outside ZabsReel): the entry is stamped, so it is approved.
+    await approveHost(dataDir, H(3), "prompt");
+    await rpc(core, "recheck_offline_media");
+    now = await assetsNow();
+    const kept = (await rpc(core, "list_media_servers")).result;
+    check(now.get("asset_e3")?.awaitingServer === undefined && now.get("asset_e4")?.awaitingServer === H(4) && kept.outside.map((o: any) => o.host).join() === H(4) && kept.approved.some((x: any) => x.host === H(3)),
+      `Keep of ${H(3)}: its asset is online and only ${H(4)} is still outside (${JSON.stringify(kept.outside)})`);
+    check((await until(() => traces(zr(3)) > 0, 5_000)) && traces(zr(4)) === 0, `the trace now has ${H(3)} lines (${traces(zr(3))}) and still none for ${H(4)}`);
+    // Look-alikes of the approved zr-evil-1.invalid (fullwidth ｚｒ, a zero-width space) still refuse the load.
+    const LOOK = /ｚｒ-evil|zr​-evil/i;
+    for (const [i, p] of [`\\\\ｚｒ-evil-1.invalid\\s\\a.mp4`, `\\\\zr​-evil-1.invalid\\s\\a.mp4`].entries()) {
+      const f = projectFile(`lookalike-${i}.aive`, { assets: [asset("asset_x", p)], tracks: [{ id: "track_v", kind: "video", index: 0, clips: [clip("clip_x", "asset_x", 0)] }] });
+      const r = await rpc(core, "load_project", { path: f });
+      check(!r.ok && /names the network computer .*, which ZabsReel can't use/.test(r.error ?? ""), `a look-alike of ${H(1)} does not load (${r.error?.slice(0, 120)})`);
+    }
+    check(!lines(traceFile).some((l) => LOOK.test(JSON.stringify(l.args))) && !lines(stubLog).some((l) => LOOK.test(JSON.stringify(l.args))), "no trace or stub-log line names a look-alike spelling");
+
+    // ---- 6. revoke ----------------------------------------------------------------------------
+    // MUTATION: keep a removed approval in HostTrust.reload → the assets stay
+    // online and the calls below open zr-evil-1.
+    console.log("6. revoke: the media is offline again and nothing opens it...");
+    check((await rpc(core, "load_project", { path: crafted })).ok, "load_project of the crafted project again");
+    // Step 5's background work (colour probes, proxies) settles first.
+    const settled = async () => {
+      const n = traces(/zr-evil/);
+      await sleep(1_000);
+      return (await rpc(core, "list_jobs", { activeOnly: true })).result.jobs.length === 0 && traces(/zr-evil/) === n;
+    };
+    check(await until(settled, 20_000), "step 5's background work finished");
+    await revokeHost(dataDir, H(1));
+    await rpc(core, "recheck_offline_media");
+    now = await assetsNow();
+    check(on1.every((id) => now.get(id)?.awaitingServer === H(1)) && now.get("asset_e2")?.awaitingServer === undefined,
+      `the ${H(1)} assets wait again; ${H(2)}'s stay online (${JSON.stringify(on1.map((id) => [id, now.get(id)?.awaitingServer]))})`);
+    const before = [traces(/zr-evil/), stubs("ffmpeg", /zr-evil/) + stubs("ffprobe", /zr-evil/)];
+    for (const [m, p] of [["render_preview", {}], ["inspect_timeline", {}], ["get_frame", {}], ["inspect_color", {}], ...g4.filter(([, q]) => q.assetId === "asset_e1" || q.clipId === "clip_e1")] as [string, Record<string, unknown>][]) {
+      const r = await rpc(core, m, p);
+      check(r.code === "media_offline" && (r.error ?? "").includes(`\\\\${H(1)}`), `${m} ${JSON.stringify(p)}: media_offline again, naming ${H(1)} (${r.code} ${r.error?.slice(0, 100)})`);
+    }
+    const ic6 = await rpc(core, "inspect_clip", { clipId: "clip_e1" });
+    const sum6 = await rpc(core, "timeline_summary");
+    const row6 = (sum6.result?.tracks ?? []).flatMap((t: any) => t.clips).find((c: any) => c.clipId === "clip_e1");
+    check(ic6.result?.offline?.host === H(1) && ic6.result.frames.length === 0 && row6?.offline === allow(1), `inspect_clip and timeline_summary show clip_e1 offline again (${row6?.offline})`);
+    for (const [route, q] of [["/file", {}], ["/frames", { from: "0", count: "1", w: "8", h: "8", fps: "30" }], ["/peaks", {}]] as const) {
+      const r = await get(core, route, { path: `//${H(1)}/s/a1.mp4`, ...q });
+      check(r.status === 403, `${route} of the revoked server's file: 403 (${r.status})`);
+    }
+    await sleep(500);
+    const after6 = [traces(/zr-evil/), stubs("ffmpeg", /zr-evil/) + stubs("ffprobe", /zr-evil/)];
+    check(after6.join() === before.join(), `after the revoke nothing opened a test host (trace and stub-log lines ${before.join("/")} → ${after6.join("/")})`);
+    check([4, 6, 7, 8, 9].every((n) => traces(zr(n)) === 0), "the servers never allowed (incl. the forged stamp's) were never touched");
   } finally {
     await stop(core);
   }
@@ -573,7 +739,7 @@ async function enforcedSteps(): Promise<void> {
 
 async function main() {
   process.exitCode = 1; // a run that stops early (an event loop that drains) never passes
-  if (!existsSync(cli)) throw new Error(`${cli} is missing: run npm run build first`);
+  for (const f of [cli, mcpCli]) if (!existsSync(f)) throw new Error(`${f} is missing: run npm run build first`);
   console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
   if (enforced) await enforcedSteps();
   else {

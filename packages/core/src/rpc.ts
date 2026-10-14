@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { EditorEngine } from "./engine.js";
 import { PRODUCT_NAME } from "./brand.js";
 import { MediaOfflineError, MediaServerNotApprovedError } from "./hosttrust.js";
-import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame } from "./types.js";
+import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame, type Clip } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
 import { EXPORT_PRESETS, EXPORT_PRESET_NAMES } from "./ffmpeg/graph.js";
@@ -149,6 +149,16 @@ const SPEED_RESULT_DOC =
 
 function summarizeTimeline(engine: EditorEngine) {
   const project = engine.getProject();
+  // Clips that can't be rendered or analysed now (7.4), and the servers they wait for.
+  const offlineClips = new Set<string>();
+  const servers = new Set<string>();
+  const offline = (clip: Clip) => {
+    const why = engine.clipOffline(clip);
+    if (!why) return undefined;
+    offlineClips.add(clip.id);
+    if (why.host) servers.add(`\\\\${why.host}`);
+    return why.text;
+  };
   const tracks = [...project.tracks]
     .sort((a, b) => a.index - b.index)
     .map((track) => ({
@@ -183,9 +193,13 @@ function summarizeTimeline(engine: EditorEngine) {
               }))
             : undefined,
           linkGroupId: clip.linkGroupId,
+          offline: offline(clip),
         };
       }),
     }));
+  const musicAsset = project.music ? project.assets.find((a) => a.id === project.music!.assetId) : undefined;
+  const music = musicAsset && engine.assetOffline(musicAsset);
+  if (music?.host) servers.add(`\\\\${music.host}`);
   return {
     name: project.name,
     projectFile: engine.getCurrentPath() ?? null,
@@ -198,6 +212,9 @@ function summarizeTimeline(engine: EditorEngine) {
     // The human↔AI annotation channel: named markers with notes.
     markers: project.markers ?? [],
     tracks,
+    ...(offlineClips.size || music
+      ? { offlineMedia: { count: offlineClips.size, servers: [...servers], ...(music ? { music: music.text } : {}) } }
+      : {}),
   };
 }
 
@@ -218,14 +235,14 @@ export const methods = {
 
   timeline_summary: {
     description:
-      "Return a compact, human-readable summary of the multi-track timeline: tracks (with stacking trackIndex, kind, mute/hide/lock), and per-clip frame positions/durations. Prefer this over get_state when reasoning about the edit. Times are in frames; the canvas carries fps.",
+      "Return a compact, human-readable summary of the multi-track timeline: tracks (with stacking trackIndex, kind, mute/hide/lock), and per-clip frame positions/durations. Prefer this over get_state when reasoning about the edit. Times are in frames; the canvas carries fps. A clip that can't be rendered or analysed now has `offline` (why: its file waits for the user to allow a network computer, was not found, …) and the summary then has `offlineMedia: {count, servers, music?}`; it works while media is offline.",
     schema: empty,
     handler: (engine) => summarizeTimeline(engine),
   },
 
   inspect_timeline: {
     description:
-      "THE VISION LOOP in one call: returns the timeline_summary (structure, in frames) AND a freshly rendered composited frame image at `atSeconds` (defaults to the midpoint) so you SEE the actual result. Call this after a batch of visual edits to verify structure + look together, then continue or fix.",
+      "THE VISION LOOP in one call: returns the timeline_summary (structure, in frames) AND a freshly rendered composited frame image at `atSeconds` (defaults to the midpoint) so you SEE the actual result. Call this after a batch of visual edits to verify structure + look together, then continue or fix. While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers.",
     schema: z.object({ atSeconds: z.number().min(0).optional() }).strict(),
     handler: async (engine, p) => ({ summary: summarizeTimeline(engine), frame: await engine.renderFrame(p.atSeconds) }),
   },
@@ -1140,14 +1157,14 @@ export const methods = {
   },
 
   render_preview: {
-    description: "Render a fast, lower-resolution preview of the entire timeline and return the output file path.",
+    description: "Render a fast, lower-resolution preview of the entire timeline and return the output file path. While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers.",
     schema: empty,
     handler: async (engine) => engine.renderPreview(),
   },
 
   export_video: {
     description:
-      "Render the final video to an absolute output path. Pick a per-platform `preset` (youtube, youtube_hevc, social=Reels/Shorts/TikTok, square, web=webm/vp9, master=near-lossless mov) and/or set fields directly: container (mp4|mov|webm), videoCodec (h264|h265|vp9), quality (CRF; lower=better/bigger), videoBitrate (e.g. '8M', overrides quality), preset/encoder speed, audioCodec (aac|opus), audioBitrate. Explicit fields override the named preset. Resolution & fps come from the canvas (set_project_settings). The output extension also implies the container. Default BLOCKS until done and returns {path, duration}. For long timelines (>~2 min) pass background:true — it returns {jobId} immediately; poll list_jobs for progress (fraction 0..1) and stop it with cancel_job. A canceled export deletes its partial file. `hardware: true` opts into GPU encoding (NVENC/QSV/AMF/VideoToolbox) — 2-10× faster but slightly lower quality-per-bit than the default software x264/x265; good for drafts and time-pressed deliveries, skip it for the final master. LOUDNESS: platform presets normalize the mix (youtube/social/square → -14 LUFS, web → -16, master → untouched); override with loudnessTarget (LUFS) + truePeak (dBTP, default -1.5), or pass a preset-less export for no normalization. The audio is always a stereo mix (mono clips play on both sides, surround clips are downmixed). COLOUR: sources are read as players read them (by their colour tags; untagged HD as BT.709, SD as BT.601) and the file is written BT.709 limited range with complete colour tags, so it plays with the same colours everywhere.",
+      "Render the final video to an absolute output path. Pick a per-platform `preset` (youtube, youtube_hevc, social=Reels/Shorts/TikTok, square, web=webm/vp9, master=near-lossless mov) and/or set fields directly: container (mp4|mov|webm), videoCodec (h264|h265|vp9), quality (CRF; lower=better/bigger), videoBitrate (e.g. '8M', overrides quality), preset/encoder speed, audioCodec (aac|opus), audioBitrate. Explicit fields override the named preset. Resolution & fps come from the canvas (set_project_settings). The output extension also implies the container. Default BLOCKS until done and returns {path, duration}. For long timelines (>~2 min) pass background:true — it returns {jobId} immediately; poll list_jobs for progress (fraction 0..1) and stop it with cancel_job. A canceled export deletes its partial file. `hardware: true` opts into GPU encoding (NVENC/QSV/AMF/VideoToolbox) — 2-10× faster but slightly lower quality-per-bit than the default software x264/x265; good for drafts and time-pressed deliveries, skip it for the final master. LOUDNESS: platform presets normalize the mix (youtube/social/square → -14 LUFS, web → -16, master → untouched); override with loudnessTarget (LUFS) + truePeak (dBTP, default -1.5), or pass a preset-less export for no normalization. The audio is always a stereo mix (mono clips play on both sides, surround clips are downmixed). COLOUR: sources are read as players read them (by their colour tags; untagged HD as BT.709, SD as BT.601) and the file is written BT.709 limited range with complete colour tags, so it plays with the same colours everywhere. While a clip it uses is offline (timeline_summary `offline`), it is refused with media_offline, listing the clips and servers.",
     schema: z
       .object({
         outputPath: z.string().min(1),

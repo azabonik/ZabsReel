@@ -75,8 +75,10 @@ jobs:
 
       # A real core process (the build above) with every fs and child_process
       # call traced and a logging FFmpeg stub: enforced, nothing names a test
-      # host and no rpc call can allow a server or read the stamp key; as
-      # shipped (log mode), a NAS path changes nothing and is only logged.
+      # host and no rpc or MCP tool can allow a server or read the stamp key,
+      # and a server allowed (or revoked) in the app takes effect without a
+      # reload; as shipped (log mode), a NAS path changes nothing and is only
+      # logged.
       - name: Smoke — network paths end to end (core process, traced)
         run: |
           AIVE_NETWORK_GATE=enforce npx tsx packages/core/scripts/smoke-unc-e2e.ts

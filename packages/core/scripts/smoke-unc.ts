@@ -78,7 +78,8 @@
  *                            is offline and a "would block" line is logged;
  *                            enforced, the asset is offline and pending; the
  *                            autosave of a project on such a server goes to
- *                            the recovery folder.
+ *                            the recovery folder; timeline_summary says why a
+ *                            clip is offline (not found; the unread state).
  *
  * Rows 5 and 6 check both modes: the network-path gate is "log" until the
  * user can allow a server in the app, and AIVE_NETWORK_GATE=enforce (CI) turns
@@ -1705,6 +1706,14 @@ async function main() {
       const e = await thrown(() => resolveFont(join(root, "render"), font, new Map(), "font.ttf"));
       check(!!e && /^Font ".*" (is a path ZabsReel never opens|is on \\\\zr-evil-9\.invalid, which hasn't been allowed)\.$/.test(e.message), `resolveFont refuses ${label} (${e?.message})`);
     }
+    // timeline_summary (7.4), in either mode: a clip whose file was not found says so, and offlineMedia counts it.
+    // MUTATION: drop the "file not found" case from engine.assetOffline → this row fails.
+    const gone = join(root, "gone.aive");
+    writeFixture(gone, JSON.stringify(project(join(root, "gone.mp4"), { missing: true })));
+    await engine.load(gone);
+    const gs = (await dispatch(engine, "timeline_summary", {})) as { tracks: { clips: { offline?: string }[] }[]; offlineMedia?: { count: number; servers: string[] } };
+    check(gs.tracks[0].clips[0].offline === "file not found" && gs.offlineMedia?.count === 1 && gs.offlineMedia.servers.length === 0,
+      `timeline_summary marks a clip whose file was not found (${gs.tracks[0].clips[0].offline}; ${JSON.stringify(gs.offlineMedia)})`);
   }
   if (enforced) {
     // The unread state (3.1), with the engine: nothing listed is trusted or outside; a load goes on with the asset
@@ -1727,6 +1736,10 @@ async function main() {
       const servers = engine.mediaServers();
       check(engine.getProject().assets[0].awaitingServer === "zr-ok-1.invalid" && JSON.stringify(servers.unread) === '["hosts.key"]' && servers.approved.length === 0 && servers.outside.length === 0 && !servers.pending.some((x) => x.origins.includes("outside")),
         `unread at start: the load goes on with the asset offline, nothing approved or outside, no outside origin (${JSON.stringify(servers)})`);
+      // MUTATION: drop the unread case from engine.offlineText → the summary row says "waiting for the user to allow".
+      const us = (await dispatch(engine, "timeline_summary", {})) as { tracks: { clips: { offline?: string }[] }[]; offlineMedia?: { servers: string[] } };
+      check(us.tracks[0].clips[0].offline === "ZabsReel couldn't read its list of approved computers; retrying" && us.offlineMedia?.servers.join() === "\\\\zr-ok-1.invalid",
+        `timeline_summary while unread: the clip's offline text is the unread one (${us.tracks[0].clips[0].offline}; ${JSON.stringify(us.offlineMedia)})`);
       const thumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
       check(thumb instanceof RpcError && thumb.code === "media_offline" && /couldn't read its list of approved computers/.test(thumb.message), `generate_thumbnail refuses with media_offline and the unread wording (${thumb?.message.slice(0, 140)})`);
       const imp = await thrown(() => dispatch(engine, "import_video", { path: "//zr-ok-1.invalid/s/b.mp4" }));

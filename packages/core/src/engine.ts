@@ -137,6 +137,16 @@ function clamp(n: number, lo: number, hi: number): number {
 const PROXY_TRIGGER_LONG_EDGE = 1920;
 
 /**
+ * The import rule for a background proxy, for media that comes online after
+ * a load (a server allowed, a placeholder probed): a large source, or one
+ * whose recorded colour a Chromium reads unlike the export. Not when it has one.
+ */
+function wantsProxy(a: MediaAsset): boolean {
+  if (!a.hasVideo || a.proxyPath) return false;
+  return Math.max(a.width, a.height) > PROXY_TRIGGER_LONG_EDGE || (!a.isImage && !!a.color && needsTaggedProxy(a));
+}
+
+/**
  * Sensible default text styling for when the AI/user doesn't specify it: a crisp,
  * universally-legible "bold social" look — size proportional to the canvas height,
  * with a black outline + soft drop shadow so it reads on ANY footage (no heavy box
@@ -817,10 +827,25 @@ export class EditorEngine extends EventEmitter {
    * The approved servers changed (a store re-read: fs.watch, a check's lazy
    * reload, the unread retry) or recheck_offline_media asked: mark the media
    * again (G3), re-check the fields whose folder could not be checked, and
-   * tell the clients. The project is not reloaded and not made unsaved (I5).
+   * tell the clients. Media that came online resumes (7.5): an offline .otio
+   * placeholder is probed, colour probes and proxies start. A revoked server's
+   * media goes offline again; its local proxies stay but are not used. The
+   * project is not reloaded and not made unsaved (I5).
    */
   onTrustChanged(): void {
-    if (this.remark(true)) this.emit("change", this.project);
+    const waited = new Set(this.project.assets.filter((a) => a.awaitingServer).map((a) => a.id));
+    if (!this.remark(true)) return;
+    this.emit("change", this.project);
+    let colors = false;
+    for (const a of this.project.assets) {
+      if (!waited.has(a.id) || a.awaitingServer || a.pathCheckFailed) continue;
+      if (a.missing) void this.reprobePlaceholder(a.id, a.path);
+      else {
+        colors = true;
+        if (wantsProxy(a)) this.proxyInBackground(a.id);
+      }
+    }
+    if (colors) void this.probeUnrecordedColors();
   }
 
   /**
@@ -906,7 +931,10 @@ export class EditorEngine extends EventEmitter {
         changed = true;
       }
     }
-    if (changed) this.emit("change", this.project);
+    if (!changed) return;
+    this.emit("change", this.project);
+    const now = this.project.assets.find((a) => a.id === id);
+    if (now && wantsProxy(now)) this.proxyInBackground(id);
   }
 
   /** Why an offline asset's file can't be used, for an error message (7.3). */
@@ -930,8 +958,67 @@ export class EditorEngine extends EventEmitter {
     return `its file was not found at ${JSON.stringify(a.path)}. Re-import or relink it, or remove_asset it.`;
   }
 
+  /**
+   * timeline_summary's `offline` text for what a clip uses (7.4), or
+   * undefined: its own media first, then a LUT, a text or caption font, an
+   * overlay graphic or a custom bleep sound ("LUT: …"). The music is
+   * `offlineMedia.music`, through `assetOffline`. Opens no media.
+   */
+  clipOffline(clip: Clip): { text: string; host?: string } | undefined {
+    const own = clip.adjustment ? undefined : this.clipAsset(clip);
+    if (own && isOffline(own)) return this.assetOffline(own);
+    const paths: [string, string | undefined][] = [["LUT", clip.effects?.lut]];
+    for (const ov of clip.overlays ?? []) paths.push(["text font", ov.font?.trim()]);
+    if (clip.captions?.cues.length) paths.push(["caption font", clip.captions.style?.font?.trim()]);
+    for (const [what, p] of paths) {
+      const why = this.sidePathOffline(p);
+      if (why) return { text: `${what}: ${why.refused ? `a path ${PRODUCT_NAME} never opens` : this.offlineText(why)}`, ...(why.host ? { host: why.host } : {}) };
+    }
+    const ids: [string, string | undefined][] = [];
+    for (const g of clip.graphics ?? []) ids.push(["graphic", g.assetId]);
+    for (const b of clip.effects?.bleeps ?? []) ids.push(["bleep sound", b.sfxAssetId]);
+    for (const [what, id] of ids) {
+      const a = id ? this.project.assets.find((x) => x.id === id) : undefined;
+      const why = a && isOffline(a) ? this.assetOffline(a) : undefined;
+      if (why) return { ...why, text: `${what}: ${why.text}` };
+    }
+    return undefined;
+  }
+
+  /** Why an offline asset can't be used, as a short phrase (timeline_summary), with its server; undefined when it is online. */
+  assetOffline(a: MediaAsset): { text: string; host?: string } | undefined {
+    if (!isOffline(a)) return undefined;
+    if (a.awaitingServer) return { text: this.offlineText({ host: a.awaitingServer }), host: a.awaitingServer };
+    if (a.pathCheckFailed) {
+      const c = classifyPath(a.path);
+      const on = c.kind === "network" ? { host: c.host } : {};
+      return { text: this.offlineText({ code: a.pathCheckFailed, ...on }), ...on };
+    }
+    return { text: "file not found" };
+  }
+
+  /** The short phrase for a file on a server not allowed (`host`) or whose folder could not be checked (`code`). */
+  private offlineText(why: { host?: string; code?: string }): string {
+    const at = why.host ? `\\\\${why.host}` : "";
+    if (why.code === "private") return `in ${PRODUCT_NAME}'s private settings folder`;
+    if (why.code) return `couldn't check its folder${at ? ` on ${at}` : ""} (${why.code})`;
+    if (this.trust.isUnread()) return `${PRODUCT_NAME} couldn't read its list of approved computers; retrying`;
+    if (this.trust.isOutside(why.host!)) return `waiting for the user to keep ${at} (added outside ${PRODUCT_NAME})`;
+    return `waiting for the user to allow ${at}`;
+  }
+
+  /**
+   * Check the server an asset waits for: when the store changed since the
+   * asset was marked (an approval with no re-check yet), the check re-reads
+   * it (lazy reload), which marks the media again (onTrustChanged).
+   */
+  private recheckWaiting(asset: MediaAsset): void {
+    if (asset.awaitingServer) this.trust.isAllowed(asset.awaitingServer);
+  }
+
   /** G4: `asset`, or a MediaOfflineError when its file may not or can't be opened (`isOffline`). */
   private requireMedia(asset: MediaAsset): MediaAsset {
+    this.recheckWaiting(asset);
     if (!isOffline(asset)) return asset;
     throw new MediaOfflineError(`Asset "${asset.name}" is offline: ${this.offlineWhy(asset)}`, asset.awaitingServer ? [asset.awaitingServer] : []);
   }
@@ -965,6 +1052,8 @@ export class EditorEngine extends EventEmitter {
    * never changes. A `missing` asset keeps today's behaviour (FFmpeg fails on it).
    */
   private assertTimelineOnline(): void {
+    // As requireMedia (recheckWaiting), once per server: one allowed since the media was marked is picked up first.
+    for (const h of new Set(this.project.assets.map((a) => a.awaitingServer))) if (h) this.trust.isAllowed(h);
     const waiting = new Map<string, string[]>();
     const unchecked = new Map<string, { code: string; host?: string }>();
     const refused: string[] = [];
@@ -6424,6 +6513,7 @@ export class EditorEngine extends EventEmitter {
     const durSec = framesToSeconds(durationFrames, fps);
 
     // An offline clip is described, not rendered: no frames, and why (7.3).
+    this.recheckWaiting(asset);
     const offline = isOffline(asset) ? { ...(asset.awaitingServer ? { host: asset.awaitingServer } : {}), reason: this.offlineWhy(asset) } : undefined;
     const n = offline ? 0 : Math.max(1, Math.min(5, Math.round(frameCount)));
     const frames: string[] = [];
