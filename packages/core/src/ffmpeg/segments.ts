@@ -28,8 +28,9 @@ const TEMPORAL_EFFECTS = new Set(["trails", "denoise"]);
  * 12: that guard pads before the effects (a clip whose video ends early keeps its length); a ramp holds its last frame to its footprint.
  * 13: player-accurate source colour reading, RGBA compositing and tagged BT.709 output (ffmpeg/colorspace.ts).
  * 14: a shape-masked clip keeps its last frame on FFmpeg 4.4 (the mask's alphamerge sits inside the end guard of 11/12).
+ * 15: a colour (eq) graded clip keeps the black base; the opaque-base shortcut of 14 could cache grey end-guard frames where the video ends early.
  */
-const CACHE_VERSION = 14;
+const CACHE_VERSION = 15;
 
 const MIN_SEG = 2; // seconds — merge primitives up to at least this
 const MAX_SEG = 10; // seconds — stop merging past this
@@ -140,7 +141,7 @@ export function segmentKey(
         ? { ...c.effects, audioFilters: undefined, pitchFallback: undefined, loudness: undefined, audioCaps: undefined }
         : c.effects,
     startSec: Number((c.startSec - seg.start).toFixed(6)),
-    // The opaque-base shortcut renders the same pixels (graph.ts fillsCanvasOpaque): cached segments stay valid.
+    // The opaque-base shortcut renders the same pixels (graph.ts fillsCanvasOpaque; an eq grade is excluded, see 15): cached segments stay valid.
     opaque: undefined,
     mtime: mtimes[c.path] ?? -1,
     graphicMtimes: (c.graphics ?? []).map((g) => mtimes[g.path] ?? -1),

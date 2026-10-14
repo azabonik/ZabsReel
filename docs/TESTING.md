@@ -161,9 +161,10 @@ npx tsx packages/core/scripts/smoke-cache.ts
 
 # Opaque-base shortcut: an opaque, untransformed, canvas-filling bottom clip is its
 # own base (no black base + overlay); alpha sources, transforms, transitions, fades,
-# opacity, masks, stills, crops and other aspects keep the black base. A rendered
-# clip, as an export and as a segment, gives framemd5-identical frames with the
-# shortcut and without it (self-synthesizes media)
+# opacity, masks, stills, crops, other aspects and a colour (eq) grade keep the black
+# base. A plain rendered clip, as an export and as segments, gives framemd5-identical
+# frames with the shortcut and without it; a colour-graded clip keeps the black base
+# whether or not it is flagged opaque (self-synthesizes media)
 npx tsx packages/core/scripts/smoke-opaque-base.ts
 
 # Loudness normalization on export (ebur128 verification), adjustment layers,

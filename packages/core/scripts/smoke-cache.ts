@@ -16,7 +16,7 @@ import { EditorEngine } from "../src/engine.js";
 import { planSegments, segmentKey } from "../src/ffmpeg/segments.js";
 import { PREVIEW_PROFILE } from "../src/ffmpeg/graph.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
-import { ffmpegVersionLine, runFfmpeg } from "../src/ffmpeg/executor.js";
+import { ffmpegVersionLine, runFfmpeg, runFfprobe } from "../src/ffmpeg/executor.js";
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), "aive-cache-"));
@@ -132,11 +132,26 @@ async function main() {
     const h264 = join(dataDir, "plain.mp4");
     const ffv1 = join(dataDir, "alpha.mkv");
     // QuickTime 4:4:4:4: FFmpeg 4.4.2 decodes it as yuva444p, 8.1 as uyva (a format hasAlpha's list misses).
+    // 9.0 removed the v408 encoder: rawvideo tagged v408 from uyva writes the identical stream.
     const v408 = join(dataDir, "alpha-v408.mov");
     const swap = join(dataDir, "swap.mkv");
     await synth(h264, "yuv420p", ["-c:v", "libx264", "-preset", "veryfast"]);
     await synth(ffv1, "yuva420p", ["-c:v", "ffv1"]);
-    await synth(v408, "yuva444p", ["-c:v", "v408"]);
+    let v408Path = "encoder";
+    await synth(v408, "yuva444p", ["-c:v", "v408"]).catch(async (err: unknown) => {
+      if (!/Unknown encoder 'v408'/.test(`${err instanceof Error ? err.message : ""}\n${(err as { stderr?: string }).stderr ?? ""}`)) throw err;
+      v408Path = "rawvideo fallback";
+      await synth(v408, "uyva", ["-c:v", "rawvideo", "-tag:v", "v408"]);
+    });
+    const v408Probe = (
+      JSON.parse(await runFfprobe(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,codec_tag_string,pix_fmt", "-of", "json", v408])) as {
+        streams: { codec_name: string; codec_tag_string: string; pix_fmt: string }[];
+      }
+    ).streams[0];
+    check(
+      v408Probe.pix_fmt === "yuva444p" || v408Probe.pix_fmt === "uyva",
+      `v408 fixture keeps its alpha (${v408Path}: ${v408Probe.codec_name}, ${v408Probe.codec_tag_string}, ${v408Probe.pix_fmt})`,
+    );
     await synth(swap, "yuv420p", ["-c:v", "libx264", "-preset", "veryfast"]);
     for (const p of [h264, ffv1, v408, swap]) oEngine.appendClip((await oEngine.importVideo(p)).id);
     type Staging = { stageRender(c: typeof oEngine.canvas): Promise<{ clips: { path: string; opaque?: boolean }[] }> };
