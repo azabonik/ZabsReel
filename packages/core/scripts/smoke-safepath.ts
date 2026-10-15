@@ -44,7 +44,7 @@ import { dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { EditorEngine } from "../src/engine.js";
-import { runFfmpeg, runFfprobe, guardFfmpegArgs, guardFfprobeArgs, ffmpegArgsLocalOnly, filterGraphNames, addFfmpegWorkRoot } from "../src/ffmpeg/executor.js";
+import { runFfmpeg, runFfprobe, guardFfmpegArgs, guardFfprobeArgs, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, filterGraphNames, addFfmpegWorkRoot } from "../src/ffmpeg/executor.js";
 import {
   safeFileStem,
   isLocalMediaPath,
@@ -469,8 +469,13 @@ async function main() {
     };
     const ffErr = await whitelistRefusal(() => runFfmpeg(["-f", "concat", "-safe", "0", "-i", dataList, "-f", "null", "-"]));
     check(/not on whitelist 'file,pipe,fd'/.test(ffErr), `runFfmpeg: FFmpeg refuses a data: entry in a concat list (${ffErr.slice(0, 120).trim()})`);
+    // ffprobe's input also gets the format allowlist (MEDIA_DEMUXERS, which has no
+    // concat), so a forced -f concat list is refused before any entry opens; its
+    // protocol whitelist is still passed before the input.
     const fpErr = await whitelistRefusal(() => runFfprobe(["-v", "error", "-f", "concat", "-safe", "0", "-show_format", dataList]));
-    check(/not on whitelist 'file,pipe,fd'/.test(fpErr), `runFfprobe: ffprobe refuses a data: entry in a concat list (${fpErr.slice(0, 120).trim()})`);
+    check(/Format not on whitelist/.test(fpErr) && !/\(no error/.test(fpErr), `runFfprobe: ffprobe refuses a concat list with a data: entry (${fpErr.slice(0, 120).trim()})`);
+    const fpArgs = ffprobeArgsLocalOnly(["-v", "error", "-show_format", dataList]);
+    check(fpArgs.slice(-3).join(" ") === `-protocol_whitelist file,pipe,fd ${dataList}`, `ffprobeArgsLocalOnly still passes -protocol_whitelist file,pipe,fd before the input (${fpArgs.slice(-3).join(" ")})`);
     const wl = ffmpegArgsLocalOnly(["-f", "lavfi", "-i", "anullsrc", "-i", "/a.mp4", "-map", "1", "-y", "/o.mp4"]);
     check(wl.filter((a) => a === "-protocol_whitelist").length === 2 && wl[wl.indexOf("/a.mp4") - 3] === "-protocol_whitelist",
       `ffmpegArgsLocalOnly puts the whitelist before every -i (${wl.join(" ")})`);

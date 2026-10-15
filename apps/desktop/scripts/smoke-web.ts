@@ -27,6 +27,12 @@
 // PLAYWRIGHT_CHROMIUM=<chrome binary> override the search (npx caches,
 // ~/.cache/ms-playwright), as in parity-gl.mts.
 //
+// The page's network limits (X3): index.html carries the CSP meta tag and the
+// shell sends the same policy as a header with the core's exact port; in the
+// page a media element pointed at the core's address on another port, or at
+// another computer, raises a media-src violation and makes no request. /file
+// answers 415 for a playlist.
+//
 // Run:  npx tsx apps/desktop/scripts/smoke-web.ts
 
 import { spawn, spawnSync } from "node:child_process";
@@ -36,6 +42,9 @@ import net from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+// The page's Content-Security-Policy (the shell sends it with the core's port).
+const netGuard = require("../electron/net-guard.cjs") as { rendererCsp: (port?: number) => string };
 
 type PW = typeof import("playwright-core");
 type Page = Awaited<ReturnType<Awaited<ReturnType<PW["chromium"]["launch"]>>["newPage"]>>;
@@ -209,6 +218,10 @@ async function main() {
     const index = await request(port, "/");
     check("GET / serves index.html", index.status === 200 && /text\/html/.test(String(index.headers["content-type"])) && index.body.includes('id="root"'));
     check("index forbids framing", /frame-ancestors 'none'/.test(String(index.headers["content-security-policy"])));
+    // MUTATION: send rendererCsp() (any port) instead of the core's port from server.cjs → this row and 7's other-port row fail.
+    const wantCsp = `frame-ancestors 'none'; ${netGuard.rendererCsp(corePort)}`;
+    check("index's CSP header limits media, images and requests to itself and the core's exact port", index.headers["content-security-policy"] === wantCsp, String(index.headers["content-security-policy"]));
+    check("…and the page carries the CSP meta tag (any core port)", index.body.includes(`<meta http-equiv="Content-Security-Policy" content="${netGuard.rendererCsp()}" />`));
     check("index sends no Referer (URL carries the token)", index.headers["referrer-policy"] === "no-referrer");
     check("launch URL carries core port + token", ready.coreOwned && new URL(ready.url).searchParams.get("port") === String(corePort) && token.length > 10);
     check("…and the shell key, which is not the core token", shellKey.length >= 32 && shellKey !== token);
@@ -264,6 +277,11 @@ async function main() {
     check("import_video accepts the picked path", imp.status === 200 && json(imp).ok === true, imp.body.slice(0, 200));
     const stream = await request(corePort, `/file?path=${encodeURIComponent(picked)}&token=${encodeURIComponent(token)}`, { headers: { range: "bytes=0-99" } });
     check("core streams it with Range (video seeking)", stream.status === 206);
+    // A browser's own HLS player would fetch every segment a playlist names: /file refuses one (smoke-unc row 18).
+    const playlist = join(dataDir, "renamed-playlist.mp4");
+    writeFileSync(playlist, "#EXTM3U\n#EXTINF:1.0,\n//zr-csp.invalid/s/seg0.ts\n");
+    const hls = await request(corePort, `/file?path=${encodeURIComponent(playlist)}&token=${encodeURIComponent(token)}`);
+    check("/file answers 415 for a playlist, whatever its name", hls.status === 415 && json(hls).error === "ZabsReel can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.", `${hls.status} ${hls.body.slice(0, 160)}`);
 
     await networkComputers({ port, corePort, token, shellKey, ready, root, dataDir, traceFile, clip });
 
@@ -439,6 +457,21 @@ async function networkComputers(o: {
     const a = await open();
     need(await waitFor("Core pill", async () => (await a.locator(".statuspill.ok").count()) > 0), "the page connects to the core");
     expect(!a.url().includes("token=") && !a.url().includes("shell="), `the page takes the token and the shell key out of the address bar (${a.url()})`);
+    // The CSP (header with the core's exact port, and the meta tag): media from the core's address on
+    // another port, or from another computer, is refused before any request is made.
+    const otherPort = corePort === 65535 ? corePort - 1 : corePort + 1;
+    const cspRequests: string[] = [];
+    a.on("request", (q) => { if (q.url().includes("zr-csp.invalid") || q.url().includes(`:${otherPort}/`)) cspRequests.push(q.url()); });
+    for (const src of [`http://127.0.0.1:${otherPort}/file?path=x`, "http://zr-csp.invalid/a.mp4"]) {
+      const v = await a.evaluate((src) => new Promise<{ directive: string; uri: string } | null>((res) => {
+        document.addEventListener("securitypolicyviolation", (e) => res({ directive: e.effectiveDirective, uri: e.blockedURI }), { once: true });
+        const el = document.createElement("video");
+        el.src = src;
+        setTimeout(() => res(null), 5000);
+      }), src);
+      expect(v?.directive === "media-src" && src.startsWith(v.uri.replace(/\/$/, "")), `a media element pointed at ${src.split("/file")[0].replace("/a.mp4", "")} raises a media-src violation (${JSON.stringify(v)})`);
+    }
+    expect(cspRequests.length === 0, `…and no request is made (${cspRequests.join(", ") || "none"})`);
     const banner = (p: Page) => p.locator(".ms-banner").innerText().catch(() => "");
     const badgeLabel = (p: Page) => p.locator(".asset-card.offline .offline-badge").first().getAttribute("aria-label").catch(() => null);
     const dialog = (p: Page) => p.getByRole("alertdialog");

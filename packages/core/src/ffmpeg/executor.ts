@@ -476,11 +476,12 @@ export function guardFfmpegArgs(args: readonly string[], cwd?: string): void {
         continue;
       }
       if (fmt === "concat") continue;
-      if (input === "-" || /^pipe:\d*$/.test(input)) continue;
+      if (isPipeInput(input)) continue;
       assertFfmpegInputLocal(input, "ffmpeg -i input");
     } else {
       const opt = ffmpegOption(a);
       if (!opt) continue;
+      assertNoInputLimitOption(a, opt.base);
       // A graph read from a file can't be checked here; the core always passes
       // graphs inline (runFfmpeg moves a long one into its own file only after
       // this check), so a file-reading graph option can only be injected.
@@ -508,8 +509,30 @@ function assertFfmpegInputLocal(input: string, where: string): void {
   // Has a colon but is not a protocol (a Windows drive path C:\…) — allowed.
 }
 
+/** The core's own pipe as an input: `-` or `pipe:N`. */
+function isPipeInput(input: string | undefined): boolean {
+  return input === "-" || (input !== undefined && /^pipe:\d*$/.test(input));
+}
+
+/**
+ * Options that widen what an input may open: the two allowlists, which only
+ * {@link ffmpegArgsLocalOnly} / {@link ffprobeArgsLocalOnly} set (after the
+ * guard), and the QuickTime reference options, which would let a .mov open
+ * the files its references name (both off by default on FFmpeg 4.4 – 9.0).
+ */
+const INPUT_LIMIT_OPTIONS: ReadonlySet<string> = new Set(["format_whitelist", "protocol_whitelist", "enable_drefs", "use_absolute_path"]);
+
+/** Refuse `arg` (base name `base`) when it is one of {@link INPUT_LIMIT_OPTIONS}. */
+function assertNoInputLimitOption(arg: string, base: string): void {
+  if (INPUT_LIMIT_OPTIONS.has(base)) throw new Error(`Refusing ffmpeg option ${arg}: ${PRODUCT_NAME} sets FFmpeg's input limits itself.`);
+}
+
 /** Guard ffprobe args: the media file is the LAST positional argument. */
 export function guardFfprobeArgs(args: readonly string[]): void {
+  for (const a of args) {
+    const opt = ffmpegOption(a);
+    if (opt) assertNoInputLimitOption(a, opt.base);
+  }
   const last = args[args.length - 1];
   if (typeof last === "string") assertFfmpegInputLocal(last, "ffprobe input");
 }
@@ -582,30 +605,65 @@ function concatListFiles(list: string): string[] {
 export const PROTOCOL_WHITELIST = "file,pipe,fd";
 
 /**
- * `args` checked by {@link guardFfmpegArgs} and with `-protocol_whitelist`
- * before every `-i`, so FFmpeg itself refuses any input that is not a local
- * file or pipe even where the TypeScript guard reads the input name differently
- * from FFmpeg. Every ffmpeg spawn in the core goes through this; pass the
- * spawn's `cwd` when its graph names files. The added flags are not part of
- * any cache key (segmentKey hashes clip data, not args).
+ * The only input formats (demuxers) FFmpeg/ffprobe may open, as their
+ * `-format_whitelist`. A media file names no other file, but a playlist,
+ * manifest or list does (HLS, DASH, ffconcat, IMF, an AviSynth script, an SDP
+ * file …), and FFmpeg picks the demuxer from the content, not the name: a
+ * playlist renamed to .mov is read as a playlist, and the `file` protocol then
+ * opens what it names, a network path included (on Windows that signs in to
+ * the server). FFmpeg checks this list right after it detects the format,
+ * before it reads anything the file names. A demuxer is accepted when any of
+ * its own names is listed (`mov` covers mov,mp4,m4a,3gp,3g2,mj2), and a name
+ * a build lacks is harmless. Being an allowlist, a demuxer a later FFmpeg adds
+ * is refused until it is added here, which happens only with a sample that
+ * scripts/smoke-demuxers.ts probes and decodes. Nested opens inherit it.
+ */
+export const MEDIA_DEMUXERS =
+  "mov,mp4,matroska,webm,avi,mpegts,mpeg,flv,asf,mxf,dv,ogg,nut,ivf,h264,hevc," +
+  "yuv4mpegpipe,wav,w64,mp3,aac,ac3,eac3,flac,aiff,caf,amr,wv,gif,image2," +
+  "png_pipe,jpeg_pipe,bmp_pipe,webp_pipe,tiff_pipe,ppm_pipe,pgm_pipe,dpx_pipe," +
+  "exr_pipe,jpegxl_pipe,svg_pipe,dts,truehd,mlp,mpegvideo,m4v,mjpeg,obu,au," +
+  "hdr_pipe,j2k_pipe,pbm_pipe,pcx_pipe,qoi_pipe,sgi_pipe,xwd_pipe";
+
+/** The -format_whitelist for the input at args[i] ("-i"), or null for one ZabsReel builds itself. */
+function formatWhitelistFor(args: readonly string[], i: number): string | null {
+  const f = inputFormat(args, i)?.toLowerCase();
+  if (f === "lavfi") return null; // a graph, checked by G7
+  if (f === "rawvideo" && isPipeInput(args[i + 1])) return null; // the core's own pipe
+  if (f === "concat") return `concat,${MEDIA_DEMUXERS}`; // nested opens inherit it
+  return MEDIA_DEMUXERS; // detected, or any other forced format
+}
+
+/**
+ * `args` checked by {@link guardFfmpegArgs} and with `-format_whitelist`
+ * ({@link formatWhitelistFor}) and `-protocol_whitelist` before every `-i`, so
+ * FFmpeg itself refuses any input that is not a local media file or pipe even
+ * where the TypeScript guard reads the input name differently from FFmpeg.
+ * Every ffmpeg spawn in the core goes through this; pass the spawn's `cwd`
+ * when its graph names files. The added flags are not part of any cache key
+ * (segmentKey hashes clip data, not args).
  */
 export function ffmpegArgsLocalOnly(args: readonly string[], cwd?: string): string[] {
   guardFfmpegArgs(args, cwd);
   assertArgvReachable(args, cwd);
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "-i" && i + 1 < args.length) out.push("-protocol_whitelist", PROTOCOL_WHITELIST);
+    if (args[i] === "-i" && i + 1 < args.length) {
+      const formats = formatWhitelistFor(args, i);
+      if (formats !== null) out.push("-format_whitelist", formats);
+      out.push("-protocol_whitelist", PROTOCOL_WHITELIST);
+    }
     out.push(args[i]);
   }
   return out;
 }
 
-/** {@link ffmpegArgsLocalOnly} for ffprobe: the whitelist goes before the input (the last argument). */
+/** {@link ffmpegArgsLocalOnly} for ffprobe: both whitelists go before the input (the last argument). */
 export function ffprobeArgsLocalOnly(args: readonly string[]): string[] {
   guardFfprobeArgs(args);
   assertArgvReachable(args);
   if (args.length === 0) return [];
-  return [...args.slice(0, -1), "-protocol_whitelist", PROTOCOL_WHITELIST, args[args.length - 1]];
+  return [...args.slice(0, -1), "-format_whitelist", MEDIA_DEMUXERS, "-protocol_whitelist", PROTOCOL_WHITELIST, args[args.length - 1]];
 }
 
 export class FfmpegError extends Error {
@@ -617,6 +675,34 @@ export class FfmpegError extends Error {
     super(message);
     this.name = "FfmpegError";
   }
+}
+
+/** What the user is told when FFmpeg refuses an input's format ({@link MEDIA_DEMUXERS}). */
+export const NOT_MEDIA_TEXT = `${PRODUCT_NAME} can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.`;
+
+/** An input FFmpeg refused because its format is not on {@link MEDIA_DEMUXERS}. */
+export class NotMediaError extends FfmpegError {
+  constructor(message: string, command: string, stderr: string) {
+    super(message, command, stderr);
+    this.name = "NotMediaError";
+  }
+}
+
+/**
+ * True when FFmpeg's stderr says an input's format is not on the allowlist.
+ * The text is the only stable part: FFmpeg 8.1+ prints it under `[in#0 @ …]`
+ * and may leave out the list.
+ */
+export function notMediaFrom(stderr: string): boolean {
+  return stderr.includes("Format not on whitelist");
+}
+
+/** The {@link NotMediaError} for a refused run: the product sentence, then FFmpeg's line naming the file. */
+function notMediaError(command: string, stderr: string): NotMediaError {
+  // 7.0+ names the file in "Error opening input file <f>." (and may add a summary line after it); 4.4 in "<f>: Invalid argument".
+  const lines = ffmpegStderrDetail(stderr, 5, 2000).split(" | ");
+  const detail = (lines.find((l) => l.startsWith("Error opening input file ")) ?? lines[lines.length - 1]).replace(/\.$/, "");
+  return new NotMediaError(`${NOT_MEDIA_TEXT}${detail ? ` (${detail}.)` : ""}`, command, stderr);
 }
 
 /**
@@ -633,7 +719,9 @@ export function ffmpegStderrDetail(stderr: string, maxLines = 5, maxChars = 600)
     .map((l) => l.trim())
     .filter(Boolean)
     // Drop the version/config banner and benign progress lines.
-    .filter((l) => !/^(ffmpeg version|built with|configuration:|lib\w+\s+\d|Input #|Stream #|Press \[q\]|frame=|size=|video:|audio:|Output #|Metadata:)/i.test(l));
+    .filter((l) => !/^(ffmpeg version|built with|configuration:|lib\w+\s+\d|Input #|Stream #|Press \[q\]|frame=|size=|video:|audio:|Output #|Metadata:)/i.test(l))
+    // and a format allowlist refusal, which would print every name on the list (NotMediaError says it instead).
+    .filter((l) => !l.includes("Format not on whitelist"));
   const tail = lines.slice(-maxLines).join(" | ");
   return tail.length > maxChars ? `…${tail.slice(-maxChars)}` : tail;
 }
@@ -658,6 +746,7 @@ export async function runFfprobe(args: string[]): Promise<string> {
     return stdout;
   } catch (err: unknown) {
     const e = err as { stderr?: string; shortMessage?: string; message?: string };
+    if (notMediaFrom(e.stderr || "")) throw notMediaError(`${FFPROBE_BIN} ${args.join(" ")}`, e.stderr || "");
     throw new FfmpegError(
       `ffprobe failed: ${e.shortMessage || e.message || "unknown error"}`,
       `${FFPROBE_BIN} ${args.join(" ")}`,
@@ -895,6 +984,7 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
     if (e.isCanceled) {
       throw new FfmpegError("ffmpeg render canceled", `${FFMPEG_BIN} ${args.join(" ")}`, e.stderr || "");
     }
+    if (notMediaFrom(e.stderr || "")) throw notMediaError(`${FFMPEG_BIN} ${args.join(" ")}`, e.stderr || "");
     const detail = ffmpegStderrDetail(e.stderr || "");
     throw new FfmpegError(
       `ffmpeg failed${detail ? `: ${detail}` : `: ${e.shortMessage || e.message || "unknown error"}`}`,
@@ -909,12 +999,16 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
  * pipe rawvideo to `pipe:1`, e.g. reading the mean RGB of a frame as 3 bytes).
  */
 export async function runFfmpegStdoutBuffer(args: string[]): Promise<Buffer> {
-  const { stdout } = await execa(FFMPEG_BIN, ffmpegArgsLocalOnly(await adaptFfmpegArgs(args)), {
-    reject: true,
-    encoding: "buffer",
-    env: CHILD_ENV,
-  });
-  return stdout as unknown as Buffer;
+  const run = ffmpegArgsLocalOnly(await adaptFfmpegArgs(args));
+  try {
+    const { stdout } = await execa(FFMPEG_BIN, run, { reject: true, encoding: "buffer", env: CHILD_ENV });
+    return stdout as unknown as Buffer;
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: unknown }).stderr;
+    const text = Buffer.isBuffer(stderr) || stderr instanceof Uint8Array ? Buffer.from(stderr).toString("utf8") : typeof stderr === "string" ? stderr : "";
+    if (notMediaFrom(text)) throw notMediaError(`${FFMPEG_BIN} ${args.join(" ")}`, text);
+    throw err;
+  }
 }
 
 /**
@@ -935,16 +1029,23 @@ export function runTool<O extends Options>(bin: string, args: readonly string[],
   return execa(bin, args, opts);
 }
 
-/** Run ffmpeg and return combined stderr (used by analysis filters that log to stderr). */
+/**
+ * Run ffmpeg and return combined stderr (used by analysis filters that log to
+ * stderr). An input whose format is refused throws {@link NotMediaError}
+ * instead: the analysis would otherwise read an empty result and carry on.
+ */
 export async function runFfmpegCaptureStderr(args: string[]): Promise<string> {
   const run = ffmpegArgsLocalOnly(await adaptFfmpegArgs(args));
+  let stderr: string;
   try {
     const result = await execa(FFMPEG_BIN, run, { reject: false, all: false, env: CHILD_ENV });
-    return result.stderr ?? "";
+    stderr = result.stderr ?? "";
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string };
-    return e.stderr ?? e.message ?? "";
+    stderr = e.stderr ?? e.message ?? "";
   }
+  if (notMediaFrom(stderr)) throw notMediaError(`${FFMPEG_BIN} ${args.join(" ")}`, stderr);
+  return stderr;
 }
 
 /** Verify ffmpeg & ffprobe are available; returns their version banner lines. */

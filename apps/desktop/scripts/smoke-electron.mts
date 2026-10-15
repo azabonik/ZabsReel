@@ -34,7 +34,13 @@
 //      project has a file, "Save" saves there and the app quits; the core the
 //      app started exits with it.
 //   7. Start again with an ABSOLUTE AIVE_DATA_DIR from another folder; a clean
-//      project closes without asking.
+//      project closes without asking. Before that (7b), the window's network
+//      limits: main sets auth-server-whitelist to a non-empty sentinel; a
+//      script from http://zr-evil.invalid and from file://zr-evil.invalid ends
+//      with net::ERR_BLOCKED_BY_CLIENT (the request guard, net-guard.cjs, which
+//      main logs by origin); a navigation away from the app's page is
+//      cancelled; the page carries the CSP meta tag, and a media element
+//      pointed at another origin raises a media-src violation.
 //   8. A never-saved project: close → "Save" → a typed name is saved as
 //      <name>.aive, then the app quits.
 //   9. Network computers (a 4th run; test servers under .invalid, which never
@@ -637,6 +643,61 @@ async function main() {
   check(!existsSync(join(cwd2, "data-abs")) && !existsSync(join(cwd2, "data-rel")), "nothing written under the working folder");
   check(await waitFor("Core pill", async () => (await r2.win.locator(".statuspill.ok").count()) > 0), "window connected");
   const info2 = JSON.parse(readFileSync(join(abs, "server.json"), "utf8"));
+
+  console.log("7b. the window's network limits: the sign-in switch, the request guard, navigation, the CSP...");
+  const before7b = r2.errors.length;
+  const authSwitch = await r2.app.evaluate(({ app }) => app.commandLine.getSwitchValue("auth-server-whitelist"));
+  check(authSwitch === "zr-no-ambient-auth.invalid", `main sets auth-server-whitelist to the sentinel (${JSON.stringify(authSwitch)})`);
+  // Requests the page's CSP does not limit (scripts), so they reach the request guard; how each
+  // one ended is recorded in main. A cancel there is ERR_BLOCKED_BY_CLIENT, before any DNS.
+  // MUTATION: remove the onBeforeRequest guard from main.cjs → these end with
+  // ERR_NAME_NOT_RESOLVED and a file error instead.
+  await r2.app.evaluate(({ session }) => {
+    const g = globalThis as unknown as { __netErrors: { url: string; error: string }[] };
+    g.__netErrors = [];
+    session.defaultSession.webRequest.onErrorOccurred((d) => void g.__netErrors.push({ url: d.url, error: d.error }));
+  });
+  const guarded = ["http://zr-evil.invalid/x.js", "file://zr-evil.invalid/s/x.js"];
+  await r2.win.evaluate((urls) => {
+    for (const src of urls) {
+      const el = document.createElement("script");
+      el.src = src;
+      document.head.append(el);
+    }
+  }, guarded);
+  const netErrors = () => r2.app.evaluate(() => (globalThis as unknown as { __netErrors: { url: string; error: string }[] }).__netErrors);
+  await waitFor("both requests end", async () => (await netErrors()).length >= guarded.length, 10000);
+  const ended = await netErrors();
+  for (const u of guarded) {
+    const e = ended.find((x) => x.url.replace(/\/$/, "") === u.replace(/\/$/, ""));
+    check(e?.error === "net::ERR_BLOCKED_BY_CLIENT", `${u} is cancelled by the guard (${e?.error ?? "no error recorded"})`);
+  }
+  check(/\[aive\] blocked a renderer request to http:\/\/zr-evil\.invalid\n/.test(r2.mainLog()) && !/zr-evil\.invalid\/x\.js/.test(r2.mainLog()),
+    "main logs the blocked origin, not the path");
+  // A navigation away from the app's own page (here to the core, which the guard would allow) does nothing.
+  // MUTATION: drop the will-navigate handler → the page leaves the app.
+  const pageUrl = r2.win.url();
+  await r2.win.evaluate((u) => void (location.href = u), `http://127.0.0.1:${info2.port}/methods`);
+  await sleep(1500);
+  check(r2.win.url() === pageUrl && (await r2.win.locator(".statuspill.ok").count()) > 0, `a navigation to another page is cancelled (${r2.win.url().split("?")[0]})`);
+  // The CSP meta tag; a media element pointed at a non-core origin is refused under media-src.
+  // MUTATION: remove the meta tag from index.html → no violation, the request goes out (and the guard cancels it).
+  const meta = await r2.win.evaluate(() => document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ?? null);
+  const netGuard = require("../electron/net-guard.cjs") as { rendererCsp: (port?: number) => string };
+  check(meta === netGuard.rendererCsp(), `the page has the CSP meta tag (${meta})`);
+  const violation = await r2.win.evaluate(() => new Promise<{ directive: string; uri: string } | null>((res) => {
+    document.addEventListener("securitypolicyviolation", (e) => res({ directive: e.effectiveDirective, uri: e.blockedURI }), { once: true });
+    const a = document.createElement("audio");
+    a.src = "http://zr-evil.invalid/a.mp4";
+    setTimeout(() => res(null), 5000);
+  }));
+  check(violation?.directive === "media-src" && violation.uri.startsWith("http://zr-evil.invalid"), `a media element pointed at http://zr-evil.invalid raises a media-src violation (${JSON.stringify(violation)})`);
+  // The console errors these refusals cause, and only those, are taken out of run 7's "no errors" check.
+  await waitFor("7b console errors", () => r2.errors.length - before7b >= 3, 5000);
+  const from7b = r2.errors.splice(before7b);
+  const blockedLines = from7b.filter((e) => e === "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT").length;
+  const cspLines = from7b.filter((e) => /^Loading media from +'http:\/\/zr-evil\.invalid\/a\.mp4' violates the following Content Security Policy directive: "media-src /.test(e)).length;
+  check(from7b.length === 3 && blockedLines === 2 && cspLines === 1, `7b's console errors are the two cancelled scripts and the media refusal (${JSON.stringify(from7b)})`);
   const closed2 = new Promise<void>((r) => r2.app.once("close", () => r()));
   await r2.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
   check(await Promise.race([closed2.then(() => true), sleep(15000).then(() => false)]), "a clean project closes without asking");

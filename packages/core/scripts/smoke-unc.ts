@@ -80,6 +80,21 @@
  *                            autosave of a project on such a server goes to
  *                            the recovery folder; timeline_summary says why a
  *                            clip is offline (not found; the unread state).
+ *  15. the args builders   — every ffmpeg input gets FFmpeg's own format
+ *                            allowlist (MEDIA_DEMUXERS; concat plus the list
+ *                            for ZabsReel's -f concat lists; none for its
+ *                            lavfi graphs and raw pipes), and so does the
+ *                            ffprobe input.
+ *  16. files that name other files — HLS, DASH, ffconcat, IMF, AviSynth and
+ *                            SDP files (also renamed to .mov / .mp4) naming a
+ *                            path on a test host are refused by probeAsset,
+ *                            runFfprobe and runFfmpeg with the given FFmpeg,
+ *                            and (Linux, strace) no FFmpeg call names the host.
+ *  17. G7 input limits     — -enable_drefs, -use_absolute_path and a caller's
+ *                            -format_whitelist / -protocol_whitelist are refused.
+ *  18. /file and playlists — a file that starts with #EXTM3U answers 415.
+ *  19. the probe message   — a refused format reads "ZabsReel can't open this
+ *                            kind of file…" on import_video and import_otio.
  *
  * The network-path gate ships enforced (io/gatedfs.ts NETWORK_GATE). Rows 5
  * and 6 also say what its "log" setting would do, which only a change of that
@@ -89,17 +104,21 @@
  * Rows 7 (its dispatch part), 10 (the engine's part) and 14 (the autosave)
  * need the gate enforced: in log mode they would let a test host through.
  *
- * No FFmpeg, no network. The only hosts are under the reserved .invalid
+ * No network. Rows 16 and 19 run FFmpeg (AIVE_FFMPEG / AIVE_FFPROBE, or the
+ * one on PATH); row 16 traces it with strace where there is one, in an empty
+ * network namespace when `unshare -rn` works, and row 18 starts the core's
+ * HTTP server on 127.0.0.1:5030. The only hosts are under the reserved .invalid
  * top-level domain (the 2.3 vectors only reach the pure classifier; the
  * second-spelling rows of 13 use an injected stat). Rows 3 and 12 start
- * scripts/trust-child.ts as second processes.
+ * scripts/trust-child.ts as second processes, row 16 this script with
+ * --ff-child.
  * Run: npx tsx packages/core/scripts/smoke-unc.ts
  */
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { approvalDialogFor, bareFileName, classifyPath, normalizeHost } from "../src/unc.js";
@@ -107,7 +126,12 @@ import { assertLocalMediaPath, assertProjectMediaLocal, isLocalMediaPath, isProt
 import { EditorEngine } from "../src/engine.js";
 import * as gfs from "../src/io/gatedfs.js";
 import { resolveDataDir } from "../src/datadir.js";
-import { assertArgvReachable, ffmpegArgsLocalOnly, ffprobeArgsLocalOnly, runTool, spawnFfmpegStream } from "../src/ffmpeg/executor.js";
+import {
+  assertArgvReachable, ffmpegArgsLocalOnly, ffmpegStderrDetail, ffprobeArgsLocalOnly, MEDIA_DEMUXERS, NOT_MEDIA_TEXT, NotMediaError, notMediaFrom, PROTOCOL_WHITELIST,
+  runFfmpeg, runFfprobe, runTool, spawnFfmpegStream,
+} from "../src/ffmpeg/executor.js";
+import { probeAsset } from "../src/ffmpeg/ffprobe.js";
+import { EditorServer } from "../src/server.js";
 import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
 import { approveHost, readTrustedHosts, revokeHost, TrustStoreError, withTrustLock, type ReadErrorInjection } from "../src/trusthosts.js";
 import { HostTrust } from "../src/hosttrust.js";
@@ -135,6 +159,8 @@ const errOf = async (fn: () => unknown): Promise<string> => {
 // named imports see the wrappers through syncBuiltinESMExports.
 const TEST_HOST = /zr-evil/i;
 const touched: string[] = [];
+/** The arguments of every child_process call (row 19 reads the ffprobe argv). */
+const spawned: unknown[][] = [];
 const names = (v: unknown, depth = 0): string[] => {
   if (typeof v === "string") return TEST_HOST.test(v) ? [v] : [];
   if (Buffer.isBuffer(v)) return names(v.toString("utf8"), depth);
@@ -152,6 +178,7 @@ for (const mod of ["node:fs", "node:fs/promises", "node:child_process"]) {
     if (typeof orig !== "function" || /^[A-Z]/.test(key)) continue;
     const wrapped = function (this: unknown, ...args: unknown[]) {
       for (const n of args.flatMap((a) => names(a))) touched.push(`${mod} ${key}(${n})`);
+      if (mod === "node:child_process") spawned.push(args);
       return (orig as (...a: unknown[]) => unknown).apply(this, args);
     };
     Object.assign(wrapped, orig);
@@ -1977,6 +2004,250 @@ async function main() {
       realTrust.start();
     }
   }
+  // ---- 15. the args builders: FFmpeg's input-format allowlist -------------------------
+  // MUTATION: make formatWhitelistFor return null when no format is forced → the
+  // plain-input rows fail.
+  console.log("15. the args builders: the format allowlist before every input...");
+  {
+    const M = MEDIA_DEMUXERS;
+    const C = `concat,${MEDIA_DEMUXERS}`;
+    /** For each -i in `out`: the -format_whitelist value right before its -protocol_whitelist, or null. */
+    const listsOf = (out: string[]) =>
+      out.flatMap((a, i) => (a !== "-i" ? [] : [out[i - 2] !== "-protocol_whitelist" || out[i - 1] !== PROTOCOL_WHITELIST ? "(no protocol list)" : out[i - 4] === "-format_whitelist" ? out[i - 3] : null]));
+    /** `out` without the pairs the helper added: the caller's argv, unchanged. */
+    const stripped = (out: string[]) => out.filter((_, i) => !["-format_whitelist", "-protocol_whitelist"].includes(out[i]) && !["-format_whitelist", "-protocol_whitelist"].includes(out[i - 1]));
+    const shown = (l: (string | null)[]) => JSON.stringify(l.map((x) => (x === M ? "MEDIA" : x === C ? "concat,MEDIA" : x)));
+    list("v.txt", "file 'r0.mov'\n");
+    list("a.txt", "file 'r0.wav'\n");
+    const previewList = list("preview-list.txt", "file 'seg-1.ts'\nfile 'seg-2.ts'\n");
+    // The argv shapes the spawn helpers get today, by call site (rg "runFfmpeg\(|runFfprobe\(|spawnFfmpegStream\(|runFfmpegStdoutBuffer\(|runFfmpegCaptureStderr\(" packages/core/src).
+    const rows: [string, string[], string | undefined, (string | null)[]][] = [
+      // thumbnails, proxies, bakes (engine.ts), analysis.ts, keycolor, signature, audiosync, clip.ts, reframe.ts, render.ts's retag and preview proxy
+      ["a plain input", ["-hide_banner", "-y", "-i", "/m/a.mp4", "-frames:v", "1", "/d/t.png"], undefined, [M]],
+      // timefx.ts chunks, frames.ts, peaks.ts, audio/fx.ts: an input with -ss / -t
+      ["a seeked input with a raw pipe output", ["-ss", "1.5", "-t", "2", "-i", "/m/a.mov", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"], undefined, [M]],
+      // graph.ts buildRenderCommand: footage, a looped still, anullsrc
+      ["a render: footage, a looped still and -f lavfi anullsrc", ["-i", "/m/a.mp4", "-loop", "1", "-framerate", "30", "-i", "/m/s.png", "-f", "lavfi", "-t", "3.000000", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-map", "0:v", "/d/o.mp4"], undefined, [M, M, null]],
+      // engine.ts preview assembly: the segment list, then the audio pass
+      ["the preview's -f concat list and its audio", ["-hide_banner", "-f", "concat", "-safe", "0", "-i", previewList, "-i", "/d/o.mp4.audio.m4a", "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-y", "/d/o.mp4"], undefined, [C, M]],
+      // timefx.ts reverse: two lists by bare name in the work dir
+      ["timefx's two -f concat lists", ["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", "v.txt", "-f", "concat", "-safe", "0", "-i", "a.txt", "-map", "0:v:0", "-c:v", "copy", "o.mov"], root, [C, C]],
+      // rvm-pipeline.ts encoder: the core's own raw frames on a pipe (its decoder is a plain input)
+      ["rvm's raw frames on pipe:0", ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "64x48", "-r", "30", "-i", "pipe:0", "-c:v", "ffv1", "/d/m.mkv"], undefined, [null]],
+      ["raw frames on stdin (-)", ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "8x8", "-i", "-", "/d/o.mkv"], undefined, [null]],
+      ["-f LAVFI in capitals", ["-f", "LAVFI", "-i", "anullsrc", "-t", "1", "/d/o.wav"], undefined, [null]],
+      ["-f rawvideo from a file, not a pipe: the list (fails closed)", ["-f", "rawvideo", "-s", "8x8", "-i", "/m/x.raw", "/d/o.mkv"], undefined, [M]],
+      ["any other forced format: the list (fails closed)", ["-f", "hls", "-i", "/m/x.m3u8", "/d/o.mkv"], undefined, [M]],
+    ];
+    for (const [name, args, cwd15, want] of rows) {
+      const out = ffmpegArgsLocalOnly(args, cwd15);
+      const got = listsOf(out);
+      check(JSON.stringify(got) === JSON.stringify(want) && JSON.stringify(stripped(out)) === JSON.stringify(args), `${name}: ${shown(got)}, the rest of the argv unchanged`);
+    }
+    const probe = ffprobeArgsLocalOnly(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "/m/a.mp4"]);
+    check(JSON.stringify(probe.slice(-5)) === JSON.stringify(["-format_whitelist", M, "-protocol_whitelist", PROTOCOL_WHITELIST, "/m/a.mp4"]) && probe.length === 11,
+      `ffprobe: both lists right before the input (${shown(probe.slice(-5).filter((_, i) => i === 1))})`);
+    const names15 = MEDIA_DEMUXERS.split(",");
+    const never = ["hls", "applehttp", "dash", "concat", "imf", "avisynth", "vapoursynth", "sdp", "rtsp", "dvdvideo", "lavfi", "vobsub", "mlv"];
+    check(names15.length === 56 && new Set(names15).size === 56 && !never.some((n) => names15.includes(n)), `MEDIA_DEMUXERS: 56 names, none that opens other files, sockets or code (${never.filter((n) => names15.includes(n)).join() || "none of " + never.join("/")})`);
+  }
+
+  // ---- 16. files that name other files ---------------------------------------------------
+  // Each reference-following form (HLS, DASH, ffconcat, IMF, AviSynth, SDP; under
+  // its own name and renamed to .mov / .mp4) names a path on zr-evil-16.invalid.
+  // A second process (this script with --ff-child) runs each through probeAsset,
+  // runFfprobe and a runFfmpeg decode with the FFmpeg this smoke is given
+  // (AIVE_FFMPEG / AIVE_FFPROBE, or PATH). On Linux each FFmpeg runs under strace
+  // (and in an empty network namespace when unshare -rn works), and no traced
+  // call may name the host. A form this build has a demuxer for must give the
+  // NotMediaError sentence (a renamed playlist that 6.1+ no longer detects as
+  // HLS, a renamed .avs or an IMF package, which only 6.1+ detects, only needs
+  // to be refused).
+  // MUTATION: give every input an empty format list (formatWhitelistFor and
+  // ffprobeArgsLocalOnly) → the trace shows the .invalid opens (failed openat).
+  console.log("16. files that name other files: refused before anything they name is opened...");
+  {
+    const dir = join(root, "refs16");
+    mkdirSync(dir, { recursive: true });
+    const E = "//zr-evil-16.invalid/s";
+    const hls = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:1.0,\n${E}/seg0.ts\n#EXT-X-ENDLIST\n`;
+    const dash = `<?xml version="1.0" encoding="UTF-8"?>\n<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">\n <BaseURL>${E}/</BaseURL>\n <Period><AdaptationSet mimeType="video/mp4"><Representation id="1" bandwidth="1000" codecs="avc1.42c00d" width="64" height="48">\n  <BaseURL>v.mp4</BaseURL><SegmentBase indexRange="0-100"><Initialization range="0-50"/></SegmentBase>\n </Representation></AdaptationSet></Period></MPD>\n`;
+    const ffconcat = `ffconcat version 1.0\nfile '${E}/a.mp4'\n`;
+    const u = (n: number) => `urn:uuid:${String(n).repeat(8)}-${String(n).repeat(4)}-${String(n).repeat(4)}-${String(n).repeat(4)}-${String(n).repeat(12)}`;
+    const cpl = `<?xml version="1.0" encoding="UTF-8"?>\n<CompositionPlaylist xmlns="http://www.smpte-ra.org/schemas/2067-3/2016" xmlns:cc="http://www.smpte-ra.org/schemas/2067-2/2016">\n<Id>${u(1)}</Id><ContentTitle>x</ContentTitle><EditRate>24 1</EditRate>\n<SegmentList><Segment><Id>${u(2)}</Id><SequenceList>\n<cc:MainImageSequence><Id>${u(3)}</Id><TrackId>${u(4)}</TrackId>\n<ResourceList><Resource xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TrackFileResourceType"><Id>${u(5)}</Id>\n<EditRate>24 1</EditRate><IntrinsicDuration>24</IntrinsicDuration><TrackFileId>${u(6)}</TrackFileId></Resource></ResourceList>\n</cc:MainImageSequence></SequenceList></Segment></SegmentList></CompositionPlaylist>\n`;
+    const assetmap = `<?xml version="1.0" encoding="UTF-8"?>\n<AssetMap xmlns="http://www.smpte-ra.org/schemas/429-9/2007/AM"><Id>${u(7)}</Id>\n<AssetList><Asset><Id>${u(6)}</Id><ChunkList><Chunk><Path>${E}/a.mxf</Path></Chunk></ChunkList></Asset></AssetList></AssetMap>\n`;
+    const sdp = "v=0\no=- 0 0 IN IP4 127.0.0.1\ns=x\nc=IN IP4 zr-evil-16.invalid\nt=0 0\nm=video 5034 RTP/AVP 96\na=rtpmap:96 H264/90000\n";
+    // [file name, content, the demuxer that would read it (it must then be a NotMediaError), or null (only refused)]
+    const fixtures: [string, string, string | null][] = [
+      ["hls.m3u8", hls, "hls"], ["hls-renamed.mp4", hls, null],
+      ["dash.mpd", dash, "dash"], ["dash-renamed.mov", dash, "dash"],
+      ["list.ffconcat", ffconcat, "concat"], ["list-renamed.mp4", ffconcat, "concat"],
+      // (5.1 lists an experimental imf demuxer that never detects a file.)
+      ["CPL_x.xml", cpl, null], ["imf-renamed.mov", cpl, null],
+      ["x.avs", `AviSource("${E}/a.avi")\n`, "avisynth"], ["avs-renamed.mov", `AviSource("${E}/a.avi")\n`, null],
+      ["x.sdp", sdp, "sdp"], ["sdp-renamed.mov", sdp, "sdp"],
+    ];
+    writeFixture(join(dir, "ASSETMAP.xml"), assetmap);
+    for (const [f, body] of fixtures) writeFixture(join(dir, f), body);
+    // ZabsReel's own -f concat list whose entry is a local playlist: refused in the nested open.
+    writeFixture(join(dir, "nested.txt"), "file 'hls.m3u8'\n");
+    const realFfmpeg = process.env.AIVE_FFMPEG || "ffmpeg";
+    const realFfprobe = process.env.AIVE_FFPROBE || "ffprobe";
+    const demuxers = new Set<string>();
+    try {
+      const listing = execFileSync(realFfmpeg, ["-hide_banner", "-demuxers"], { encoding: "utf8" });
+      for (const m of listing.matchAll(/^\s*D\S*\s+(\S+)/gm)) for (const n of m[1].split(",")) demuxers.add(n);
+    } catch (err) {
+      check(false, `ffmpeg -demuxers runs (${(err as Error).message.slice(0, 100)})`);
+    }
+    if (demuxers.has("applehttp")) demuxers.add("hls"); // 4.4's name for it
+    const can = (cmd: string, args: string[]) => spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
+    const traced = process.platform === "linux" && can("strace", ["-V"]);
+    const isolated = traced && can("unshare", ["-rn", "true"]);
+    const logs = join(dir, "trace");
+    mkdirSync(logs, { recursive: true });
+    const env: NodeJS.ProcessEnv = { ...process.env, AIVE_FFMPEG: realFfmpeg, AIVE_FFPROBE: realFfprobe };
+    if (traced) {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      for (const [name, real] of [["ffmpeg", realFfmpeg], ["ffprobe", realFfprobe]]) {
+        const sh = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+        writeFixture(join(bin, name), `#!/bin/sh\nexec ${isolated ? "unshare -rn " : ""}strace -f -qq -s 1024 -e trace=file,network -o ${sh(join(logs, name))}.$$ ${sh(real)} "$@"\n`, { mode: 0o755 });
+        env[name === "ffmpeg" ? "AIVE_FFMPEG" : "AIVE_FFPROBE"] = join(bin, name);
+      }
+    }
+    console.log(`  (FFmpeg: ${realFfmpeg}; ${traced ? `traced with strace${isolated ? " in an empty network namespace" : ""}` : "no strace here: the refusals are checked, the trace part is skipped"})`);
+    const files = fixtures.map(([f]) => join(dir, f));
+    const results = await new Promise<{ file: string; op: string; refused: boolean; notMedia?: boolean; message?: string }[] | string>((res) => {
+      execFile(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), "--ff-child", JSON.stringify(files), join(dir, "nested.txt")], { encoding: "utf8", env, timeout: 300_000, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
+        try {
+          res(JSON.parse(stdout.trim().split("\n").pop() ?? ""));
+        } catch {
+          res(`${err?.message ?? ""} ${stderr}`.slice(0, 300));
+        }
+      });
+    });
+    if (typeof results === "string") check(false, `the --ff-child process ran (${results})`);
+    else {
+      for (const [f, , demuxer] of fixtures) {
+        const must = demuxer !== null && demuxers.has(demuxer);
+        for (const r of results.filter((x) => x.file === join(dir, f))) {
+          const wording = r.op === "probeAsset" ? r.message === `Can't import "${f}": ${NOT_MEDIA_TEXT}` : !!r.message?.startsWith(NOT_MEDIA_TEXT);
+          check(r.refused && (!must || (r.notMedia === true && wording)),
+            `${f}, ${r.op}: refused${must ? " with the sentence (NotMediaError)" : r.notMedia ? " (NotMediaError)" : " (this build doesn't read it as that format)"} (${r.message?.slice(0, 110)})`);
+        }
+      }
+      const nested = results.find((r) => r.op === "runFfmpeg -f concat");
+      check(!!nested && nested.refused && nested.notMedia === true && !!nested.message?.startsWith(NOT_MEDIA_TEXT), `ZabsReel's own -f concat list naming a local playlist: refused in the nested open (${nested?.message?.slice(0, 110)})`);
+      check(results.length === fixtures.length * 3 + 1, `every fixture ran through probeAsset, runFfprobe and runFfmpeg (${results.length} results)`);
+    }
+    if (traced) {
+      const lines = readdirSync(logs).flatMap((f) => readFileSync(join(logs, f), "utf8").split("\n"));
+      const evil = lines.filter((l) => /zr-evil/i.test(l));
+      check(lines.some((l) => l.includes("hls.m3u8")) && lines.some((l) => l.includes("dash-renamed.mov")), `the trace works: it sees FFmpeg open the fixtures (${readdirSync(logs).length} traced processes)`);
+      check(evil.length === 0, `no traced FFmpeg call names zr-evil-16.invalid (${JSON.stringify(evil.slice(0, 3).map((l) => l.slice(0, 140)))})`);
+    }
+  }
+
+  // ---- 17. G7: options that widen what an input may open --------------------------------
+  // MUTATION: drop "enable_drefs" from INPUT_LIMIT_OPTIONS → its rows fail.
+  console.log("17. G7: -enable_drefs, -use_absolute_path and caller-supplied allowlists are refused...");
+  for (const opt of ["-enable_drefs", "-enable_drefs:0", "-use_absolute_path", "-format_whitelist", "-protocol_whitelist"]) {
+    const want = `Refusing ffmpeg option ${opt}: ZabsReel sets FFmpeg's input limits itself.`;
+    const asInput = await errOf(() => ffmpegArgsLocalOnly([opt, "1", "-i", "/m/a.mov", "-f", "null", "-"]));
+    const asOutput = await errOf(() => ffmpegArgsLocalOnly(["-i", "/m/a.mov", opt, "1", "/d/o.mp4"]));
+    const probe17 = await errOf(() => ffprobeArgsLocalOnly(["-v", "error", opt, "1", "/m/a.mov"]));
+    check(asInput === want && asOutput === want && probe17 === want, `${opt}: refused by ffmpeg (input and output position) and ffprobe (${asInput}; ${asOutput}; ${probe17})`);
+  }
+
+  // ---- 18. /file never serves an HLS playlist ----------------------------------------------
+  // MUTATION: skip the isHlsPlaylist check in serveFile → the 415 rows fail.
+  console.log("18. /file answers 415 for a file that starts with #EXTM3U...");
+  {
+    const data18 = join(root, "data");
+    const server = new EditorServer(engine, { port: 5030, dataDir: data18 });
+    const port18 = await server.start();
+    const token18 = server.getToken();
+    const dir = join(data18, "r18");
+    mkdirSync(dir, { recursive: true });
+    const put = (name: string, body: string | Buffer) => {
+      writeFixture(join(dir, name), body);
+      return join(dir, name);
+    };
+    const ask = async (p: string, method = "GET") => {
+      const r = await fetch(`http://127.0.0.1:${port18}/file?path=${encodeURIComponent(p)}&token=${token18}`, { method });
+      const body = method === "GET" ? await r.text() : "";
+      return { status: r.status, error: r.status === 415 && body ? (JSON.parse(body) as { error?: string }).error : undefined };
+    };
+    try {
+      const playlist = `#EXTINF:1.0,\n${"//zr-evil-18.invalid/s/seg0.ts"}\n`;
+      for (const [name, body] of [
+        ["plain.m3u8", `#EXTM3U\n${playlist}`],
+        ["bom-and-space.mp4", `﻿ \t\r\n#EXTM3U\n${playlist}`],
+        ["lower-case.mov", `#extm3u\n${playlist}`],
+        ["mixed-case.bin", `\n\n#ExtM3u\n${playlist}`],
+      ] as const) {
+        const p = put(name, body);
+        const [get, head] = [await ask(p), await ask(p, "HEAD")];
+        check(get.status === 415 && get.error === NOT_MEDIA_TEXT && head.status === 415, `${name}: GET and HEAD answer 415 with the sentence (${get.status} ${get.error}; HEAD ${head.status})`);
+      }
+      const lut = put("grade.cube", 'TITLE "grade"\n# a comment\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n');
+      const mp4 = put("clip.mp4", Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom"), Buffer.alloc(12)]));
+      const [l, m] = [await ask(lut), await ask(mp4)];
+      check(l.status === 200 && m.status === 200, `a .cube LUT and an mp4 are still served (${l.status}, ${m.status})`);
+      // The cached answer follows the file: a new size, then a new mtime with the same size.
+      const changing = put("changing.mp4", "#EXTM3X\n");
+      const first = await ask(changing);
+      put("changing.mp4", `#EXTM3U\n${playlist}`);
+      const grown = await ask(changing);
+      put("changing.mp4", `#EXTM3X\n${playlist}`);
+      const t = (Date.now() + 5_000) / 1000;
+      utimesSync(changing, t, t);
+      const touched18 = await ask(changing);
+      check(first.status === 200 && grown.status === 415 && touched18.status === 200, `the cache re-checks a changed file: 200, then 415 (new size), then 200 (same size, new mtime) (${first.status}, ${grown.status}, ${touched18.status})`);
+    } finally {
+      await server.stop();
+    }
+  }
+
+  // ---- 19. the probe message -------------------------------------------------------------
+  // MUTATION: probeAsset back to -v quiet → the import rows show the generic probe
+  // error instead of the sentence.
+  console.log("19. the probe message: a refused format gets the sentence...");
+  {
+    check(notMediaFrom("[hls @ 0x55d0c1a2b400] Format not on whitelist 'mov,mp4,matroska'\nx.m3u8: Invalid argument")
+      && notMediaFrom("[in#0 @ 0x6524d3c89280] Format not on whitelist\n[in#0 @ 0x6524d3c89280] Error opening input: Invalid argument\nError opening input file x.m3u8.")
+      && !notMediaFrom("[mov,mp4,m4a,3gp,3g2,mj2 @ 0x5c2c] moov atom not found\nx.mp4: Invalid data found when processing input"),
+      "notMediaFrom finds both message shapes (with the list, and 8.1+'s [in#0 @ …] form), and nothing else");
+    const detail = ffmpegStderrDetail("[in#0 @ 0x1] Format not on whitelist 'mov,mp4,matroska,webm'\n[in#0 @ 0x1] Error opening input: Invalid argument\nError opening input file /m/x.m3u8.");
+    check(!detail.includes("whitelist") && detail.includes("Error opening input file /m/x.m3u8."), `ffmpegStderrDetail drops the allowlist line (${detail})`);
+    const dir = join(root, "r19");
+    mkdirSync(dir, { recursive: true });
+    const ffmpeg19 = process.env.AIVE_FFMPEG || "ffmpeg";
+    const tone = join(dir, "tone.wav");
+    const rare = join(dir, "song.voc");
+    execFileSync(ffmpeg19, ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=0.2", tone]);
+    execFileSync(ffmpeg19, ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=0.2", "-c:a", "pcm_u8", "-f", "voc", rare]);
+    const playlist = join(dir, "clip.m3u8");
+    writeFixture(playlist, "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:1.0,\n//zr-evil-19.invalid/s/seg0.ts\n#EXT-X-ENDLIST\n");
+    spawned.length = 0;
+    const probed = await thrown(() => probeAsset(tone));
+    const probeArgv = spawned.map((a) => a.find(Array.isArray) as string[] | undefined).find((argv) => argv?.includes("-show_streams"));
+    check(probed === null && !!probeArgv && probeArgv.join(" ").includes("-v error") && !probeArgv.includes("quiet"), `probeAsset runs ffprobe with -v error (${probeArgv?.slice(0, 4).join(" ")})`);
+    for (const [label, p] of [["a playlist", playlist], ["a rare container (Creative Voice, not on the list)", rare]] as const) {
+      const before = engine.getProject().assets.length;
+      const e = await thrown(() => dispatch(engine, "import_video", { path: p }));
+      const want = `Can't import "${basename(p)}": ${NOT_MEDIA_TEXT}`;
+      check(e?.message === want && engine.getProject().assets.length === before, `import_video of ${label}: "${e?.message}", nothing added`);
+    }
+    const otio19 = join(dir, "x.otio");
+    writeFixture(otio19, JSON.stringify({ ...otio, tracks: { ...otio.tracks, children: [{ ...otio.tracks.children[0], children: [{ ...otio.tracks.children[0].children[0], media_references: { DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: playlist } } }] }] } }));
+    const imported = await engine.importOtio(otio19);
+    const asset19 = engine.getProject().assets.find((a) => a.path === playlist);
+    check(!!asset19?.missing && imported.missing.includes(playlist) && imported.warnings.includes(`Can't import "clip.m3u8": ${NOT_MEDIA_TEXT}`),
+      `import_otio of a clip whose file is a playlist: the asset is missing, and the warning says why (${JSON.stringify(imported.warnings)})`);
+  }
+
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
 
   rmSync(root, { recursive: true, force: true });
@@ -1985,7 +2256,34 @@ async function main() {
   process.exit(failures === 0 ? 0 : 1);
 }
 
-main().catch((err) => {
+/**
+ * Row 16's second process (`--ff-child <files JSON> <concat list>`): each file
+ * through probeAsset, runFfprobe and a runFfmpeg decode, then ZabsReel's own
+ * `-f concat` shape on the list, with the FFmpeg its environment names (the
+ * smoke's traced wrappers). Prints one JSON line.
+ */
+async function ffChild(): Promise<void> {
+  const files = JSON.parse(process.argv[3]) as string[];
+  const out: { file: string; op: string; refused: boolean; notMedia?: boolean; message?: string }[] = [];
+  const run = async (file: string, op: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+      out.push({ file, op, refused: false });
+    } catch (err) {
+      out.push({ file, op, refused: true, notMedia: err instanceof NotMediaError, message: (err as Error).message });
+    }
+  };
+  for (const f of files) {
+    await run(f, "probeAsset", () => probeAsset(f));
+    await run(f, "runFfprobe", () => runFfprobe(["-v", "error", "-show_format", "-show_streams", f]));
+    await run(f, "runFfmpeg", () => runFfmpeg(["-hide_banner", "-i", f, "-frames:v", "1", "-f", "null", "-"]));
+  }
+  const list = process.argv[4];
+  await run(list, "runFfmpeg -f concat", () => runFfmpeg(["-hide_banner", "-f", "concat", "-safe", "0", "-i", list, "-f", "null", "-"]));
+  console.log(JSON.stringify(out));
+}
+
+(process.argv[2] === "--ff-child" ? ffChild() : main()).catch((err) => {
   console.error(err);
   process.exit(1);
 });

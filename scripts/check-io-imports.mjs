@@ -17,7 +17,14 @@
 //    require(…) of it;
 //  - motion/render.ts no longer passes GateNetworkFsPlugin (G9) to bundle(),
 //    or mentions disableWebSecurity (Chromium would then load file:// from the
-//    graphic) or rspack (it resolves in native code, outside G9's wrapper).
+//    graphic) or rspack (it resolves in native code, outside G9's wrapper);
+//  - motion/render.ts no longer starts its browser through the network limits
+//    and renders in it (installChromeGuard(, isGuardedBrowser(,
+//    puppeteerInstance), or no longer refuses Remotion's media downloads
+//    (onDownload), or mentions selectComposition / getCompositions (they open
+//    a browser whose downloads nothing refuses), chromiumOptions or
+//    browserExecutable;
+//  - a packages/core/src file outside motion/ imports @remotion/renderer.
 //
 // It only reads. Usage: node scripts/check-io-imports.mjs [--root <dir>]
 //                       node scripts/check-io-imports.mjs --self-test
@@ -49,6 +56,15 @@ const GATEDFS_SPEC = String.raw`[./]*(?:[\w-]+\/)*io\/gatedfs(?:\.js)?`;
 const GATEDFS = new RegExp(String.raw`\b(import|export)\s+(?!type\b)([^;'"\`]*?)\bfrom\s*(['"])${GATEDFS_SPEC}\3`, "g");
 /** io/gatedfs.js as the only argument of a call: import("…"), require("…"). */
 const GATEDFS_CALL = new RegExp(String.raw`\(\s*(['"\`])${GATEDFS_SPEC}\1\s*\)`, "g");
+/** @remotion/renderer (or a file in it) imported in any of the forms above. */
+const RENDERER_SPEC = String.raw`@remotion\/renderer(?:\/[^'"\`]*)?`;
+const RENDERER = new RegExp(
+  String.raw`\b(?:import|export)\s+(?!type\b)[^;'"\`]*?\bfrom\s*(['"])${RENDERER_SPEC}\1|\bimport\s*(['"])${RENDERER_SPEC}\2|\(\s*(['"\`])${RENDERER_SPEC}\3\s*\)`,
+  "g",
+);
+/** What motion/render.ts must contain (the browser through the network limits, no downloads), and must not. */
+const RENDER_MUST = ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload"];
+const RENDER_MUST_NOT = ["selectComposition", "getCompositions", "chromiumOptions", "browserExecutable"];
 
 const bareName = (m) => m.replace(/^node:/, "");
 const lineOf = (text, index) => text.slice(0, index).split("\n").length;
@@ -104,6 +120,13 @@ export function scan(root) {
       }
       if (/disableWebSecurity/.test(text)) problems.push(`${shown}: mentions disableWebSecurity; the graphic's Chromium must keep web security on`);
       if (/rspack/i.test(text)) problems.push(`${shown}: mentions rspack, which resolves outside G9's file-system wrapper`);
+      for (const m of RENDER_MUST.filter((w) => !text.includes(w))) {
+        problems.push(`${shown}: has no ${m}; the graphic must render in a browser started through chromeguard.ts, with every media download refused`);
+      }
+      for (const m of RENDER_MUST_NOT.filter((w) => text.includes(w))) problems.push(`${shown}: mentions ${m}, which bypasses the graphics browser's limits`);
+    }
+    if (!rel.startsWith("motion/")) {
+      for (const m of text.matchAll(RENDERER)) problems.push(`${shown}:${lineOf(text, m.index)}: imports @remotion/renderer; only motion/ may (chromeguard.ts limits its browser)`);
     }
   }
   return problems;
@@ -114,7 +137,11 @@ export function scan(root) {
 function selfTest() {
   const dir = mkdtempSync(join(tmpdir(), "check-io-imports-"));
   let failures = 0;
-  const GOOD_RENDER = `import { bundle } from "@remotion/bundler";\nimport { GateNetworkFsPlugin } from "./netgate.js";\nbundle({ webpackOverride: (c) => ({ ...c, plugins: [...(c.plugins ?? []), new GateNetworkFsPlugin()] }) });\n`;
+  /** The browser through chromeguard.ts, every download refused. */
+  const GUARDED_RENDER = `installChromeGuard();\nconst b = await openBrowser("chrome");\nif (!isGuardedBrowser(b)) throw new Error("x");\nrenderMedia({ puppeteerInstance: b, onDownload: refuse });\n`;
+  const GOOD_RENDER =
+    `import { bundle } from "@remotion/bundler";\nimport { openBrowser, renderMedia } from "@remotion/renderer";\nimport { GateNetworkFsPlugin } from "./netgate.js";\n` +
+    `bundle({ webpackOverride: (c) => ({ ...c, plugins: [...(c.plugins ?? []), new GateNetworkFsPlugin()] }) });\n${GUARDED_RENDER}`;
   const base = {
     "io/gatedfs.ts": `import * as fs from "node:fs";\nimport * as fsp from "node:fs/promises";\n`,
     "ffmpeg/executor.ts": `import { execa } from "execa";\nimport { readFileSync } from "../io/gatedfs.js";\n`,
@@ -175,15 +202,38 @@ function selfTest() {
     run("a re-export of a gated function passes", { "barrel.ts": `export { stat, readFile } from "./io/gatedfs.js";\nexport type { BlockedPathError } from "./io/gatedfs.js";\n` }, null);
     run("datadir.ts may re-export bootstrap", { "datadir.ts": `import { bootstrap } from "./io/gatedfs.js";\nexport { bootstrap } from "./io/gatedfs.js";\n` }, null);
     run("render.ts without the G9 plugin fails", {
-      "motion/render.ts": `import { bundle } from "@remotion/bundler";\nbundle({ webpackOverride: (c) => c });\n`,
+      "motion/render.ts": `import { bundle } from "@remotion/bundler";\nbundle({ webpackOverride: (c) => c });\n${GUARDED_RENDER}`,
     }, /motion\/render\.ts: bundle\(\) must get plugins/);
     run("render.ts that imports the plugin but does not pass it fails", {
-      "motion/render.ts": `import { GateNetworkFsPlugin } from "./netgate.js";\nbundle({ webpackOverride: (c) => ({ ...c, plugins: c.plugins }) });\nvoid GateNetworkFsPlugin;\n`,
+      "motion/render.ts": `import { GateNetworkFsPlugin } from "./netgate.js";\nbundle({ webpackOverride: (c) => ({ ...c, plugins: c.plugins }) });\nvoid GateNetworkFsPlugin;\n${GUARDED_RENDER}`,
     }, /motion\/render\.ts: bundle\(\) must get plugins/);
     run("render.ts with disableWebSecurity fails", {
-      "motion/render.ts": `${GOOD_RENDER}renderMedia({ chromiumOptions: { disableWebSecurity: true } });\n`,
+      "motion/render.ts": `${GOOD_RENDER}const options = { disableWebSecurity: true };\n`,
     }, /motion\/render\.ts: mentions disableWebSecurity/);
     run("render.ts with rspack fails", { "motion/render.ts": `${GOOD_RENDER}bundle({ rspack: true });\n` }, /motion\/render\.ts: mentions rspack/);
+    for (const must of ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload"]) {
+      run(`render.ts without ${must} fails`, { "motion/render.ts": GOOD_RENDER.split(must).join("x") }, new RegExp(`motion/render\\.ts: has no ${must.replace("(", "\\(")}`));
+    }
+    for (const [what, line] of [
+      ["selectComposition", `const c = await selectComposition({ serveUrl, id: "Graphic" });\n`],
+      ["getCompositions", `await getCompositions(serveUrl);\n`],
+      ["chromiumOptions", `renderMedia({ chromiumOptions: { gl: "angle" } });\n`],
+      ["browserExecutable", `openBrowser("chrome", { browserExecutable: "/x/chrome" });\n`],
+    ]) {
+      run(`render.ts with ${what} fails`, { "motion/render.ts": `${GOOD_RENDER}${line}` }, new RegExp(`motion/render\\.ts: mentions ${what}`));
+    }
+    for (const [form, body] of [
+      ["a named import", `import { renderMedia } from "@remotion/renderer";\n`],
+      ["a file in it", `import { downloadAsset } from "@remotion/renderer/dist/assets/download-and-map-assets-to-file.js";\n`],
+      ["a dynamic import", `const r = await import("@remotion/renderer");\n`],
+      ["a require", `const r = require('@remotion/renderer');\n`],
+    ]) {
+      run(`@remotion/renderer outside motion/ (${form}) fails`, { "engine.ts": body }, /engine\.ts:1: imports @remotion\/renderer/);
+    }
+    run("@remotion/renderer in motion/ and a type-only import elsewhere pass", {
+      "motion/chromeguard.ts": `import { RenderInternals } from "@remotion/renderer";\n`,
+      "engine.ts": `import type { HeadlessBrowser } from "@remotion/renderer";\n`,
+    }, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

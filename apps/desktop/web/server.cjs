@@ -26,6 +26,7 @@ const { spawn } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { ensureCore, browserBlocksPort, getDataDir } = require("../electron/core-launcher.cjs");
 const { PRODUCT_NAME, MCP_KEY } = require("../electron/brand.cjs");
+const { rendererCsp } = require("../electron/net-guard.cjs");
 
 const RENDERER_DIR = path.join(__dirname, "..", "dist", "renderer");
 const DEFAULT_PORT = 4790;
@@ -110,7 +111,7 @@ function fsError(err, target) {
 
 // ---- Static renderer ---------------------------------------------------------
 
-async function serveStatic(pathname, res) {
+async function serveStatic(pathname, res, csp) {
   let rel;
   try {
     rel = decodeURIComponent(pathname);
@@ -152,7 +153,9 @@ async function serveStatic(pathname, res) {
     // The launch URL carries the session token until the page strips it, so
     // never leak it in a Referer, and never let another site frame the editor.
     "Referrer-Policy": "no-referrer",
-    ...(isHtml ? { "Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY" } : {}),
+    // The page's own policy (index.html has it too, with any port): media, images
+    // and requests only from here and the core's exact port.
+    ...(isHtml ? { "Content-Security-Policy": csp, "X-Frame-Options": "DENY" } : {}),
   });
   fs.createReadStream(abs).pipe(res);
 }
@@ -448,6 +451,8 @@ async function handleApi(req, url, res, core, browsed) {
  */
 function createWebServer(core, shellKey) {
   let boundPort = 0;
+  // Never framed by another site; media, images and requests only from here and the core.
+  const csp = `frame-ancestors 'none'; ${rendererCsp(core.port)}`;
   /** Network computers this shell listed a folder of (listDir): picker auto-trust. */
   const browsed = new Set();
   const server = http.createServer(async (req, res) => {
@@ -477,7 +482,7 @@ function createWebServer(core, shellKey) {
         sendJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
       }
-      await serveStatic(url.pathname, res);
+      await serveStatic(url.pathname, res, csp);
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500;
       sendJson(res, status, { ok: false, error: err && err.message ? err.message : String(err) });

@@ -86,11 +86,30 @@ function onsetSec(x: Float32Array, frac = 0.25): number {
   return NaN;
 }
 
-/** Interleaved 48 kHz float samples through the -af chain `af`, fed and read as raw f32 (no 16-bit rounding). */
+/**
+ * Interleaved 48 kHz float samples through the -af chain `af`, fed as a 32-bit
+ * float WAV and read as raw f32 (no 16-bit rounding). A WAV, not a raw f32le
+ * input: the executor's format allowlist (MEDIA_DEMUXERS) refuses a forced
+ * raw format read from a file.
+ */
 async function pcmF32(dir: string, x: Float32Array, af: string[], channels = 1): Promise<Float32Array> {
-  const src = join(dir, `in-${channels}.f32`);
-  writeFileSync(src, Buffer.from(x.buffer, x.byteOffset, x.byteLength));
-  const b = Buffer.from(await runFfmpegStdoutBuffer(["-hide_banner", "-v", "error", "-f", "f32le", "-ar", String(SR), "-ac", String(channels), "-i", src,
+  const src = join(dir, `in-${channels}.wav`);
+  const data = Buffer.from(x.buffer, x.byteOffset, x.byteLength);
+  const head = Buffer.alloc(44);
+  head.write("RIFF", 0, "ascii");
+  head.writeUInt32LE(36 + data.length, 4);
+  head.write("WAVEfmt ", 8, "ascii");
+  head.writeUInt32LE(16, 16);
+  head.writeUInt16LE(3, 20); // WAVE_FORMAT_IEEE_FLOAT
+  head.writeUInt16LE(channels, 22);
+  head.writeUInt32LE(SR, 24);
+  head.writeUInt32LE(SR * channels * 4, 28);
+  head.writeUInt16LE(channels * 4, 32);
+  head.writeUInt16LE(32, 34);
+  head.write("data", 36, "ascii");
+  head.writeUInt32LE(data.length, 40);
+  writeFileSync(src, Buffer.concat([head, data]));
+  const b = Buffer.from(await runFfmpegStdoutBuffer(["-hide_banner", "-v", "error", "-i", src,
     "-af", af.join(","), "-f", "f32le", "-ar", String(SR), "-ac", String(channels), "-"]));
   const out = new Float32Array(b.length / 4);
   for (let i = 0; i < out.length; i++) out[i] = b.readFloatLE(i * 4);

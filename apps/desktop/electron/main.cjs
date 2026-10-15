@@ -9,7 +9,7 @@
 //   4. Tear down the core on quit ONLY if we were the ones who started it.
 //
 // Written in CommonJS so it runs directly under Electron with no build step.
-const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { ensureCore, browserBlocksPort, getDataDir } = require("./core-launcher.cjs");
@@ -17,6 +17,12 @@ const { applyBundledAssetEnv } = require("./bundled-assets.cjs");
 const { finalSavePath: decideSavePath, closeGuard } = require("./save-rules.cjs");
 const { PRODUCT_NAME, MCP_KEY, APP_ID, APP_ID_DEV } = require("./brand.cjs");
 const { reviewServer, askPicked } = require("./media-servers.cjs");
+const { isAllowedRendererUrl, isAppPage, devOriginOf, shownOrigin } = require("./net-guard.cjs");
+
+// Windows signs in automatically to "intranet" servers. A non-empty list that
+// matches no real host turns that off; an empty value would turn it back on.
+// (Electron knows only the "whitelist" spelling.)
+app.commandLine.appendSwitch("auth-server-whitelist", "zr-no-ambient-auth.invalid");
 
 // Branding: the display name (taskbar / jump-list / dialogs) and a stable Windows
 // AppUserModelID so the taskbar shows OUR name + icon instead of "Electron" and
@@ -35,6 +41,8 @@ let coreChild = null;
 let coreOwned = false;
 let corePort = null;
 let coreToken = null;
+// The renderer's request limits (net-guard.cjs), set once the core's port is known.
+let guardCtx = null;
 
 // Project state mirrored from the renderer so the main process can guard quit.
 let mainWin = null;
@@ -174,6 +182,10 @@ function createWindow(port, token) {
   win.webContents.on("did-finish-load", lockZoom);
   win.webContents.on("zoom-changed", () => lockZoom());
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // A link, a form or a script that would leave the app's own page does nothing.
+  win.webContents.on("will-navigate", (e, url) => {
+    if (!isAppPage(url, guardCtx)) e.preventDefault();
+  });
 
   const devUrl = process.env.ELECTRON_RENDERER_URL;
   if (devUrl) {
@@ -421,6 +433,25 @@ app.whenReady().then(async () => {
         { blockedPort: true },
       );
     }
+    // The renderer requests only its own files and the core: anything else is
+    // cancelled before it leaves (net::ERR_BLOCKED_BY_CLIENT). The default
+    // session only: electron-updater has its own.
+    guardCtx = {
+      rendererDir: path.join(__dirname, "..", "dist", "renderer"),
+      corePort,
+      devOrigin: devOriginOf(process.env.ELECTRON_RENDERER_URL),
+      platform: process.platform,
+    };
+    const blocked = new Set();
+    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+      const ok = isAllowedRendererUrl(details.url, guardCtx);
+      const shown = ok ? "" : shownOrigin(details.url);
+      if (!ok && !blocked.has(shown)) {
+        blocked.add(shown);
+        console.error(`[aive] blocked a renderer request to ${shown}`);
+      }
+      callback({ cancel: !ok });
+    });
     buildMenu();
     createWindow(corePort, coreToken);
     setupAutoUpdate();

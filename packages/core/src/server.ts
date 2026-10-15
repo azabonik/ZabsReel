@@ -1,12 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { createReadStream, stat, mkdir, writeFile } from "./io/gatedfs.js";
+import { createReadStream, open, stat, mkdir, writeFile } from "./io/gatedfs.js";
 import { extname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { join } from "node:path";
 import { EditorEngine } from "./engine.js";
 import { dispatch, RpcError, methods } from "./rpc.js";
-import { checkBinaries } from "./ffmpeg/executor.js";
+import { checkBinaries, NOT_MEDIA_TEXT } from "./ffmpeg/executor.js";
 import { parseFramesQuery, streamFrames } from "./ffmpeg/frames.js";
 import { NoAudioError, parsePeaksQuery, peaksFor } from "./media/peaks.js";
 import type { Project } from "./types.js";
@@ -43,6 +43,41 @@ function sendJson(res: ServerResponse, status: number, body: unknown, withCors =
   const payload = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(payload);
+}
+
+/** How many files' "is it an HLS playlist?" answers /file keeps (by path, size and mtime). */
+const PLAYLIST_CACHE_MAX = 256;
+const playlistCache = new Map<string, boolean>();
+
+/**
+ * True when the file starts with `#EXTM3U` (after a UTF-8 BOM and white space,
+ * any case): an HLS playlist. A browser's own HLS player (Chromium plays one
+ * whatever the Content-Type) would fetch every segment it names, a network
+ * path included, so /file never serves one. Reads at most 64 bytes, once per
+ * path, size and mtime. A read error answers false: the stream then fails the
+ * same way.
+ */
+async function isHlsPlaylist(path: string, size: number, mtimeMs: number): Promise<boolean> {
+  const key = `${size}:${mtimeMs}:${path}`;
+  const known = playlistCache.get(key);
+  if (known !== undefined) return known;
+  let head: Buffer;
+  try {
+    const fh = await open(path, "r");
+    try {
+      const { buffer, bytesRead } = await fh.read(Buffer.alloc(64), 0, 64, 0);
+      head = buffer.subarray(0, bytesRead);
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return false;
+  }
+  const text = head.toString("latin1").replace(/^\xEF\xBB\xBF/, "").replace(/^[ \t\r\n\f\v]+/, "");
+  const answer = text.slice(0, 7).toUpperCase() === "#EXTM3U";
+  if (playlistCache.size >= PLAYLIST_CACHE_MAX) playlistCache.delete(playlistCache.keys().next().value!);
+  playlistCache.set(key, answer);
+  return answer;
 }
 
 /** The fields an rpc error carries besides its message: G1e's code and its server(s) (rpc.ts). */
@@ -407,6 +442,10 @@ export class EditorServer {
     }
     if (!info.isFile()) {
       sendJson(res, 400, { ok: false, error: "Not a file" });
+      return;
+    }
+    if (await isHlsPlaylist(path, info.size, info.mtimeMs)) {
+      sendJson(res, 415, { ok: false, error: NOT_MEDIA_TEXT });
       return;
     }
 

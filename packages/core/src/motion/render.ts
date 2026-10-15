@@ -3,9 +3,13 @@ import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { bundle } from "@remotion/bundler";
-import { ensureBrowser, selectComposition, renderMedia } from "@remotion/renderer";
+import { ensureBrowser, openBrowser, renderMedia } from "@remotion/renderer";
+import type { VideoConfig } from "remotion";
+import { PRODUCT_NAME } from "../brand.js";
 import { colorTagArgs, FFMPEG_DEFAULT_CODING, h264RetagBsf, tagFramesStep } from "../ffmpeg/colorspace.js";
 import { runFfmpeg } from "../ffmpeg/executor.js";
+import { examplePath } from "../unc.js";
+import { installChromeGuard, isGuardedBrowser, remotionPatched } from "./chromeguard.js";
 import { GateNetworkFsPlugin } from "./netgate.js";
 
 /**
@@ -20,7 +24,9 @@ import { GateNetworkFsPlugin } from "./netgate.js";
  *
  * Remotion drives a headless Chrome ("Chrome Headless Shell") which is
  * downloaded on first use and cached by Remotion (like our whisper/YuNet
- * binaries) — see ensureBrowser().
+ * binaries) — see ensureBrowser(). It runs with ZabsReel's network limits
+ * (chromeguard.ts), and the render downloads no media for the graphic
+ * (refuseDownload).
  *
  * NOTE on licensing: Remotion is source-available under the Remotion License
  * (not OSI open-source); companies of 4+ people need a paid license. It is the
@@ -83,8 +89,34 @@ function freePort(): Promise<number> {
   });
 }
 
+/**
+ * The composition renderGraphic renders, built here rather than read back from
+ * the page (Remotion's composition lookup opens a browser of its own, whose
+ * downloads nothing guards). rootSource registers the same numbers, so the
+ * page and the render agree.
+ */
+export function graphicComposition(o: RenderGraphicOptions): VideoConfig {
+  const props = o.props ?? {};
+  return {
+    id: "Graphic",
+    width: Math.round(o.width),
+    height: Math.round(o.height),
+    fps: o.fps,
+    durationInFrames: Math.max(1, Math.round(o.durationInFrames)),
+    defaultProps: props,
+    props,
+    defaultCodec: null,
+    defaultOutName: null,
+    defaultVideoImageFormat: null,
+    defaultPixelFormat: null,
+    defaultProResProfile: null,
+    defaultSampleRate: null,
+  };
+}
+
 /** Generate the Remotion Root that registers the AI component as a composition. */
-function rootSource(o: RenderGraphicOptions): string {
+export function rootSource(o: RenderGraphicOptions): string {
+  const c = graphicComposition(o);
   return `import React from "react";
 import { Composition } from "remotion";
 import Graphic from "./Graphic";
@@ -92,18 +124,42 @@ import Graphic from "./Graphic";
 export const RemotionRoot: React.FC = () => {
   return (
     <Composition
-      id="Graphic"
+      id="${c.id}"
       component={Graphic as unknown as React.FC}
-      durationInFrames={${Math.max(1, Math.round(o.durationInFrames))}}
-      fps={${o.fps}}
-      width={${Math.round(o.width)}}
-      height={${Math.round(o.height)}}
-      defaultProps={${JSON.stringify(o.props ?? {})} as Record<string, unknown>}
+      durationInFrames={${c.durationInFrames}}
+      fps={${c.fps}}
+      width={${c.width}}
+      height={${c.height}}
+      defaultProps={${JSON.stringify(c.defaultProps)} as Record<string, unknown>}
     />
   );
 };
 `;
 }
+
+/**
+ * Remotion's onDownload for every render: refuses every source. Remotion
+ * downloads each <OffthreadVideo>, <Video> and <Audio> source (a data: URL
+ * too) and hands the file to its own ffprobe and compositor, which ZabsReel's
+ * FFmpeg limits (executor.ts) don't reach: a playlist delivered that way would
+ * open the network paths it names. Refused here, nothing is written.
+ */
+export const refuseDownload = (src: string): never => {
+  throw new Error(
+    `Graphics can't load media through <OffthreadVideo>, <Video> or <Audio> (${examplePath(src)}). ` +
+      "Draw the graphic with shapes, text and CSS, or put the media on the timeline as its own clip.",
+  );
+};
+
+/** The Remotion calls renderGraphic makes (smoke-chromeguard passes stubs). */
+export interface GraphicRemotion {
+  bundle: typeof bundle;
+  ensureBrowser: typeof ensureBrowser;
+  openBrowser: typeof openBrowser;
+  renderMedia: typeof renderMedia;
+  remotionPatched: () => boolean;
+}
+const REMOTION: GraphicRemotion = { bundle, ensureBrowser, openBrowser, renderMedia, remotionPatched };
 
 const ENTRY_SOURCE = `import { registerRoot } from "remotion";
 import { RemotionRoot } from "./Root";
@@ -112,9 +168,14 @@ registerRoot(RemotionRoot);
 
 /**
  * Render an AI-authored Remotion component to an alpha video file. The scaffold
- * is written under `workDir`, bundled, rendered, and then cleaned up.
+ * is written under `workDir`, bundled, rendered, and then cleaned up. Refuses
+ * (fails closed) when the installed Remotion lacks ZabsReel's patch, or when
+ * its browser did not start through the network limits (chromeguard.ts).
  */
-export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
+export async function renderGraphic(opts: RenderGraphicOptions, remotion: GraphicRemotion = REMOTION): Promise<void> {
+  if (!remotion.remotionPatched()) {
+    throw new Error(`Graphics are turned off: this copy of Remotion is missing ${PRODUCT_NAME}'s safety patch. Run npm install again.`);
+  }
   await mkdir(opts.workDir, { recursive: true });
   await writeFile(join(opts.workDir, "Graphic.tsx"), opts.code, "utf8");
   await writeFile(join(opts.workDir, "Root.tsx"), rootSource(opts), "utf8");
@@ -123,7 +184,7 @@ export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
   const modulesDir = nodeModulesDir();
 
   try {
-    const serveUrl = await bundle({
+    const serveUrl = await remotion.bundle({
       entryPoint: join(opts.workDir, "index.ts"),
       // The scaffold lives outside the repo's node_modules tree, so point
       // webpack at the installed node_modules so `react`/`remotion`/the AI's
@@ -140,37 +201,53 @@ export async function renderGraphic(opts: RenderGraphicOptions): Promise<void> {
     });
 
     // Downloads Chrome Headless Shell on first use (cached by Remotion).
-    await ensureBrowser();
+    await remotion.ensureBrowser();
 
-    const inputProps = opts.props ?? {};
-    const port = await freePort();
-    const composition = await selectComposition({ serveUrl, id: "Graphic", inputProps, port });
-
-    const alpha = opts.alpha !== false;
-    await renderMedia({
-      composition,
-      serveUrl,
-      port,
-      // Alpha overlay: ProRes 4444 keeps an alpha channel so the graphic can be
-      // composited over footage (transparent wherever the component doesn't
-      // paint). This needs BOTH an alpha-carrying pixelFormat AND PNG frames —
-      // the default JPEG frames have no alpha, so Remotion silently falls back to
-      // an opaque 4:2:2 format and transparent regions bake to black. Standalone:
-      // opaque H.264 the preview player can decode.
-      ...(alpha
-        ? ({ codec: "prores", proResProfile: "4444", pixelFormat: "yuva444p10le", imageFormat: "png" } as const)
-        : ({ codec: "h264", pixelFormat: "yuv420p" } as const)),
-      // Pinned: BT.601, untagged (tagGraphicColor / graphicPreviewProxy tag the result as that).
-      colorSpace: "default",
-      outputLocation: opts.outPath,
-      inputProps,
-      onProgress: opts.onProgress ? ({ progress }) => opts.onProgress!(progress) : undefined,
-    });
+    // Our own browser, started through the network limits, for the whole render.
+    installChromeGuard();
+    const browser = await remotion.openBrowser("chrome", { chromeMode: "headless-shell" });
+    try {
+      if (!isGuardedBrowser(browser)) {
+        throw new Error(`Graphics are turned off: ${PRODUCT_NAME} couldn't start the graphics browser with its network limits.`);
+      }
+      await renderWith(remotion, opts, serveUrl, browser);
+    } finally {
+      await browser.close({ silent: true }).catch(() => {});
+    }
   } finally {
     // Best-effort cleanup of the scaffold (the bundle lives in a temp dir
     // Remotion manages; the scaffold is ours).
     await rm(opts.workDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/** The renderMedia call of {@link renderGraphic}, in `browser`. */
+async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions, serveUrl: string, browser: Awaited<ReturnType<typeof openBrowser>>): Promise<void> {
+  const composition = graphicComposition(opts);
+  const inputProps = composition.props;
+  const port = await freePort();
+  const alpha = opts.alpha !== false;
+  await remotion.renderMedia({
+    composition,
+    serveUrl,
+    port,
+    puppeteerInstance: browser,
+    onDownload: refuseDownload,
+    // Alpha overlay: ProRes 4444 keeps an alpha channel so the graphic can be
+    // composited over footage (transparent wherever the component doesn't
+    // paint). This needs BOTH an alpha-carrying pixelFormat AND PNG frames —
+    // the default JPEG frames have no alpha, so Remotion silently falls back to
+    // an opaque 4:2:2 format and transparent regions bake to black. Standalone:
+    // opaque H.264 the preview player can decode.
+    ...(alpha
+      ? ({ codec: "prores", proResProfile: "4444", pixelFormat: "yuva444p10le", imageFormat: "png" } as const)
+      : ({ codec: "h264", pixelFormat: "yuv420p" } as const)),
+    // Pinned: BT.601, untagged (tagGraphicColor / graphicPreviewProxy tag the result as that).
+    colorSpace: "default",
+    outputLocation: opts.outPath,
+    inputProps,
+    onProgress: opts.onProgress ? ({ progress }) => opts.onProgress!(progress) : undefined,
+  });
 }
 
 /**

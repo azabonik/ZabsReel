@@ -28,8 +28,9 @@ jobs:
         run: node scripts/release-guard.mjs --self-test
 
       # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
+      # strace: smoke-unc row 16 traces FFmpeg on files that name a test server.
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
 
       - name: Install dependencies
         run: npm ci
@@ -86,3 +87,17 @@ jobs:
         run: |
           node scripts/check-io-imports.mjs --self-test
           node scripts/check-io-imports.mjs
+
+      # FFmpeg's input-format allowlist: every media format on it still probes
+      # and decodes one frame as without it (samples made with lavfi).
+      - name: Smoke — media formats under the demuxer allowlist (FFmpeg, no network)
+        run: npx tsx packages/core/scripts/smoke-demuxers.ts
+
+      # The graphics browser's switches, its media downloads refused, Remotion's
+      # same-as patch (applied by npm ci's postinstall) and the render.ts lint.
+      # Its real-Chrome part runs only where the headless shell is cached.
+      - name: Smoke — graphics browser network limits (no Chrome download)
+        run: npx tsx packages/core/scripts/smoke-chromeguard.ts
+
+      - name: Smoke — desktop window request guard and CSP (pure logic)
+        run: npx tsx apps/desktop/scripts/smoke-netguard.ts

@@ -85,7 +85,8 @@ npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP te
 # shell or the core. Network computers (test servers under .invalid, traced):
 # the approve / revoke / picked routes need the shell key, the in-app Allow and
 # Keep dialogs, Save As never starts in a folder from the project's name, and
-# nothing touches a server before it is allowed (needs the build and a Chromium)
+# nothing touches a server before it is allowed; the page's CSP (header with the
+# core's exact port) and /file's 415 for a playlist (needs the build and a Chromium)
 npx tsx apps/desktop/scripts/smoke-web.ts
 npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); the network-computer dialogs and the one flow that asks and saves (Review…, and a picked file on a new server: asks once, never saves silently; the web shell's reviews one at a time); S/Delete after a split; path bar vs a late listing
 
@@ -135,15 +136,35 @@ npx tsx packages/core/scripts/smoke-security.ts
 # smoke-unc-e2e below.
 npx tsx packages/core/scripts/smoke-safepath.ts
 
-# Network paths (no FFmpeg, no network, temp dirs; every test server is under the
+# Network paths (no network, temp dirs; every test server is under the
 # reserved .invalid domain): one key per server, device / NT paths and server
 # names without a key refused with a message that says how to fix the path,
 # gatedfs and the FFmpeg argv check (a server not allowed is never opened),
 # graphic imports, the approval store (stamps, "added outside ZabsReel", the
 # lock, read errors and the unread state) and the private trust folder (no rpc
 # path, /file request or graphic import reaches it, in any spelling or through a
-# link, and no error quotes the key)
+# link, and no error quotes the key). Rows 15-19 use FFmpeg: every input gets
+# FFmpeg's format allowlist, playlists, manifests and list files (also renamed
+# to .mov / .mp4) are refused before anything they name is opened (traced with
+# strace on Linux), /file answers 415 for a playlist, and an import says
+# "ZabsReel can't open this kind of file…"
 npx tsx packages/core/scripts/smoke-unc.ts
+
+# The demuxer allowlist keeps media working: one lavfi sample per format on
+# MEDIA_DEMUXERS that this FFmpeg can write probes and decodes one frame with
+# the allowlist as without it (AIVE_FFMPEG / AIVE_FFPROBE pick the build)
+npx tsx packages/core/scripts/smoke-demuxers.ts
+
+# The graphics browser (Remotion): every Chrome it starts gets the resolver rule
+# and the sign-in sentinel, renderGraphic renders only in such a browser and
+# refuses every media download, the same-as patch is applied (npm install's
+# postinstall), and the render.ts lint. With Remotion's headless shell already
+# cached it also renders real graphics (in an empty network namespace when
+# `unshare -rn` works); it never downloads one
+npx tsx packages/core/scripts/smoke-chromeguard.ts
+
+# The desktop window's request guard and CSP (electron/net-guard.cjs, plain logic)
+npx tsx apps/desktop/scripts/smoke-netguard.ts
 
 # Network paths end to end (needs the build and FFmpeg): a real core process with
 # every fs and child_process call traced and a logging FFmpeg stub. A crafted
@@ -443,8 +464,11 @@ Save → saved, then quit; the core it started exits), and network computers
 offline clip, Allow and Keep offline, the Keep and Remove dialog for a server
 added outside ZabsReel, a picked file on a new server (it asks once, and
 nothing is saved before Allow), the "You opened" and "The AI
-assistant asked" wording, and **Project → Network computers…**. It fails on renderer
-console errors. The app runs with its own profile (`--user-data-dir` in the
+assistant asked" wording, and **Project → Network computers…**; and the
+window's network limits (the sign-in switch, the request guard cancelling a
+request to another computer or a `file://` URL with a host, a navigation away
+from the app cancelled, the CSP refusing media from another origin). It fails
+on renderer console errors. The app runs with its own profile (`--user-data-dir` in the
 test folder), so your ZabsReel profile and its recent projects are left alone.
 
 ```bash

@@ -25,7 +25,7 @@ import {
   type SceneCut,
   type ColorInspection,
 } from "./ffmpeg/analysis.js";
-import { acrossfadeNeedsMix, addFfmpegWorkRoot, ffmpegVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder } from "./ffmpeg/executor.js";
+import { acrossfadeNeedsMix, addFfmpegWorkRoot, ffmpegVersion, ffmpegVersionLine, runFfmpeg, pickHwEncoder, NotMediaError } from "./ffmpeg/executor.js";
 import { xfadeNeedsEofPad } from "./ffmpeg/version.js";
 import { stabilizeFilters, type StabilizeOptions } from "./ffmpeg/stabilize.js";
 import { EFFECTS, effectByType } from "./effects/registry.js";
@@ -6737,6 +6737,7 @@ export class EditorEngine extends EventEmitter {
     // import only leaves those files back in baked/, where clean-up trashes them
     // again; the open project is untouched either way.
     const restored = await this.storage.restore(json);
+    const notMedia: string[] = [];
     const result = await otioToProject(json, async (mediaPath) => {
       // A protocol/URL target_url (http:, file:, data:, …) must NOT be probed:
       // ffprobe would open the protocol (SSRF); nor may a device / NT path or a
@@ -6750,10 +6751,13 @@ export class EditorEngine extends EventEmitter {
       if (isProtocolLike(mediaPath) || this.awaitsApproval(mediaPath) || this.trust.loadFieldCheck(mediaPath) !== "ok") return null;
       try {
         return await probeAsset(mediaPath);
-      } catch {
+      } catch (err) {
+        // A playlist, manifest or list file stays a placeholder too; the warning says why.
+        if (err instanceof NotMediaError) notMedia.push(err.message);
         return null;
       }
     });
+    result.warnings.push(...notMedia);
 
     // An .otio is untrusted input too (see load()): otioToProject already skips
     // probing a non-local target_url, but the path still travels into the

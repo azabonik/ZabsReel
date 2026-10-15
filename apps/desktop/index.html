@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Media, images, requests and fonts only from this page and the core on 127.0.0.1
+         (electron/net-guard.cjs rendererCsp; the web shell also sends it with the core's exact port). -->
+    <meta http-equiv="Content-Security-Policy" content="media-src 'self' http://127.0.0.1:*; img-src 'self' data: blob: http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'" />
     <title>ZabsReel</title>
   </head>
   <body>

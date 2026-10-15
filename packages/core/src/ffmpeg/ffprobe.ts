@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { runFfprobe } from "./executor.js";
+import { NOT_MEDIA_TEXT, NotMediaError, runFfprobe } from "./executor.js";
 import { newId } from "../ids.js";
 import type { MediaAsset } from "../types.js";
 import type { ProbedColor } from "./colorspace.js";
@@ -72,18 +72,18 @@ export function probedColor(video: FfprobeStream): ProbedColor {
 
 /**
  * Probe a media file and build a MediaAsset. Throws if the file has no
- * decodable video or audio stream.
+ * decodable video or audio stream, and a {@link NotMediaError} naming the file
+ * when FFmpeg refuses its format (a playlist, manifest or list file).
  */
 export async function probeAsset(path: string): Promise<MediaAsset> {
-  const stdout = await runFfprobe([
-    "-v",
-    "quiet",
-    "-print_format",
-    "json",
-    "-show_format",
-    "-show_streams",
-    path,
-  ]);
+  let stdout: string;
+  try {
+    // -v error, not quiet: a format refusal must reach stderr (executor.ts notMediaFrom).
+    stdout = await runFfprobe(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]);
+  } catch (err) {
+    if (err instanceof NotMediaError) throw new NotMediaError(`Can't import "${basename(path)}": ${NOT_MEDIA_TEXT}`, err.command, err.stderr);
+    throw err;
+  }
 
   let data: FfprobeOutput;
   try {

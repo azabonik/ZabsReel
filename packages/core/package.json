@@ -60,14 +60,14 @@
     "start": "tsx src/cli.ts"
   },
   "dependencies": {
-    "@remotion/bundler": "^4.0.481",
-    "@remotion/renderer": "^4.0.481",
+    "@remotion/bundler": "4.0.481",
+    "@remotion/renderer": "4.0.481",
     "execa": "^9.5.2",
     "nanoid": "^5.0.9",
     "onnxruntime-node": "^1.26.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "remotion": "^4.0.481",
+    "remotion": "4.0.481",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
   },
