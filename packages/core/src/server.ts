@@ -54,24 +54,21 @@ const playlistCache = new Map<string, boolean>();
  * any case): an HLS playlist. A browser's own HLS player (Chromium plays one
  * whatever the Content-Type) would fetch every segment it names, a network
  * path included, so /file never serves one. Reads at most 64 bytes, once per
- * path, size and mtime. A read error answers false: the stream then fails the
- * same way.
+ * path, size and mtime. A read error is thrown to the caller and not cached:
+ * /file then refuses the file, because a stream opened after a failed check
+ * could still serve a playlist.
  */
 async function isHlsPlaylist(path: string, size: number, mtimeMs: number): Promise<boolean> {
   const key = `${size}:${mtimeMs}:${path}`;
   const known = playlistCache.get(key);
   if (known !== undefined) return known;
   let head: Buffer;
+  const fh = await open(path, "r");
   try {
-    const fh = await open(path, "r");
-    try {
-      const { buffer, bytesRead } = await fh.read(Buffer.alloc(64), 0, 64, 0);
-      head = buffer.subarray(0, bytesRead);
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    return false;
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(64), 0, 64, 0);
+    head = buffer.subarray(0, bytesRead);
+  } finally {
+    await fh.close();
   }
   const text = head.toString("latin1").replace(/^\xEF\xBB\xBF/, "").replace(/^[ \t\r\n\f\v]+/, "");
   const answer = text.slice(0, 7).toUpperCase() === "#EXTM3U";
@@ -444,7 +441,15 @@ export class EditorServer {
       sendJson(res, 400, { ok: false, error: "Not a file" });
       return;
     }
-    if (await isHlsPlaylist(path, info.size, info.mtimeMs)) {
+    // Fail closed: when the head can't be read, nothing is streamed.
+    let playlist: boolean;
+    try {
+      playlist = await isHlsPlaylist(path, info.size, info.mtimeMs);
+    } catch {
+      sendJson(res, 500, { ok: false, error: "Couldn't read the file" });
+      return;
+    }
+    if (playlist) {
       sendJson(res, 415, { ok: false, error: NOT_MEDIA_TEXT });
       return;
     }

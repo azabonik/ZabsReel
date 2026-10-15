@@ -33,6 +33,10 @@
 // another computer, raises a media-src violation and makes no request. /file
 // answers 415 for a playlist.
 //
+// No core is left running: stopping the shell must end its core's process
+// (not only its port), and at the end, also after a failure, any core this
+// smoke started that still runs is stopped by its exact pid (leftover-cores.ts).
+//
 // Run:  npx tsx apps/desktop/scripts/smoke-web.ts
 
 import { spawn, spawnSync } from "node:child_process";
@@ -42,6 +46,7 @@ import net from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { corePidIn, isCoreOf, stopLeftoverCores } from "./leftover-cores";
 
 // The page's Content-Security-Policy (the shell sends it with the core's port).
 const netGuard = require("../electron/net-guard.cjs") as { rendererCsp: (port?: number) => string };
@@ -294,6 +299,9 @@ async function main() {
       if (!coreGone) await new Promise((r) => setTimeout(r, 200));
     }
     check("core it started is stopped too", coreGone);
+    // MUTATION: make the web shell's stop() skip core.child.kill() → this row fails (the core keeps running).
+    const corePid = corePidIn(dataDir);
+    check("…its process exits, not only its port", corePid !== null && (await waitFor("core process exit", () => !isCoreOf(corePid, dataDir), 10000)), `pid ${corePid}`);
 
     console.log("9. ports browsers refuse (ERR_UNSAFE_PORT)");
     const blocked = spawnSync(process.execPath, [serverPath, "--port", "5060", "--no-open"], {
@@ -316,6 +324,10 @@ async function main() {
     check("…and stops the core it started", blockedCoreGone);
   } finally {
     if (shell.exitCode === null) shell.kill("SIGKILL");
+    // A failure part way (or the SIGKILL above) leaves the shell's core running: stop it by its pid.
+    const cores = await stopLeftoverCores([dataDir, join(root, "data-blocked"), join(root, "data-blocked-core")]);
+    if (cores.stopped.length) console.log(`  (stopped a core left running: ${cores.stopped.join(", ")})`);
+    check("no core this smoke started is left running", cores.left.length === 0, cores.left.join(", "));
     rmSync(root, { recursive: true, force: true });
   }
 
@@ -405,6 +417,13 @@ async function networkComputers(o: {
     unlisted.status === 200 && JSON.stringify(json(unlisted).needsApproval) === '["zr-pick.invalid"]' && !listed("zr-pick.invalid"), unlisted.body);
   const listing = await request(port, `/api/fs/list?path=${encodeURIComponent("//zr-pick.invalid/s")}`, { headers: { "x-zabsreel-shell": shellKey } });
   console.log(`  (listed //zr-pick.invalid/s: ${listing.status}; on Linux it is a missing local folder, and the shell notes the server either way)`);
+  // Plan 2.2: a device path, or a server name that can't be allowed, is refused before the shell reads anything.
+  // MUTATION: drop the refused check in listDir → these rows get 404 (a missing local folder) and the trace shows the readdir.
+  for (const p of ["//./UNC/zr-evil-refused.invalid/s", "//zr-evil-refused.invalid@SSL/s"]) {
+    const refusedList = await request(port, `/api/fs/list?path=${encodeURIComponent(p)}`, { headers: { "x-zabsreel-shell": shellKey } });
+    check(`/api/fs/list ${p} → 400 with the refusal`, refusedList.status === 400 && String(json(refusedList).error).startsWith(`Refusing to open ${p}: `), `${refusedList.status} ${refusedList.body.slice(0, 160)}`);
+  }
+  check("…and nothing in the shell read those paths", traced("zr-evil-refused").length === 0, JSON.stringify(traced("zr-evil-refused")).slice(0, 300));
   const pickedRes = await post("/api/media-servers/picked", { paths: [pickedPath] });
   check("…then picked on it → allowed (via picker)", JSON.stringify(json(pickedRes).approved) === '["zr-pick.invalid"]' && viaOf("zr-pick.invalid") === "picker", pickedRes.body);
   check("GET picked → 405", (await request(port, "/api/media-servers/picked", { headers: { "x-zabsreel-shell": shellKey } })).status === 405);

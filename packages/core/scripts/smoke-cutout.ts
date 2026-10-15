@@ -642,10 +642,14 @@ async function main(): Promise<void> {
     const AS_EXPORTED = "scale=in_color_matrix=bt709:in_range=tv:flags=bilinear+accurate_rnd+full_chroma_int"; // OUTPUT_COLOR
     const worst = (a: number[][], b: number[][], which: boolean[]) =>
       Math.round(Math.max(0, ...a.flatMap((p, i) => (which[i] ? p.map((v, c) => Math.abs(v - b[i][c])) : []))) * 10) / 10;
-    const pat = join(dir, "colpat.rgb");
-    const rgb = (w: number, h: number) => {
-      const b = Buffer.alloc(w * h * 3);
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) b.set(PAT[Math.floor((y * 2) / h) * 8 + Math.floor((x * 8) / w)], (y * w + x) * 3);
+    // A binary PPM (P6: rgb24 behind a text header), so FFmpeg detects its format: the core's format allowlist
+    // refuses a forced -f rawvideo read from a file (raw video comes only from its own pipe).
+    const pat = join(dir, "colpat.ppm");
+    const ppm = (w: number, h: number) => {
+      const head = Buffer.from(`P6\n${w} ${h}\n255\n`, "ascii");
+      const b = Buffer.alloc(head.length + w * h * 3);
+      head.copy(b);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) b.set(PAT[Math.floor((y * 2) / h) * 8 + Math.floor((x * 8) / w)], head.length + (y * w + x) * 3);
       return b;
     };
     const ALL = (m: string, p: string, t: string) => ["-colorspace", m, "-color_primaries", p, "-color_trc", t];
@@ -656,9 +660,9 @@ async function main(): Promise<void> {
       { name: "full range, BT.709-tagged", w: W, h: H, matrix: "bt709", range: "pc", tags: [...ALL("bt709", "bt709", "bt709"), "-color_range", "pc"] },
     ];
     for (const [k, row] of rows.entries()) {
-      writeFileSync(pat, rgb(row.w, row.h));
+      writeFileSync(pat, ppm(row.w, row.h));
       const png = join(dir, `colpat${k}.png`);
-      await ff(["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", `${row.w}x${row.h}`, "-i", pat, "-frames:v", "1", png]);
+      await ff(["-i", pat, "-frames:v", "1", png]);
       const file = join(dir, `colsrc${k}.${row.mjpeg ? "mkv" : "mp4"}`);
       const pix = row.range === "pc" ? "yuvj420p" : "yuv420p";
       const v = (opt: string) => (row.tags.includes(opt) ? row.tags[row.tags.indexOf(opt) + 1] : "unknown");

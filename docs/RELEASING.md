@@ -119,6 +119,23 @@ on `windows-latest` before it packages anything:
 
 A failure stops the release. Fix the cause; don't skip the step.
 
+The Windows gate can only run on a Windows runner. Before the first `v*` tag
+that includes it, and after a change to these smokes or to the gate steps,
+run it once without a tag:
+
+1. Push the branch, then start **Release** from the Actions tab
+   (`workflow_dispatch`) on that branch. The release guard passes a branch
+   ref, and the attach step runs only on a tag, so this run publishes
+   nothing. It only keeps the build outputs as a CI artifact.
+2. In the log of "Smoke — network paths end to end", find step 7. It must
+   print `7. a second share spelling of a data folder on \\localhost...`
+   followed by its checks, not the line
+   `7. skipped: a second share spelling ... it runs in release.yml`. The
+   skip line on `windows-latest` means that step 7 did not run.
+3. Every gate step must be green. If one fails (for example `net share`, the
+   Server service, or the `.cmd` FFmpeg stub that the e2e runs through
+   `cmd.exe`), fix it before you push the tag.
+
 ### Release text
 
 `generate_release_notes` writes the list of changes. Add the text below to the

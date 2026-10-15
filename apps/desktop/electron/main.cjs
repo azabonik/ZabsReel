@@ -344,8 +344,10 @@ ipcMain.handle("dialog:saveFile", async (_e, ext) => {
     filters,
     properties: ["dontAddToRecent"],
   });
-  const chosen = result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
-  return chosen ? ((await askAboutPicked([chosen]))[0] ?? null) : null;
+  // The server question comes first: the overwrite check stats the path, and
+  // nothing in main touches a server the user has not answered for.
+  const asked = result.canceled || !result.filePath ? null : ((await askAboutPicked([result.filePath]))[0] ?? null);
+  return asked ? finalSavePath(asked, filters) : null;
 });
 
 ipcMain.handle("dialog:openProject", async () => {
@@ -377,8 +379,9 @@ ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
     filters,
     properties: ["dontAddToRecent"],
   });
-  const picked = result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
-  const chosen = picked ? ((await askAboutPicked([picked]))[0] ?? null) : null;
+  // Server question first, then the overwrite check (as in dialog:saveFile).
+  const asked = result.canceled || !result.filePath ? null : ((await askAboutPicked([result.filePath]))[0] ?? null);
+  const chosen = asked ? finalSavePath(asked, filters) : null;
   // Cancelled during "Save before closing?": stay open, and don't close on a later save.
   if (!chosen) guardStep({ type: "save-as-cancelled" });
   return chosen;

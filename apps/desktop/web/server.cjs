@@ -222,13 +222,17 @@ async function listPlaces() {
  * resolve what a link points at — which keeps big folders on /mnt/c quick.
  * A folder on a network computer adds that computer to `browsed` before it
  * is listed (even when the listing then fails): the user browsed there in
- * the picker, so a file he picks there may be allowed without asking.
+ * the picker, so a file he picks there may be allowed without asking. A
+ * refused form (device, NT, or a server name 2.2 refuses) answers 400 first.
  */
 async function listDir(raw, browsed) {
   if (raw && !path.isAbsolute(raw)) throw new HttpError(400, "Path must be absolute");
   if (raw) {
     const { unc } = await trustModules();
     const c = unc.classifyPath(raw);
+    // A device or NT path, or a server name that can't be allowed (plan 2.2), is
+    // refused before anything reads it, with the core's wording.
+    if (c.kind === "refused") throw new HttpError(400, `Refusing to open ${raw}: ${c.reason}`);
     if (c.kind === "network") browsed.add(c.host);
   }
   const dir = raw ? path.resolve(raw) : os.homedir();

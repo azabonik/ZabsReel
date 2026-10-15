@@ -83,6 +83,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { resolveSaveName, presetForPath } from "../src/savename.js";
 import { exportFilters } from "../src/platform.js";
+import { stopLeftoverCores } from "./leftover-cores.js";
 
 type PW = typeof import("playwright-core");
 type ElectronApp = Awaited<ReturnType<PW["_electron"]["launch"]>>;
@@ -141,6 +142,15 @@ const pidAlive = (pid: number) => {
 };
 
 const launched: ElectronApp[] = [];
+/** The data folder of every launch: at the end, also after a failure, no core of these may still run. */
+const launchedDataDirs: string[] = [];
+
+/** Stop any core of this run that is still running (by its exact pid, leftover-cores.ts); the check fails if one stays. */
+async function noLeftoverCores() {
+  const cores = await stopLeftoverCores([...new Set(launchedDataDirs)]);
+  if (cores.stopped.length) console.log(`  (stopped a core left running: ${cores.stopped.join(", ")})`);
+  check(cores.left.length === 0, `no core this smoke started is left running${cores.left.length ? ` (${cores.left.join(", ")})` : ""}`);
+}
 
 interface Run {
   app: ElectronApp;
@@ -166,6 +176,7 @@ async function launch(pw: PW, cwd: string, dataDir: string): Promise<Run> {
     timeout: 60000,
   });
   launched.push(app);
+  launchedDataDirs.push(resolve(cwd, dataDir));
   let log = "";
   app.process().stderr?.on("data", (d) => (log += d.toString()));
   app.process().stdout?.on("data", (d) => (log += d.toString()));
@@ -729,6 +740,7 @@ async function main() {
   // ---------------------------------------------------------------- run 4
   await networkComputers(pw, work, cwd2, clip);
 
+  await noLeftoverCores();
   rmSync(work, { recursive: true, force: true });
   if (failures) {
     console.log(`\nELECTRON SMOKE TEST FAILED (${failures} check(s))`);
@@ -924,6 +936,66 @@ async function networkComputers(pw: PW, work: string, cwd: string, clip: string)
   check((await calls(app, "showMessageBox")).length === 0, "…picked once it is allowed: no dialog");
   await win.locator(".error-bar").click();
 
+  // 9c'. The export, open-project and save-as pickers ask the same question (askAboutPicked in each
+  // handler): Keep offline gives no path and leaves the store as it was. The save pickers ask before
+  // their overwrite check, so main stats nothing on a server the user has not answered for.
+  // MUTATION: drop askAboutPicked from dialog:openProject → its row gets a path and no dialog.
+  // MUTATION: run finalSavePath before askAboutPicked in dialog:saveFile → the export row's spy sees out.mp4 stat'd.
+  await app.evaluate(() => {
+    const g = globalThis as unknown as { __exists: string[]; __realExists?: (p: unknown) => boolean };
+    const nodeFs = (process as unknown as { getBuiltinModule: (m: string) => { existsSync: (p: unknown) => boolean } }).getBuiltinModule("node:fs");
+    g.__exists = [];
+    g.__realExists ??= nodeFs.existsSync;
+    const real = g.__realExists;
+    nodeFs.existsSync = (p: unknown) => {
+      g.__exists.push(String(p));
+      return real(p);
+    };
+  });
+  const existsCalls = () => app.evaluate(() => (globalThis as unknown as { __exists: string[] }).__exists.splice(0));
+  await stub(app, "showSaveDialog", [saveResult(join(work, "spied"))]);
+  const spiedPath = await win.evaluate(() => window.aive!.pickSavePath("mp4"));
+  const spiedCalls = await existsCalls();
+  check(spiedPath === join(work, "spied.mp4") && spiedCalls.includes(join(work, "spied.mp4")), `the existsSync spy in main sees the overwrite check of a local save (${spiedPath}; ${JSON.stringify(spiedCalls)})`);
+  const storeBeforePickers = readFileSync(hostsFile, "utf8");
+  const pickers = [
+    ["export", "zr-pick2.invalid", "//zr-pick2.invalid/s/out", () => stub(app, "showSaveDialog", [saveResult("//zr-pick2.invalid/s/out")]), () => win.evaluate(() => window.aive!.pickSavePath("mp4"))],
+    ["open project", "zr-pick3.invalid", "//zr-pick3.invalid/p/a.aive", () => stub(app, "showOpenDialog", [{ canceled: false, filePaths: ["//zr-pick3.invalid/p/a.aive"] }]), () => win.evaluate(() => window.aive!.openProject())],
+    ["save project as", "zr-pick3.invalid", "//zr-pick3.invalid/p/x", () => stub(app, "showSaveDialog", [saveResult("//zr-pick3.invalid/p/x")]), () => win.evaluate(() => window.aive!.saveProjectAs("x"))],
+  ] as const;
+  for (const [what, host, picked, setUp, run] of pickers) {
+    await setUp();
+    await stub(app, "showMessageBox", [{ response: 0 }]);
+    const got = await run();
+    const [box] = await calls(app, "showMessageBox");
+    const statted = (await existsCalls()).filter((p) => p.includes(host));
+    check(box?.title === `Allow media from \\\\${host}?` && buttonsOf(box) === '["Keep offline","Allow"]' && (box.detail ?? "").startsWith(`You picked ${picked}.`),
+      `${what}: a pick on ${host} → the Allow dialog (${box?.title}, "${(box?.detail ?? "").split("\n")[0]}")`);
+    check(got === null && readFileSync(hostsFile, "utf8") === storeBeforePickers && !listed(host) && statted.length === 0,
+      `${what}: Keep offline → no path, the store is unchanged, and main stat'd nothing there (${JSON.stringify(got)}; ${JSON.stringify(statted)})`);
+  }
+  // Save As kept offline during "Save before closing?" counts as a cancelled Save As: the window
+  // stays open, and a later clean report does not close it.
+  // MUTATION: send save-as-cancelled only when the save dialog itself is cancelled → the clean report closes the window.
+  await win.evaluate(() => window.aive!.reportProjectState({ dirty: true, hasPath: false }));
+  await stub(app, "showMessageBoxSync", [0]); // "Save"
+  await stub(app, "showSaveDialog", [saveResult("//zr-pick3.invalid/p/guarded")]);
+  await stub(app, "showMessageBox", [{ response: 0 }]); // Keep offline
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
+  await waitFor("allow dialog on close", async () => (await calls(app, "showMessageBox")).length > 0, 10000);
+  await sleep(1000);
+  check(!win.isClosed() && (await calls(app, "showSaveDialog")).length === 1 && (await calls(app, "showMessageBox"))[0]?.title === "Allow media from \\\\zr-pick3.invalid?",
+    "close → Save → Save As on zr-pick3.invalid → Keep offline: the window stays open");
+  await win.evaluate(() => window.aive!.reportProjectState({ dirty: false, hasPath: false }));
+  await sleep(1500);
+  check(!win.isClosed(), "…and a later clean report does not close it (the Save request was dropped)");
+  check(readFileSync(hostsFile, "utf8") === storeBeforePickers, "…and the store is unchanged");
+  await existsCalls();
+  await app.evaluate(() => {
+    const g = globalThis as unknown as { __realExists: (p: unknown) => boolean };
+    (process as unknown as { getBuiltinModule: (m: string) => { existsSync: (p: unknown) => boolean } }).getBuiltinModule("node:fs").existsSync = g.__realExists;
+  });
+
   // 9d. Origin wording: a recent project (the page's own request) vs an agent's import.
   await win.evaluate((p) => localStorage.setItem("aive.recent", JSON.stringify([p])), "//zr-evil-7.invalid/p/a.aive");
   await win.reload();
@@ -1011,5 +1083,7 @@ main().catch(async (err) => {
     const closed = await Promise.race([a.close().then(() => true, () => true), sleep(15000).then(() => false)]);
     if (!closed) a.process().kill("SIGKILL");
   }
+  // A killed app leaves its core running.
+  await noLeftoverCores().catch((e) => console.error("could not stop a leftover core:", e));
   process.exit(1);
 });

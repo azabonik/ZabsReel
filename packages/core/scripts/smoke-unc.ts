@@ -171,13 +171,19 @@ const names = (v: unknown, depth = 0): string[] => {
 const require = createRequire(import.meta.url);
 /** The test's own writes of fixture text that names a test host go around the trace. */
 const writeFixture = (require("node:fs") as typeof import("node:fs")).writeFileSync;
+/**
+ * fs calls that read from an open fd into the buffers they are given: those buffers are output, and a pooled
+ * one can still hold an earlier row's text (webpack reads into Buffer.allocUnsafe), so they are not scanned.
+ */
+const FILLS_BUFFERS: ReadonlySet<string> = new Set(["read", "readSync", "readv", "readvSync"]);
 for (const mod of ["node:fs", "node:fs/promises", "node:child_process"]) {
   const m = require(mod) as Record<string, unknown>;
   for (const key of Object.keys(m)) {
     const orig = m[key];
     if (typeof orig !== "function" || /^[A-Z]/.test(key)) continue;
+    const fills = mod === "node:fs" && FILLS_BUFFERS.has(key);
     const wrapped = function (this: unknown, ...args: unknown[]) {
-      for (const n of args.flatMap((a) => names(a))) touched.push(`${mod} ${key}(${n})`);
+      for (const n of args.flatMap((a) => (fills && (ArrayBuffer.isView(a) || Array.isArray(a)) ? [] : names(a)))) touched.push(`${mod} ${key}(${n})`);
       if (mod === "node:child_process") spawned.push(args);
       return (orig as (...a: unknown[]) => unknown).apply(this, args);
     };
@@ -775,6 +781,23 @@ async function main() {
 
   // ---- shared by rows 3, 4, 12 and 13 ------------------------------------------------
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** Run `fn` with setInterval recorded (still armed for real): the delay of each interval it armed. */
+  const intervalsArmedBy = (fn: () => void): number[] => {
+    const real = globalThis.setInterval;
+    const delays: number[] = [];
+    globalThis.setInterval = ((cb: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      return real(cb, ms);
+    }) as unknown as typeof setInterval;
+    try {
+      fn();
+    } finally {
+      globalThis.setInterval = real;
+    }
+    return delays;
+  };
+  /** How long the unread rows wait for the 1 s retry to end the state: generous, so a loaded machine never fails them. */
+  const RETRY_WAIT_MS = 10_000;
   const trustRoot = join(root, "trust-tests");
   mkdirSync(trustRoot, { recursive: true });
   let dataN = 0;
@@ -1235,7 +1258,8 @@ async function main() {
   // outside. Drop the kept key → the stale HostTrust row loses nas. Treat an
   // unreadable key with no copy as "no key" → the unread rows list nas and
   // zr-evil-3.invalid as outside and approvalDialogFor gives "keep". Drop the
-  // 1 s retry timer → the unread rows are still unread after 2 s. Ignore
+  // 1 s retry timer → the unread rows arm no timer and are still unread after
+  // 10 s; arm it at another delay → the "every 1 s" rows fail. Ignore
   // onlyIfOutside → the remove-after-keep row removes the host. Drop the lazy
   // reload or the watch → their HostTrust rows fail. Keep a missing or corrupt
   // key (or list) as the last good copy → the missing/corrupt-then-EBUSY rows
@@ -1364,16 +1388,18 @@ async function main() {
       const r = readTrustedHosts(d, { readError: inject });
       check(r.approved.length === 0 && r.outside.length === 0 && JSON.stringify(r.unread) === JSON.stringify([file]) && approvalDialogFor(r, "nas") === "unread" && approvalDialogFor(r, E3) === "unread",
         `unread at start (${file} EBUSY, no good copy): nothing approved or outside, unread ${JSON.stringify(r.unread)}, approvalDialogFor gives "unread" for both (${JSON.stringify(r)})`);
-      const ht = new HostTrust(d, { readError: inject }).start();
+      let ht!: HostTrust;
+      const armed = intervalsArmedBy(() => (ht = new HostTrust(d, { readError: inject }).start()));
       const l = ht.list();
       check(l.approved.length === 0 && l.outside.length === 0 && JSON.stringify(l.unread) === JSON.stringify([file]) && !gfs.allowedNetworkHosts().has("nas"),
         `HostTrust started under it: unread ${JSON.stringify(l.unread)}, nas not published (${JSON.stringify(l)})`);
+      check(JSON.stringify(armed) === "[1000]", `the unread state arms one retry timer, every 1 s (${JSON.stringify(armed)} ms)`);
       delete inject[file];
       const t0 = Date.now();
-      while (Date.now() - t0 < 2_000 && ht.list().unread.length > 0) await sleep(50);
+      while (Date.now() - t0 < RETRY_WAIT_MS && ht.list().unread.length > 0) await sleep(50);
       const after = ht.list();
       check(after.unread.length === 0 && names(after.approved) === "nas" && names(after.outside) === E3 && gfs.allowedNetworkHosts().has("nas") && !gfs.allowedNetworkHosts().has(E3),
-        `the read works again: within 2 s, with no check and no mtime change (the 1 s retry), nas is approved and only now is ${E3} outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
+        `the read works again: with no check and no mtime change (the retry timer alone), nas is approved and only now is ${E3} outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
       ht.close();
     }
     const d = freshData();
@@ -1975,7 +2001,7 @@ async function main() {
     const realTrust = engine.trust;
     const ht = new HostTrust(d, { readError: inject, onChange: () => engine.onTrustChanged() });
     (engine as unknown as { trust: HostTrust }).trust = ht;
-    ht.start();
+    const armed = intervalsArmedBy(() => ht.start());
     try {
       const f = join(root, "unread.aive");
       writeFixture(f, JSON.stringify(project("//zr-ok-1.invalid/s/a.mp4", { hasVideo: false, hasAudio: true })));
@@ -1992,12 +2018,13 @@ async function main() {
       const imp = await thrown(() => dispatch(engine, "import_video", { path: "//zr-ok-1.invalid/s/b.mp4" }));
       check(imp instanceof RpcError && imp.code === "media_server_not_approved" && imp.details.unread === true && /couldn't read its list of approved computers; retrying/.test(imp.message)
         && !engine.mediaServers().pending.some((x) => x.origins.includes("request")), `import_video refuses with unread: true and adds no request (${imp?.message.slice(0, 120)})`);
+      check(JSON.stringify(armed) === "[1000]", `the unread state arms one retry timer, every 1 s (${JSON.stringify(armed)} ms)`);
       delete inject["hosts.key"];
       const t0 = Date.now();
-      while (Date.now() - t0 < 2_000 && engine.getProject().assets[0].awaitingServer) await sleep(50);
+      while (Date.now() - t0 < RETRY_WAIT_MS && engine.getProject().assets[0].awaitingServer) await sleep(50);
       const after = engine.mediaServers();
       check(engine.getProject().assets[0].awaitingServer === undefined && after.unread.length === 0 && after.pending.some((x) => x.host === "zr-evil-3.invalid" && x.origins.includes("outside")),
-        `the read works again: within 2 s the asset is online, and only now is zr-evil-3.invalid pending as outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
+        `the read works again: the retry timer alone brings the asset online, and only now is zr-evil-3.invalid pending as outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
     } finally {
       ht.close();
       (engine as unknown as { trust: HostTrust }).trust = realTrust;
@@ -2162,6 +2189,8 @@ async function main() {
 
   // ---- 18. /file never serves an HLS playlist ----------------------------------------------
   // MUTATION: skip the isHlsPlaylist check in serveFile → the 415 rows fail.
+  // MUTATION: let isHlsPlaylist answer false on a read error (fail open) → the
+  // "head read fails" row gets 200 instead of 500.
   console.log("18. /file answers 415 for a file that starts with #EXTM3U...");
   {
     const data18 = join(root, "data");
@@ -2205,6 +2234,33 @@ async function main() {
       utimesSync(changing, t, t);
       const touched18 = await ask(changing);
       check(first.status === 200 && grown.status === 415 && touched18.status === 200, `the cache re-checks a changed file: 200, then 415 (new size), then 200 (same size, new mtime) (${first.status}, ${grown.status}, ${touched18.status})`);
+      // Fail closed: the 64-byte head read fails (EBUSY, as from a scanner holding the file) while a
+      // stream could still open it. /file answers 500 and streams nothing, and the failure is not cached.
+      const locked = put("locked.mp4", `#EXTM3U\n${playlist}`);
+      const fsp18 = require("node:fs/promises") as Record<string, unknown>;
+      const realOpen = fsp18.open as (...a: unknown[]) => unknown;
+      fsp18.open = (...a: unknown[]) => {
+        if (a[0] === locked) return Promise.reject(Object.assign(new Error(`EBUSY: resource busy or locked, open '${locked}'`), { code: "EBUSY" }));
+        return realOpen(...a);
+      };
+      syncBuiltinESMExports();
+      const readBody18 = async (method: string) => {
+        const r = await fetch(`http://127.0.0.1:${port18}/file?path=${encodeURIComponent(locked)}&token=${token18}`, { method });
+        const text = method === "GET" ? await r.text() : "";
+        return { status: r.status, error: text.startsWith("{") ? (JSON.parse(text) as { error?: string }).error : text.slice(0, 40) };
+      };
+      let busyGet: { status: number; error?: string };
+      let busyHead: { status: number; error?: string };
+      try {
+        [busyGet, busyHead] = [await readBody18("GET"), await readBody18("HEAD")];
+      } finally {
+        fsp18.open = realOpen;
+        syncBuiltinESMExports();
+      }
+      check(busyGet.status === 500 && busyGet.error === "Couldn't read the file" && busyHead.status === 500,
+        `the head read fails: GET and HEAD answer 500 "Couldn't read the file", nothing is streamed (${busyGet.status} ${busyGet.error}; HEAD ${busyHead.status})`);
+      const unlocked = await ask(locked);
+      check(unlocked.status === 415, `…and the failure is not cached: readable again, the same file answers 415 (${unlocked.status})`);
     } finally {
       await server.stop();
     }
