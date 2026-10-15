@@ -4412,7 +4412,7 @@ export class EditorEngine extends EventEmitter {
           effects = { ...effects, lut: name };
         }
       }
-      // FFmpeg 7.x's acrossfade is unreliable: ramp chunks and transitions are mixed instead (graph.ts).
+      // FFmpeg 6.1 – 7.x's acrossfade drops audio: ramp chunks and transitions are mixed instead (graph.ts).
       if (asset.hasAudio && (effects?.speedRamp || clip.transition) && (await acrossfadeNeedsMix())) {
         effects = { ...effects, audioCaps: { ...effects?.audioCaps, mixCrossfade: true } };
       }

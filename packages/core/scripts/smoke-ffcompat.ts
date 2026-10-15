@@ -1,6 +1,6 @@
 /**
  * FFmpeg version-compatibility smoke (no downloads; synthesizes its inputs).
- * ZabsReel supports FFmpeg 4.4 and 7.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
+ * ZabsReel supports FFmpeg 4.4 and 6.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
  * run this against every build you ship or test:
  *
  *   npx tsx packages/core/scripts/smoke-ffcompat.ts
@@ -8,7 +8,8 @@
  *
  * Checks, each against the RUNNING binary unless marked pure:
  *   - version parsing of real banners (pure) with the gates that follow from it
- *     (afftfilt, the xfade EOF pad before 7.0), and this FFmpeg's version; the
+ *     (afftfilt, the xfade EOF pad before 7.0, mixed audio joins on 6.1 – 7.x),
+ *     and this FFmpeg's version; the
  *     version/ffprobe banners are probed once (the authenticated /health reads them);
  *   - `ffmpeg -filters` parsing: 3 flag columns up to 7.x, 2 from 8.0 (which
  *     hid rubberband, so pitch effects silently used the fallback);
@@ -33,8 +34,9 @@
  *     (4.4 – 6.1 dropped it: a black frame), and a keyed, speed-ramped clip (as
  *     footage and as a matte cutout) shows the ramp model's frame in every slot;
  *   - a speed-ramped clip's audio (chunks joined by 8 ms crossfades) and short
- *     clips joined by transitions export the same audio every time (7.x's
- *     acrossfade cut short or dropped it at random; on 7.x they are mixed).
+ *     clips joined by transitions export the same audio every time, with no
+ *     silent gap (6.1 – 7.x's acrossfade ends its output when the next piece
+ *     ends first: 6.1 every time, 7.x at random; there they are mixed).
  */
 import { execa } from "execa";
 import { createHash } from "node:crypto";
@@ -244,22 +246,29 @@ function vsModel(got: ArrayLike<number>, ref: ArrayLike<number>, from: number, t
 }
 
 // Real `ffmpeg -version` heads (banner … libavfilter line) of the builds the matrix ran, plus
-// the afftfilt boundary: 5.0 (libavfilter 8.24) has 4.4's afftfilt, 5.1 (8.44) the rewrite.
-type Want = { major: number | null; generation: number | null; tested: boolean; lavfiMinor: number; afftfiltV2: boolean; xfadeEofPad: boolean };
+// the afftfilt boundary: 5.0 (libavfilter 8.24) has 4.4's afftfilt, 5.1 (8.44) the rewrite, and the
+// acrossfade boundary: 6.0 (9.3) waits for its first input's end, 6.1 (9.12) – 7.x do not (mixed joins);
+// git builds of libavfilter 9 and 11 mix too (an 11.x git build may predate 8.0's acrossfade rewrite).
+type Want = { major: number | null; generation: number | null; tested: boolean; lavfiMinor: number; afftfiltV2: boolean; xfadeEofPad: boolean; mixJoins: boolean };
 const BANNERS: Array<[string, string, Want]> = [
-  ["ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers", "libavfilter     7.110.100 /  7.110.100", { major: 4, generation: 4, tested: true, lavfiMinor: 110, afftfiltV2: false, xfadeEofPad: true }],
-  ["ffmpeg version 5.0.3 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 24.100 /  8. 24.100", { major: 5, generation: 5, tested: false, lavfiMinor: 24, afftfiltV2: false, xfadeEofPad: true }],
-  ["ffmpeg version n5.1.6-11-gcde3c5fc0c-20241130 Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter     8. 44.100 /  8. 44.100", { major: 5, generation: 5, tested: false, lavfiMinor: 44, afftfiltV2: true, xfadeEofPad: true }],
-  ["ffmpeg version n7.1.5-12-g1fdbca85aa-20260731 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    10.  5.100 / 10.  5.100", { major: 7, generation: 7, tested: true, lavfiMinor: 5, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version 7.1-full_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter    10.  4.100 / 10.  4.100", { major: 7, generation: 7, tested: true, lavfiMinor: 4, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version n8.0.1-66-g27b8d1a017-20260228 Copyright (c) 2000-2025 the FFmpeg developers", "libavfilter    11.  4.100 / 11.  4.100", { major: 8, generation: 8, tested: true, lavfiMinor: 4, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version n8.1.3-18-g46d899d7a0-20261012 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    11. 14.103 / 11. 14.103", { major: 8, generation: 8, tested: true, lavfiMinor: 14, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version n9.0.2-27-g7e93014c5b-20261012 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    12.  1.102 / 12.  1.102", { major: 9, generation: 9, tested: true, lavfiMinor: 1, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version N-121234-gdeadbeef00-20261001 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    12.  3.100 / 12.  3.100", { major: null, generation: 9, tested: false, lavfiMinor: 3, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version 2026-10-01-git-abcdef1234-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    11. 14.103 / 11. 14.103", { major: null, generation: 8, tested: false, lavfiMinor: 14, afftfiltV2: true, xfadeEofPad: false }],
-  ["ffmpeg version N-102000-g0123456789 Copyright (c) 2000-2021 the FFmpeg developers", "libavfilter     7.110.100 /  7.110.100", { major: null, generation: 4, tested: false, lavfiMinor: 110, afftfiltV2: false, xfadeEofPad: true }],
-  ["ffmpeg version N-105500-g89abcdef01 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 24.100 /  8. 24.100", { major: null, generation: 5, tested: false, lavfiMinor: 24, afftfiltV2: false, xfadeEofPad: true }],
-  ["ffmpeg version N-107900-gfedcba9876 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 44.100 /  8. 44.100", { major: null, generation: 5, tested: false, lavfiMinor: 44, afftfiltV2: true, xfadeEofPad: true }],
+  ["ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers", "libavfilter     7.110.100 /  7.110.100", { major: 4, generation: 4, tested: true, lavfiMinor: 110, afftfiltV2: false, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version 5.0.3 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 24.100 /  8. 24.100", { major: 5, generation: 5, tested: false, lavfiMinor: 24, afftfiltV2: false, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version n5.1.6-11-gcde3c5fc0c-20241130 Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter     8. 44.100 /  8. 44.100", { major: 5, generation: 5, tested: false, lavfiMinor: 44, afftfiltV2: true, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version 6.0 Copyright (c) 2000-2023 the FFmpeg developers", "libavfilter     9.  3.100 /  9.  3.100", { major: 6, generation: 6, tested: true, lavfiMinor: 3, afftfiltV2: true, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version n6.1.2-15-ga6a07eebdf-20241130 Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter     9. 12.100 /  9. 12.100", { major: 6, generation: 6, tested: true, lavfiMinor: 12, afftfiltV2: true, xfadeEofPad: true, mixJoins: true }],
+  ["ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", "libavfilter     9. 12.100 /  9. 12.100", { major: 6, generation: 6, tested: true, lavfiMinor: 12, afftfiltV2: true, xfadeEofPad: true, mixJoins: true }],
+  ["ffmpeg version n7.1.5-12-g1fdbca85aa-20260731 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    10.  5.100 / 10.  5.100", { major: 7, generation: 7, tested: true, lavfiMinor: 5, afftfiltV2: true, xfadeEofPad: false, mixJoins: true }],
+  ["ffmpeg version 7.1-full_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter    10.  4.100 / 10.  4.100", { major: 7, generation: 7, tested: true, lavfiMinor: 4, afftfiltV2: true, xfadeEofPad: false, mixJoins: true }],
+  ["ffmpeg version n8.0.1-66-g27b8d1a017-20260228 Copyright (c) 2000-2025 the FFmpeg developers", "libavfilter    11.  4.100 / 11.  4.100", { major: 8, generation: 8, tested: true, lavfiMinor: 4, afftfiltV2: true, xfadeEofPad: false, mixJoins: false }],
+  ["ffmpeg version n8.1.3-18-g46d899d7a0-20261012 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    11. 14.103 / 11. 14.103", { major: 8, generation: 8, tested: true, lavfiMinor: 14, afftfiltV2: true, xfadeEofPad: false, mixJoins: false }],
+  ["ffmpeg version n9.0.2-27-g7e93014c5b-20261012 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    12.  1.102 / 12.  1.102", { major: 9, generation: 9, tested: true, lavfiMinor: 1, afftfiltV2: true, xfadeEofPad: false, mixJoins: false }],
+  ["ffmpeg version N-121234-gdeadbeef00-20261001 Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    12.  3.100 / 12.  3.100", { major: null, generation: 9, tested: false, lavfiMinor: 3, afftfiltV2: true, xfadeEofPad: false, mixJoins: false }],
+  ["ffmpeg version 2026-10-01-git-abcdef1234-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers", "libavfilter    11. 14.103 / 11. 14.103", { major: null, generation: 8, tested: false, lavfiMinor: 14, afftfiltV2: true, xfadeEofPad: false, mixJoins: true }],
+  ["ffmpeg version N-115000-g1a2b3c4d5e Copyright (c) 2000-2024 the FFmpeg developers", "libavfilter    11.  0.100 / 11.  0.100", { major: null, generation: 8, tested: false, lavfiMinor: 0, afftfiltV2: true, xfadeEofPad: false, mixJoins: true }],
+  ["ffmpeg version N-102000-g0123456789 Copyright (c) 2000-2021 the FFmpeg developers", "libavfilter     7.110.100 /  7.110.100", { major: null, generation: 4, tested: false, lavfiMinor: 110, afftfiltV2: false, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version N-105500-g89abcdef01 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 24.100 /  8. 24.100", { major: null, generation: 5, tested: false, lavfiMinor: 24, afftfiltV2: false, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version N-107900-gfedcba9876 Copyright (c) 2000-2022 the FFmpeg developers", "libavfilter     8. 44.100 /  8. 44.100", { major: null, generation: 5, tested: false, lavfiMinor: 44, afftfiltV2: true, xfadeEofPad: true, mixJoins: false }],
+  ["ffmpeg version N-112000-g0a1b2c3d4e Copyright (c) 2000-2023 the FFmpeg developers", "libavfilter     9.  8.100 /  9.  8.100", { major: null, generation: 6, tested: false, lavfiMinor: 8, afftfiltV2: true, xfadeEofPad: true, mixJoins: true }],
 ];
 
 async function main(): Promise<void> {
@@ -271,9 +280,9 @@ async function main(): Promise<void> {
   for (const [banner, lavfi, want] of BANNERS) {
     const v = parseFfmpegVersion(`${banner}\nbuilt with gcc 14\nconfiguration: --enable-gpl\nlibavutil      60.  8.100 / 60.  8.100\n${lavfi}\n`);
     check(v.major === want.major && v.generation === want.generation && v.tested === want.tested && (untestedFfmpegWarning(v) === null) === want.tested &&
-      v.lavfiMinor === want.lavfiMinor && hasAfftfiltV2(v) === want.afftfiltV2 && xfadeNeedsEofPad(v) === want.xfadeEofPad,
+      v.lavfiMinor === want.lavfiMinor && hasAfftfiltV2(v) === want.afftfiltV2 && xfadeNeedsEofPad(v) === want.xfadeEofPad && acrossfadeUnreliable(v) === want.mixJoins,
       `${v.major !== null ? `${v.label}, ` : "git build, "}libavfilter ${v.lavfi}.${v.lavfiMinor}: generation ${v.generation}, ${v.tested ? "tested" : "untested (startup warning)"}, ` +
-      `afftfilt ${hasAfftfiltV2(v) ? "v2" : "v1"}, xfade EOF pad ${xfadeNeedsEofPad(v) ? "on" : "off"}`);
+      `afftfilt ${hasAfftfiltV2(v) ? "v2" : "v1"}, xfade EOF pad ${xfadeNeedsEofPad(v) ? "on" : "off"}, audio joins ${acrossfadeUnreliable(v) ? "mixed" : "acrossfade"}`);
   }
   check(hasAfftfiltV2(null) && hasAfftfiltV2({ major: null, minor: null, lavfi: null, lavfiMinor: null }), "afftfilt v2 for an unknown build");
   check(preferredFilterScriptFlag({ generation: 4 }) === "-filter_complex_script" && preferredFilterScriptFlag({ generation: 6 }) === "-filter_complex_script" &&
@@ -282,6 +291,7 @@ async function main(): Promise<void> {
   check(!hasAfftdnV2({ generation: 4 }) && hasAfftdnV2({ generation: 5 }) && hasAfftdnV2({ generation: 9 }) && hasAfftdnV2(null), "afftdn v2 from FFmpeg 5 (and for an unknown build)");
   check(xfadeNeedsEofPad({ generation: 4 }) && xfadeNeedsEofPad({ generation: 6 }) && !xfadeNeedsEofPad({ generation: 7 }) && !xfadeNeedsEofPad({ generation: 9 }) &&
     !xfadeNeedsEofPad(null) && !xfadeNeedsEofPad({ generation: null }), "xfade EOF pad before FFmpeg 7 only (off for an unknown build)");
+  check(!acrossfadeUnreliable(null) && !acrossfadeUnreliable({ major: null, minor: null, generation: null, lavfi: null }), "audio joins use acrossfade on an unknown build");
 
   console.log("this FFmpeg");
   const v = await ffmpegVersion();
@@ -663,8 +673,9 @@ async function main(): Promise<void> {
       `${dark.every((d) => d < 0) ? "the last video frame held to the footprint" : `BLACK from frame ${dark.filter((d) => d >= 0).join(" / ")}`}`);
   }
 
-  // Audio joins: 7.x's acrossfade returned a cut-short or empty stream at random
-  // for short inputs (a ramp's chunks); there the joins are mixed (graph.ts).
+  // Audio joins: 6.1 – 7.x's acrossfade ends its output when its second input ends
+  // first (a ramp's chunks): 6.1 left a ramp's end silent, 7.x cut it short at
+  // random; there the joins are mixed (graph.ts).
   console.log("audio joins (speed ramp chunks, transitions)");
   const rampSrc = join(dir, "ramp.mkv");
   await execa(FFMPEG_BIN, ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=160x90:r=30:d=6", "-f", "lavfi", "-i", `sine=f=440:d=6:sample_rate=${SR}`,
@@ -684,7 +695,7 @@ async function main(): Promise<void> {
     for (let i = 0; i + 4800 <= y.length - 4800; i += 4800) rampWorst = Math.min(rampWorst, db(rms(y.subarray(i, i + 4800))));
   }
   check(rampSums.size === 1 && rampWorst > -30,
-    `3 exports of a "montage" speed ramp: ${rampSums.size} distinct result(s), quietest 100 ms ${rampWorst.toFixed(1)} dBFS${acrossfadeUnreliable(v) ? " (FFmpeg 7.x: mixed joins)" : ""}`);
+    `3 exports of a "montage" speed ramp: ${rampSums.size} distinct result(s), quietest 100 ms ${rampWorst.toFixed(1)} dBFS${acrossfadeUnreliable(v) ? " (mixed joins)" : ""}`);
   const shortClip = async (f: number): Promise<string> => {
     const p = join(dir, `short${f}.mkv`);
     await execa(FFMPEG_BIN, ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=160x90:r=30:d=0.4", "-f", "lavfi", "-i", `sine=f=${f}:d=0.4:sample_rate=${SR}`,
@@ -710,7 +721,7 @@ async function main(): Promise<void> {
     for (let i = 0; i + 2400 <= y.length - 2400; i += 2400) worstGap = Math.min(worstGap, db(rms(y.subarray(i, i + 2400))));
   }
   check(sums.size === 1 && Math.abs(len - 1.0) < 0.06 && worstGap > -30,
-    `4 exports of 3 × 0.4 s clips with 0.1 s fades: ${sums.size} distinct result(s), ${len.toFixed(3)} s, quietest 50 ms ${worstGap.toFixed(1)} dBFS${acrossfadeUnreliable(v) ? " (FFmpeg 7.x: mixed joins)" : ""}`);
+    `4 exports of 3 × 0.4 s clips with 0.1 s fades: ${sums.size} distinct result(s), ${len.toFixed(3)} s, quietest 50 ms ${worstGap.toFixed(1)} dBFS${acrossfadeUnreliable(v) ? " (mixed joins)" : ""}`);
 
   writeFileSync(join(dir, "done"), "ok");
   if (failures) {

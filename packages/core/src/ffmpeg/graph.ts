@@ -900,8 +900,8 @@ function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inp
     parts.push(`[${label}]`);
   });
   if (fx.audioCaps?.mixCrossfade && parts.length > 1) {
-    // FFmpeg 7.x: the same joins as faded chunks mixed at their sample positions
-    // (emitMixCrossfades) — its acrossfade drops or cuts short chunks at random.
+    // FFmpeg 6.1 – 7.x: the same joins as faded chunks mixed at their sample positions
+    // (emitMixCrossfades) — its acrossfade drops or cuts short chunks.
     const pieces = chunks.map((_, k) => ({ label: parts[k], len: lens[k] + xf[k], fadeIn: k > 0 && xf[k - 1] >= 8 ? xf[k - 1] : 0 }));
     const mixed = emitMixCrossfades(filterParts, pieces, `${tag}m`);
     filterParts.push(`${mixed}${[...pin, ...audioOutputSteps(clip)].join(",")}[${outLabel}]`);
@@ -922,9 +922,9 @@ function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inp
  * Join audio pieces end to end at 48 kHz, each piece crossfading (linear, like
  * acrossfade's tri curves) into the next over the NEXT piece's `fadeIn`
  * samples (0 = butt join), by fading each piece and mixing them all at their
- * sample positions. Used instead of chained acrossfade on FFmpeg 7.x, whose
- * acrossfade returns a cut-short or empty stream at random when its inputs are
- * short (version.ts acrossfadeUnreliable); mixing by position gives the same
+ * sample positions. Used instead of chained acrossfade on FFmpeg 6.1 – 7.x, whose
+ * acrossfade ends its output when the second input ends first, cutting the
+ * stream short (version.ts acrossfadeUnreliable); mixing by position gives the same
  * samples on every run. Every piece must be exactly `len` samples long.
  * Returns the joined stream's label.
  */
@@ -1467,7 +1467,7 @@ export function buildRenderCommand(
       let cur = `[a${members[0].idx}]`;
       const mixJoins = members.length > 1 && members.some((m) => m.clip.effects?.audioCaps?.mixCrossfade);
       if (mixJoins) {
-        // FFmpeg 7.x (see emitMixCrossfades): each clip pinned to its timeline length.
+        // FFmpeg 6.1 – 7.x (see emitMixCrossfades): each clip pinned to its timeline length.
         const pieces = members.map((m, i) => {
           const len = Math.max(1, Math.round(m.clip.outDuration * 48000));
           filterParts.push(`[a${m.idx}]apad,atrim=end_sample=${len},asetpts=PTS-STARTPTS[ap${m.idx}]`);
