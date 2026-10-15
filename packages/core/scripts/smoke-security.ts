@@ -147,11 +147,14 @@ async function main() {
   const missingErr = lutErr(missingCube);
   check(/does not exist/.test(missingErr), `setting a .cube that does not exist is refused (${missingErr.slice(0, 90)})`);
   check(lutNow() === cubePath, "the refused missing LUT leaves the clip's .cube LUT");
-  // MUTATION: drop the try/catch around statSync in setClipEffects → a NUL byte
-  // escapes as Node's raw ERR_INVALID_ARG_VALUE and this row fails.
+  // A NUL byte is refused before anything resolves the path (G2, ENUL), with a
+  // product sentence that names the clip, never Node's raw ERR_INVALID_ARG_VALUE.
+  // MUTATION: drop the NUL check in HostTrust.checkPath → the refusal becomes
+  // "couldn't check this path (ERR_INVALID_ARG_VALUE)" and this row fails.
   const nulErr = lutErr(join(dataDir, "..", "aive-sec-nul\u0000.cube"));
-  check(/does not exist or is not a file/.test(nulErr) && nulErr.includes(lutClip.id),
-    `a LUT path with a NUL byte gets the LUT refusal, not a raw fs error (${JSON.stringify(nulErr.slice(0, 90))})`);
+  check(/contains a NUL character/.test(nulErr) && nulErr.includes(lutClip.id) && !/ERR_INVALID_ARG_VALUE|must be a string/.test(nulErr),
+    `a LUT path with a NUL byte gets a plain refusal naming the clip, not a raw fs error (${JSON.stringify(nulErr.slice(0, 90))})`);
+  check(lutNow() === cubePath, "the refused NUL-byte LUT leaves the clip's .cube LUT");
   const upperCube = join(dataDir, "..", `aive-sec-upper-${Date.now()}.CUBE`);
   writeFileSync(upperCube, "LUT_3D_SIZE 2\n");
   check(lutErr(upperCube) === "(accepted)" && lutNow() === upperCube, "an existing .CUBE file is accepted as a LUT");

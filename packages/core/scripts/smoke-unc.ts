@@ -1219,6 +1219,17 @@ async function main() {
         check(!r.ok && !r.private && r.code === "EDOTDOT", `checkPath(${JSON.stringify(p)}) is EDOTDOT (${JSON.stringify(r)})`);
         check(ht.loadFieldCheck(p) === "EDOTDOT", `loadFieldCheck(${JSON.stringify(p)}) is EDOTDOT (${ht.loadFieldCheck(p)})`);
       }
+      // A NUL character: no file name holds one, so it is refused before any resolve or stat
+      // (Node would throw a raw ERR_INVALID_ARG_VALUE). MUTATION: drop the NUL line from
+      // checkPath or loadFieldCheck → these rows fail.
+      const stats: string[] = [];
+      const htNul = new HostTrust("\\\\zr-data.invalid\\zr", { platform: "win32", stat: (p) => { stats.push(p); return { dev: 1n, ino: 1n }; }, realpath: (p) => { stats.push(p); return p; } });
+      for (const p of ["C:\\zr\\proxies\\a\u0000.mp4", "\\\\zr-data.invalid\\video\\a\u0000.mp4", "\\\\zr-evil-3.invalid\\s\\a\u0000.mp4"]) {
+        const r = htNul.checkPath(p);
+        check(!r.ok && !r.private && r.code === "ENUL", `checkPath(${JSON.stringify(p)}) is ENUL (${JSON.stringify(r)})`);
+        check(htNul.loadFieldCheck(p) === "ENUL", `loadFieldCheck(${JSON.stringify(p)}) is ENUL (${htNul.loadFieldCheck(p)})`);
+      }
+      check(stats.length === 0, `a NUL path is refused before any stat or realpath (${JSON.stringify(stats)})`);
     }
     // Linux on a case-insensitive mount (drvfs, ext4 casefold): TRUST is trust/ when it has trust/'s file id.
     {

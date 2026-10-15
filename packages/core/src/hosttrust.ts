@@ -139,6 +139,8 @@ const PRIVATE: PathCheck = { ok: false, private: true };
 const IDENTITY: PathCheck = { ok: false, private: true, rule: "the identity check" };
 /** A path with a ".." segment: never resolved, so a link before the ".." can't lead into the trust folder. */
 const DOTDOT: PathCheck = { ok: false, private: false, code: "EDOTDOT" };
+/** A path with a NUL character: no file name can hold one, and Node refuses it with a raw error. */
+const NUL: PathCheck = { ok: false, private: false, code: "ENUL" };
 
 /**
  * True when `p` has a ".." segment, split on "/" and "\\" on every platform.
@@ -591,6 +593,7 @@ export class HostTrust {
    * passes (safepath's assertPathUsable refuses it with its own message).
    */
   checkPath(p: string, cache = new Map<string, FileId | null>()): PathCheck {
+    if (p.includes("\0")) return NUL;
     const { text, c } = classifyFsText(p, { platform: this.platform });
     if (c.kind === "refused") return OK;
     if (this.quick(text)) return PRIVATE;
@@ -609,6 +612,7 @@ export class HostTrust {
     if (r.private) return `in ${PRODUCT_NAME}'s private settings folder`;
     if (r.code === "EDOTDOT") return `it has a ".." segment, which ${PRODUCT_NAME} doesn't follow; pass the full path without ".."`;
     if (r.code === "EDANGLING") return `it goes through a link whose target does not exist; pass the path of the real file`;
+    if (r.code === "ENUL") return "it contains a NUL character, which no file name can hold";
     return `${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again`;
   }
 
@@ -626,6 +630,7 @@ export class HostTrust {
     if (r.code === "EDANGLING") {
       throw new PrivatePathError(`${field} ${show(p)} goes through a link whose target does not exist, so ${PRODUCT_NAME} can't tell where it leads; nothing was opened. Pass the path of the real file or folder.`);
     }
+    if (r.code === "ENUL") throw new PrivatePathError(`${field} ${show(p)} contains a NUL character, which no file name can hold, so nothing was opened.`);
     throw new PrivatePathError(`${field} ${show(p)}: ${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again.`);
   }
 
@@ -640,6 +645,7 @@ export class HostTrust {
    */
   loadFieldCheck(p: unknown, cache = new Map<string, FileId | null>()): string {
     if (typeof p !== "string" || p === "") return "ok";
+    if (p.includes("\0")) return "ENUL";
     if (this.privateAsSpelled(p)) return "private";
     const c = classifyPath(p);
     if (c.kind === "refused") return "ok";

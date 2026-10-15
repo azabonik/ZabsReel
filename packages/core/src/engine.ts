@@ -2191,7 +2191,7 @@ export class EditorEngine extends EventEmitter {
       assertLocalMediaPath(patch.lut, "LUT path");
       // G1: a network computer the user has not allowed; G2: the private trust folder.
       this.trust.requirePath(patch.lut, "LUT path");
-      this.trust.assertNotPrivate(patch.lut, "LUT path");
+      this.trust.assertNotPrivate(patch.lut, `Clip "${clipId}" LUT path`);
       // /file serves a clip's LUT to the live preview (isServablePath), so only
       // an existing .cube file can be one, not any file the agent names. (A
       // path statSync rejects outright, e.g. one with a NUL byte, is "missing".)
