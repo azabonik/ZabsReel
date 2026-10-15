@@ -93,6 +93,11 @@ function forbidden(engine: EditorEngine, path: string, what: string): { ok: fals
     : `Forbidden: ${what} only ${what === "/frames" ? "decodes" : "reads"} files /file would serve.` };
 }
 
+/** The body of a /file, /frames or /peaks refusal: {@link forbidden}, or "File not found" for a 404. */
+function refusal(engine: EditorEngine, path: string, what: string, status = 403): { ok: false; error: string } {
+  return status === 404 ? { ok: false, error: "File not found" } : forbidden(engine, path, what);
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -361,11 +366,15 @@ export class EditorServer {
       if (req.method === "GET" && url.pathname === "/frames") {
         // Decoded source frames for the live preview's trails / denoise (ffmpeg/frames.ts).
         const q = parseFramesQuery(url.searchParams);
-        if (typeof q === "string") respond(400, { ok: false, error: q });
-        else if (!this.engine.isServablePath(q.path)) respond(403, forbidden(this.engine, q.path, "/frames"));
+        if (typeof q === "string") {
+          respond(400, { ok: false, error: q });
+          return;
+        }
+        const open = this.engine.servablePath(q.path);
+        if ("status" in open) respond(open.status, refusal(this.engine, q.path, "/frames", open.status));
         else {
           cors(res);
-          await streamFrames(q, res);
+          await streamFrames({ ...q, path: open.path }, res);
         }
         return;
       }
@@ -383,8 +392,8 @@ export class EditorServer {
 
   /**
    * Waveform peaks of a file /file would serve (media/peaks.ts). The path only
-   * reaches FFmpeg as its -i input, after the same isServablePath check, and
-   * no error body names it.
+   * reaches FFmpeg as its -i input, after the same servablePath check (the
+   * checked path is the one read), and no error body names it.
    */
   private async servePeaks(q: URLSearchParams, res: ServerResponse, respond: (status: number, body: unknown) => void): Promise<void> {
     const p = parsePeaksQuery(q);
@@ -392,13 +401,15 @@ export class EditorServer {
       respond(400, { ok: false, error: p });
       return;
     }
-    if (!this.engine.isServablePath(p.path)) {
-      respond(403, forbidden(this.engine, p.path, "/peaks"));
+    const open = this.engine.servablePath(p.path);
+    if ("status" in open) {
+      respond(open.status, refusal(this.engine, p.path, "/peaks", open.status));
       return;
     }
+    const path = open.path;
     let info;
     try {
-      info = await stat(p.path);
+      info = await stat(path);
     } catch {
       respond(404, { ok: false, error: "File not found" });
       return;
@@ -409,7 +420,7 @@ export class EditorServer {
     }
     let body: Buffer;
     try {
-      body = await peaksFor(p.path, p.buckets, this.options.dataDir);
+      body = await peaksFor(path, p.buckets, this.options.dataDir);
     } catch (err) {
       if (err instanceof NoAudioError) respond(422, { ok: false, error: err.message });
       else respond(500, { ok: false, error: "Computing the peaks failed" });
@@ -420,16 +431,21 @@ export class EditorServer {
     res.end(body);
   }
 
-  /** Stream a local file with HTTP Range support (needed for video seeking). */
-  private async serveFile(path: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!path) {
+  /**
+   * Stream a local file with HTTP Range support (needed for video seeking).
+   * Every stat and open uses the one path servablePath checked.
+   */
+  private async serveFile(raw: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!raw) {
       sendJson(res, 400, { ok: false, error: "Missing 'path'" });
       return;
     }
-    if (!this.engine.isServablePath(path)) {
-      sendJson(res, 403, forbidden(this.engine, path, "/file"));
+    const open = this.engine.servablePath(raw);
+    if ("status" in open) {
+      sendJson(res, open.status, refusal(this.engine, raw, "/file", open.status));
       return;
     }
+    const path = open.path;
     let info;
     try {
       info = await stat(path);

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { existsSync, statSync, mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes } from "./io/gatedfs.js";
+import { existsSync, statSync, mkdir, writeFile, readFile, copyFile, stat, readdir, rm, rename, utimes, realpathNative } from "./io/gatedfs.js";
 import { homedir } from "node:os";
-import { join, dirname, basename, extname, isAbsolute, resolve, sep } from "node:path";
+import { join, dirname, basename, extname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import { newId } from "./ids.js";
 import { PRODUCT_NAME } from "./brand.js";
@@ -9,7 +9,7 @@ import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectVa
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
-import { HostTrust, MediaOfflineError, examplePath, type MediaServers } from "./hosttrust.js";
+import { HostTrust, MediaOfflineError, examplePath, hasDotDot, type MediaServers } from "./hosttrust.js";
 import { bareFileName, classifyPath } from "./unc.js";
 import { assetFileBytes, isEngineBake, prunableLibraryBakes, unusedAssets } from "./library.js";
 import { probeAsset } from "./ffmpeg/ffprobe.js";
@@ -723,46 +723,97 @@ export class EditorEngine extends EventEmitter {
   /**
    * Security allowlist for the HTTP /file endpoint (and /frames, /peaks). A
    * path is servable only if it lives under the engine's data dir (previews/
-   * proxies/frames/baked/thumbnails/scopes/…), is the source/proxy/preview file
+   * proxies/frames/baked/thumbnails/scopes/…, so an asset's proxy or preview
+   * too; one outside it is not served, and load drops it), is the source file
    * of an imported asset, or is the .cube LUT a clip of the project uses
    * (setClipEffects only sets an existing .cube; load drops a non-.cube LUT).
    * Everything else is rejected, so the server can never be used to read
-   * arbitrary files on disk.
+   * arbitrary files on disk. Lexical: the routes use {@link servablePath}.
    */
   isServablePath(p: string): boolean {
+    return this.servableAs(p) !== null;
+  }
+
+  /**
+   * The one path /file, /frames and /peaks open for query `raw`, or the status
+   * that refuses it (nothing opened). A ".." segment is refused (EDOTDOT: a
+   * lexical resolve differs from the kernel's after a link), then the resolved
+   * path must pass {@link isServablePath} and so must its real path. A data-dir
+   * path's real path must be under the data dir's real path, so a link in the
+   * data dir that leads out of it answers 403. One exception: a folder the
+   * engine writes to ({@link DATA_AREAS}) may be a link to another disk (a
+   * symlinked proxies/, storage.ts), and a file under that folder's real path
+   * is served. A clip's LUT must have a real path that also ends in .cube, so
+   * a .cube link to another file answers 403. Only an asset's own file skips
+   * the real-path check: its path can already be named directly, and G2's
+   * realpath stays the only I/O for media on a share. The path returned is
+   * the one checked, not its real path, so a link swapped in after the check
+   * is followed: that needs write access to the data dir (or the LUT's
+   * folder), which is outside the threat model.
+   */
+  servablePath(raw: string): { path: string } | { status: 403 | 404 } {
+    // The query as given first: on Linux a resolve makes `\\host\…` or `//host/…` a local name.
+    if (hasDotDot(raw) || classifyPath(raw).kind === "refused" || this.awaitsApproval(raw)) return { status: 403 };
+    const p = resolve(raw);
+    const as = this.servableAs(p);
+    if (as === null) return { status: 403 };
+    // An asset's own file needs no real path (and a share gets no extra I/O):
+    // a missing one is the route's 404.
+    if (as === "entry") return { path: p };
+    let real: string;
+    try {
+      real = realpathNative(p);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return { status: code === "ENOENT" || code === "ENOTDIR" ? 404 : 403 };
+    }
+    // A clip's LUT: only a file that is really a .cube (not a link to another file).
+    if (as === "lut") return real.toLowerCase().endsWith(".cube") ? { path: p } : { status: 403 };
+    let dataRoot = this.dataDir;
+    try {
+      dataRoot = realpathNative(this.dataDir);
+    } catch {
+      /* not made yet: nothing real is under it */
+    }
+    if (isUnder(real, dataRoot)) return { path: p };
+    // Case-folded on Windows (servableForm), as DATA_AREAS is: `Proxies` is proxies/.
+    const [area, ...rest] = relative(servableForm(this.dataDir), servableForm(p)).split(sep);
+    if (DATA_AREAS.has(area) && rest.length > 0) {
+      try {
+        if (isUnder(real, realpathNative(join(this.dataDir, area)))) return { path: p };
+      } catch {
+        /* gone since: refused */
+      }
+    }
+    return { status: 403 };
+  }
+
+  /** How `p` is servable: in the data dir ("data"), an asset's file ("entry"), a clip's .cube LUT ("lut"), or null. */
+  private servableAs(p: string): "data" | "entry" | "lut" | null {
     // Never a file that waits for approval (G6), nor the private trust folder (the
     // stamp key is there) under any spelling, whatever else allows it: G2's rpc
     // check, so a link or /proc/self/root/… is resolved (one realpath) and a
     // path with a ".." segment is refused before anything resolves it.
-    if (this.awaitsApproval(p) || !this.trust.checkPath(p).ok) return false;
-    const norm = (s: string): string => {
-      const r = resolve(s);
-      // Windows paths are case-insensitive; compare them case-folded.
-      return process.platform === "win32" ? r.toLowerCase() : r;
-    };
-    const target = norm(p);
-    if ([...this.uncheckedPaths.keys()].some((u) => norm(u) === target)) return false;
+    if (this.awaitsApproval(p) || !this.trust.checkPath(p).ok) return null;
+    const target = servableForm(p);
+    if ([...this.uncheckedPaths.keys()].some((u) => servableForm(u) === target)) return null;
     for (const a of this.project.assets) {
-      if (a.pathCheckFailed && [a.path, a.cutout?.colorPath].some((x) => x && norm(x) === target)) return false;
+      if (a.pathCheckFailed && [a.path, a.cutout?.colorPath].some((x) => x && servableForm(x) === target)) return null;
     }
-    const dataRoot = norm(this.dataDir);
-    if (target === dataRoot || target.startsWith(dataRoot + sep)) return true;
+    if (isUnder(p, this.dataDir)) return "data";
     for (const a of this.project.assets) {
-      if (a.awaitingServer || a.pathCheckFailed) continue;
-      for (const candidate of [a.path, a.proxyPath, a.previewPath]) {
-        if (candidate && norm(candidate) === target) return true;
-      }
+      if (!a.awaitingServer && !a.pathCheckFailed && servableForm(a.path) === target) return "entry";
     }
     // A .cube LUT a clip of this project uses (apply_lut): the live preview
     // fetches it to run the LUT on the GPU. Only that exact file, only .cube.
     if (target.toLowerCase().endsWith(".cube")) {
       for (const t of this.project.tracks) {
         for (const c of t.clips) {
-          if (c.effects?.lut && norm(c.effects.lut) === target) return true;
+          if (c.effects?.lut && servableForm(c.effects.lut) === target) return "lut";
         }
       }
     }
-    return false;
+    return null;
   }
 
   /**
@@ -6664,6 +6715,7 @@ export class EditorEngine extends EventEmitter {
     // file must leave the open project, its path, dirty state and undo history
     // as they were (else the next autosave writes the refused file over it).
     const project = validateLoadedProject(migrateProject(loaded));
+    dropForeignCaches(project, this.dataDir);
     const unchecked = this.trust.checkLoadedProject(project);
     // Bring back any baked/proxy file it names that a clean-up moved to the trash.
     this.lastRestoredFromTrash = await this.storage.restore(project);
@@ -6768,6 +6820,7 @@ export class EditorEngine extends EventEmitter {
     // project — sanitise ids and refuse non-local media before it is used, on
     // the local copy so a refused import leaves the open project untouched.
     const project = validateLoadedProject(migrateProject(result.project));
+    dropForeignCaches(project, this.dataDir);
     const unchecked = this.trust.checkLoadedProject(project, { otio: true });
     this.lastRestoredFromTrash = restored;
     this.undoStack = [];
@@ -6819,6 +6872,42 @@ export class EditorEngine extends EventEmitter {
     this.lastSavedRevision = this.project.revision;
     this.emit("change", this.project);
     this.storage.schedule();
+  }
+}
+
+/** `s` resolved, case-folded on Windows (its paths are case-insensitive): the form /file compares. */
+function servableForm(s: string): string {
+  const r = resolve(s);
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+
+/**
+ * The data-dir folders the engine writes files into (never trust/). One may be
+ * a link to another disk; /file serves what is under its real path.
+ */
+const DATA_AREAS = new Set([
+  "baked", "proxies", "previews", "thumbnails", "frames", "scopes", "masks",
+  "motion", "captions", "render", "cache", "sfx", "transcripts",
+]);
+
+/** True when `p` is `dir` or under it (by {@link servableForm}). */
+function isUnder(p: string, dir: string): boolean {
+  const target = servableForm(p);
+  const root = servableForm(dir);
+  return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/**
+ * Drop a loaded asset's proxy or preview path that is a full path outside the
+ * data dir: they are engine-made caches, always written there, and /file
+ * serves no other one. An old relative bake is kept (nothing serves it
+ * unless it resolves into the data dir).
+ */
+function dropForeignCaches(project: Project, dataDir: string): void {
+  const foreign = (p: string | undefined) => p !== undefined && (isAbsolute(p) || win32.isAbsolute(p)) && !isUnder(p, dataDir);
+  for (const a of project.assets ?? []) {
+    if (foreign(a.proxyPath)) delete a.proxyPath;
+    if (foreign(a.previewPath)) delete a.previewPath;
   }
 }
 

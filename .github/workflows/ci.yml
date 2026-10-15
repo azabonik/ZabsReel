@@ -62,7 +62,10 @@ jobs:
       - name: Smoke — CLIP tokenizer (pure logic)
         run: npx tsx packages/core/scripts/smoke-clip-tokenizer.ts
 
-      - name: Smoke — security (token auth + /file allowlist)
+      # /file, /frames and /peaks open only the path they checked: a ".." after a
+      # linked folder, a link out of the data dir and a proxy or preview path
+      # outside it answer 403 with nothing opened (fs and child_process traced).
+      - name: Smoke — security (token auth + /file allowlist, real paths)
         run: npx tsx packages/core/scripts/smoke-security.ts
 
       - name: Smoke — jobs (background export, progress, cancel)

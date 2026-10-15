@@ -115,7 +115,9 @@ npx tsx packages/core/scripts/smoke-brand.ts
 node scripts/check-brand.mjs
 node scripts/check-brand.mjs --self-test
 
-# Security: session-token auth (HTTP/WS) + /file allowlist, HEAD /file and its ETag (self-synthesizes media)
+# Security: session-token auth (HTTP/WS) + /file allowlist, HEAD /file and its ETag, and /file, /frames and
+# /peaks opening only the path they checked (links, "..", proxy and preview paths, which load and import_otio
+# drop when outside the data dir; a symlinked proxies/ is still served; self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
 
 # Untrusted .aive / .otio: crafted ids stay inside the data dir, URL/protocol media

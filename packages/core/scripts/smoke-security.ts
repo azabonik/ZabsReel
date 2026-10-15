@@ -6,17 +6,70 @@
  *    serves only data-dir artifacts + imported asset files; HEAD /file gives
  *    an exposed ETag (size + mtime) that changes when a file is rewritten.
  *  - WebSocket upgrade without the token → connection refused.
+ *  - /file, /frames and /peaks open only the path they checked (fs and
+ *    child_process traced): a ".." after a linked folder, a link in the data
+ *    dir that leads out of it, and an asset's proxy or preview path outside
+ *    the data dir are refused (403) and nothing opens them; load drops such a
+ *    proxy or preview path, and so does an .otio import; data-dir files, a
+ *    file in a symlinked proxies/ and an asset's own file (a link included)
+ *    are still served, through the resolved path. A missing data-dir file is
+ *    404; a clip's .cube LUT that links to a non-.cube file is refused.
  *
  * Run: npx tsx packages/core/scripts/smoke-security.ts
  * (No media arguments needed — synthesizes its own clip with ffmpeg lavfi.)
  */
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import WebSocket from "ws";
 import { EditorEngine } from "../src/engine.js";
 import { EditorServer } from "../src/server.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
+import { projectToOtio } from "../src/interop/otio.js";
+
+// ---- fs / child_process trace (section 6) ------------------------------------
+// Every fs, fs/promises and child_process function records its string arguments
+// (and argv arrays) while `tracing`; the core's gatedfs and execa see the
+// wrappers through syncBuiltinESMExports.
+const traced: string[] = [];
+let tracing = false;
+const require = createRequire(import.meta.url);
+for (const mod of ["node:fs", "node:fs/promises", "node:child_process"]) {
+  const m = require(mod) as Record<string, unknown>;
+  const wrap = (orig: (...a: unknown[]) => unknown, key: string) => {
+    const wrapped = function (this: unknown, ...args: unknown[]) {
+      if (tracing) {
+        for (const a of args) for (const v of Array.isArray(a) ? a : [a]) if (typeof v === "string") traced.push(`${mod} ${key} ${v}`);
+      }
+      return orig.apply(this, args);
+    };
+    return Object.assign(wrapped, orig);
+  };
+  for (const key of Object.keys(m)) {
+    const orig = m[key];
+    if (typeof orig !== "function" || /^[A-Z]/.test(key)) continue;
+    m[key] = wrap(orig as (...a: unknown[]) => unknown, key);
+    // gatedfs's realpathNative calls fs.realpathSync.native.
+    const native = (orig as { native?: unknown }).native;
+    if (typeof native === "function") (m[key] as { native: unknown }).native = wrap(native as (...a: unknown[]) => unknown, `${key}.native`);
+  }
+}
+syncBuiltinESMExports();
+
+/** The traced calls `fn` makes. */
+async function traceOf<T>(fn: () => Promise<T>): Promise<{ value: T; calls: string[] }> {
+  traced.length = 0;
+  tracing = true;
+  try {
+    return { value: await fn(), calls: traced.slice() };
+  } finally {
+    tracing = false;
+  }
+}
+
+/** Calls that read content or start a process (stat, open, createReadStream, readFile, FFmpeg/ffprobe). */
+const OPENS = / (stat|open|createReadStream|readFile|spawn|execFile|exec|fork|spawnSync|execFileSync) /;
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), "aive-security-"));
@@ -158,6 +211,7 @@ async function main() {
   const upperCube = join(dataDir, "..", `aive-sec-upper-${Date.now()}.CUBE`);
   writeFileSync(upperCube, "LUT_3D_SIZE 2\n");
   check(lutErr(upperCube) === "(accepted)" && lutNow() === upperCube, "an existing .CUBE file is accepted as a LUT");
+  // MUTATION: drop the toLowerCase in servablePath's LUT real-path test → 403.
   const upperOk = await fetch(`${base}/file?path=${encodeURIComponent(upperCube)}&token=${token}`);
   check(upperOk.status === 200, `/file for the clip's .CUBE LUT → 200 (got ${upperOk.status})`);
   engine.clearClipEffects(lutClip.id);
@@ -182,6 +236,198 @@ async function main() {
     ws.on("error", () => { clearTimeout(timer); resolve(false); });
   });
   check(wsAllowed, "WS upgrade with token connects");
+
+  console.log("6. /file, /frames and /peaks open only the path they checked...");
+  if (process.platform === "win32") {
+    console.log("  (skipped: needs symbolic links)");
+  } else {
+    // Outside the data dir: a media file the routes must never serve, and a
+    // folder whose link sits in the data dir. Inside it: a decoy with the
+    // name a lexical resolve of the ".." query gives.
+    const outside = mkdtempSync(join(tmpdir(), "aive-sec-outside-"));
+    const secret = join(outside, "real", "secret.mp4");
+    mkdirSync(join(outside, "real", "sub"), { recursive: true });
+    await runFfmpeg([
+      "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y", secret,
+    ]);
+    copyFileSync(secret, join(dataDir, "secret.mp4"));
+    mkdirSync(join(dataDir, "previews"), { recursive: true });
+    symlinkSync(join(outside, "real", "sub"), join(dataDir, "zr-hop"), "dir");
+    symlinkSync(join(outside, "real"), join(dataDir, "zr-outlink"), "dir");
+    symlinkSync(secret, join(dataDir, "previews", "zr-leak.mp4"));
+    const get = (route: string, p: string) => {
+      const q = new URLSearchParams({ path: p, token, from: "0", count: "1", w: "8", h: "8", fps: "10" });
+      return traceOf(async () => {
+        const r = await fetch(`${base}${route}?${q}`);
+        return { status: r.status, body: Buffer.from(await r.arrayBuffer()) };
+      });
+    };
+    /** Each route refuses `p` (403), and no stat, open, read or process names `marks`. */
+    const refused = async (p: string, marks: RegExp, what: string) => {
+      for (const route of ["/file", "/frames", "/peaks"]) {
+        const { value, calls } = await get(route, p);
+        const opened = calls.filter((c) => OPENS.test(c) && marks.test(c));
+        check(value.status === 403 && opened.length === 0,
+          `${route} of ${what}: 403 and nothing opened (got ${value.status}, ${value.body.length} bytes; ${JSON.stringify(opened.slice(0, 2))})`);
+      }
+    };
+    const marks = new RegExp(`zr-hop|zr-outlink|zr-leak|${outside.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+
+    // a. A ".." after a linked folder: the kernel follows zr-hop first (to the
+    // outside folder), a lexical resolve gives the decoy. Refused before either.
+    // Defence in depth: the resolved path is the one opened, so without the rule
+    // the decoy, not the outside file, would be served.
+    // MUTATION: drop the hasDotDot test in servablePath → the decoy is served (200).
+    await refused(join(dataDir, "zr-hop") + "/../secret.mp4", marks, `a ".." after a linked folder`);
+
+    // b. A link in the data dir that leads out of it (a folder link, a file link).
+    // MUTATION: accept any real path in servablePath (drop the isUnder(real, …)
+    // test) → the outside file is served (200).
+    await refused(join(dataDir, "zr-outlink", "secret.mp4"), marks, "a file through a folder link in the data dir that leads out");
+    await refused(join(dataDir, "previews", "zr-leak.mp4"), marks, "a file link in the data dir that leads out");
+
+    // c. An asset's proxy or preview path outside the data dir is not servable;
+    // its media path is. MUTATION: match a.proxyPath / a.previewPath again in
+    // servableAs → these rows get 200.
+    const asset = engine.getProject().assets[0];
+    const preview = join(outside, "real", "preview.mp4");
+    copyFileSync(secret, preview);
+    asset.proxyPath = secret;
+    asset.previewPath = preview;
+    await refused(secret, marks, "an asset's proxy path outside the data dir");
+    await refused(preview, marks, "an asset's preview path outside the data dir");
+    check(!engine.isServablePath(secret) && !engine.isServablePath(preview), "isServablePath is false for both");
+
+    // d. Load drops a proxy or preview path outside the data dir (engine-made caches,
+    // always written there) and keeps one inside it.
+    // MUTATION: drop the dropForeignCaches call in load → the outside paths stay.
+    const inside = join(dataDir, "previews", "zr-ok.webm");
+    writeFileSync(inside, "webm");
+    const saved = JSON.parse(JSON.stringify(engine.getProject()));
+    saved.assets[0].proxyPath = secret;
+    saved.assets[0].previewPath = preview;
+    saved.assets.push({ ...saved.assets[0], id: "asset_inside", proxyPath: inside, previewPath: inside });
+    mkdirSync(join(dataDir, "projects"), { recursive: true });
+    const projectFile = join(dataDir, "projects", "zr-caches.aive");
+    writeFileSync(projectFile, JSON.stringify(saved));
+    await engine.load(projectFile);
+    const [a0, a1] = engine.getProject().assets;
+    check(a0.proxyPath === undefined && a0.previewPath === undefined,
+      `load drops a proxy and a preview path outside the data dir (${a0.proxyPath}, ${a0.previewPath})`);
+    check(a1?.proxyPath === inside && a1?.previewPath === inside, "load keeps a proxy and a preview path in the data dir");
+
+    // e. Still served: a data-dir file and the asset's own file, through the path
+    // that was checked (resolved), never the query as given.
+    // MUTATION: stat / open the raw query in serveFile (or pass q / p.path to
+    // streamFrames / peaksFor) → that row's traced path is the raw one.
+    const okFile = join(dataDir, "previews", "zr-ok.png");
+    writeFileSync(okFile, "png-bytes");
+    const okRaw = `${dataDir}//previews/./zr-ok.png`;
+    const okGet = await get("/file", okRaw);
+    const okSeen = okGet.calls.filter((c) => OPENS.test(c) && c.includes("zr-ok.png"));
+    check(okGet.value.status === 200 && okGet.value.body.toString() === "png-bytes", `/file of a data-dir file → 200 (got ${okGet.value.status})`);
+    check(okSeen.length >= 2 && okSeen.every((c) => c.endsWith(` ${okFile}`)),
+      `/file stats and opens exactly the resolved path (${JSON.stringify(okSeen)})`);
+    const decoy = join(dataDir, "secret.mp4");
+    for (const route of ["/frames", "/peaks"]) {
+      const r = await get(route, `${dataDir}//./secret.mp4`);
+      const seen = r.calls.filter((c) => OPENS.test(c) && c.includes("secret.mp4"));
+      check(r.value.status === 200 && r.value.body.length > 0, `${route} of a data-dir media file → 200 (got ${r.value.status}, ${r.value.body.length} bytes)`);
+      check(seen.some((c) => / (spawn|execFile) /.test(c)) && seen.every((c) => c.endsWith(` ${decoy}`)),
+        `${route} hands FFmpeg exactly the resolved path (${JSON.stringify(seen.slice(0, 3))})`);
+    }
+    const own = await get("/file", clipPath);
+    check(own.value.status === 200, `/file of the asset's own path after the load → 200 (got ${own.value.status})`);
+
+    // e2. A data-dir file that is missing (a cache that cleanup removed) is 404
+    // "File not found", not 403, on every route, so the client regenerates it;
+    // so is a path under a file (ENOTDIR). servablePath's real-path lookup decides.
+    // MUTATION: collapse the ENOENT/ENOTDIR ternary in servablePath to 403 → these rows fail.
+    const missing = join(dataDir, "previews", "zr-missing.mp4");
+    for (const [p, what] of [[missing, "a missing data-dir file"], [join(okFile, "x"), "a path under a data-dir file (ENOTDIR)"]]) {
+      for (const route of ["/file", "/frames", "/peaks"]) {
+        const r = await get(route, p);
+        let error = "";
+        try { error = (JSON.parse(r.value.body.toString()) as { error?: string }).error ?? ""; } catch { /* not JSON */ }
+        check(r.value.status === 404 && error === "File not found", `${route} of ${what} → 404 "File not found" (got ${r.value.status}, ${JSON.stringify(error)})`);
+      }
+    }
+
+    // f. An asset imported through a link: its own path is servable whatever its real path.
+    // MUTATION: drop the "entry" early return in servablePath → 403.
+    const viaLink = join(outside, "zr-media-link.mp4");
+    symlinkSync(secret, viaLink);
+    await engine.importVideo(viaLink);
+    const linked = await get("/file", viaLink);
+    check(linked.value.status === 200 && linked.value.body.equals(readFileSync(secret)), `/file of an asset imported through a link → 200 (got ${linked.value.status})`);
+    // Its real path is not looked up for /file: only G2's check (trust.checkPath)
+    // resolves it, once, so media on a share gets no extra I/O per request.
+    // MUTATION: move the "entry" return after the realpathNative call → two.
+    const realpaths = linked.calls.filter((c) => / realpath/.test(c) && c.endsWith(` ${viaLink}`));
+    check(realpaths.length === 1, `/file of an asset's own path resolves it once, for G2 only (${JSON.stringify(realpaths)})`);
+
+    // g. A data-dir folder the engine writes to may be a link to another disk (a
+    // symlinked proxies/): what is under its real path is served. The links that
+    // lead out stay refused, and so does a file link in that folder that leads
+    // out of its real path. MUTATION: drop the DATA_AREAS test in servablePath
+    // → the proxy rows get 403.
+    const bigDisk = mkdtempSync(join(tmpdir(), "aive-sec-bigdisk-"));
+    mkdirSync(join(bigDisk, "proxies"));
+    copyFileSync(secret, join(bigDisk, "proxies", "zr-big.mp4"));
+    symlinkSync(secret, join(bigDisk, "proxies", "zr-leak-big.mp4"));
+    check(!existsSync(join(dataDir, "proxies")), "no proxies/ yet in the data dir");
+    symlinkSync(join(bigDisk, "proxies"), join(dataDir, "proxies"), "dir");
+    for (const route of ["/file", "/frames", "/peaks"]) {
+      const r = await get(route, join(dataDir, "proxies", "zr-big.mp4"));
+      check(r.value.status === 200 && r.value.body.length > 0, `${route} of a file in a symlinked proxies/ → 200 (got ${r.value.status}, ${r.value.body.length} bytes)`);
+    }
+    await refused(join(dataDir, "proxies", "zr-leak-big.mp4"), marks, "a file link in a symlinked proxies/ that leads out of it");
+    await refused(join(dataDir, "zr-outlink", "secret.mp4"), marks, "a folder link out of the data dir, with a symlinked proxies/");
+    await refused(join(dataDir, "previews", "zr-leak.mp4"), marks, "a file link out of the data dir, with a symlinked proxies/");
+    await refused(join(dataDir, "zr-hop") + "/../secret.mp4", marks, `a ".." after a linked folder, with a symlinked proxies/`);
+    // Only what is under such a folder: a file link that has a folder's name is refused.
+    // MUTATION: drop the `rest.length > 0` test in servablePath → 200.
+    check(!existsSync(join(dataDir, "sfx")), "no sfx/ yet in the data dir");
+    symlinkSync(secret, join(dataDir, "sfx"));
+    await refused(join(dataDir, "sfx"), /sfx|aive-sec-outside-/, "a file link named like a data-dir folder that leads out");
+
+    // h. An .otio import drops a proxy or preview path outside the data dir and
+    // keeps one inside it, as load does (the asset list travels in the metadata).
+    // MUTATION: drop the dropForeignCaches call in importOtio → the outside paths stay.
+    const forOtio = JSON.parse(JSON.stringify(saved));
+    forOtio.assets[1].path = decoy;
+    const otioFile = join(dataDir, "projects", "zr-caches.otio");
+    writeFileSync(otioFile, JSON.stringify(projectToOtio(forOtio)));
+    await engine.importOtio(otioFile);
+    const outAsset = engine.getProject().assets.find((a) => a.path === clipPath);
+    const inAsset = engine.getProject().assets.find((a) => a.path === decoy);
+    check(outAsset !== undefined && outAsset.proxyPath === undefined && outAsset.previewPath === undefined,
+      `import_otio drops a proxy and a preview path outside the data dir (${outAsset?.proxyPath}, ${outAsset?.previewPath})`);
+    check(inAsset?.proxyPath === inside && inAsset?.previewPath === inside, "import_otio keeps a proxy and a preview path in the data dir");
+
+    // i. A clip's LUT must really be a .cube: a .cube link to another file (an
+    // untrusted project's LUT in an extracted pack) is refused and nothing reads
+    // the target; a .cube link to another .cube is served (a real .cube: section 4).
+    // MUTATION: return "entry" again for a clip's LUT in servableAs (no real-path
+    // check) → the link-to-a-media-file rows get 200.
+    const lutLink = join(outside, "zr-lut-link.cube");
+    symlinkSync(secret, lutLink);
+    const lutUser = engine.appendClip(engine.getProject().assets[0].id);
+    engine.setClipEffects(lutUser.id, { lut: lutLink });
+    await refused(lutLink, marks, "a clip's .cube LUT that links to a non-.cube file");
+    // MUTATION: drop the "lut" return in servablePath (it falls to the data-dir
+    // test) → this row and section 4's .cube and .CUBE rows get 403.
+    const realCube = join(outside, "real", "zr-look.cube");
+    writeFileSync(realCube, "LUT_3D_SIZE 2\n");
+    const cubeLink = join(outside, "zr-cube-link.cube");
+    symlinkSync(realCube, cubeLink);
+    engine.setClipEffects(lutUser.id, { lut: cubeLink });
+    const viaCube = await get("/file", cubeLink);
+    check(viaCube.value.status === 200 && viaCube.value.body.toString() === "LUT_3D_SIZE 2\n",
+      `/file of a clip's .cube LUT that links to another .cube → 200 (got ${viaCube.value.status})`);
+  }
 
   await server.stop();
   console.log(failures === 0 ? "\nSECURITY SMOKE TEST PASSED" : `\nSECURITY SMOKE TEST FAILED (${failures})`);
