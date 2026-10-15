@@ -65,24 +65,17 @@ jobs:
       - name: Smoke — safepath (traversal, protocols, filter allowlist)
         run: npx tsx packages/core/scripts/smoke-safepath.ts
 
-      # Run as shipped (the network gate only logs until the app can allow a
-      # server) and enforced. The approval store, its stamps and the private
-      # trust folder are checked in both: the trust-folder refusal is always on.
+      # The network gate as shipped (enforced): the approval store, its stamps
+      # and the private trust folder.
       - name: Smoke — network paths (host keys, refusals, gatedfs, ffmpeg argv, graphic imports, approval store, trust folder)
-        run: |
-          npx tsx packages/core/scripts/smoke-unc.ts
-          AIVE_NETWORK_GATE=enforce npx tsx packages/core/scripts/smoke-unc.ts
+        run: npx tsx packages/core/scripts/smoke-unc.ts
 
       # A real core process (the build above) with every fs and child_process
-      # call traced and a logging FFmpeg stub: enforced, nothing names a test
-      # host and no rpc or MCP tool can allow a server or read the stamp key,
-      # and a server allowed (or revoked) in the app takes effect without a
-      # reload; as shipped (log mode), a NAS path changes nothing and is only
-      # logged.
+      # call traced and a logging FFmpeg stub: nothing names a test host, no
+      # rpc or MCP tool can allow a server or read the stamp key, and a server
+      # allowed (or revoked) in the app takes effect without a reload.
       - name: Smoke — network paths end to end (core process, traced)
-        run: |
-          AIVE_NETWORK_GATE=enforce npx tsx packages/core/scripts/smoke-unc-e2e.ts
-          npx tsx packages/core/scripts/smoke-unc-e2e.ts
+        run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
 
       - name: I/O import gate (core fs and child processes go through the network-path gate)
         run: |

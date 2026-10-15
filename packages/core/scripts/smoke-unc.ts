@@ -81,10 +81,10 @@
  *                            the recovery folder; timeline_summary says why a
  *                            clip is offline (not found; the unread state).
  *
- * Rows 5 and 6 check both modes: the network-path gate is "log" until the
- * user can allow a server in the app, and AIVE_NETWORK_GATE=enforce (CI) turns
- * it on. Device paths and keyless names are refused in both, and so is the
- * trust folder (rows 4, 11, 13).
+ * The network-path gate ships enforced (io/gatedfs.ts NETWORK_GATE). Rows 5
+ * and 6 also say what its "log" setting would do, which only a change of that
+ * constant brings back. Device paths and keyless names are refused in both,
+ * and so is the trust folder (rows 4, 11, 13).
  *
  * Rows 7 (its dispatch part), 10 (the engine's part) and 14 (the autosave)
  * need the gate enforced: in log mode they would let a test host through.
@@ -161,8 +161,8 @@ for (const mod of ["node:fs", "node:fs/promises", "node:child_process"]) {
 syncBuiltinESMExports();
 
 async function main() {
-  const enforced = gfs.NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
-  console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
+  const enforced = gfs.NETWORK_GATE === "enforce";
+  console.log(`(network gate: ${enforced ? "enforced" : "log mode"})`);
   /** console.error lines written while `fn` runs. */
   const logsOf = async (fn: () => unknown): Promise<string[]> => {
     const lines: string[] = [];
@@ -415,7 +415,8 @@ async function main() {
   // the call); [0, 1] → [1] → the rename-from rows fail. Make existsSync
   // call through → its rows fail. Let refused forms through (return null for
   // "refused" in blocked()) → the device / @SSL rows fail in both modes. Ignore
-  // ENFORCED → the enforce rows fail under AIVE_NETWORK_GATE=enforce. Let the
+  // ENFORCED → the enforce rows fail. Set NETWORK_GATE to "log" → the
+  // "ships enforced" row fails. Let the
   // bootstrap skip the refused check (bootstrapping before the refused test in
   // blocked()) → the early bootstrap rows fail. Drop assertUsable from
   // resolveDataDir → the data folder rows fail. Drop R5 from classifyFsText →
@@ -445,7 +446,7 @@ async function main() {
   try {
     const NET = "//zr-evil-5.invalid/s/x";
     const LOCAL = join(root, "local-file");
-    check(gfs.networkGateEnforced() === enforced, `networkGateEnforced() is ${enforced} (NETWORK_GATE "${gfs.NETWORK_GATE}"; only the variable's "enforce" changes it)`);
+    check(gfs.NETWORK_GATE === "enforce" && gfs.networkGateEnforced() === true, `the gate ships enforced: networkGateEnforced() is ${gfs.networkGateEnforced()} (NETWORK_GATE "${gfs.NETWORK_GATE}")`);
     // (The bootstrap rows "before any setAllowedNetworkHosts" run first in main(), before any engine exists.)
     // datadir.ts refuses such a folder at startup, where the cause is, and touches nothing.
     for (const [label, opts] of [
@@ -1733,7 +1734,7 @@ async function main() {
       check(!!pend && pend.origins.includes("request") && pend.examples.length > 0 && events >= Object.keys(RPC_PATH_PARAMS).length,
         `the server is pending with origin request, and each request told the clients ("media-servers": ${events}) (${JSON.stringify(pend)})`);
     } else {
-      console.log("  (dispatch rows need AIVE_NETWORK_GATE=enforce: in log mode G1 only logs)");
+      console.log("  (dispatch rows need the gate enforced: in log mode G1 only logs)");
     }
   }
 

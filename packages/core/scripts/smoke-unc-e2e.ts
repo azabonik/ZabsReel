@@ -14,7 +14,7 @@
  * real binary. Every host is under the reserved .invalid top-level domain, so
  * even a leak reaches nobody.
  *
- * Enforced (AIVE_NETWORK_GATE=enforce, until the gate ships enforced):
+ * Enforced (the gate ships enforced: io/gatedfs.ts NETWORK_GATE):
  *  1. load_project of a crafted project naming the hosts in every spelling and
  *     every field: the assets wait for their servers, network caches are
  *     dropped, each server is pending once (origin project; the two entries
@@ -41,12 +41,13 @@
  *  6. Revoke: the media is offline again and nothing opens it any more.
  *  7. (win32 only) A second share spelling of a data folder on \\localhost is
  *     refused by the identity check or the name rule; skipped elsewhere.
- * Log mode (no AIVE_NETWORK_GATE): a project naming \\zr-nas.invalid\s\a.mp4
- * loads unchanged (not offline, nothing pending), a "would block" line is
- * logged, and the probe goes through (to the stub, which answers for it).
+ * Log mode (only if NETWORK_GATE is set back to "log"): a project naming
+ * \\zr-nas.invalid\s\a.mp4 loads unchanged (not offline, nothing pending), a
+ * "would block" line is logged, and the probe goes through (to the stub,
+ * which answers for it).
  *
  * Needs the build (npm run build: the core and the MCP server) and FFmpeg. Temp dirs only.
- * Run: AIVE_NETWORK_GATE=enforce npx tsx packages/core/scripts/smoke-unc-e2e.ts
+ * Run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
  */
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createHmac, createHash, randomBytes } from "node:crypto";
@@ -57,6 +58,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { approveHost, revokeHost } from "../src/trusthosts.js";
+import { NETWORK_GATE } from "../src/io/gatedfs.js";
 import { projectToOtio } from "../src/interop/otio.js";
 import type { Project } from "../src/types.js";
 
@@ -65,7 +67,7 @@ const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;
   console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
 };
-const enforced = process.env.AIVE_NETWORK_GATE === "enforce";
+const enforced = NETWORK_GATE === "enforce";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cli = join(repo, "packages/core/dist/cli.js");
 const mcpCli = join(repo, "packages/mcp/dist/index.js");
@@ -815,11 +817,12 @@ async function enforcedSteps(): Promise<void> {
 async function main() {
   process.exitCode = 1; // a run that stops early (an event loop that drains) never passes
   for (const f of [cli, mcpCli]) if (!existsSync(f)) throw new Error(`${f} is missing: run npm run build first`);
-  console.log(`(network gate: ${enforced ? "enforced" : "log mode"}; AIVE_NETWORK_GATE=${process.env.AIVE_NETWORK_GATE ?? "(unset)"})`);
+  console.log(`(network gate: ${enforced ? "enforced" : "log mode"})`);
+  check(enforced, `the gate ships enforced (NETWORK_GATE "${NETWORK_GATE}")`);
   if (enforced) await enforcedSteps();
   else {
     await logMode();
-    console.log("(steps 1-4 and 7 need AIVE_NETWORK_GATE=enforce: in log mode the gate only logs)");
+    console.log("(steps 1-4 and 7 need the gate enforced: in log mode it only logs)");
   }
   rmSync(root, { recursive: true, force: true });
   console.log(failures === 0 ? "\nALL UNC E2E CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

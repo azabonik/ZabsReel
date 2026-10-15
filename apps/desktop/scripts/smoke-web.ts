@@ -308,8 +308,6 @@ async function main() {
   console.log("\nWEB SMOKE PASSED");
 }
 
-const ENFORCE = process.env.AIVE_NETWORK_GATE === "enforce";
-
 /** Steps 6-7: allowing network computers through the shell (plan 9.6). */
 async function networkComputers(o: {
   port: number; corePort: number; token: string; shellKey: string; ready: { url: string };
@@ -458,40 +456,36 @@ async function networkComputers(o: {
     const choose = (p: Page, name: string) => dialog(p).getByRole("button", { name, exact: true }).click().then(() => true, () => false);
     const evilFor = (host: string) => evil.filter((u) => u.includes(host));
 
-    if (ENFORCE) {
-      // Plan 9.6 step 4: a project on a server not allowed.
-      await rpc("load_project", { path: crafted1 });
-      expect(await waitFor("project banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-1\.invalid\. They stay offline until you allow it/.test(await banner(a))),
-        `banner: "${(await banner(a)).replace(/\s+/g, " ")}"`);
-      expect(await waitFor("badge", async () => (await badgeLabel(a)) === "Offline: waiting for you to allow \\\\zr-evil-1.invalid"), `media pool badge (${await badgeLabel(a)})`);
-      expect(await review(a, "zr-evil-1.invalid"), "Review… opens the in-app dialog");
-      const d = dialog(a);
-      const attr = (n: string) => d.getAttribute(n).catch(() => null);
-      expect((await attr("aria-modal")) === "true" && !!(await attr("aria-labelledby")) && !!(await attr("aria-describedby")),
-        "…an alertdialog: modal, labelled and described");
-      const dText = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
-      expect(dText.includes("Allow media from \\\\zr-evil-1.invalid?") && dText.includes("This project uses 1 file stored there, for example //zr-evil-1.invalid/s/a.mp4."),
-        `…with the Allow wording (${dText.slice(0, 160)})`);
-      let f = await focused(a);
-      expect(f.inside && f.text === "Keep offline", `…focus starts on Keep offline (${f.text})`);
-      await a.keyboard.press("Tab");
-      const f2 = await focused(a);
-      await a.keyboard.press("Tab");
-      f = await focused(a);
-      expect(f2.inside && f2.text === "Allow" && f.inside && f.text === "Keep offline", `…Tab stays inside (${f2.text}, then ${f.text})`);
-      await a.keyboard.press("Escape");
-      expect(await waitFor("dialog closed", async () => (await dialog(a).count()) === 0, 5000), "Esc closes it");
-      await sleep(500);
-      expect(!listed("zr-evil-1.invalid") && (await badgeLabel(a)) !== null, "…and keeps it offline (the store is unchanged)");
-      expect(evilFor("zr-evil-1").length === 0, `the page asked for none of its files (${evilFor("zr-evil-1").join(", ") || "none"})`);
-      expect(traced("zr-evil-1").length === 0, `nothing in the shell or the core touched it (${JSON.stringify(traced("zr-evil-1")).slice(0, 300)})`);
-      await review(a, "zr-evil-1.invalid");
-      await choose(a, "Allow");
-      expect(await waitFor("allowed", () => viaOf("zr-evil-1.invalid") === "prompt", 10000), "Allow → the store has it (via prompt)");
-      expect(await waitFor("online", async () => (await a.locator(".asset-card.offline").count()) === 0, 10000), "…and the clip comes online without a reload");
-    } else {
-      console.log("  (the page's offline steps need AIVE_NETWORK_GATE=enforce: in log mode nothing is offline)");
-    }
+    // Plan 9.6 step 4: a project on a server not allowed.
+    await rpc("load_project", { path: crafted1 });
+    expect(await waitFor("project banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-1\.invalid\. They stay offline until you allow it/.test(await banner(a))),
+      `banner: "${(await banner(a)).replace(/\s+/g, " ")}"`);
+    expect(await waitFor("badge", async () => (await badgeLabel(a)) === "Offline: waiting for you to allow \\\\zr-evil-1.invalid"), `media pool badge (${await badgeLabel(a)})`);
+    expect(await review(a, "zr-evil-1.invalid"), "Review… opens the in-app dialog");
+    const d = dialog(a);
+    const attr = (n: string) => d.getAttribute(n).catch(() => null);
+    expect((await attr("aria-modal")) === "true" && !!(await attr("aria-labelledby")) && !!(await attr("aria-describedby")),
+      "…an alertdialog: modal, labelled and described");
+    const dText = (await d.innerText().catch(() => "")).replace(/\s+/g, " ");
+    expect(dText.includes("Allow media from \\\\zr-evil-1.invalid?") && dText.includes("This project uses 1 file stored there, for example //zr-evil-1.invalid/s/a.mp4."),
+      `…with the Allow wording (${dText.slice(0, 160)})`);
+    let f = await focused(a);
+    expect(f.inside && f.text === "Keep offline", `…focus starts on Keep offline (${f.text})`);
+    await a.keyboard.press("Tab");
+    const f2 = await focused(a);
+    await a.keyboard.press("Tab");
+    f = await focused(a);
+    expect(f2.inside && f2.text === "Allow" && f.inside && f.text === "Keep offline", `…Tab stays inside (${f2.text}, then ${f.text})`);
+    await a.keyboard.press("Escape");
+    expect(await waitFor("dialog closed", async () => (await dialog(a).count()) === 0, 5000), "Esc closes it");
+    await sleep(500);
+    expect(!listed("zr-evil-1.invalid") && (await badgeLabel(a)) !== null, "…and keeps it offline (the store is unchanged)");
+    expect(evilFor("zr-evil-1").length === 0, `the page asked for none of its files (${evilFor("zr-evil-1").join(", ") || "none"})`);
+    expect(traced("zr-evil-1").length === 0, `nothing in the shell or the core touched it (${JSON.stringify(traced("zr-evil-1")).slice(0, 300)})`);
+    await review(a, "zr-evil-1.invalid");
+    await choose(a, "Allow");
+    expect(await waitFor("allowed", () => viaOf("zr-evil-1.invalid") === "prompt", 10000), "Allow → the store has it (via prompt)");
+    expect(await waitFor("online", async () => (await a.locator(".asset-card.offline").count()) === 0, 10000), "…and the clip comes online without a reload");
 
     // Plan 9.6 step 5: Save As with a project named like a path.
     await rpc("load_project", { path: craftedName });
@@ -514,46 +508,44 @@ async function networkComputers(o: {
     expect(await waitFor("saved", () => existsSync(join(saveDir, "x.aive")), 10000), "Save writes x.aive into the folder listed");
     expect(picked.every((b) => !b.includes("zr-evil.invalid")) && !listed("zr-evil.invalid"), `/api/media-servers/picked got no zr-evil.invalid path (${picked.join(" | ") || "no call"}); the store is unchanged`);
 
-    if (ENFORCE) {
-      // Plan 9.6 step 6: added outside ZabsReel.
-      addOutside("zr-evil-3.invalid");
-      await rpc("load_project", { path: crafted3 });
-      const outsideBanner = /This project uses 1 file on \\\\zr-evil-3\.invalid\. It is in your list of allowed network computers, but ZabsReel didn't put it there/;
-      expect(await waitFor("outside banner", async () => outsideBanner.test(await banner(a))), `outside entry: banner "${(await banner(a)).replace(/\s+/g, " ")}"`);
-      expect(await review(a, "zr-evil-3.invalid"), "Review… opens the in-app dialog");
-      const kText = (await dialog(a).innerText().catch(() => "")).replace(/\s+/g, " ");
-      expect(kText.includes("Keep \\\\zr-evil-3.invalid?") && kText.includes("was added to your allowed network computers outside ZabsReel"), `…the Keep dialog (${kText.slice(0, 120)})`);
-      let f = await focused(a);
-      expect(f.inside && f.text === "Remove", `…focus starts on Remove (${f.text})`);
-      await a.keyboard.press("Escape");
-      expect(await waitFor("removed", () => !listed("zr-evil-3.invalid"), 10000), "Esc removes it from the store");
-      expect(await waitFor("allow banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-3\.invalid\. They stay offline until you allow it/.test(await banner(a)), 10000),
-        "…and the project now asks to allow it");
-      expect(traced("zr-evil-3").length === 0 && evilFor("zr-evil-3").length === 0, "nothing touched zr-evil-3 so far");
-      addOutside("zr-evil-3.invalid");
-      expect(await waitFor("outside banner again", async () => outsideBanner.test(await banner(a))), "written again: the outside banner is back");
-      await review(a, "zr-evil-3.invalid");
-      await choose(a, "Keep");
-      expect(await waitFor("kept", () => viaOf("zr-evil-3.invalid") === "prompt", 10000), "Keep → allowed with a valid stamp (via prompt)");
-      expect(await waitFor("online", async () => (await a.locator(".asset-card.offline").count()) === 0, 10000), "…and the clip comes online");
+    // Plan 9.6 step 6: added outside ZabsReel.
+    addOutside("zr-evil-3.invalid");
+    await rpc("load_project", { path: crafted3 });
+    const outsideBanner = /This project uses 1 file on \\\\zr-evil-3\.invalid\. It is in your list of allowed network computers, but ZabsReel didn't put it there/;
+    expect(await waitFor("outside banner", async () => outsideBanner.test(await banner(a))), `outside entry: banner "${(await banner(a)).replace(/\s+/g, " ")}"`);
+    expect(await review(a, "zr-evil-3.invalid"), "Review… opens the in-app dialog");
+    const kText = (await dialog(a).innerText().catch(() => "")).replace(/\s+/g, " ");
+    expect(kText.includes("Keep \\\\zr-evil-3.invalid?") && kText.includes("was added to your allowed network computers outside ZabsReel"), `…the Keep dialog (${kText.slice(0, 120)})`);
+    f = await focused(a);
+    expect(f.inside && f.text === "Remove", `…focus starts on Remove (${f.text})`);
+    await a.keyboard.press("Escape");
+    expect(await waitFor("removed", () => !listed("zr-evil-3.invalid"), 10000), "Esc removes it from the store");
+    expect(await waitFor("allow banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-3\.invalid\. They stay offline until you allow it/.test(await banner(a)), 10000),
+      "…and the project now asks to allow it");
+    expect(traced("zr-evil-3").length === 0 && evilFor("zr-evil-3").length === 0, "nothing touched zr-evil-3 so far");
+    addOutside("zr-evil-3.invalid");
+    expect(await waitFor("outside banner again", async () => outsideBanner.test(await banner(a))), "written again: the outside banner is back");
+    await review(a, "zr-evil-3.invalid");
+    await choose(a, "Keep");
+    expect(await waitFor("kept", () => viaOf("zr-evil-3.invalid") === "prompt", 10000), "Keep → allowed with a valid stamp (via prompt)");
+    expect(await waitFor("online", async () => (await a.locator(".asset-card.offline").count()) === 0, 10000), "…and the clip comes online");
 
-      // Two UI hosts: Keep in page A, then Esc in page B.
-      addOutside("zr-evil-3.invalid");
-      const b = await open();
-      need(await waitFor("page B", async () => (await b.locator(".statuspill.ok").count()) > 0), "a second page of the same shell connects");
-      expect(await waitFor("outside in both", async () => outsideBanner.test(await banner(a)) && outsideBanner.test(await banner(b))), "both pages show the outside banner");
-      expect((await review(a, "zr-evil-3.invalid")) && (await review(b, "zr-evil-3.invalid")), "the Keep dialog is open in both");
-      await choose(a, "Keep");
-      expect(await waitFor("kept by A", () => viaOf("zr-evil-3.invalid") === "prompt", 10000), "Keep in page A → allowed");
-      f = await focused(b);
-      revokes.length = 0;
-      await b.keyboard.press("Escape");
-      expect(await waitFor("B answered", () => revokes.length > 0, 10000) && revokes[0] === 200, `Esc in page B sends its Remove (${revokes.join()})`);
-      expect(f.text === "Remove" && viaOf("zr-evil-3.invalid") === "prompt", "…which leaves it allowed with a valid stamp (it was kept meanwhile)");
-      expect(await waitFor("B closed", async () => (await dialog(b).count()) === 0, 5000), "page B's dialog closes");
-      expect(await waitFor("both online", async () => (await a.locator(".asset-card.offline").count()) === 0 && (await b.locator(".asset-card.offline").count()) === 0
-        && (await a.locator(".asset-card").count()) > 0 && (await b.locator(".asset-card").count()) > 0, 10000), "both pages show the clip online");
-    }
+    // Two UI hosts: Keep in page A, then Esc in page B.
+    addOutside("zr-evil-3.invalid");
+    const b = await open();
+    need(await waitFor("page B", async () => (await b.locator(".statuspill.ok").count()) > 0), "a second page of the same shell connects");
+    expect(await waitFor("outside in both", async () => outsideBanner.test(await banner(a)) && outsideBanner.test(await banner(b))), "both pages show the outside banner");
+    expect((await review(a, "zr-evil-3.invalid")) && (await review(b, "zr-evil-3.invalid")), "the Keep dialog is open in both");
+    await choose(a, "Keep");
+    expect(await waitFor("kept by A", () => viaOf("zr-evil-3.invalid") === "prompt", 10000), "Keep in page A → allowed");
+    f = await focused(b);
+    revokes.length = 0;
+    await b.keyboard.press("Escape");
+    expect(await waitFor("B answered", () => revokes.length > 0, 10000) && revokes[0] === 200, `Esc in page B sends its Remove (${revokes.join()})`);
+    expect(f.text === "Remove" && viaOf("zr-evil-3.invalid") === "prompt", "…which leaves it allowed with a valid stamp (it was kept meanwhile)");
+    expect(await waitFor("B closed", async () => (await dialog(b).count()) === 0, 5000), "page B's dialog closes");
+    expect(await waitFor("both online", async () => (await a.locator(".asset-card.offline").count()) === 0 && (await b.locator(".asset-card.offline").count()) === 0
+      && (await a.locator(".asset-card").count()) > 0 && (await b.locator(".asset-card").count()) > 0, 10000), "both pages show the clip online");
 
     expect(traced("zr-evil.invalid").length === 0, "nothing ever touched zr-evil.invalid (the Save As name)");
     const pick = traced("zr-pick");

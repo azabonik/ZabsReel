@@ -31,12 +31,12 @@ import { PRODUCT_NAME } from "../brand.js";
 import { classifyPath, type PathClass } from "../unc.js";
 
 /**
- * "log" until the user can allow a server from both UI hosts; then
- * "enforce". AIVE_NETWORK_GATE=enforce (read once, here) turns enforcement on
- * for tests; nothing turns it off.
+ * "enforce": a path on a server the user has not allowed is refused. ("log",
+ * which only logged what it would block, carried the rollout until the user
+ * could allow a server in both UI hosts.)
  */
-export const NETWORK_GATE = "log" as "log" | "enforce";
-const ENFORCED = NETWORK_GATE === "enforce" || process.env.AIVE_NETWORK_GATE === "enforce";
+export const NETWORK_GATE = "enforce" as "log" | "enforce";
+const ENFORCED = NETWORK_GATE === "enforce";
 
 /** True when a path on a server that is not allowed is refused (not only logged). */
 export function networkGateEnforced(): boolean {
