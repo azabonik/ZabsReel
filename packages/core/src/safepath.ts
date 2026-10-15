@@ -16,14 +16,14 @@
  *    path as a local file (accepted) vs a URL/protocol form (rejected).
  *  - {@link assertPathUsable} refuses, for any rpc path, a Windows device / NT
  *    path or a network path whose server name has no key (unc.ts).
- *
- * A network path with a usable server name passes here: unc.ts recognizes it,
- * and media on a server the user has not allowed stays offline and is never
- * opened (hosttrust.ts).
  *  - {@link sanitizeProjectIds} rewrites non-token ids on load/import.
  *  - {@link assertProjectMediaLocal} refuses a project whose media is non-local.
  *  - {@link coerceProjectNumbers} / {@link coerceProjectValues} give every
  *    value that reaches an FFmpeg graph the type the model says it has.
+ *
+ * A network path with a usable server name passes here: unc.ts recognizes it,
+ * and media on a server the user has not allowed stays offline and is never
+ * opened (hosttrust.ts).
  */
 import { newId } from "./ids.js";
 import { PRODUCT_NAME } from "./brand.js";

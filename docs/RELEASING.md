@@ -105,9 +105,9 @@ them.
 
 ZabsReel opens media on a network computer only after the user allows that
 computer (README, "Media on a network drive"). The Linux CI runs the same
-smokes on every push, but only a Windows host signs in to a network computer on
-its own, so the release job runs them again on `windows-latest` before it
-packages anything:
+smokes on every push to main and every pull request, but only a Windows host
+signs in to a network computer on its own, so the release job runs them again
+on `windows-latest` before it packages anything:
 
 - `smoke-unc.ts` and `node scripts/check-io-imports.mjs`;
 - `smoke-unc-e2e.ts`, a real core process with every file and process call

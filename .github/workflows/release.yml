@@ -43,10 +43,13 @@ jobs:
       # leak reaches nobody. smoke-unc-e2e's step 7 runs only on Windows: it
       # shares temp folders on \\localhost with `net share` (the runner is an
       # administrator) and removes the shares at the end.
+      # One command per step: the default shell here is pwsh, which does not
+      # stop a multi-line run block when a native command fails.
+      - name: I/O import gate self-test
+        run: node scripts/check-io-imports.mjs --self-test
+
       - name: I/O import gate (core fs and child processes go through the network-path gate)
-        run: |
-          node scripts/check-io-imports.mjs --self-test
-          node scripts/check-io-imports.mjs
+        run: node scripts/check-io-imports.mjs
 
       - name: Smoke — network paths (host keys, refusals, gatedfs, ffmpeg argv, graphic imports, approval store, trust folder)
         run: npx tsx packages/core/scripts/smoke-unc.ts
