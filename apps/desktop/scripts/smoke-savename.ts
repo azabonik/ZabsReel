@@ -10,18 +10,22 @@
  * guard), electron/media-servers.cjs (the approval dialogs: the renderer's
  * display-only "You opened" context counts only when the core's pending list
  * agrees; the web shell's in-app dialogs in src/mediaservers.ts say the
- * same), src/editkeys.ts (S / Delete after a split) and src/pathbar.ts (a
- * late folder listing keeps a typed path).
+ * same; one flow asks and saves the answer, for Review… and for a file picked
+ * in a native dialog, which asks once per server and never allows silently;
+ * the web shell's reviews in src/platform.ts run one at a time), src/editkeys.ts
+ * (S / Delete after a split) and src/pathbar.ts (a late folder listing keeps a
+ * typed path).
  * Run: npx tsx apps/desktop/scripts/smoke-savename.ts
  */
 import { createRequire } from "node:module";
 import { resolveSaveName, presetForPath, presetSwapNote } from "../src/savename.js";
-import { exportFilters, PROJECT_FILTERS, type FileFilter } from "../src/platform.js";
+import { exportFilters, PROJECT_FILTERS, getSnapshot, initPlatform, platform, type FileFilter } from "../src/platform.js";
 import { clipIsLive, splitFrameFor } from "../src/editkeys.js";
 import { PathBarEdits } from "../src/pathbar.js";
 import type { Clip, Project } from "../src/types.js";
 import * as unc from "@aive/core/unc";
 import { allowDialogText, keepDialogText, userContextPath } from "../src/mediaservers.js";
+import type { MediaServers } from "../src/types.js";
 
 type Guard = { pendingSaveQuit: boolean; forceQuit: boolean };
 type GuardEvent =
@@ -148,10 +152,20 @@ eq(bar.listingMayReplace(mark), true, "listing started after the edits → shows
 // only when the core's pending entry lists that path among its requests.
 type Pending = { host: string; origins: string[]; files: number; examples: string[] };
 type Box = { title: string; message: string; detail?: string; buttons: string[]; defaultId: number; cancelId: number };
+type Store = { approved: { host: string; via: string }[]; outside: { host: string }[]; unread: string[] };
+type Io = {
+  show: (b: Box) => Promise<{ response: number }>; pendingEntry: (key: string) => Promise<Pending | undefined>;
+  approve: (key: string, via: string) => Promise<void>; revoke: (key: string) => Promise<{ removed: boolean }>;
+  recheck: () => Promise<void>; log: (t: string) => void;
+};
+type Review = { key: string; list: Store; via: string; context?: unknown; picked?: string; platform: string; unc: typeof unc };
 const ms = createRequire(import.meta.url)("../electron/media-servers.cjs") as {
   userContextPath: (context: unknown, key: string, entry: Pending | undefined, u: typeof unc) => string | null;
-  allowDialog: (o: { key: string; entry?: Pending; userPath: string | null; platform: string }) => Box;
+  allowDialog: (o: { key: string; entry?: Pending; userPath: string | null; pickedPath?: string | null; platform: string }) => Box;
   keepDialog: (o: { key: string; entry?: Pending; platform: string }) => Box;
+  reviewServer: (o: Review, io: Io) => Promise<boolean>;
+  pickedHostsToAsk: (paths: string[], list: Store, dataDir: string, u: typeof unc) => { key: string; path: string }[];
+  askPicked: (paths: string[], o: { readList: () => Store; dataDir: string; platform: string; unc: typeof unc }, io: Io) => Promise<string[]>;
 };
 const asked: Pending = { host: "nas", origins: ["request"], files: 0, examples: ["//nas/p/a.aive"] };
 const user = { origin: "user", path: "//nas/p/a.aive" };
@@ -201,4 +215,133 @@ eq(`${same}/${total}`, `${total}/${total}`, "web dialogs: the same title, messag
 eq(allowDialogText("nas", pendings[1], userContextPath(user, "nas", pendings[1]), "linux").detail.split("\n\n")[0], "You opened //nas/p/a.aive.", "web Allow dialog: the page's own path → \"You opened\"");
 eq(allowDialogText("nas", pendings[1], userContextPath({ origin: "user", path: "//nas/p/b.aive" }, "nas", pendings[1]), "linux").detail.split("\n\n")[0], "The AI assistant asked to open //nas/p/a.aive.", "…a path the core doesn't list → the core's wording");
 
-process.exit(failed ? 1 : 0);
+// The one flow behind Review… and the native pickers (electron/media-servers.cjs reviewServer and askPicked),
+// against a store in memory: the dialogs it shows, and every write it makes.
+function fakeMain(store: Store, answers: number[], opts: { removed?: boolean } = {}) {
+  const shown: Box[] = [];
+  const writes: string[] = [];
+  const io: Io = {
+    show: async (b) => {
+      shown.push(b);
+      return { response: b.buttons.length === 1 ? 0 : answers.shift() ?? 0 };
+    },
+    pendingEntry: async () => undefined,
+    approve: async (key, via) => {
+      writes.push(`approve ${key} ${via}`);
+      store.outside = store.outside.filter((o) => o.host !== key);
+      store.approved.push({ host: key, via });
+    },
+    revoke: async (key) => {
+      writes.push(`revoke ${key}`);
+      const removed = opts.removed ?? true;
+      if (removed) store.outside = store.outside.filter((o) => o.host !== key);
+      return { removed };
+    },
+    recheck: async () => { writes.push("recheck"); },
+    log: () => {},
+  };
+  const pick = (paths: string[], dataDir = "/home/u/.zabsreel/data") =>
+    ms.askPicked(paths, { readList: () => store, dataDir, platform: "linux", unc }, io);
+  return { io, shown, writes, pick };
+}
+const emptyStore = (): Store => ({ approved: [], outside: [], unread: [] });
+const PICK = "\\\\zr-pick.invalid\\s\\a.mp4";
+async function pickerChecks() {
+  eq(ms.pickedHostsToAsk([PICK, "//ZR-PICK.invalid/s/b.mp4", "/home/u/c.mp4"], emptyStore(), "/d", unc), [{ key: "zr-pick.invalid", path: PICK }],
+    "picked paths: one question per server not allowed yet, none for a local file");
+  eq(ms.pickedHostsToAsk([PICK, "\\\\nas@SSL\\s\\a.mp4", "//?/UNC/x/s/a.mp4"], { ...emptyStore(), approved: [{ host: "zr-pick.invalid", via: "prompt" }] }, "/d", unc), [],
+    "…none for an allowed server, and a refused form is left to the core");
+  eq(ms.pickedHostsToAsk(["//nas/zr/a.mp4"], emptyStore(), "//nas/zr", unc), [], "…none for the data folder's own server");
+
+  let m = fakeMain(emptyStore(), [0]);
+  const kept = await m.pick([PICK, "/home/u/c.mp4"]);
+  eq([m.shown.map((b) => b.title), m.shown[0]?.detail?.split("\n\n")[0], m.shown[0]?.buttons], [["Allow media from \\\\zr-pick.invalid?"], `You picked ${PICK}.`, ["Keep offline", "Allow"]],
+    "empty store, a file picked on \\\\zr-pick.invalid → the Allow dialog: \"You picked …\"");
+  eq([m.writes, kept], [[], ["/home/u/c.mp4"]], "…Keep offline (0) → nothing written, and the picked path on that server is left out");
+
+  const store = emptyStore();
+  m = fakeMain(store, [1]);
+  const allowed = await m.pick([PICK, "//zr-pick.invalid/s/b.mp4"]);
+  eq([m.shown.length, m.writes, allowed], [1, ["approve zr-pick.invalid picker", "recheck"], [PICK, "//zr-pick.invalid/s/b.mp4"]],
+    "…Allow (1) → one question for two files there, one write with via \"picker\", both paths kept");
+  const again = fakeMain(store, [1]);
+  eq([await again.pick([PICK]), again.shown.length, again.writes], [[PICK], 0, []], "…picked again once allowed: no question, no write");
+
+  m = fakeMain({ ...emptyStore(), outside: [{ host: "zr-pick.invalid" }] }, [1]);
+  await m.pick([PICK]);
+  eq([m.shown[0]?.title, m.shown[0]?.buttons, m.writes], ["Keep \\\\zr-pick.invalid?", ["Remove", "Keep"], ["approve zr-pick.invalid picker", "recheck"]],
+    "a picked file on a server added outside ZabsReel → the Keep dialog; Keep (1) saves it with via \"picker\"");
+  m = fakeMain({ ...emptyStore(), outside: [{ host: "zr-pick.invalid" }] }, [0]);
+  eq([await m.pick([PICK]), m.writes], [[], ["revoke zr-pick.invalid", "recheck"]], "…Remove (0) removes the outside entry and leaves the path out");
+
+  m = fakeMain({ ...emptyStore(), unread: ["hosts.key"] }, [1]);
+  eq([await m.pick([PICK]), m.shown.map((b) => b.buttons), m.writes], [[], [["OK"]], []], "unread store: a pick shows only the info box, writes nothing and leaves the path out");
+  m = fakeMain({ ...emptyStore(), unread: ["hosts.key"] }, [1]);
+  eq([await ms.reviewServer({ key: "nas", list: { ...emptyStore(), unread: ["hosts.key"] }, via: "prompt", platform: "linux", unc }, m.io), m.shown.map((b) => [b.title, b.buttons]), m.writes],
+    [false, [["Network computers", ["OK"]]], []], "Review… while the store is unread: only the info box (OK), no write, resolves false");
+
+  const outside = (): Store => ({ ...emptyStore(), outside: [{ host: "evil" }] });
+  m = fakeMain(outside(), [0], { removed: false });
+  eq([await ms.reviewServer({ key: "evil", list: outside(), via: "prompt", platform: "linux", unc }, m.io), m.writes], [true, ["revoke evil", "recheck"]],
+    "Keep dialog, Remove or Esc after another window kept it ({removed: false}) → resolves true (allowed)");
+  m = fakeMain(outside(), [0], { removed: true });
+  eq(await ms.reviewServer({ key: "evil", list: outside(), via: "prompt", platform: "linux", unc }, m.io), false, "…and when it was removed → false");
+  m = fakeMain(emptyStore(), [1]);
+  eq([await ms.reviewServer({ key: "nas", list: emptyStore(), via: "prompt", platform: "linux", unc }, m.io), m.writes], [true, ["approve nas prompt", "recheck"]], "Review… Allow → saved with via \"prompt\"");
+}
+
+// The web shell (src/platform.ts): a review asked for while one is open waits for its answer; it never answers
+// the open one for the user (false would be Remove in a Keep dialog). Its Keep dialog's Remove after another tab
+// kept the server resolves true, and the unread state shows only its note.
+async function webReviewChecks() {
+  let servers: MediaServers = { gate: "enforce", approved: [], outside: [{ host: "zr-evil-3.invalid", display: "\\\\zr-evil-3.invalid" }], unread: [], pending: [] };
+  const posts: string[] = [];
+  let removed = true;
+  (globalThis as { window?: object }).window = {};
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === "POST") posts.push(`${url} ${init.body}`);
+    const body = url === "/api/config" ? { platform: "linux", sep: "/", home: "/home/u", places: [], mcp: { available: false, packaged: false, mcpEntry: null, json: "" } }
+      : url.endsWith("/revoke") ? { ok: true, removed } : { ok: true };
+    return new Response(JSON.stringify(body), { status: 200 });
+  }) as typeof fetch;
+  eq(await initPlatform("k", async () => servers), "web", "web shell host detected (fetch stubbed)");
+  const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
+  const first = platform.approveMediaServer("zr-evil-3.invalid");
+  await tick();
+  const open = getSnapshot().review;
+  const second = platform.approveMediaServer("zr-evil-3.invalid");
+  await tick();
+  eq([open?.kind, getSnapshot().review?.id === open?.id, posts], ["keep", true, []], "a second review while the Keep dialog is open: the open one stays, nothing is posted");
+  servers = { ...servers, outside: [], approved: [{ host: "zr-evil-3.invalid", display: "\\\\zr-evil-3.invalid", via: "prompt", added: "" }] };
+  open?.resolve(true);
+  eq([await first, await second, posts.map((p) => p.split(" ")[0]), getSnapshot().review], [true, true, ["/api/media-servers/approve"], null],
+    "…Keep in it: one approve, and the second review then finds the server allowed and asks nothing");
+
+  servers = { ...servers, approved: [], outside: [{ host: "zr-evil-3.invalid", display: "\\\\zr-evil-3.invalid" }] };
+  removed = false;
+  posts.length = 0;
+  const esc = platform.approveMediaServer("zr-evil-3.invalid");
+  await tick();
+  getSnapshot().review?.resolve(false);
+  eq([await esc, posts], [true, ['/api/media-servers/revoke {"host":"zr-evil-3.invalid","onlyIfOutside":true}']],
+    "Keep dialog, Remove or Esc after another tab kept it (removed: false) → resolves true (allowed)");
+
+  servers = { ...servers, unread: ["hosts.key"] };
+  posts.length = 0;
+  const unread = platform.approveMediaServer("zr-evil-3.invalid");
+  await tick();
+  const note = getSnapshot().review;
+  note?.resolve(false);
+  eq([note?.kind, await unread, posts], ["unread", false, []], "unread store: only the note, resolves false, nothing posted");
+}
+
+// A check that waits on a promise nobody settles would otherwise let node exit with 0.
+process.on("beforeExit", () => {
+  console.log("FAIL the async checks did not finish (a dialog or request never settled)");
+  process.exit(1);
+});
+void (async () => {
+  await pickerChecks();
+  await webReviewChecks();
+  process.exit(failed ? 1 : 0);
+})();

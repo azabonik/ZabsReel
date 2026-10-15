@@ -131,8 +131,9 @@ Leave it out of later releases.
 > those clips stay offline and ZabsReel does not contact that computer until
 > you click **Allow** once for it. On Windows, opening a file there can send
 > your Windows sign-in to that computer, so allow only computers you know.
-> Files you pick in ZabsReel's own dialogs work as before. Remove a computer
-> in **Project → Network computers…**. An AI client can't allow a computer;
+> Picking a file on a new network computer in ZabsReel's own dialogs asks
+> once for that computer. Remove a computer in **Project → Network
+> computers…**. An AI client can't allow a computer;
 > ZabsReel's tools tell it which clips wait for which computer.
 >
 > **Some network paths are now refused.** A project or an import that names

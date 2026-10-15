@@ -135,7 +135,7 @@ export function NetworkComputersDialog(props: {
                     </tr>
                   )}
                   {ms.approved.length === 0 && !ms.dataFolderHost && (
-                    <tr><td colSpan={3} className="muted">None yet. Files you pick yourself in {PRODUCT_NAME} add their computer here.</td></tr>
+                    <tr><td colSpan={3} className="muted">None yet. A computer you allow is listed here.</td></tr>
                   )}
                 </tbody>
               </table>

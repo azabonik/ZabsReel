@@ -50,6 +50,11 @@ jobs:
       - name: Smoke — compositor plan (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-composite.ts
 
+      # Includes the desktop app's network-computer dialogs: a file picked on a
+      # server not allowed yet asks once, and nothing is saved before Allow.
+      - name: Smoke — save names, the native dialogs' rules and the network-computer dialogs (pure logic)
+        run: npx tsx apps/desktop/scripts/smoke-savename.ts
+
       - name: Smoke — opaque base (render graph + pixel A/B)
         run: npx tsx packages/core/scripts/smoke-opaque-base.ts
 

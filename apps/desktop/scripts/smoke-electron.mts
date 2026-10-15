@@ -47,7 +47,9 @@
 //      the core for none of its files (no /file, /peaks or /frames URL, no
 //      thumbnail); Keep offline in the Allow dialog changes nothing, Allow
 //      stores it and the clips come online. A file picked in the native open
-//      dialog stores its server before the path reaches the page. A recent
+//      dialog on a server not allowed yet asks once ("You picked …"): Keep
+//      offline returns no path and saves nothing, and the store stays
+//      unchanged until Allow, which saves it (via picker). A recent
 //      project on a server not allowed opens the dialog with "You opened" and
 //      the banner says "You tried"; an agent's import_video says "The AI
 //      assistant asked" in both. Project → Network computers… lists the
@@ -195,9 +197,24 @@ const calls = (app: ElectronApp, fn: string) =>
   app.evaluate((_e, fn) => ((globalThis as unknown as { __calls: Record<string, unknown[]> }).__calls?.[fn] ?? []), fn) as Promise<
     {
       defaultPath?: string; filters?: { name?: string; extensions: string[] }[]; message?: string;
-      title?: string; detail?: string; buttons?: string[]; defaultId?: number; cancelId?: number;
+      title?: string; detail?: string; buttons?: string[]; defaultId?: number; cancelId?: number; properties?: string[];
     }[]
   >;
+/** Stub showMessageBox so it waits: each call is kept in globalThis.__calls at once, and answer() settles the oldest. */
+async function stubWaiting(app: ElectronApp) {
+  await app.evaluate(({ dialog }) => {
+    const g = globalThis as unknown as { __calls: Record<string, unknown[]>; __answers: ((r: { response: number }) => void)[] };
+    g.__calls ??= {};
+    g.__calls.showMessageBox = [];
+    g.__answers = [];
+    (dialog as unknown as Record<string, unknown>).showMessageBox = (...args: unknown[]) => {
+      g.__calls.showMessageBox.push(args.find((a) => a && typeof a === "object" && !("webContents" in (a as object))));
+      return new Promise((res) => g.__answers.push(res));
+    };
+  });
+}
+const answer = (app: ElectronApp, response: number) =>
+  app.evaluate((_e, response) => (globalThis as unknown as { __answers: ((r: { response: number }) => void)[] }).__answers.shift()?.({ response }), response);
 const saveResult = (filePath: string | null) => (filePath ? { canceled: false, filePath } : { canceled: true, filePath: undefined });
 
 async function waitFor(what: string, fn: () => boolean | Promise<boolean>, ms = 30000): Promise<boolean> {
@@ -276,6 +293,7 @@ async function main() {
   await stub(app, "showOpenDialog", [{ canceled: false, filePaths: [clip] }]);
   await win.getByRole("button", { name: "Import", exact: true }).click();
   check(await waitFor("asset row", async () => (await win.getByRole("button", { name: "Add to timeline" }).count()) > 0), "clip.mp4 is in the library");
+  const [mopts] = await calls(app, "showOpenDialog");
   await win.getByRole("button", { name: "Add to timeline" }).first().click();
   const play = win.getByRole("button", { name: "Play", exact: true });
   check(await waitFor("Play enabled", async () => (await play.count()) > 0 && (await play.isEnabled())), "timeline has a clip (Play enabled)");
@@ -556,6 +574,9 @@ async function main() {
   await win.evaluate(() => window.aive!.openProject());
   const [oopts] = await calls(app, "showOpenDialog");
   check(oopts?.filters?.[0]?.name === "ZabsReel Project", `project open filter is named "${oopts?.filters?.[0]?.name}"`);
+  // A picked file is not added to the OS's recent files (all four dialogs).
+  const noRecent = [mopts, opts, popts, oopts].map((o) => !!o?.properties?.includes("dontAddToRecent"));
+  check(noRecent.every(Boolean), `import, export, save-as and open dialogs pass dontAddToRecent (${noRecent.join(", ")})`);
 
   console.log("5. export from the Export menu...");
   const exportWith = async (label: RegExp, typedPath: string) => {
@@ -817,15 +838,29 @@ async function networkComputers(pw: PW, work: string, cwd: string, clip: string)
   await openViaMenu(crafted1); // its server is allowed: nothing pending any more
   check(await waitFor("no banner", async () => (await win.locator(".ms-banner").count()) === 0, 15000), "back on crafted1: no banner");
 
-  // 9c. Picker auto-trust: stored before the picked path reaches the page.
+  // 9c. A file picked on a server not allowed yet asks once (Round 5: a pick alone allows nothing, because a
+  // Windows dialog follows a shortcut to another computer). Keep offline leaves the path out; nothing is
+  // saved until Allow, which saves it with via "picker"; picked again, it asks nothing.
   await stub(app, "showOpenDialog", [{ canceled: false, filePaths: ["//zr-pick.invalid/s/a.mp4"] }]);
   check(!listed("zr-pick.invalid"), "zr-pick.invalid is not in the store yet");
-  const picked = await win.evaluate(() => window.aive!.pickFiles());
-  check(picked[0] === "//zr-pick.invalid/s/a.mp4" && viaOf("zr-pick.invalid") === "picker", `picked → the store has it (via ${viaOf("zr-pick.invalid")}) when the path comes back`);
+  await stub(app, "showMessageBox", [{ response: 0 }]);
+  const keptOff = await win.evaluate(() => window.aive!.pickFiles());
+  const [pickBox] = await calls(app, "showMessageBox");
+  check(pickBox?.title === "Allow media from \\\\zr-pick.invalid?" && buttonsOf(pickBox) === '["Keep offline","Allow"]' && pickBox.cancelId === 0
+    && (pickBox.detail ?? "").startsWith("You picked //zr-pick.invalid/s/a.mp4."), `picked → the Allow dialog (${pickBox?.title}, "${(pickBox?.detail ?? "").split("\n")[0]}")`);
+  check(keptOff.length === 0 && !listed("zr-pick.invalid"), `Keep offline → the store is unchanged and no path comes back (${JSON.stringify(keptOff)})`);
+  await stubWaiting(app);
+  const picking = win.evaluate(() => window.aive!.pickFiles());
+  await waitFor("picker dialog", async () => (await calls(app, "showMessageBox")).length > 0, 10000);
+  await sleep(500);
+  check((await calls(app, "showMessageBox")).length === 1 && !listed("zr-pick.invalid"), "picked again: asked, and the store is unchanged while the dialog is open");
+  await answer(app, 1);
+  const picked = await picking;
+  check(picked[0] === "//zr-pick.invalid/s/a.mp4" && viaOf("zr-pick.invalid") === "picker", `Allow → the store has it (via ${viaOf("zr-pick.invalid")}) when the path comes back`);
   await stub(app, "showMessageBox", [{ response: 0 }]);
   await win.getByRole("button", { name: "Import", exact: true }).click();
   check(await waitFor("import refused", async () => (await win.locator(".error-bar").count()) > 0, 15000), `the import itself then fails as the file isn't there (${(await win.locator(".error-bar").innerText().catch(() => "")).split("\n")[0]})`);
-  check((await calls(app, "showMessageBox")).length === 0, "…with no approval dialog");
+  check((await calls(app, "showMessageBox")).length === 0, "…picked once it is allowed: no dialog");
   await win.locator(".error-bar").click();
 
   // 9d. Origin wording: a recent project (the page's own request) vs an agent's import.

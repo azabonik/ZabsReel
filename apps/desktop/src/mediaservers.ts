@@ -36,6 +36,16 @@ export function lutGateFor(ms: MediaServers | null): ((path: string) => boolean)
   };
 }
 
+/**
+ * The recent projects that stay in the window's own-request set ("You
+ * tried…") once remember_projects answered: the ones it skipped on a network
+ * computer, whose server is pending because this window asked (sanitized as
+ * in the pending list).
+ */
+export function ownRecentPaths(skipped: readonly { path: string }[]): Set<string> {
+  return new Set(skipped.filter((s) => classifyPath(s.path).kind === "network").map((s) => examplePath(s.path)));
+}
+
 /** The network computer a path is on, or null. */
 function hostOf(path: string): string | null {
   const c = classifyPath(path);

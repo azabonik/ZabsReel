@@ -39,7 +39,7 @@
 // Run:  npx tsx apps/desktop/scripts/smoke-composite.ts
 
 import { activeLayersAt, bleepLayersOf, timelineDurationSec } from "../src/composite";
-import { bannerLines, lutGateFor, offlineState } from "../src/mediaservers";
+import { bannerLines, lutGateFor, offlineState, ownRecentPaths } from "../src/mediaservers";
 import { bleepMuteSpans, expandBleeps } from "../src/bleeps";
 import { muteGainAt } from "../src/mutes";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
@@ -1648,6 +1648,9 @@ async function jobStatusChecks(): Promise<void> {
   check("banner: every example sent by this window → \"You tried\"", lines[2] === "You tried to open a file on the network computer \\\\u. Nothing has been opened yet.", lines[2]);
   check("banner: any example this window didn't send → \"The AI assistant asked\"", lines[3] === "The AI assistant asked to open a file on the network computer \\\\a. Nothing has been opened.", lines[3]);
   check("banner: Keep offline hides a server's line", bannerLines(ms({ pending: [pend("p", ["project"], 1, [])] }), null, new Set(), new Set(["p"])).length === 0);
+  const own = ownRecentPaths([{ path: "//zr-evil-7.invalid/p/a.aive" }, { path: "/home/u/gone.aive" }, { path: "C:\\gone.aive" }]);
+  check("own requests: of the recent projects remember_projects skipped, only those on a network computer stay \"You tried\" (the rest leave the set)",
+    [...own].join() === "//zr-evil-7.invalid/p/a.aive", JSON.stringify([...own]));
   const unchecked = bannerLines(ms(), { ...project, assets: [chk] }, new Set(), new Set());
   check("banner: files whose folder couldn't be checked, with Try again", unchecked.length === 1 && unchecked[0].action === "retry" &&
     text(unchecked[0]) === "ZabsReel couldn't check the folder of 1 file on \\\\nas2 (EACCES), so it didn't open it. It stays offline until the folder can be read.", text(unchecked[0] ?? { before: "", who: "", after: "" }));

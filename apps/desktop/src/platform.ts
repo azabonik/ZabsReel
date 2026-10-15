@@ -154,9 +154,12 @@ async function requestPick(req: PickRequest): Promise<string[] | null> {
   return paths;
 }
 
-/** Show an in-app review dialog (reviewdialog.tsx); resolves with the user's answer. */
+/**
+ * Show an in-app review dialog (reviewdialog.tsx); resolves with the user's
+ * answer. One at a time (approveMediaServer queues them): false is an answer
+ * (Keep offline, or Remove), so an open dialog is never closed with it.
+ */
 function requestReview(r: Omit<PendingReview, "id" | "resolve">): Promise<boolean> {
-  snapshot.review?.resolve(false);
   return new Promise((resolve) => {
     set({
       review: {
@@ -199,6 +202,9 @@ async function reviewInPage(key: string, context: ApproveContext | undefined): P
   await api("/api/media-servers/approve", { host: key });
   return true;
 }
+
+/** The web shell's reviews, one after another; each reads the core's list when its turn comes. */
+let reviews: Promise<unknown> = Promise.resolve();
 
 export const platform = {
   async pickFiles(): Promise<string[]> {
@@ -257,7 +263,11 @@ export const platform = {
     if (h === "electron" && window.aive!.mediaServers) return window.aive!.mediaServers.approve(server, context);
     if (h !== "web") return false;
     const n = normalizeHost(server);
-    return n.ok ? reviewInPage(n.key, context) : false;
+    if (!n.ok) return false;
+    // A second review waits for the open one: answering it for the user could remove a server (Keep's default).
+    const next = reviews.then(() => reviewInPage(n.key, context));
+    reviews = next.catch(() => {});
+    return next;
   },
 
   /** Remove `server` from the allowed list (Project → Network computers). Rejects when that could not be saved. */

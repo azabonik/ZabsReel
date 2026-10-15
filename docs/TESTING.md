@@ -87,7 +87,7 @@ npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP te
 # Keep dialogs, Save As never starts in a folder from the project's name, and
 # nothing touches a server before it is allowed (needs the build and a Chromium)
 npx tsx apps/desktop/scripts/smoke-web.ts
-npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); S/Delete after a split; path bar vs a late listing
+npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); the network-computer dialogs and the one flow that asks and saves (Review…, and a picked file on a new server: asks once, never saves silently; the web shell's reviews one at a time); S/Delete after a split; path bar vs a late listing
 
 # Skill installer: `zabsreel migrate` handles two older generations. It finds and
 # removes only what Relo's SynthCut left (MCP server "ai-video-editor" that runs
@@ -441,7 +441,8 @@ Save → saved, then quit; the core it started exits), and network computers
 (test servers under `.invalid`, native dialogs stubbed): the banner and
 **Offline** badges, no `/file`, `/peaks`, `/frames` or thumbnail request for an
 offline clip, Allow and Keep offline, the Keep and Remove dialog for a server
-added outside ZabsReel, picker auto-trust, the "You opened" and "The AI
+added outside ZabsReel, a picked file on a new server (it asks once, and
+nothing is saved before Allow), the "You opened" and "The AI
 assistant asked" wording, and **Project → Network computers…**. It fails on renderer
 console errors. The app runs with its own profile (`--user-data-dir` in the
 test folder), so your ZabsReel profile and its recent projects are left alone.

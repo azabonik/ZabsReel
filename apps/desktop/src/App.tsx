@@ -26,7 +26,7 @@ import { MCP_KEY, PRODUCT_NAME } from "@aive/core/brand";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 import { StorageDialog } from "./storagedialog";
-import { lutGateFor, offlineState } from "./mediaservers";
+import { lutGateFor, offlineState, ownRecentPaths } from "./mediaservers";
 import { MediaServerBanner, NetworkComputersDialog } from "./networkcomputers";
 import { setLutGate } from "./gl/runtime";
 import { examplePath } from "@aive/core/unc";
@@ -144,11 +144,15 @@ export function App({ api }: { api: CoreApi }) {
   useEffect(() => {
     api.onStatus(setConnected);
     api.onState((p, fp) => { setProject(p); setProjectPath(fp); });
-    api.onMediaServers(setMediaServers);
+    api.onMediaServers((s) => {
+      // The live preview leaves out a LUT on a network computer that is not allowed (only while the core
+      // enforces). Set here, before React commits this state: the preview draws in its own effect, which
+      // runs before an effect of App's would.
+      setLutGate(lutGateFor(s));
+      setMediaServers(s);
+    });
   }, [api]);
 
-  // The live preview leaves out a LUT on a network computer that is not allowed (only while the core enforces).
-  useEffect(() => setLutGate(lutGateFor(mediaServers)), [mediaServers]);
   useEffect(() => setDismissedServers(new Set()), [projectPath]);
 
   // Track unsaved changes: the first state after New/Open/Save is the clean
@@ -452,9 +456,17 @@ export function App({ api }: { api: CoreApi }) {
     if (!connected || recentsRemembered.current || recents.length === 0) return;
     recentsRemembered.current = true;
     // A recent project on a network computer not allowed yet is skipped and
-    // makes that server pending: this window asked, not the AI assistant.
-    for (const p of recents) ownRequests.current.add(examplePath(p));
-    api.rpc("remember_projects", { paths: recents }).catch(() => {});
+    // makes that server pending: this window asked, not the AI assistant. The
+    // rest leave the set once the core answers, so an AI assistant's later
+    // request for one of them is worded as the assistant's.
+    const added = recents.map(examplePath).filter((p) => !ownRequests.current.has(p));
+    for (const p of added) ownRequests.current.add(p);
+    api.rpc<{ skipped: { path: string }[] }>("remember_projects", { paths: recents })
+      .then((r) => {
+        const keep = ownRecentPaths(r.skipped);
+        for (const p of added) if (!keep.has(p)) ownRequests.current.delete(p);
+      })
+      .catch(() => {});
   }, [connected, recents, api]);
 
   // Ctrl/⌘+S saves (separate listener so it works even while a field is focused).
