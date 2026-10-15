@@ -839,7 +839,7 @@ export interface ResolvedEffects {
   pitchFallback?: boolean;
   /**
    * How the rendering FFmpeg's audio filters differ from 4.4's (effects/audio.ts
-   * AudioFilterCaps, from audio/fx.ts), plus `mixCrossfade`: FFmpeg 7.x, whose
+   * AudioFilterCaps, from audio/fx.ts), plus `mixCrossfade`: FFmpeg 6.1 – 7.x, whose
    * acrossfade is unreliable — ramp chunks and transitions are joined by mixing
    * (graph.ts emitMixCrossfades; set by the engine's render staging).
    */

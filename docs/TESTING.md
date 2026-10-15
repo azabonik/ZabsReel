@@ -21,7 +21,7 @@ Plus how to test the **packaged installer** offline.
 | Need | Check | Install |
 |---|---|---|
 | Node.js ≥ 20 | `node --version` | https://nodejs.org |
-| FFmpeg + ffprobe on PATH (4.4, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
+| FFmpeg + ffprobe on PATH (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | (AI testing) Claude Desktop | — | https://claude.ai/download |
 
 Everything else (whisper.cpp + model, YuNet model, Remotion's headless Chrome)
@@ -356,8 +356,9 @@ npx tsx packages/core/scripts/smoke-voicefx.ts
 # plus an impulse that checks which afftfilt this build has, vibrato's primed
 # delay line, vibrance's pinned luma weights (8.0 swapped the defaults), a
 # stereo export mix after a mono first clip, the last frame of clips with
-# an alpha-keeping effect (4.4 – 6.1 dropped it), and keyed speed-ramped clips
-# (footage and matte cutout) against the ramp model.
+# an alpha-keeping effect (4.4 – 6.1 dropped it), keyed speed-ramped clips
+# (footage and matte cutout) against the ramp model, and the audio joins of a
+# speed ramp and of transitions (6.1 – 7.x's acrossfade dropped audio).
 npx tsx packages/core/scripts/smoke-ffcompat.ts
 
 # Time effects: freeze_frame (ripples the timeline + linked audio; ripple 'all'
@@ -596,13 +597,16 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-col
 
 ### FFmpeg versions
 
-ZabsReel supports FFmpeg **4.4, 7.1, 8.0, 8.1 and 9.0**
-(`TESTED_FFMPEG_VERSIONS` in `packages/core/src/ffmpeg/version.ts`). The core
-logs a warning at startup for any other version, and
-`apps/desktop/scripts/prepare-bundle.ts` refuses to stage one unless
+ZabsReel supports FFmpeg **4.4, 6.1, 7.1, 8.0, 8.1 and 9.0**
+(`TESTED_FFMPEG_VERSIONS` in `packages/core/src/ffmpeg/version.ts`). The core's
+startup warning goes by major version (`TESTED_FFMPEG_MAJORS`): it logs one for
+5.x and for git builds, but another release of a listed major (for example 6.0
+or 7.0) runs without a warning.
+`apps/desktop/scripts/prepare-bundle.ts` goes by the exact version: it refuses
+to stage any version not on the list (6.0 and 7.0 too) unless
 `AIVE_BUNDLE_ALLOW_UNTESTED_FFMPEG=1` is set (`smoke-bundle-ffmpeg.ts` checks
 that gate; with `AIVE_BUNDLE_SMOKE_BUILDS=<dir>` holding
-`<dir>/{6.1,7.1,8.1}/bin/` static builds it also runs it on them).
+`<dir>/{5.1,7.1,8.1}/bin/` static builds it also runs it on them).
 
 Every smoke and `parity-gl.mts` use `AIVE_FFMPEG` / `AIVE_FFPROBE`, so you can
 run any of them against another build. Static Linux builds come from the
@@ -625,7 +629,7 @@ Differences between the versions, and what the core does about them:
 | afftdn was rewritten: 25 ms output delay, a different noise-floor scale, noise tracking that barely works | 5.0+ | Each pass is trimmed by its delay, and the noise floor offset is recalibrated with tracking off. Noise reduction and enhance_voice match 4.4 within about 1.5 dB on smoke-voice's speech. |
 | afftfilt was rewritten: sqrt-Hann on input and output, win_size − hop latency. The robot came out quieter, duller, 8–32 ms late, and lost isolated transients. | 5.1+ | The robot runs afftfilt with `win_func=rect`, and its expression rebuilds 4.4's Hann spectrum from the neighbouring bins. The latency is padded and trimmed off, the 3 pre-roll frames are gated, and the input is padded to a whole hop (4.4 rounds its output up to one, so a robot after *normalize* keeps its tail). It matches 4.4 within −65 dB at 0.0 dB level, and the live preview matches it too. |
 | `anlmdn` crashes on any input | 9.0 | Probed once at run time. *Reduce noise* with *Extra pass* skips the non-local-means stage. |
-| `acrossfade` returns a cut-short or empty stream at random when its inputs are short | 7.x | Speed-ramp chunks and transitions are joined by fading the pieces and mixing them at their sample positions. |
+| `acrossfade` ends its output as soon as its second input has ended, even while the first is still playing. Speed-ramp chunks and transitions come from one source, so the next piece is often complete first: on 6.1 a speed ramp's audio lost its end (silence), on 7.x it came out cut short or empty at random | 6.1 – 7.x (and git builds of libavfilter 9 and 11) | Speed-ramp chunks and transitions are joined by fading the pieces and mixing them at their sample positions. |
 | `vibrance` defaults: red and blue luma weights swapped | 8.0+ | The weights from 4.4 (which the preview shader uses) are passed explicitly. |
 | A `scale` in `-filter_complex` without `flags` is bilinear in 4.4 and bicubic from 5.0 | 5.0+ | The motion-graphics scale names `flags=bilinear`. |
 | The export mix took the first clip's channel layout up to 5.x (a mono first clip made the export mono), and is stereo from 6.1 | all | The mix is pinned to stereo. |
@@ -657,6 +661,19 @@ On 9.0, the download-dependent smokes motion, matte, reframe, captions and
 animtext also pass (captions needs `jfk.wav`, animtext a clip argument). The
 "before" runs for 7.1, 8.0 and 8.1 covered the suites that failed on 9.0, and
 smoke-ramps.
+
+6.1.2 (BtbN, 2024-11-30; Ubuntu 24.04 ships 6.1.1), 2026-10-15: before the
+acrossfade fix, smoke-ffcompat failed one check (the last 0.6 s of a speed
+ramp's audio was silent). After it, ffcompat, ramps, time, transitions and
+voice pass on 4.4, 5.1, 6.1, 7.1, 8.0, 8.1 and 9.0.
+
+Ubuntu 24.04's own build (the one CI's `ubuntu-latest` installs with apt),
+2026-10-15, in a `ubuntu:24.04` container with `apt-get install ffmpeg`:
+`ffmpeg version 6.1.1-3ubuntu5` (libavfilter 9.12.100). smoke-ffcompat passes
+(rubberband present, 3 "montage" ramp exports identical with mixed joins) and
+smoke-ramps passes. With the acrossfade fix turned off for 6.1, the same build
+fails the "montage" ramp check (quietest 100 ms at -240 dBFS), so the CI step
+guards the fix. CI's ffcompat step prints `ffmpeg -version | head -1` first.
 
 What to expect:
 - The **first** captions run downloads whisper.cpp + the `base.en` model (~150 MB);

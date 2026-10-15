@@ -134,7 +134,7 @@ export function segmentKey(
     // Segments are VIDEO-only: audio effects can't change a pixel, so they stay
     // out of the key (an audio-effect edit re-renders only the audio pass).
     // Clips without them hash exactly as before — no CACHE_VERSION bump.
-    // (A clip whose only effect is the FFmpeg 7.x audioCaps flag hashes as one without effects.)
+    // (A clip whose only effect is the FFmpeg 6.1 – 7.x audioCaps flag hashes as one without effects.)
     effects: c.effects && Object.keys(c.effects).every((k) => k === "audioCaps")
       ? undefined
       : c.effects && (c.effects.audioFilters || c.effects.pitchFallback || c.effects.loudness || c.effects.audioCaps)

@@ -244,7 +244,7 @@ There is **no packaged installer for macOS or Linux yet** — the current releas
 # 1. Prerequisites
 #    • Node.js >= 20        (https://nodejs.org  — or `brew install node`)
 #    • Git
-#    • FFmpeg + ffprobe on your PATH, a tested version (4.4, 7.1, 8.0, 8.1 or 9.0 —
+#    • FFmpeg + ffprobe on your PATH, a tested version (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 —
 #      see "Supported FFmpeg versions" below):
 #         macOS:  brew install ffmpeg
 #         Linux:  sudo apt install ffmpeg          # Debian / Ubuntu
@@ -296,13 +296,14 @@ ZabsReel runs FFmpeg as a separate program, so the version matters. The full tes
 | FFmpeg | Status | Notes |
 |---|---|---|
 | 4.4 | tested | The version on Ubuntu 22.04. The WebGL preview models its filters. |
+| 6.1 | tested | The version on Ubuntu 24.04. |
 | 7.1 | tested | |
 | 8.0 | tested | |
 | 8.1 | tested | |
 | 9.0 | tested | Its `anlmdn` filter crashes, so *Reduce noise* with *Extra pass* runs the second spectral pass only. |
-| 5.x, 6.x, git builds | not tested | Expected to work; the core prints a warning at startup. |
+| 5.x, 6.0, git builds | not tested | Expected to work; the core prints a warning at startup for 5.x and git builds. |
 
-The core adapts to the differences it knows about (for example, `-filter_complex_script` no longer exists in 9.0, from 8.1 FFmpeg tracks premultiplied alpha, and the noise reduction filter changed in 5.0), so the same project exports the same picture on each tested version within a level or two of rounding, and the audio effects are tuned to match 4.4 within about 2 dB. When the core starts with a version outside this list, it logs a warning. To use a specific build, set `AIVE_FFMPEG` and `AIVE_FFPROBE` to its binaries. `docs/TESTING.md` has the per-version test results and how to run the tests against another build.
+The core adapts to the differences it knows about (for example, `-filter_complex_script` no longer exists in 9.0, from 8.1 FFmpeg tracks premultiplied alpha, and the noise reduction filter changed in 5.0), so the same project exports the same picture on each tested version within a level or two of rounding, and the audio effects are tuned to match 4.4 within about 2 dB. The startup warning goes by major version: the core logs one for 5.x and for git builds, but 6.0 and 7.0 run without a warning (the desktop bundle still refuses to ship them). To use a specific build, set `AIVE_FFMPEG` and `AIVE_FFPROBE` to its binaries. `docs/TESTING.md` has the per-version test results and how to run the tests against another build.
 
 ## Media on a network drive
 

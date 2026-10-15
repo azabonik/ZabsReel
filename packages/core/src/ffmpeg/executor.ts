@@ -826,7 +826,7 @@ export function ffmpegVersion(): Promise<FfmpegVersion> {
   return versionPromise;
 }
 
-/** True when this FFmpeg's acrossfade can't be trusted (7.x; version.ts acrossfadeUnreliable). */
+/** True when this FFmpeg's acrossfade can't be trusted (6.1 – 7.x, git builds of libavfilter 9 and 11; version.ts acrossfadeUnreliable). */
 export async function acrossfadeNeedsMix(): Promise<boolean> {
   return acrossfadeUnreliable(await ffmpegVersion().catch(() => null));
 }

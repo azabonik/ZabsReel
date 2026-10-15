@@ -1,6 +1,6 @@
 /**
  * FFmpeg versions and the few behaviours that differ between the releases
- * ZabsReel supports (4.4 and 7.1 – 9.0). Pure: executor.ts runs the probes
+ * ZabsReel supports (4.4 and 6.1 – 9.0). Pure: executor.ts runs the probes
  * (`ffmpeg -version` once per process, plus two lazy feature probes) and
  * applies what is decided here.
  *
@@ -21,7 +21,8 @@
  *    synthesis windows, latency win_size − hop ({@link hasAfftfiltV2},
  *    effects/audio.ts robotSteps).
  *  - anlmdn crashes in FFmpeg 9.0 (executor.ts anlmdnWorks).
- *  - acrossfade is unreliable on short inputs in 7.x ({@link acrossfadeUnreliable}).
+ *  - acrossfade drops audio when its second input ends first in 6.1 – 7.x and
+ *    pre-8.0 git builds ({@link acrossfadeUnreliable}).
  *  - xfade drops the outgoing clip's last frame before 7.0 ({@link xfadeNeedsEofPad}).
  *  - `ffmpeg -filters` prints 2 flag columns from 8.0 (3 before; audio/fx.ts).
  */
@@ -31,7 +32,7 @@ import { PRODUCT_NAME } from "../brand.js";
  * FFmpeg releases the full test matrix ran against (docs/TESTING.md). Bundles
  * must ship one of them (apps/desktop/scripts/prepare-bundle.ts).
  */
-export const TESTED_FFMPEG_VERSIONS = ["4.4", "7.1", "8.0", "8.1", "9.0"] as const;
+export const TESTED_FFMPEG_VERSIONS = ["4.4", "6.1", "7.1", "8.0", "8.1", "9.0"] as const;
 /** Major versions the core runs on without a startup warning. */
 export const TESTED_FFMPEG_MAJORS: readonly number[] = [...new Set(TESTED_FFMPEG_VERSIONS.map((v) => Number(v.split(".")[0])))];
 
@@ -112,15 +113,25 @@ export function hasAfftfiltV2(v: Pick<FfmpegVersion, "major" | "minor" | "lavfi"
 }
 
 /**
- * True for FFmpeg 7.x (libavfilter 10): its acrossfade returns a cut-short or
- * empty stream at random when its inputs are short (two 0.3 s inputs, a speed
- * ramp's chunks): measured with 7.1.5, 2–5 different outputs in 10 runs of the
- * same command. Its source is the same as in 6.1, so the trigger is 7.0's
- * reworked (threaded) ffmpeg CLI feeding the graph; 6.1 and 8.0+ (whose
- * acrossfade was rewritten) give one result. graph.ts mixes instead.
+ * True for FFmpeg 6.1 – 7.x (libavfilter 9.x – 10): their acrossfade ends its
+ * output as soon as its SECOND input has reached EOF, even while the first is
+ * still playing (FFmpeg commit c44fe10160, 2023-06: activate() checks input 1's
+ * pending EOF before input 0 has finished). A ramp's chunks come from one
+ * asplit (and a transition's clips are decoded side by side), so the next piece
+ * is often complete before the one it joins: the rest of the first piece and
+ * all of the second are dropped.
+ * 6.1's single-threaded CLI does it the same way every time (a "montage" ramp
+ * lost about 0.6 s: silence at its end); 7.x's threaded CLI at random (2–5
+ * different outputs in 10 runs). 6.0 and 8.0+ (whose acrossfade was
+ * rewritten) wait for the first input's end. graph.ts mixes instead. A git
+ * build of libavfilter 9 or 11 counts as affected (mixing is correct on every
+ * version): libavfilter 11 git builds made before 8.0's rewrite still have the
+ * c44fe10160 code, and no one has measured the libavfilter minor of the rewrite.
  */
-export function acrossfadeUnreliable(v: Pick<FfmpegVersion, "generation"> | null): boolean {
-  return v?.generation === 7;
+export function acrossfadeUnreliable(v: Pick<FfmpegVersion, "major" | "minor" | "generation" | "lavfi"> | null): boolean {
+  if (v?.major === 6) return (v.minor ?? 0) >= 1;
+  if (v != null && v.major === null && v.lavfi === 11) return true;
+  return v?.generation === 6 || v?.generation === 7;
 }
 
 /**

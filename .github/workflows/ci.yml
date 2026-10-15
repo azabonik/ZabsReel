@@ -96,6 +96,18 @@ jobs:
       - name: Smoke — media formats under the demuxer allowlist (FFmpeg, no network)
         run: npx tsx packages/core/scripts/smoke-demuxers.ts
 
+      # The apt FFmpeg on ubuntu-latest is Ubuntu 24.04's 6.1, a tested version:
+      # its version-specific checks (6.1's acrossfade dropped the end of a speed
+      # ramp's audio) and the speed-ramp suite. The step prints the version first,
+      # so a runner image with another FFmpeg shows in the log.
+      - name: Smoke — FFmpeg version compatibility (synthesized media)
+        run: |
+          ffmpeg -version | head -1
+          npx tsx packages/core/scripts/smoke-ffcompat.ts
+
+      - name: Smoke — speed ramps (synthesized media)
+        run: npx tsx packages/core/scripts/smoke-ramps.ts
+
       # The graphics browser's switches, its media downloads refused, Remotion's
       # same-as patch (applied by npm ci's postinstall) and the render.ts lint.
       # Its real-Chrome part runs only where the headless shell is cached.
