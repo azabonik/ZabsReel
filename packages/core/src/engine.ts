@@ -2193,9 +2193,13 @@ export class EditorEngine extends EventEmitter {
       this.trust.requirePath(patch.lut, "LUT path");
       this.trust.assertNotPrivate(patch.lut, "LUT path");
       // /file serves a clip's LUT to the live preview (isServablePath), so only
-      // an existing .cube file can be one — never an arbitrary file on disk.
+      // an existing .cube file can be one, not any file the agent names. (A
+      // path statSync rejects outright, e.g. one with a NUL byte, is "missing".)
+      const isFile = (p: string): boolean => {
+        try { return !!statSync(p, { throwIfNoEntry: false })?.isFile(); } catch { return false; }
+      };
       const why = !/\.cube$/i.test(patch.lut) ? "is not a .cube file"
-        : !statSync(patch.lut, { throwIfNoEntry: false })?.isFile() ? "does not exist or is not a file" : "";
+        : !isFile(patch.lut) ? "does not exist or is not a file" : "";
       if (why) {
         throw new Error(`Clip "${clipId}" LUT path "${patch.lut}" ${why}. A LUT must be an existing .cube file (absolute path); clear_clip_effects removes a LUT.`);
       }
