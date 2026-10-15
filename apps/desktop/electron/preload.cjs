@@ -20,4 +20,11 @@ contextBridge.exposeInMainWorld("aive", {
   reportSaveFailed: () => ipcRenderer.send("project:save-failed"),
   /** Ready-to-paste MCP client config for this exact install (no repo path guessing). */
   getMcpConfig: () => ipcRenderer.invoke("mcp:config"),
+  /** Network computers: the main process asks in a native dialog the page can't answer. */
+  mediaServers: {
+    /** Review server `host` (Allow, or Keep for one added outside ZabsReel); resolves true when it is allowed. `context` only changes the wording. */
+    approve: (host, context) => ipcRenderer.invoke("media-servers:approve", host, context),
+    /** Remove server `host` from the allowed list (no dialog); rejects when that could not be saved. */
+    revoke: (host) => ipcRenderer.invoke("media-servers:revoke", host),
+  },
 });

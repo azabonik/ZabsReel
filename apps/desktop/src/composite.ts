@@ -13,7 +13,7 @@
 // Canvas2D fallback when WebGL2 is unavailable.
 
 import type { CropRect, MediaAsset, Project, TextOverlay, TextStyle } from "./types";
-import { clipDurationFrames } from "./types";
+import { clipDurationFrames, isOffline } from "./types";
 import {
   buildSegments, colorFilter, exactSourceTimeFor, fadeOpacity, rateAt, sourceTimeFor, vignetteAngles, type Segment,
 } from "./playback";
@@ -367,7 +367,7 @@ export function activeLayersAt(
           const ge = g.endFrame ?? Infinity;
           if (localTL < gs || localTL > ge) continue;
           const gAsset = assetById.get(g.assetId);
-          const gpath = gAsset?.previewPath;
+          const gpath = gAsset && !isOffline(gAsset) ? gAsset.previewPath : undefined;
           if (!gpath) continue;
           const dur = gAsset?.duration ?? 0;
           let st = (localTL - gs) / fps;
@@ -488,7 +488,7 @@ export function bleepLayersOf(project: Project): PlacedBleep[] {
       for (const layer of expandBleeps(clip, project.fps, customDuration)) {
         if (layer.sfxDuration <= 0) continue;
         const sfx = layer.sfxAssetId ? assets.get(layer.sfxAssetId) : builtin.get(layer.sound);
-        if (!sfx?.hasAudio) continue;
+        if (!sfx?.hasAudio || isOffline(sfx)) continue; // a custom sound on a server not allowed yet
         out.push({ clipId: clip.id, trackIndex: track.index, layer, path: sfx.path });
       }
     }

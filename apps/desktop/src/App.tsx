@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { CoreApi } from "./api";
-import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, Project, TextStyle, TranscriptHit, VisualHit } from "./types";
-import { clipDurationFrames } from "./types";
+import type { CoreApi, RpcRefusal } from "./api";
+import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, MediaServers, Project, TextStyle, TranscriptHit, VisualHit } from "./types";
+import { clipDurationFrames, isOffline } from "./types";
 import { SpeedPanel, type SpeedRampParams } from "./speedramp";
 import {
   buildSegments, createPlaybackStore, fmtTime, revertIfRefused, usePlaybackValue,
@@ -26,6 +26,10 @@ import { MCP_KEY, PRODUCT_NAME } from "@aive/core/brand";
 import { AudioEffectsGroup, type AudioRpc } from "./audiofxpanel";
 import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps";
 import { StorageDialog } from "./storagedialog";
+import { lutGateFor, offlineState } from "./mediaservers";
+import { MediaServerBanner, NetworkComputersDialog } from "./networkcomputers";
+import { setLutGate } from "./gl/runtime";
+import { examplePath } from "@aive/core/unc";
 import { StatusLine } from "./jobstatus";
 import { BusyAction } from "./jobstate";
 import { UnusedMediaStrip } from "./unusedmedia";
@@ -113,6 +117,16 @@ export function App({ api }: { api: CoreApi }) {
   const closeStorage = useCallback(() => setShowStorage(false), []);
   const [showUnused, setShowUnused] = useState(false);
   const closeUnused = useCallback(() => setShowUnused(false), []);
+  // ---- network computers (mediaservers.ts, networkcomputers.tsx) ----
+  const [mediaServers, setMediaServers] = useState<MediaServers | null>(null);
+  const [showServers, setShowServers] = useState(false);
+  const closeServers = useCallback(() => setShowServers(false), []);
+  const [serversBusy, setServersBusy] = useState<string | null>(null);
+  const [serversError, setServersError] = useState<string | null>(null);
+  // Banner lines hidden with "Keep offline", until the next project is opened (not saved anywhere).
+  const [dismissedServers, setDismissedServers] = useState<ReadonlySet<string>>(new Set());
+  // Paths this window itself sent and the core refused (sanitized as in the pending list): "You tried…".
+  const ownRequests = useRef(new Set<string>());
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("aive.recent") || "[]"); } catch { return []; }
   });
@@ -128,7 +142,12 @@ export function App({ api }: { api: CoreApi }) {
   useEffect(() => {
     api.onStatus(setConnected);
     api.onState((p, fp) => { setProject(p); setProjectPath(fp); });
+    api.onMediaServers(setMediaServers);
   }, [api]);
+
+  // The live preview leaves out a LUT on a network computer that is not allowed (only while the core enforces).
+  useEffect(() => setLutGate(lutGateFor(mediaServers)), [mediaServers]);
+  useEffect(() => setDismissedServers(new Set()), [projectPath]);
 
   // Track unsaved changes: the first state after New/Open/Save is the clean
   // baseline; any later revision bump means the project has unsaved edits.
@@ -218,11 +237,13 @@ export function App({ api }: { api: CoreApi }) {
     [segments],
   );
 
-  // Fetch thumbnails for assets that don't have one yet.
+  // Fetch thumbnails for assets that don't have one yet. Not for an offline
+  // asset: its file is not opened (a server not allowed yet). Its thumbnail
+  // from before stays on disk but is not shown until it is online again.
   useEffect(() => {
     if (!project) return;
     for (const asset of project.assets) {
-      if (thumbs[asset.id] || !asset.hasVideo) continue;
+      if (thumbs[asset.id] || !asset.hasVideo || isOffline(asset)) continue;
       api
         .rpc<{ path: string }>("generate_thumbnail", { assetId: asset.id, atSeconds: 0 })
         // NB: fileUrl already contains `?path=…`, so the cache-buster must use
@@ -232,10 +253,58 @@ export function App({ api }: { api: CoreApi }) {
     }
   }, [project, api, thumbs]);
 
+  const liveThumbs = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const [id, url] of Object.entries(thumbs)) {
+      const a = assetById.get(id);
+      if (!a || !isOffline(a)) out[id] = url;
+    }
+    return out;
+  }, [thumbs, assetById]);
+
+  /**
+   * A call this window makes with a path the user chose (open, save, export,
+   * import): when the core refuses it because the path is on a network
+   * computer that is not allowed, ask the UI host (its own dialog, with "You
+   * opened …") and, once allowed, try the call again. Resolves null when the
+   * user keeps the server offline. Not while the store is unread: no dialog then.
+   */
+  const withApproval = async <T,>(path: string, call: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await call();
+    } catch (e) {
+      const r = e as RpcRefusal;
+      if (r.code !== "media_server_not_approved" || !r.host || r.unread || !platform.canReviewMediaServers()) throw e;
+      ownRequests.current.add(examplePath(path));
+      if (!(await platform.approveMediaServer(r.host, { origin: "user", path }))) return null;
+      return call();
+    }
+  };
+  const reviewServer = async (host: string) => {
+    const mine = mediaServers?.pending.find((p) => p.host === host)?.examples.find((e) => ownRequests.current.has(e));
+    try {
+      await platform.approveMediaServer(host, mine ? { origin: "user", path: mine } : undefined);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const recheckMedia = () => { api.rpc("recheck_offline_media").catch((e) => setError(e instanceof Error ? e.message : String(e))); };
+  const removeServer = async (host: string) => {
+    setServersError(null);
+    setServersBusy(`Removing \\\\${host}…`);
+    try {
+      await platform.revokeMediaServer(host);
+    } catch {
+      setServersError(`Couldn't remove \\\\${host}; try again.`);
+    } finally {
+      setServersBusy(null);
+    }
+  };
+
   const importMedia = () =>
     run("Importing", async () => {
       const paths = await platform.pickFiles();
-      for (const path of paths) await api.rpc("import_video", { path });
+      for (const path of paths) await withApproval(path, () => api.rpc("import_video", { path }));
     });
 
   const addToTimeline = (assetId: string) => run("Adding clip", () => api.rpc("append_clip", { assetId }));
@@ -322,13 +391,15 @@ export function App({ api }: { api: CoreApi }) {
     setShowProjectMenu(false);
     if (dirty && !window.confirm("Discard unsaved changes and start a new project?")) return;
     pendingBaseline.current = true;
+    setDismissedServers(new Set());
     await run("New project", () => api.rpc("new_project"));
   };
   const openProjectPath = async (path: string) => {
     setShowProjectMenu(false);
     if (dirty && !window.confirm("Discard unsaved changes and open another project?")) return;
     pendingBaseline.current = true;
-    const ok = await run("Opening project", () => api.rpc("load_project", { path }));
+    setDismissedServers(new Set());
+    const ok = await run("Opening project", () => withApproval(path, () => api.rpc("load_project", { path })));
     if (ok !== null) pushRecent(path);
   };
   const openProject = async () => {
@@ -347,7 +418,7 @@ export function App({ api }: { api: CoreApi }) {
     const path = await platform.saveProjectAs(project?.name || "Untitled");
     if (!path) return;
     pendingBaseline.current = true;
-    const ok = await run("Saving project", () => api.rpc("save_project", { path }));
+    const ok = await run("Saving project", () => withApproval(path, () => api.rpc("save_project", { path })));
     if (ok !== null) pushRecent(path);
     else saveFailed();
   };
@@ -355,7 +426,7 @@ export function App({ api }: { api: CoreApi }) {
     setShowProjectMenu(false);
     if (!projectPath) { await saveProjectAs(); return; }
     pendingBaseline.current = true;
-    const ok = await run("Saving project", () => api.rpc("save_project", { path: projectPath }));
+    const ok = await run("Saving project", () => withApproval(projectPath, () => api.rpc("save_project", { path: projectPath })));
     if (ok !== null) pushRecent(projectPath);
     else saveFailed();
   };
@@ -378,6 +449,9 @@ export function App({ api }: { api: CoreApi }) {
   useEffect(() => {
     if (!connected || recentsRemembered.current || recents.length === 0) return;
     recentsRemembered.current = true;
+    // A recent project on a network computer not allowed yet is skipped and
+    // makes that server pending: this window asked, not the AI assistant.
+    for (const p of recents) ownRequests.current.add(examplePath(p));
     api.rpc("remember_projects", { paths: recents }).catch(() => {});
   }, [connected, recents, api]);
 
@@ -443,7 +517,8 @@ export function App({ api }: { api: CoreApi }) {
       const out = await platform.pickSavePath(EXPORT_PRESETS.find((p) => p.id === preset)?.ext);
       if (!out) return;
       const usePreset = presetForPath(EXPORT_PRESETS, preset, out);
-      const r = await api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(usePreset ? { preset: usePreset } : {}) });
+      const r = await withApproval(out, () => api.rpc<{ path: string; duration: number }>("export_video", { outputPath: out, ...(usePreset ? { preset: usePreset } : {}) }));
+      if (!r) return;
       setError(null);
       const note = presetSwapNote(EXPORT_PRESETS, preset, usePreset, out);
       alert(`Exported ${fmt(r.duration)} video to:\n${r.path}${note ? `\n\n${note}` : ""}`);
@@ -676,6 +751,7 @@ export function App({ api }: { api: CoreApi }) {
                   <button role="menuitem" className="proj-menu-item" onClick={saveProject}><Check size={13} /> Save<span className="menu-kbd">Ctrl+S</span></button>
                   <button role="menuitem" className="proj-menu-item" onClick={saveProjectAs}><Export size={13} /> Save As…</button>
                   <button role="menuitem" className="proj-menu-item" onClick={() => { setShowProjectMenu(false); setShowStorage(true); }}><Trash size={13} /> Storage…</button>
+                  <button role="menuitem" className="proj-menu-item" onClick={() => { setShowProjectMenu(false); setServersError(null); setShowServers(true); }}><Frame size={13} /> Network computers…</button>
                   {recents.length > 0 && (
                     <>
                       <div className="proj-menu-head">Recent</div>
@@ -702,6 +778,11 @@ export function App({ api }: { api: CoreApi }) {
       </header>
 
       {error && <ErrorBar message={error} onDismiss={() => setError(null)} />}
+      <MediaServerBanner
+        ms={mediaServers} project={project} own={ownRequests.current} dismissed={dismissedServers}
+        canReview={platform.canReviewMediaServers()} onReview={reviewServer} onRetry={recheckMedia}
+        onDismiss={(host) => setDismissedServers((d) => new Set([...d, host]))}
+      />
 
       {showConnect && (
         <>
@@ -711,6 +792,12 @@ export function App({ api }: { api: CoreApi }) {
       )}
 
       {showStorage && <StorageDialog api={api} onClose={closeStorage} />}
+      {showServers && (
+        <NetworkComputersDialog
+          ms={mediaServers} canReview={platform.canReviewMediaServers()} busy={serversBusy} error={serversError}
+          onReview={reviewServer} onRemove={removeServer} onClose={closeServers}
+        />
+      )}
 
 
       {exactSrc && (
@@ -855,7 +942,7 @@ export function App({ api }: { api: CoreApi }) {
                 <div className="results-head">Similar to <b>{visualHits.refName}</b> {visualHits.semantic ? "(semantic)" : "(perceptual)"}</div>
                 {visualHits.hits.map((h) => (
                   <div key={h.assetId} className="result-row vis">
-                    <div className="asset-thumb sm">{thumbs[h.assetId] ? <img src={thumbs[h.assetId]} alt="" /> : <Film size={14} />}</div>
+                    <div className="asset-thumb sm">{liveThumbs[h.assetId] ? <img src={liveThumbs[h.assetId]} alt="" /> : <Film size={14} />}</div>
                     <span className="result-text">{h.name}</span>
                     <span className="result-score">{Math.round(h.score * 100)}%</span>
                     <button className="icon-btn" onClick={() => addToTimeline(h.assetId)} aria-label="Add to timeline"><Plus size={14} /></button>
@@ -865,61 +952,73 @@ export function App({ api }: { api: CoreApi }) {
               </div>
             ) : visibleAssets.length ? (
               <div className="asset-list">
-                {visibleAssets.map((a) => (
-                  <div key={a.id} className="asset-card">
-                    <div className="asset-thumb">
-                      {thumbs[a.id] ? (
-                        <img src={thumbs[a.id]} alt="" />
-                      ) : a.hasVideo ? (
-                        <Film size={18} />
-                      ) : (
-                        <Waveform size={18} />
-                      )}
-                    </div>
-                    <div className="asset-info">
-                      <div className="asset-name" title={a.path}>{a.name}</div>
-                      <div className="asset-meta">
-                        {a.hasVideo && (
-                          <>
-                            <span>{a.width}×{a.height}</span>
-                            <span className="sep">·</span>
-                          </>
-                        )}
-                        <span>{fmt(a.duration)}</span>
-                        {(a.transcriptIndexed || a.transcript) && <><span className="sep">·</span><span title="Transcript indexed">◎</span></>}
-                        {a.proxyPath && <><span className="sep">·</span><span title="Preview proxy ready (export uses full res)">⚡</span></>}
-                        {a.hasAudio && (
-                          <>
-                            <span className="sep">·</span>
-                            <Waveform size={11} />
-                          </>
+                {visibleAssets.map((a) => {
+                  const off = offlineState(a, mediaServers);
+                  return (
+                    <div key={a.id} className={`asset-card ${off ? "offline" : ""}`}>
+                      <div className="asset-thumb">
+                        {liveThumbs[a.id] ? (
+                          <img src={liveThumbs[a.id]} alt="" />
+                        ) : a.hasVideo ? (
+                          <Film size={18} />
+                        ) : (
+                          <Waveform size={18} />
                         )}
                       </div>
-                      {folders.length > 0 && (
-                        <select className="folder-pick" value={a.folderId ?? ""} onChange={(e) => moveToFolder(a.id, e.target.value || null)} aria-label="Folder">
-                          <option value="">No folder</option>
-                          {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-                        </select>
-                      )}
-                    </div>
-                    <div className="asset-actions">
-                      <button className="icon-btn" onClick={() => addToTimeline(a.id)} aria-label="Add to timeline" title="Add to timeline">
-                        <Plus size={15} />
-                      </button>
-                      <button className="icon-btn" onClick={() => indexAsset(a.id, { transcript: true, visual: true })} aria-label="Index for search" title="Index transcript + visuals for search" disabled={!connected}>
-                        <Search size={14} />
-                      </button>
-                      {a.hasVideo && (
-                        <button className="icon-btn" onClick={() => findSimilar(a.id, a.name)} aria-label="Find similar shots" title="Find similar-looking shots" disabled={!connected}>
-                          <Sparkles size={14} />
+                      <div className="asset-info">
+                        <div className="asset-name" title={a.path}>{a.name}</div>
+                        <div className="asset-meta">
+                          {a.hasVideo && (
+                            <>
+                              <span>{a.width}×{a.height}</span>
+                              <span className="sep">·</span>
+                            </>
+                          )}
+                          <span>{fmt(a.duration)}</span>
+                          {(a.transcriptIndexed || a.transcript) && <><span className="sep">·</span><span title="Transcript indexed">◎</span></>}
+                          {a.proxyPath && <><span className="sep">·</span><span title="Preview proxy ready (export uses full res)">⚡</span></>}
+                          {a.hasAudio && (
+                            <>
+                              <span className="sep">·</span>
+                              <Waveform size={11} />
+                            </>
+                          )}
+                        </div>
+                        {off && (
+                          <div className="offline-badge" role="note" aria-label={off.label} title={off.label}>
+                            <Alert size={11} /> Offline
+                            {off.action === "review" && platform.canReviewMediaServers() && a.awaitingServer && (
+                              <button className="btn btn-sm" onClick={() => reviewServer(a.awaitingServer!)}>Review…</button>
+                            )}
+                            {off.action === "retry" && <button className="btn btn-sm" onClick={recheckMedia}>Try again</button>}
+                          </div>
+                        )}
+                        {folders.length > 0 && (
+                          <select className="folder-pick" value={a.folderId ?? ""} onChange={(e) => moveToFolder(a.id, e.target.value || null)} aria-label="Folder">
+                            <option value="">No folder</option>
+                            {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                          </select>
+                        )}
+                      </div>
+                      <div className="asset-actions">
+                        <button className="icon-btn" onClick={() => addToTimeline(a.id)} aria-label="Add to timeline" title="Add to timeline">
+                          <Plus size={15} />
                         </button>
-                      )}
-                      <button className="icon-btn" onClick={() => removeAsset(a.id)} aria-label="Remove from library" title="Remove">
-                        <Trash size={14} />
-                      </button>
+                        <button className="icon-btn" onClick={() => indexAsset(a.id, { transcript: true, visual: true })} aria-label="Index for search" title="Index transcript + visuals for search" disabled={!connected}>
+                          <Search size={14} />
+                        </button>
+                        {a.hasVideo && (
+                          <button className="icon-btn" onClick={() => findSimilar(a.id, a.name)} aria-label="Find similar shots" title="Find similar-looking shots" disabled={!connected}>
+                            <Sparkles size={14} />
+                          </button>
+                        )}
+                        <button className="icon-btn" onClick={() => removeAsset(a.id)} aria-label="Remove from library" title="Remove">
+                          <Trash size={14} />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="empty">
@@ -1052,7 +1151,7 @@ export function App({ api }: { api: CoreApi }) {
               clip={selected}
               index={selectedIndex}
               asset={selected.assetId ? assetById.get(selected.assetId) : undefined}
-              thumb={selected.assetId ? thumbs[selected.assetId] : undefined}
+              thumb={selected.assetId ? liveThumbs[selected.assetId] : undefined}
               project={project}
               connected={connected}
               busy={!!busy}
@@ -1116,7 +1215,8 @@ export function App({ api }: { api: CoreApi }) {
       <Timeline
         project={project}
         assetById={assetById}
-        thumbs={thumbs}
+        thumbs={liveThumbs}
+        offlineLabel={(a) => offlineState(a, mediaServers)?.label ?? null}
         fileUrl={fileUrlFor}
         store={store}
         selectedClip={selectedClip}

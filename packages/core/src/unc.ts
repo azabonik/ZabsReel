@@ -123,3 +123,14 @@ export function bareFileName(name: string): string {
   const bare = last.replace(/[:\u0000-\u001f\u007f-\u009f]/g, "");
   return bare === "" ? "Untitled" : bare;
 }
+
+/**
+ * A path from untrusted data as an example in a message or the pending list:
+ * control and bidi characters removed, at most 80 characters with a middle
+ * ellipsis. The UI hosts compare a path the user opened with the pending
+ * list's examples through this too.
+ */
+export function examplePath(p: string): string {
+  const s = p.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "");
+  return s.length <= 80 ? s : `${s.slice(0, 39)}…${s.slice(-40)}`;
+}

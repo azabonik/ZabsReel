@@ -7,6 +7,7 @@
 // App code calls `platform.*` and never needs to know which one it got.
 
 import { PRODUCT_NAME } from "@aive/core/brand";
+import type { ApproveContext } from "./types";
 
 export type McpConfig = { available: boolean; packaged: boolean; mcpEntry: string | null; json: string };
 export type FileFilter = { name: string; extensions: string[] }; // extensions without the dot; "*" = any
@@ -157,6 +158,32 @@ export const platform = {
     if (h === "web") return (await requestPick({ mode: "save", title: "Save project as", confirmLabel: "Save", filters: PROJECT_FILTERS.slice(0, 1), defaultName: base, key: "project" }))?.[0] ?? null;
     if (h === "expired") return null;
     return window.prompt("Absolute path to save (.aive):");
+  },
+
+  /**
+   * Whether this host can allow a network computer: only a UI host process
+   * can write the approval store, after its own dialog. The bare page can't.
+   */
+  canReviewMediaServers(): boolean {
+    return snapshot.status === "electron";
+  },
+
+  /**
+   * Review network computer `server`: the host shows the Allow dialog (or Keep,
+   * for one added outside ZabsReel, or only "couldn't read its list"). True
+   * when the server is allowed now. `context` only changes the dialog's wording.
+   */
+  async approveMediaServer(server: string, context?: ApproveContext): Promise<boolean> {
+    const h = await host();
+    if (h === "electron" && window.aive!.mediaServers) return window.aive!.mediaServers.approve(server, context);
+    return false;
+  },
+
+  /** Remove `server` from the allowed list (Project → Network computers). Rejects when that could not be saved. */
+  async revokeMediaServer(server: string): Promise<void> {
+    const h = await host();
+    if (h === "electron" && window.aive!.mediaServers) return window.aive!.mediaServers.revoke(server);
+    throw new Error(`Open ${PRODUCT_NAME} (the app) to change the network computers.`);
   },
 
   async getMcpConfig(): Promise<McpConfig | null> {

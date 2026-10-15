@@ -234,6 +234,25 @@ export function setFileUrl(fn: (path: string) => string): void {
   notify(); // a frame drawn before this may have left a LUT out
 }
 
+let lutAllowed: ((path: string) => boolean) | null = null;
+
+/**
+ * Which LUT paths the preview may fetch: a LUT on a network computer the user
+ * has not allowed is left out, with no /file request (null: every path). A
+ * cached LUT the new gate refuses is dropped, so nothing re-checks its file.
+ */
+export function setLutGate(fn: ((path: string) => boolean) | null): void {
+  lutAllowed = fn;
+  if (fn) {
+    for (const [path, e] of [...luts]) {
+      if (fn(path)) continue;
+      dropLutTexture(e);
+      luts.delete(path);
+    }
+  }
+  notify();
+}
+
 /** Called when the pipeline's availability changes or a LUT finishes loading (repaint). */
 export function onGLChange(fn: () => void): () => void {
   listeners.add(fn);
@@ -752,6 +771,7 @@ function watchLuts(): void {
 
 /** The LUT's state; starts loading it through the /file route, and keeps an eye on the file while it is used. */
 export function lutStatus(path: string): LutEntry["state"] {
+  if (lutAllowed && !lutAllowed(path)) return "loading"; // left out, never fetched
   let e = luts.get(path);
   if (!e) {
     // No resolver yet (the first frame can draw before the preview installs

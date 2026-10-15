@@ -38,7 +38,8 @@
 //
 // Run:  npx tsx apps/desktop/scripts/smoke-composite.ts
 
-import { activeLayersAt, timelineDurationSec } from "../src/composite";
+import { activeLayersAt, bleepLayersOf, timelineDurationSec } from "../src/composite";
+import { bannerLines, lutGateFor, offlineState } from "../src/mediaservers";
 import { bleepMuteSpans, expandBleeps } from "../src/bleeps";
 import { muteGainAt } from "../src/mutes";
 // The core originals the renderer mirrors (run under tsx, which resolves core's .js imports).
@@ -56,7 +57,7 @@ import {
   EFFECTS, EFFECT_CATEGORIES, defaultsFor, effectByType, effectGL, exactOnly, gblurParams, hqdn3dCoefs, lensFillScale, posterizeTable, previewFidelity,
   previewScaleFor, vignetteAngle, vignetteFactor,
 } from "@aive/core/effects";
-import type { AudioEffect, Bleep, Clip, MediaAsset, Project, Track, VisualEffect } from "../src/types";
+import type { AudioEffect, Bleep, Clip, MediaAsset, MediaServers, Project, Track, VisualEffect } from "../src/types";
 import { audioCarrier, audioFxField } from "../src/audiofx";
 import { AudioRouter } from "../src/audiograph";
 import { clearLiveTrackVolume, liveTrackVolume, meterLevel, onLiveTrackVolumeChange, setLiveTrackVolume } from "../src/livevolume";
@@ -1590,6 +1591,66 @@ async function jobStatusChecks(): Promise<void> {
   } finally {
     g.WebSocket = realWs;
   }
+}
+
+// --- offline media: a network computer not allowed yet (core hosttrust.ts) ----
+{
+  console.log("\noffline media (network computers)");
+  const nas = asset("nas", { path: "//nas/v/a.mp4", proxyPath: "/data/proxies/nas.mp4", awaitingServer: "nas" });
+  const chk = asset("chk", { path: "//nas2/v/b.mp4", pathCheckFailed: "EACCES" });
+  const ok = asset("ok", { proxyPath: "/data/proxies/ok.mp4" });
+  const pa = new Map([nas, chk, ok].map((a) => [a.id, a]));
+  const segs = buildSegments([clip("N", "nas", 0, 30), clip("K", "chk", 30, 30), clip("O", "ok", 60, 30)], pa, FPS);
+  check("offline: a clip waiting for its server has no path (no decoder, /file or /peaks for it), not even its local proxy", segs[0].path === undefined, String(segs[0].path));
+  check("offline: …nor a clip whose folder couldn't be checked", segs[1].path === undefined, String(segs[1].path));
+  check("offline: an online clip still prefers its proxy", segs[2].path === "/data/proxies/ok.mp4", String(segs[2].path));
+
+  const gOff = asset("gOff", { path: "//nas/g.webm", previewPath: "//nas/g.webm", awaitingServer: "nas" });
+  const gOn = asset("gOn", { previewPath: "/data/motion/g.webm" });
+  const custom = asset("custom", { path: "//nas/s/boing.wav", hasVideo: false, duration: 0.7, awaitingServer: "nas" });
+  const BLEEPS: Bleep[] = [{ id: "b1", start: 0.5, end: 0.8, sfxAssetId: "custom" }, { id: "b2", start: 1.0, end: 1.2, sound: "beep" }];
+  const beep = asset("beep", { hasVideo: false, duration: 0.5, builtinSfx: "beep" });
+  const gp: Project = {
+    ...project, assets: [vidA, gOff, gOn, custom, beep], music: undefined,
+    tracks: [track("video", 0, [clip("G", "vidA", 0, 60, {
+      graphics: [{ id: "g1", assetId: "gOff", startFrame: 0, endFrame: 59 }, { id: "g2", assetId: "gOn", startFrame: 0, endFrame: 59 }],
+      effects: { bleeps: BLEEPS },
+    })])],
+  };
+  const g = activeLayersAt(gp, new Map(gp.assets.map((a) => [a.id, a])), 10 / FPS).clips.find((l) => l.clipId === "G");
+  check("offline: a motion graphic whose asset is offline is not drawn; an online one is", g?.graphics.map((x) => x.path).join() === "/data/motion/g.webm", JSON.stringify(g?.graphics));
+  const sfx = bleepLayersOf(gp).map((b) => b.path);
+  check("offline: a custom bleep sound on a server not allowed is not played; a built-in one is", sfx.join() === beep.path, JSON.stringify(sfx));
+
+  const ms = (patch: Partial<MediaServers> = {}): MediaServers => ({ gate: "enforce", approved: [], outside: [], unread: [], pending: [], ...patch });
+  const gate = lutGateFor(ms({ approved: [{ host: "nas", display: "\\\\nas", via: "prompt", added: "" }], dataFolderHost: "data" }))!;
+  check("LUT gate (enforce): a LUT on a server not allowed is left out", !!gate && !gate("//evil/l/a.cube") && !gate("\\\\evil\\l\\a.cube"));
+  check("LUT gate (enforce): local, allowed and data-folder LUTs load", gate("/luts/a.cube") && gate("C:/luts/a.cube") && gate("//NAS/l/a.cube") && gate("//data/l/a.cube"));
+  check("LUT gate (enforce): a refused form never loads", !gate("//nas@SSL/l/a.cube") && !gate("//?/C:/l/a.cube"));
+  check("LUT gate (log): every LUT loads, as before", lutGateFor(ms({ gate: "log" })) === null && lutGateFor(null) === null);
+
+  check("badge: waiting for a server", offlineState(nas, ms())?.label === "Offline: waiting for you to allow \\\\nas" && offlineState(nas, ms())?.action === "review");
+  check("badge: a folder that couldn't be checked → Try again", offlineState(chk, ms())?.label === "Offline: ZabsReel couldn't check this file's folder on \\\\nas2" && offlineState(chk, ms())?.action === "retry");
+  check("badge: unread store → retrying, no Review", offlineState(nas, ms({ unread: ["hosts.key"] }))?.action === null && /couldn't read its list of approved computers; retrying/.test(offlineState(nas, ms({ unread: ["hosts.key"] }))?.label ?? ""));
+  check("badge: an online asset has none", offlineState(ok, ms()) === null);
+
+  const text = (l: { before: string; who: string; after: string }) => l.before + l.who + l.after;
+  const pend = (host: string, origins: MediaServers["pending"][number]["origins"], files: number, examples: string[]) =>
+    ({ host, display: `\\\\${host}`, origins, files, examples, since: "" });
+  const lines = bannerLines(ms({ pending: [
+    pend("p", ["project"], 3, ["//p/a.mp4"]),
+    pend("o", ["project", "request", "outside"], 2, ["//o/a.mp4"]),
+    pend("u", ["request"], 0, ["//u/x.aive"]),
+    pend("a", ["request"], 0, ["//a/x.mp4", "//a/y.mp4"]),
+  ] }), null, new Set(["//u/x.aive", "//a/x.mp4"]), new Set()).map(text);
+  check("banner: project origin", lines[0] === "This project uses 3 files on the network computer \\\\p. They stay offline until you allow it.", lines[0]);
+  check("banner: added outside ZabsReel wins over the other origins", lines[1] === "This project uses 2 files on \\\\o. It is in your list of allowed network computers, but ZabsReel didn't put it there, so they stay offline until you check it.", lines[1]);
+  check("banner: every example sent by this window → \"You tried\"", lines[2] === "You tried to open a file on the network computer \\\\u. Nothing has been opened yet.", lines[2]);
+  check("banner: any example this window didn't send → \"The AI assistant asked\"", lines[3] === "The AI assistant asked to open a file on the network computer \\\\a. Nothing has been opened.", lines[3]);
+  check("banner: Keep offline hides a server's line", bannerLines(ms({ pending: [pend("p", ["project"], 1, [])] }), null, new Set(), new Set(["p"])).length === 0);
+  const unchecked = bannerLines(ms(), { ...project, assets: [chk] }, new Set(), new Set());
+  check("banner: files whose folder couldn't be checked, with Try again", unchecked.length === 1 && unchecked[0].action === "retry" &&
+    text(unchecked[0]) === "ZabsReel couldn't check the folder of 1 file on \\\\nas2 (EACCES), so it didn't open it. It stays offline until the folder can be read.", text(unchecked[0] ?? { before: "", who: "", after: "" }));
 }
 
 void jobStatusChecks()

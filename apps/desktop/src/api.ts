@@ -1,6 +1,9 @@
-import type { JobInfo, Project } from "./types";
+import type { JobInfo, MediaServers, Project } from "./types";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+
+/** An rpc refusal's fields besides its message (core G1e): media_server_not_approved or media_offline. */
+export type RpcRefusal = Error & { code?: string; host?: string; hosts?: string[]; outside?: boolean; unread?: boolean };
 
 /**
  * Client for the editor core. Holds a live WebSocket for state + job
@@ -17,6 +20,7 @@ export class CoreApi {
   private stateCb?: (p: Project, filePath: string | null) => void;
   private jobCb?: (j: JobInfo) => void;
   private statusCb?: (connected: boolean) => void;
+  private serversCb?: (s: MediaServers) => void;
   private closed = false;
   private attempts = 0;
   // The socket can open — and deliver the first state — before React's effects
@@ -25,6 +29,7 @@ export class CoreApi {
   // subscribers instead of being dropped.
   private connected = false;
   private lastState: { project: Project; filePath: string | null } | null = null;
+  private lastServers: MediaServers | null = null;
   /** Absolute .aive path of the open project, or null if never saved. */
   filePath: string | null = null;
 
@@ -41,6 +46,11 @@ export class CoreApi {
   onState(cb: (p: Project, filePath: string | null) => void): void {
     this.stateCb = cb;
     if (this.lastState) cb(this.lastState.project, this.lastState.filePath);
+  }
+  /** The network computers (list_media_servers): with every state, and on their own when only they change. */
+  onMediaServers(cb: (s: MediaServers) => void): void {
+    this.serversCb = cb;
+    if (this.lastServers) cb(this.lastServers);
   }
   /** Every job change (start, progress, done, error, canceled); undefined unsubscribes. */
   onJob(cb: ((j: JobInfo) => void) | undefined): void {
@@ -106,6 +116,10 @@ export class CoreApi {
           this.filePath = (msg.filePath as string | null) ?? null;
           this.lastState = { project: msg.project as Project, filePath: this.filePath };
           this.stateCb?.(msg.project as Project, this.filePath);
+          if (msg.mediaServers) this.servers(msg.mediaServers as MediaServers);
+          break;
+        case "media-servers":
+          this.servers(msg.mediaServers as MediaServers);
           break;
         case "job":
           this.jobCb?.(msg.job as JobInfo);
@@ -115,7 +129,10 @@ export class CoreApi {
           if (!p) break;
           this.pending.delete(msg.id as number);
           if (msg.ok) p.resolve(msg.result);
-          else p.reject(new Error((msg.error as string) || "RPC failed"));
+          else {
+            const { code, host, hosts, outside, unread } = msg as Partial<RpcRefusal>;
+            p.reject(Object.assign(new Error((msg.error as string) || "RPC failed"), { code, host, hosts, outside, unread }));
+          }
           break;
         }
       }
@@ -135,6 +152,11 @@ export class CoreApi {
       void this.authRejected().then((rejected) => { if (!rejected) retry(); });
     };
     ws.onerror = () => ws.close();
+  }
+
+  private servers(s: MediaServers): void {
+    this.lastServers = s;
+    this.serversCb?.(s);
   }
 
   /** Send an RPC command to the engine and await its result. */

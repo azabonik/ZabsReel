@@ -3,16 +3,19 @@
 //      an AI client (MCP) if present, so the app and the AI share one session.
 //   2. Open a window that loads the React renderer, passing it the core port.
 //   3. Provide native file open/save dialogs to the renderer over IPC.
+//   3a. Allow or remove network computers (the core's approval store) after a
+//      native dialog; the core itself has no call that allows one.
 //   4. Tear down the core on quit ONLY if we were the ones who started it.
 //
 // Written in CommonJS so it runs directly under Electron with no build step.
 const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { ensureCore, browserBlocksPort } = require("./core-launcher.cjs");
+const { ensureCore, browserBlocksPort, getDataDir } = require("./core-launcher.cjs");
 const { applyBundledAssetEnv } = require("./bundled-assets.cjs");
 const { finalSavePath: decideSavePath, closeGuard } = require("./save-rules.cjs");
 const { PRODUCT_NAME, MCP_KEY, APP_ID, APP_ID_DEV } = require("./brand.cjs");
+const { allowDialog, keepDialog, unreadBox, notSavedBox, userContextPath } = require("./media-servers.cjs");
 
 // Branding: the display name (taskbar / jump-list / dialogs) and a stable Windows
 // AppUserModelID so the taskbar shows OUR name + icon instead of "Electron" and
@@ -194,6 +197,149 @@ ipcMain.on("project:state", (_e, state) => {
 // failed, so the next save (the autosave included) must not close the window.
 ipcMain.on("project:save-failed", () => guardStep({ type: "save-failed" }));
 
+// ---- network computers (@aive/core hosttrust.ts) ------------------------------
+// Only the UI hosts write the approval store (<dataDir>/trust), through
+// @aive/core/trusthosts, and only after the user's own gesture: Allow or Keep
+// in a native dialog the renderer cannot answer, or a file picked in a folder
+// the user browsed to (picker auto-trust). Each write is followed by
+// recheck_offline_media with main's own token, so the core picks it up even
+// where its folder watch does not fire.
+
+let coreModules = null;
+/** @aive/core's ESM modules for the store, loaded on first use. */
+function trustModules() {
+  coreModules ??= Promise.all([import("@aive/core/unc"), import("@aive/core/trusthosts")]).then(([unc, trust]) => ({ unc, trust }));
+  return coreModules;
+}
+
+/** One rpc call to the core with main's own session token. */
+async function coreRpc(method, params = {}) {
+  const res = await fetch(`http://127.0.0.1:${corePort}/rpc`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-aive-token": coreToken || "" },
+    body: JSON.stringify({ method, params }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body.result;
+}
+
+const errText = (err) => (err && err.message ? err.message : String(err));
+
+/** Ask the core to re-read the store and re-check offline media; never fails the caller. */
+async function recheckOfflineMedia() {
+  try {
+    await coreRpc("recheck_offline_media");
+  } catch (err) {
+    console.error(`[aive] recheck_offline_media failed: ${errText(err)}`);
+  }
+}
+
+function messageBox(opts) {
+  return mainWin ? dialog.showMessageBox(mainWin, opts) : dialog.showMessageBox(opts);
+}
+
+/**
+ * Picker auto-trust: the servers of files the user picked in a native dialog,
+ * which only ever opens in a folder he navigated to (no dialog gets a folder
+ * from project or agent data). Stored before the paths go to the renderer. A
+ * host that can't be allowed (a refused form) is left to the core's refusal.
+ */
+async function trustPicked(paths) {
+  const { unc, trust } = await trustModules();
+  const hosts = new Set();
+  for (const p of paths) {
+    const c = unc.classifyPath(p);
+    if (c.kind === "network") hosts.add(c.host);
+  }
+  if (!hosts.size) return;
+  const dataDir = getDataDir();
+  const approved = new Set(trust.readTrustedHosts(dataDir).approved.map((a) => a.host));
+  for (const host of hosts) {
+    if (approved.has(host)) continue;
+    try {
+      await trust.approveHost(dataDir, host, "picker");
+    } catch (err) {
+      // Not saved: the core refuses the path and the renderer asks instead.
+      console.error(`[aive] couldn't save \\\\${host} as allowed: ${errText(err)}`);
+    }
+  }
+  await recheckOfflineMedia();
+}
+
+// Review a network computer. The store decides the dialog (approvalDialogFor):
+// unread → only "couldn't read its list"; added outside ZabsReel → Keep /
+// Remove; else Allow / Keep offline. Resolves true when the server is allowed.
+// `context` ({ origin: "user", path }) only changes the wording, and only when
+// the core's pending list agrees (userContextPath).
+ipcMain.handle("media-servers:approve", async (_e, host, context) => {
+  const { unc, trust } = await trustModules();
+  const h = typeof host === "string" ? unc.normalizeHost(host) : { ok: false };
+  if (!h.ok) return false;
+  const key = h.key;
+  const dataDir = getDataDir();
+  const list = trust.readTrustedHosts(dataDir);
+  const which = unc.approvalDialogFor(list, key);
+  if (which === "unread") {
+    await messageBox(unreadBox());
+    return false;
+  }
+  if (which === "allow" && list.approved.some((a) => a.host === key)) {
+    await recheckOfflineMedia(); // allowed already (another window): nothing to ask
+    return true;
+  }
+  // The core's own count and examples; nothing the renderer sends is shown as fact.
+  const servers = await coreRpc("list_media_servers").catch(() => null);
+  const entry = servers ? servers.pending.find((p) => p.host === key) : undefined;
+  if (which === "keep") {
+    const { response } = await messageBox(keepDialog({ key, entry, platform: process.platform }));
+    if (response === 1) {
+      try {
+        await trust.approveHost(dataDir, key, "prompt");
+      } catch (err) {
+        console.error(`[aive] keep \\\\${key}: ${errText(err)}`);
+        await messageBox(notSavedBox("Couldn't save; try again."));
+        return false;
+      }
+      await recheckOfflineMedia();
+      return true;
+    }
+    // Remove, or Esc: only while it is still outside (another window may have kept it meanwhile).
+    let removed;
+    try {
+      ({ removed } = await trust.revokeHost(dataDir, key, { onlyIfOutside: true }));
+    } catch (err) {
+      console.error(`[aive] remove \\\\${key}: ${errText(err)}`);
+      await messageBox(notSavedBox(`Couldn't remove \\\\${key}; try again.`));
+      return false;
+    }
+    await recheckOfflineMedia();
+    return !removed;
+  }
+  const userPath = userContextPath(context, key, entry, unc);
+  const { response } = await messageBox(allowDialog({ key, entry, userPath, platform: process.platform }));
+  if (response !== 1) return false;
+  try {
+    await trust.approveHost(dataDir, key, "prompt");
+  } catch (err) {
+    console.error(`[aive] allow \\\\${key}: ${errText(err)}`);
+    await messageBox(notSavedBox("Couldn't save; try again."));
+    return false;
+  }
+  await recheckOfflineMedia();
+  return true;
+});
+
+// Remove a network computer (Project → Network computers). No dialog: it only
+// takes trust away. Rejects when the store could not be written.
+ipcMain.handle("media-servers:revoke", async (_e, host) => {
+  const { unc, trust } = await trustModules();
+  const h = typeof host === "string" ? unc.normalizeHost(host) : { ok: false };
+  if (!h.ok) throw new Error("Not a network computer name.");
+  await trust.revokeHost(getDataDir(), h.key);
+  await recheckOfflineMedia();
+});
+
 ipcMain.handle("dialog:openFiles", async () => {
   const result = await dialog.showOpenDialog({
     title: "Import media",
@@ -203,7 +349,9 @@ ipcMain.handle("dialog:openFiles", async () => {
       { name: "All Files", extensions: ["*"] },
     ],
   });
-  return result.canceled ? [] : result.filePaths;
+  if (result.canceled) return [];
+  await trustPicked(result.filePaths);
+  return result.filePaths;
 });
 
 // Extension rule and the second overwrite question: save-rules.cjs. Returns the
@@ -235,7 +383,9 @@ ipcMain.handle("dialog:saveFile", async (_e, ext) => {
     defaultPath: `export.${want.extensions[0]}`,
     filters,
   });
-  return result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
+  const chosen = result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
+  if (chosen) await trustPicked([chosen]);
+  return chosen;
 });
 
 ipcMain.handle("dialog:openProject", async () => {
@@ -247,11 +397,18 @@ ipcMain.handle("dialog:openProject", async () => {
       { name: "All Files", extensions: ["*"] },
     ],
   });
-  return result.canceled || !result.filePaths.length ? null : result.filePaths[0];
+  if (result.canceled || !result.filePaths.length) return null;
+  await trustPicked([result.filePaths[0]]); // the project file's own server; not the media in it
+  return result.filePaths[0];
 });
 
+// `defaultName` is the project's name, which a project file or the agent can
+// set: only its bare file name goes into defaultPath, so the dialog opens in
+// the folder the OS remembers from the user's own use, never in a folder (or
+// on a server) the name points at, and a Save there is auto-trusted safely.
 ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
-  const base = (defaultName && String(defaultName)) || "Untitled";
+  const { unc } = await trustModules();
+  const base = unc.bareFileName((defaultName && String(defaultName)) || "Untitled");
   const filters = [{ name: `${PRODUCT_NAME} Project`, extensions: ["aive"] }];
   const result = await dialog.showSaveDialog({
     title: "Save project as",
@@ -259,6 +416,7 @@ ipcMain.handle("dialog:saveProject", async (_e, defaultName) => {
     filters,
   });
   const chosen = result.canceled || !result.filePath ? null : finalSavePath(result.filePath, filters);
+  if (chosen) await trustPicked([chosen]);
   // Cancelled during "Save before closing?": stay open, and don't close on a later save.
   if (!chosen) guardStep({ type: "save-as-cancelled" });
   return chosen;

@@ -21,6 +21,7 @@ import {
 import type { CSSProperties } from "react";
 import type { CoreApi } from "./api";
 import type { MediaAsset, MusicSettings, Project, TextStyle } from "./types";
+import { isOffline } from "./types";
 import {
   HOLD_MS, holdLastFrame, segmentAt, stepFrames, totalDuration,
   type PlayerHandle, type PlaybackStore, type Segment,
@@ -972,7 +973,7 @@ export const PreviewPlayer = forwardRef<PlayerHandle, Props>(function PreviewPla
         {/* Looping background-music bed. */}
         <audio
           ref={musicRef}
-          src={musicAsset ? api.fileUrl(musicAsset.path) : undefined}
+          src={musicAsset && !isOffline(musicAsset) ? api.fileUrl(musicAsset.path) : undefined}
           preload="auto"
         />
 

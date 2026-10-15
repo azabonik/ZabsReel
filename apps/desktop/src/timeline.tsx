@@ -20,7 +20,7 @@ import { usePeaks, peakRange } from "./waveform";
 import { clearLiveTrackVolume, liveTrackVolume, meterLevel, onLiveTrackVolumeChange, setLiveTrackVolume } from "./livevolume";
 import { BLEEP_MIN_WINDOW, BLEEP_SOUND_LABELS, bleepGlyph, expandBleeps, type BleepLayer } from "./bleeps";
 import {
-  Captions, Eye, EyeOff, Lock, Music, Plus, Scissors, Sparkles, Type,
+  Alert, Captions, Eye, EyeOff, Lock, Music, Plus, Scissors, Sparkles, Type,
   Volume, VolumeX, Waveform, X, ZoomIn, ZoomOut,
 } from "./icons";
 
@@ -52,6 +52,8 @@ interface Props {
   project: Project | null;
   assetById: Map<string, MediaAsset>;
   thumbs: Record<string, string>;
+  /** Why an asset is offline (mediaservers.tsx offlineState), or null: its clips are hatched and say so. */
+  offlineLabel?: (asset: MediaAsset) => string | null;
   /** Media path → URL the renderer can fetch (the core's /file route); the waveform decoder needs it. */
   fileUrl: (path: string) => string;
   store: PlaybackStore;
@@ -104,7 +106,7 @@ type Drag =
 
 export function Timeline(props: Props) {
   const {
-    project, assetById, thumbs, fileUrl, store, selectedClip, justUpdated, connected,
+    project, assetById, thumbs, offlineLabel, fileUrl, store, selectedClip, justUpdated, connected,
     music, musicAsset, onSelectClip, onSeek, onSplit, onMoveClip, onTrimClip,
     onRemove, onRippleDelete, onSetTrack, onAddTrack, onRemoveTrack, onSetElementWindow,
     onSetMarkers, selectedBleep, onSelectBleep, onSetBleepWindow,
@@ -527,6 +529,7 @@ export function Timeline(props: Props) {
                     <ClipBlock
                       key={seg.clip.id} seg={seg} track={t} pps={pps} fps={fps} rowH={h}
                       thumb={seg.asset ? thumbs[seg.asset.id] : undefined}
+                      offline={seg.asset ? offlineLabel?.(seg.asset) ?? null : null}
                       fileUrl={fileUrl}
                       selected={selectedClip === seg.clip.id}
                       drag={drag}
@@ -698,10 +701,10 @@ function clipPeaks(seg: Segment): Float32Array | null {
 
 // ---------------------------------------------------------------------------
 function ClipBlock({
-  seg, track, pps, fps, rowH, thumb, fileUrl, selected, drag, onBodyDown, onTrimDown, onSplit, onRipple, onRemove, onSelect,
+  seg, track, pps, fps, rowH, thumb, offline, fileUrl, selected, drag, onBodyDown, onTrimDown, onSplit, onRipple, onRemove, onSelect,
   selectedBleepId, onSelectBleep, onSetBleepWindow, secAtClientX, customDuration,
 }: {
-  seg: Segment; track: Track; pps: number; fps: number; rowH: number; thumb?: string; fileUrl: (path: string) => string; selected: boolean;
+  seg: Segment; track: Track; pps: number; fps: number; rowH: number; thumb?: string; offline: string | null; fileUrl: (path: string) => string; selected: boolean;
   drag: Drag | null;
   onBodyDown: (e: ReactPointerEvent) => void;
   onTrimDown: (e: ReactPointerEvent, edge: "l" | "r") => void;
@@ -814,11 +817,12 @@ function ClipBlock({
 
   return (
     <div
-      className={`tl-clip ${isAudio ? "audio" : ""} ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${drag?.kind === "move" && drag.clipId === seg.clip.id ? "ghosted" : ""} ${bleepLayers.length ? "has-bleeps" : ""}`}
+      className={`tl-clip ${isAudio ? "audio" : ""} ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${drag?.kind === "move" && drag.clipId === seg.clip.id ? "ghosted" : ""} ${bleepLayers.length ? "has-bleeps" : ""} ${offline ? "offline" : ""}`}
       style={{ left, width: w } as CSSProperties}
       onPointerDown={onBodyDown}
       onClick={(e) => { e.stopPropagation(); onSelect(); }}
-      role="button" tabIndex={0} title={seg.asset?.name}
+      role="button" tabIndex={0} title={offline ? `${seg.asset?.name ?? ""}\n${offline}` : seg.asset?.name}
+      aria-label={offline ? `${seg.asset?.name ?? "Clip"}. ${offline}` : undefined}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
     >
       <span className="tl-trim l" onPointerDown={(e) => onTrimDown(e, "l")} aria-label="Trim start" />
@@ -826,6 +830,7 @@ function ClipBlock({
 
       {!isAudio && <div className="tl-clip-thumb" style={thumb ? { backgroundImage: `url(${thumb})` } : undefined} />}
       {peaks && <ClipWave peaks={peaks} seg={seg} fps={fps} width={w} height={rowH} />}
+      {offline && <span className="tl-clip-offline" aria-hidden="true"><Alert size={12} /></span>}
 
       {/* Keyframe / transform indicator only — text, captions, graphics and the
           transition are shown as labeled bars on the element rail below. */}

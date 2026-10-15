@@ -7,8 +7,10 @@
  * Also the rules the matrix can't reach through Electron or a browser:
  * electron/save-rules.cjs (the native dialogs' extension rule, which must match
  * resolveSaveName; the second overwrite question; the unsaved-changes close
- * guard), src/editkeys.ts (S / Delete after a split) and src/pathbar.ts (a late
- * folder listing keeps a typed path).
+ * guard), electron/media-servers.cjs (the approval dialogs: the renderer's
+ * display-only "You opened" context counts only when the core's pending list
+ * agrees), src/editkeys.ts (S / Delete after a split) and src/pathbar.ts (a
+ * late folder listing keeps a typed path).
  * Run: npx tsx apps/desktop/scripts/smoke-savename.ts
  */
 import { createRequire } from "node:module";
@@ -17,6 +19,7 @@ import { exportFilters, PROJECT_FILTERS, type FileFilter } from "../src/platform
 import { clipIsLive, splitFrameFor } from "../src/editkeys.js";
 import { PathBarEdits } from "../src/pathbar.js";
 import type { Clip, Project } from "../src/types.js";
+import * as unc from "@aive/core/unc";
 
 type Guard = { pendingSaveQuit: boolean; forceQuit: boolean };
 type GuardEvent =
@@ -138,5 +141,30 @@ eq(bar.listingMayReplace(mark), false, "typed while the listing was loading → 
 bar.typed();
 mark = bar.mark();
 eq(bar.listingMayReplace(mark), true, "listing started after the edits → shows its path");
+
+// The approval dialogs (electron/media-servers.cjs): the page's context only changes the wording, and
+// only when the core's pending entry lists that path among its requests.
+type Pending = { host: string; origins: string[]; files: number; examples: string[] };
+type Box = { title: string; message: string; detail?: string; buttons: string[]; defaultId: number; cancelId: number };
+const ms = createRequire(import.meta.url)("../electron/media-servers.cjs") as {
+  userContextPath: (context: unknown, key: string, entry: Pending | undefined, u: typeof unc) => string | null;
+  allowDialog: (o: { key: string; entry?: Pending; userPath: string | null; platform: string }) => Box;
+  keepDialog: (o: { key: string; entry?: Pending; platform: string }) => Box;
+};
+const asked: Pending = { host: "nas", origins: ["request"], files: 0, examples: ["//nas/p/a.aive"] };
+const user = { origin: "user", path: "//nas/p/a.aive" };
+eq(ms.userContextPath(user, "nas", asked, unc), "//nas/p/a.aive", "the page opened a path the core lists → \"You opened\"");
+eq(ms.userContextPath({ origin: "user", path: "//nas/p/b.aive" }, "nas", asked, unc), null, "a path the core doesn't list → ignored");
+eq(ms.userContextPath({ origin: "user", path: "//other/p/a.aive" }, "nas", { ...asked, examples: ["//other/p/a.aive"] }, unc), null, "a path on another server → ignored");
+eq(ms.userContextPath(user, "nas", { ...asked, origins: ["project"] }, unc), null, "no request from the core → ignored");
+eq(ms.userContextPath({ origin: "agent", path: "//nas/p/a.aive" }, "nas", asked, unc), null, "not origin user → ignored");
+eq(ms.userContextPath(user, "nas", undefined, unc), null, "nothing pending → ignored");
+const allow = ms.allowDialog({ key: "nas", entry: asked, userPath: null, platform: "win32" });
+eq([allow.title, allow.buttons, allow.defaultId, allow.cancelId], ["Allow media from \\\\nas?", ["Keep offline", "Allow"], 0, 0], "Allow dialog: Keep offline is the default and Esc");
+eq(allow.detail?.split("\n\n")[0], "The AI assistant asked to open //nas/p/a.aive.", "…an agent's request says so");
+eq(/scrambled copy of your password/.test(allow.detail ?? "") && !/scrambled/.test(ms.allowDialog({ key: "nas", userPath: null, platform: "linux" }).detail ?? ""), true, "…the Windows sign-in sentence only on Windows");
+const keep = ms.keepDialog({ key: "evil", entry: { host: "evil", origins: ["outside", "project"], files: 2, examples: ["//evil/v/a.mp4"] }, platform: "linux" });
+eq([keep.title, keep.buttons, keep.defaultId, keep.cancelId], ["Keep \\\\evil?", ["Remove", "Keep"], 0, 0], "Keep dialog: Remove is the default and Esc");
+eq(keep.detail?.split("\n\n")[1], "This project uses 2 files stored there, for example //evil/v/a.mp4.", "…says what the project uses there");
 
 process.exit(failed ? 1 : 0);

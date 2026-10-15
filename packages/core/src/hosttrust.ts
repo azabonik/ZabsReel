@@ -29,7 +29,7 @@
  */
 import { posix, win32, type PlatformPath } from "node:path";
 import { PRODUCT_NAME } from "./brand.js";
-import { classifyPath } from "./unc.js";
+import { classifyPath, examplePath } from "./unc.js";
 import { readTrustedHosts, trustDir, type ApprovedHost, type ReadErrorInjection, type TrustFile } from "./trusthosts.js";
 import {
   classifyFsText,
@@ -103,14 +103,8 @@ export class MediaOfflineError extends Error {
 /** How long an rpc request keeps its server pending. */
 const REQUEST_TTL_MS = 30 * 60_000;
 
-/**
- * A path from untrusted data as an example in a message or the pending list:
- * control and bidi characters removed, at most 80 characters with a middle ellipsis.
- */
-export function examplePath(p: string): string {
-  const s = p.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "");
-  return s.length <= 80 ? s : `${s.slice(0, 39)}…${s.slice(-40)}`;
-}
+/** Sanitized example paths (unc.ts, so the UI hosts compare paths the same way). */
+export { examplePath };
 
 /** A file's identity: equal dev and ino are one file, under any spelling of its path (ino 0 means unknown). */
 interface FileId {

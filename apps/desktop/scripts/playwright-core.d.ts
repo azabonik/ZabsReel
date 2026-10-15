@@ -31,6 +31,9 @@ declare module "playwright-core" {
   }
   export interface Locator {
     first(): Locator;
+    last(): Locator;
+    locator(selector: string, options?: { hasText?: string | RegExp; has?: Locator }): Locator;
+    getAttribute(name: string): Promise<string | null>;
     count(): Promise<number>;
     innerText(): Promise<string>;
     allInnerTexts(): Promise<string[]>;
@@ -54,8 +57,9 @@ declare module "playwright-core" {
     // A string is evaluated as an expression in the page; its result is unknown here.
     evaluate<R>(pageFunction: string | (() => R | Promise<R>)): Promise<R>;
     evaluate<R, Arg>(pageFunction: (arg: Arg) => R | Promise<R>, arg: Arg): Promise<R>;
-    locator(selector: string, options?: { hasText?: string | RegExp }): Locator;
+    locator(selector: string, options?: { hasText?: string | RegExp; has?: Locator }): Locator;
     getByRole(role: string, options?: RoleOptions): Locator;
+    reload(): Promise<unknown>;
     mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void>; down(): Promise<void>; up(): Promise<void> };
     keyboard: { press(key: string): Promise<void>; down(key: string): Promise<void>; up(key: string): Promise<void> };
     isClosed(): boolean;

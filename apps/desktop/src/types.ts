@@ -354,6 +354,30 @@ export interface JobInfo {
   startedAt: number;
 }
 
+/** Offline: not found, waiting for a network computer the user has not allowed, or its folder could not be checked (core types.ts). */
+export function isOffline(a: Pick<MediaAsset, "missing" | "awaitingServer" | "pathCheckFailed">): boolean {
+  return !!a.missing || !!a.awaitingServer || !!a.pathCheckFailed;
+}
+
+/** Why a server waits for the user (core hosttrust.ts PendingOrigin). */
+export type PendingOrigin = "project" | "request" | "outside";
+
+/** The core's list_media_servers (mediaServers in the state): no stamp or key in any field. */
+export interface MediaServers {
+  /** "log": nothing is blocked yet (only logged); "enforce". */
+  gate: "log" | "enforce";
+  approved: { host: string; display: string; via: "prompt" | "picker"; added: string }[];
+  /** In the allowed list, but ZabsReel did not add it: not used until the user keeps it. */
+  outside: { host: string; display: string }[];
+  /** Store files the core could not read yet: no listed server is used until it can. */
+  unread: string[];
+  pending: { host: string; display: string; origins: PendingOrigin[]; files: number; examples: string[]; since: string }[];
+  dataFolderHost?: string;
+}
+
+/** Display-only context for the approval dialog: the user opened this path himself. */
+export type ApproveContext = { origin: "user"; path: string };
+
 declare global {
   interface Window {
     aive?: {
@@ -366,6 +390,10 @@ declare global {
       reportProjectState: (state: { dirty: boolean; hasPath: boolean }) => void;
       reportSaveFailed?: () => void;
       getMcpConfig: () => Promise<{ available: boolean; packaged: boolean; mcpEntry: string | null; json: string }>;
+      mediaServers?: {
+        approve: (host: string, context?: ApproveContext) => Promise<boolean>;
+        revoke: (host: string) => Promise<void>;
+      };
     };
   }
 }

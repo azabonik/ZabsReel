@@ -11,6 +11,7 @@ import { useSyncExternalStore } from "react";
 import { DEFAULT_PREVIEW_SCALE, effectByType, isEnabled, vignetteAngle } from "@aive/core/effects";
 import { clipFootprintFrames, clipTimeMap, hasSpeedRamp, rampFrameModel, sourceFrameShownAt, type ClipTimeMap, type RampFrameModel } from "@aive/core/speed";
 import type { Clip, MediaAsset, ColorAdjust, ColorGrade, VisualEffect } from "./types";
+import { isOffline } from "./types";
 
 export interface PlaybackState {
   playhead: number;
@@ -107,7 +108,9 @@ export function buildSegments(clips: Clip[], assetById: Map<string, MediaAsset>,
     const srcOut = clip.sourceOutFrame / fps;
     const start = clip.startFrame / fps;
     const asset = clip.assetId ? assetById.get(clip.assetId) : undefined; // adjustment layers have no source
-    const path = asset?.proxyPath ?? asset?.path; // preview prefers a low-res proxy; export uses the original
+    // Preview prefers a low-res proxy; export uses the original. An offline asset (its server not
+    // allowed yet) has no path, so the pool, the preview and the waveform never ask for its file.
+    const path = !asset || isOffline(asset) ? undefined : asset.proxyPath ?? asset.path;
     // The footprint, in whole frames as the engine and the export count it (not the continuous source / speed).
     const fpFrames = clipFootprintFrames(clip, fps);
     const tlDur = Math.max(0.01, fpFrames / fps);

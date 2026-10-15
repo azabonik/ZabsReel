@@ -37,7 +37,25 @@
 //      project closes without asking.
 //   8. A never-saved project: close → "Save" → a typed name is saved as
 //      <name>.aive, then the app quits.
-//   No renderer console errors or page errors in either run.
+//   9. Network computers (a 4th run; test servers under .invalid, which never
+//      resolve, and native dialogs stubbed). With AIVE_NETWORK_GATE=enforce:
+//      a server in the store that ZabsReel didn't stamp ("added outside") is
+//      offline at load, with the outside banner; Review… shows the Keep dialog
+//      (Remove default and Esc): Remove takes it out of the store, Keep stamps
+//      it and its clips come online without a reload. A project on a server
+//      not allowed shows the banner and an "Offline" badge, and the page asks
+//      the core for none of its files (no /file, /peaks or /frames URL, no
+//      thumbnail); Keep offline in the Allow dialog changes nothing, Allow
+//      stores it and the clips come online. A file picked in the native open
+//      dialog stores its server before the path reaches the page. A recent
+//      project on a server not allowed opens the dialog with "You opened" and
+//      the banner says "You tried"; an agent's import_video says "The AI
+//      assistant asked" in both. Project → Network computers… lists the
+//      servers (outside ones with Keep… and Remove, no date) and Remove takes
+//      one out. Save As never starts in a folder from the project's name.
+//      As shipped (log mode) nothing is offline or pending, and the parts the
+//      store decides (Keep dialog, picker, Save As name) still hold.
+//   No renderer console errors or page errors in any run.
 //   The app runs with its own profile (--user-data-dir) in the test folder, so
 //   the user's ZabsReel profile and its recent projects are left alone.
 //
@@ -160,7 +178,7 @@ async function launch(pw: PW, cwd: string, dataDir: string): Promise<Run> {
 }
 
 /** Replace a main-process dialog function; every call's options are kept in globalThis.__calls. */
-async function stub(app: ElectronApp, fn: "showOpenDialog" | "showSaveDialog" | "showMessageBoxSync", results: unknown[]) {
+async function stub(app: ElectronApp, fn: "showOpenDialog" | "showSaveDialog" | "showMessageBoxSync" | "showMessageBox", results: unknown[]) {
   await app.evaluate(({ dialog }, { fn, results }) => {
     const g = globalThis as unknown as { __calls: Record<string, unknown[]>; __results: Record<string, unknown[]> };
     g.__calls ??= {};
@@ -177,7 +195,10 @@ async function stub(app: ElectronApp, fn: "showOpenDialog" | "showSaveDialog" | 
 }
 const calls = (app: ElectronApp, fn: string) =>
   app.evaluate((_e, fn) => ((globalThis as unknown as { __calls: Record<string, unknown[]> }).__calls?.[fn] ?? []), fn) as Promise<
-    { defaultPath?: string; filters?: { name?: string; extensions: string[] }[]; message?: string }[]
+    {
+      defaultPath?: string; filters?: { name?: string; extensions: string[] }[]; message?: string;
+      title?: string; detail?: string; buttons?: string[]; defaultId?: number; cancelId?: number;
+    }[]
   >;
 const saveResult = (filePath: string | null) => (filePath ? { canceled: false, filePath } : { canceled: true, filePath: undefined });
 
@@ -625,6 +646,9 @@ async function main() {
   check(r3.errors.length === 0, `no renderer console errors${r3.errors.length ? `:\n    ${r3.errors.join("\n    ")}` : ""}`);
   await r3.app.close().catch(() => {});
 
+  // ---------------------------------------------------------------- run 4
+  await networkComputers(pw, work, cwd2, clip);
+
   rmSync(work, { recursive: true, force: true });
   if (failures) {
     console.log(`\nELECTRON SMOKE TEST FAILED (${failures} check(s))`);
@@ -632,6 +656,277 @@ async function main() {
   }
   console.log("\nELECTRON SMOKE TEST PASSED");
   process.exit(0);
+}
+
+const ENFORCE = process.env.AIVE_NETWORK_GATE === "enforce";
+
+/** Run 4 (step 9 above): network computers. `work` holds run 1's manual.aive, whose clip.mp4 asset is moved onto test servers. */
+async function networkComputers(pw: PW, work: string, cwd: string, clip: string) {
+  console.log(`9. network computers (gate: ${ENFORCE ? "enforce" : "log"})...`);
+  const { readTrustedHosts } = await import("@aive/core/trusthosts");
+  const dataDir = join(work, "data-unc");
+  const hostsFile = join(dataDir, "trust", "hosts.json");
+  type Entry = { host: string };
+  /** Write an entry ZabsReel did not stamp ("added outside ZabsReel"), as a hand edit would. */
+  const addOutside = (host: string) => {
+    const cur = existsSync(hostsFile) ? JSON.parse(readFileSync(hostsFile, "utf8")) : { version: 2, servers: [] };
+    cur.servers = [...cur.servers.filter((e: Entry) => e.host !== host), { host }];
+    writeFileSync(hostsFile, JSON.stringify(cur, null, 2));
+  };
+  mkdirSync(join(dataDir, "trust"), { recursive: true, mode: 0o700 });
+  addOutside("zr-evil-3.invalid");
+  const viaOf = (host: string) => readTrustedHosts(dataDir).approved.find((a) => a.host === host)?.via;
+  const listed = (host: string) => {
+    const t = readTrustedHosts(dataDir);
+    return [...t.approved, ...t.outside].some((e) => e.host === host);
+  };
+
+  // Projects made from run 1's manual.aive: its clip.mp4 asset on a test server (.invalid never resolves).
+  const base = JSON.parse(readFileSync(join(work, "manual.aive"), "utf8"));
+  const clipAsset = base.assets.find((a: { path: string }) => a.path === clip);
+  check(!!clipAsset, "manual.aive has the clip.mp4 asset");
+  const craft = (file: string, edit: (p: typeof base) => void) => {
+    const p = structuredClone(base);
+    edit(p);
+    writeFileSync(join(work, file), JSON.stringify(p));
+    return join(work, file);
+  };
+  const onServer = (host: string) => (p: typeof base) => {
+    for (const a of p.assets) {
+      if (a.path !== clip) continue;
+      a.path = `//${host}/s/a.mp4`;
+      delete a.proxyPath;
+      delete a.previewPath;
+    }
+  };
+  const crafted1 = craft("crafted1.aive", onServer("zr-evil-1.invalid"));
+  const crafted3 = craft("crafted3.aive", onServer("zr-evil-3.invalid"));
+  const craftedName = craft("crafted-name.aive", (p) => { p.name = "\\\\zr-evil.invalid\\s\\x"; });
+  // The local clip, graded with a LUT on a server not allowed: the live preview leaves the LUT out.
+  const craftedLut = craft("crafted-lut.aive", (p) => {
+    for (const t of p.tracks) for (const c of t.clips) c.effects = { ...c.effects, lut: "//zr-evil-5.invalid/l/a.cube" };
+  });
+
+  const r = await launch(pw, cwd, dataDir);
+  const { app, win } = r;
+  check(await waitFor("Core pill", async () => (await win.locator(".statuspill.ok").count()) > 0), "window connected");
+  const info = JSON.parse(readFileSync(join(dataDir, "server.json"), "utf8"));
+  /** An rpc call as the agent makes it: HTTP with the session token from server.json. */
+  const agentRpc = async (method: string, params: object = {}) => {
+    const res = await fetch(`http://127.0.0.1:${info.port}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aive-token": info.token },
+      body: JSON.stringify({ method, params }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const servers = async () => (await agentRpc("list_media_servers")).body.result;
+  check((await servers()).gate === (ENFORCE ? "enforce" : "log"), `the core's gate is "${(await servers()).gate}"`);
+
+  // Every page request that names a test server, and every thumbnail the page asks the core for.
+  const evil: string[] = [];
+  let clipServed = 0;
+  win.on("request", (q) => {
+    const u = decodeURIComponent(q.url());
+    if (u.includes("zr-evil")) evil.push(u);
+    if ([clip, clipAsset?.proxyPath].some((p) => p && u.includes(`/file?path=${p}&`))) clipServed++;
+  });
+  const notFound: string[] = [];
+  win.on("response", (q) => {
+    if (q.status() === 404) notFound.push(decodeURIComponent(q.url()));
+  });
+  const watchThumbs = () => win.evaluate(`(() => {
+    window.__thumbs = [];
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (d) {
+      if (typeof d === "string" && d.includes('"generate_thumbnail"')) window.__thumbs.push(JSON.parse(d).params.assetId);
+      return send.call(this, d);
+    };
+  })()`);
+  await watchThumbs();
+  const thumbsAsked = () => win.evaluate(() => (window as unknown as { __thumbs: string[] }).__thumbs);
+  const clearThumbs = () => win.evaluate(() => { (window as unknown as { __thumbs: string[] }).__thumbs = []; });
+  const evilFor = (host: string) => evil.filter((u) => u.includes(host));
+
+  const bannerText = () => win.locator(".ms-banner").innerText().catch(() => "");
+  const badge = win.locator(".asset-card.offline .offline-badge");
+  const badgeLabel = () => badge.first().getAttribute("aria-label").catch(() => null);
+  const openViaMenu = async (file: string) => {
+    await stub(app, "showOpenDialog", [{ canceled: false, filePaths: [file] }]);
+    await win.getByRole("button", { name: /Project/ }).click();
+    await win.getByRole("menuitem", { name: /^Open/ }).click();
+  };
+  /** Click the banner's Review… with the native dialog stubbed to `response`; the dialog's options. */
+  const review = async (host: string, response: number) => {
+    await stub(app, "showMessageBox", [{ response }]);
+    await win.getByRole("button", { name: `Review \\\\${host}…`, exact: true }).click();
+    await waitFor("approval dialog", async () => (await calls(app, "showMessageBox")).length > 0, 10000);
+    return (await calls(app, "showMessageBox"))[0] ?? {};
+  };
+  const buttonsOf = (o: { buttons?: string[] }) => JSON.stringify(o.buttons ?? []);
+
+  if (ENFORCE) {
+    // 9a. Added outside ZabsReel: offline at load, the Keep dialog decides.
+    await openViaMenu(crafted3);
+    check(await waitFor("outside banner", async () => /It is in your list of allowed network computers, but ZabsReel didn't put it there/.test(await bannerText()), 15000),
+      `outside entry: banner "${(await bannerText()).replace(/\s+/g, " ")}"`);
+    check(await waitFor("badge", async () => (await badgeLabel()) === "Offline: waiting for you to allow \\\\zr-evil-3.invalid", 5000), `…the asset is offline (${await badgeLabel()})`);
+    await sleep(1500);
+    check(evilFor("zr-evil-3").length === 0, `…the page asked for none of its files (${evilFor("zr-evil-3").join(", ") || "no request"})`);
+    check(!(await thumbsAsked()).includes(clipAsset.id), "…and no thumbnail");
+    let box = await review("zr-evil-3.invalid", 0);
+    check(box.title === "Keep \\\\zr-evil-3.invalid?" && buttonsOf(box) === '["Remove","Keep"]' && box.defaultId === 0 && box.cancelId === 0,
+      `Review… → the Keep dialog (${box.title}, ${buttonsOf(box)}, default ${box.defaultId}, cancel ${box.cancelId})`);
+    check(await waitFor("removed", () => !listed("zr-evil-3.invalid"), 10000), "Remove (default, Esc) → the server is out of the store");
+    check(await waitFor("allow banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-3\.invalid\. They stay offline until you allow it/.test(await bannerText()), 10000),
+      `…and the project now gets the normal banner ("${(await bannerText()).replace(/\s+/g, " ")}")`);
+    addOutside("zr-evil-3.invalid");
+    await openViaMenu(crafted3);
+    check(await waitFor("outside again", async () => /didn't put it there/.test(await bannerText()), 15000), "written again by hand and reopened: outside again");
+    box = await review("zr-evil-3.invalid", 1);
+    check(box.title === "Keep \\\\zr-evil-3.invalid?", `Review… → Keep dialog again (${box.title})`);
+    check(await waitFor("kept", () => viaOf("zr-evil-3.invalid") === "prompt", 10000), "Keep → the store has it with a valid stamp (via prompt)");
+    check(await waitFor("online", async () => (await badge.count()) === 0, 10000), "…and the asset comes online without a reload");
+
+    // 9b. A project on a server not allowed: banner, badge, nothing asked for; Keep offline, then Allow.
+    await clearThumbs(); // the same asset was online on zr-evil-3 just now
+    await openViaMenu(crafted1);
+    check(await waitFor("project banner", async () => /This project uses 1 file on the network computer \\\\zr-evil-1\.invalid\. They stay offline until you allow it/.test(await bannerText()), 15000),
+      `banner: "${(await bannerText()).replace(/\s+/g, " ")}"`);
+    check(await waitFor("badge", async () => (await badgeLabel()) === "Offline: waiting for you to allow \\\\zr-evil-1.invalid", 5000), `media pool badge (${await badgeLabel()}, "${await badge.first().innerText().catch(() => "")}")`);
+    check(await win.locator(".tl-clip.offline").count() > 0, `timeline clips are hatched (${await win.locator(".tl-clip.offline").count()})`);
+    check((await win.locator('.ms-banner[role="status"]').count()) === 1, "the banner is a polite status (role=status)");
+    await sleep(1500);
+    check(evilFor("zr-evil-1").length === 0, `no /file, /peaks or /frames request names the server (${evilFor("zr-evil-1").join(", ") || "none"})`);
+    check(!(await thumbsAsked()).includes(clipAsset.id), "no thumbnail asked for the offline asset");
+    box = await review("zr-evil-1.invalid", 0);
+    check(box.title === "Allow media from \\\\zr-evil-1.invalid?" && buttonsOf(box) === '["Keep offline","Allow"]' && box.defaultId === 0 && box.cancelId === 0,
+      `Review… → the Allow dialog (${box.title}, ${buttonsOf(box)}, default ${box.defaultId}, cancel ${box.cancelId})`);
+    check((box.detail ?? "").startsWith("This project uses 1 file stored there, for example //zr-evil-1.invalid/s/a.mp4."), `…its detail: "${(box.detail ?? "").split("\n")[0]}"`);
+    await sleep(1000);
+    check(!listed("zr-evil-1.invalid") && (await badge.count()) > 0, "Keep offline → the store is unchanged and the asset is still offline");
+    box = await review("zr-evil-1.invalid", 1);
+    check(await waitFor("allowed", () => viaOf("zr-evil-1.invalid") === "prompt", 10000), "Allow → the store has it (via prompt)");
+    check(await waitFor("online", async () => (await badge.count()) === 0, 10000), "…and the asset comes online without a reload (badge gone)");
+
+    // 9b'. A local clip whose LUT is on a server not allowed: the preview draws the clip, without the LUT.
+    const served = clipServed;
+    await openViaMenu(craftedLut);
+    check(await waitFor("lut banner", async () => /\\\\zr-evil-5\.invalid/.test(await bannerText()), 15000), `a LUT on zr-evil-5.invalid: banner "${(await bannerText()).replace(/\s+/g, " ")}"`);
+    check((await badge.count()) === 0, "…the clip itself is online");
+    await win.getByRole("button", { name: "Play", exact: true }).click();
+    await sleep(2500);
+    await win.getByRole("button", { name: "Pause", exact: true }).click().catch(() => {});
+    check(clipServed > served, `…the preview played the local clip (${clipServed - served} /file requests)`);
+    check(evilFor("zr-evil-5").length === 0, `…and never asked for the LUT (${evilFor("zr-evil-5").join(", ") || "no request"})`);
+    await openViaMenu(crafted1); // its server is allowed: nothing pending any more
+    check(await waitFor("no banner", async () => (await win.locator(".ms-banner").count()) === 0, 15000), "back on crafted1: no banner");
+  } else {
+    await openViaMenu(crafted3);
+    check(await waitFor("asset card", async () => (await win.locator(".asset-card").count()) > 0, 15000), "the project opens");
+    await sleep(1500);
+    const ms = await servers();
+    check(ms.pending.length === 0 && ms.outside.some((o: Entry) => o.host === "zr-evil-3.invalid"), `log mode: nothing pending, the hand-written entry is listed as outside (${JSON.stringify(ms.outside)})`);
+    check((await win.locator(".ms-banner").count()) === 0 && (await badge.count()) === 0, "…no banner and no offline badge");
+    // The store, not the gate, picks the dialog: Keep shows in log mode too.
+    await stub(app, "showMessageBox", [{ response: 1 }]);
+    const kept = await win.evaluate(() => window.aive!.mediaServers!.approve("zr-evil-3.invalid"));
+    const [box] = await calls(app, "showMessageBox");
+    check(box?.title === "Keep \\\\zr-evil-3.invalid?" && buttonsOf(box ?? {}) === '["Remove","Keep"]' && kept === true && viaOf("zr-evil-3.invalid") === "prompt",
+      `the Keep dialog (${box?.title}) → stamped (${viaOf("zr-evil-3.invalid")})`);
+  }
+
+  // 9c. Picker auto-trust: stored before the picked path reaches the page.
+  await stub(app, "showOpenDialog", [{ canceled: false, filePaths: ["//zr-pick.invalid/s/a.mp4"] }]);
+  check(!listed("zr-pick.invalid"), "zr-pick.invalid is not in the store yet");
+  const picked = await win.evaluate(() => window.aive!.pickFiles());
+  check(picked[0] === "//zr-pick.invalid/s/a.mp4" && viaOf("zr-pick.invalid") === "picker", `picked → the store has it (via ${viaOf("zr-pick.invalid")}) when the path comes back`);
+  await stub(app, "showMessageBox", [{ response: 0 }]);
+  await win.getByRole("button", { name: "Import", exact: true }).click();
+  check(await waitFor("import refused", async () => (await win.locator(".error-bar").count()) > 0, 15000), `the import itself then fails as the file isn't there (${(await win.locator(".error-bar").innerText().catch(() => "")).split("\n")[0]})`);
+  check((await calls(app, "showMessageBox")).length === 0, "…with no approval dialog");
+  await win.locator(".error-bar").click();
+
+  if (ENFORCE) {
+    // 9d. Origin wording: a recent project (the page's own request) vs an agent's import.
+    await win.evaluate((p) => localStorage.setItem("aive.recent", JSON.stringify([p])), "//zr-evil-7.invalid/p/a.aive");
+    await win.reload();
+    check(await waitFor("Core pill", async () => (await win.locator(".statuspill.ok").count()) > 0), "page reloaded with a recent project on zr-evil-7.invalid");
+    await watchThumbs();
+    await stub(app, "showMessageBox", [{ response: 0 }]);
+    await win.getByRole("button", { name: /Project/ }).click();
+    await win.getByRole("menuitem", { name: "a.aive", exact: true }).click();
+    await waitFor("approval dialog", async () => (await calls(app, "showMessageBox")).length > 0, 10000);
+    const [mine] = await calls(app, "showMessageBox");
+    check((mine?.detail ?? "").startsWith("You opened //zr-evil-7.invalid/p/a.aive."), `opening it asks at once: "${(mine?.detail ?? "").split("\n")[0]}"`);
+    check(await waitFor("own banner", async () => /You tried to open a file on the network computer \\\\zr-evil-7\.invalid/.test(await bannerText()), 10000),
+      `…the banner says "You tried" ("${(await bannerText()).replace(/\s+/g, " ")}")`);
+    const refused = await agentRpc("import_video", { path: "//zr-evil-9.invalid/s/a.mp4" });
+    check(refused.status === 403 && refused.body.code === "media_server_not_approved" && refused.body.host === "zr-evil-9.invalid", `an agent's import_video is refused (${refused.status} ${refused.body.code})`);
+    check(await waitFor("agent banner", async () => /The AI assistant asked to open a file on the network computer \\\\zr-evil-9\.invalid/.test(await bannerText()), 10000),
+      `…the banner says "The AI assistant asked" ("${(await bannerText()).replace(/\s+/g, " ")}")`);
+    const agent = await review("zr-evil-9.invalid", 0);
+    check((agent.detail ?? "").startsWith("The AI assistant asked to open //zr-evil-9.invalid/s/a.mp4."), `…and so does its dialog: "${(agent.detail ?? "").split("\n")[0]}"`);
+    check(evilFor("zr-evil-7").length === 0 && evilFor("zr-evil-9").length === 0, "no page request names zr-evil-7 or zr-evil-9");
+  }
+
+  // 9e. Project → Network computers…: allowed servers with Remove, outside ones with Keep… and Remove (no date).
+  addOutside("zr-evil-4.invalid");
+  await win.getByRole("button", { name: /Project/ }).click();
+  await win.getByRole("menuitem", { name: /Network computers/ }).click();
+  const dlg = win.getByRole("dialog", { name: /Network computers/ });
+  check(await waitFor("outside row", async () => (await dlg.innerText().catch(() => "")).includes("\\\\zr-evil-4.invalid"), 10000), "the dialog opens and lists the entry written by hand");
+  const outsideRow = dlg.locator("table", { has: win.locator("caption", { hasText: "Added outside ZabsReel" }) }).locator("tr", { hasText: "zr-evil-4.invalid" });
+  const rowText = (await outsideRow.innerText().catch(() => "")).replace(/\s+/g, " ");
+  const want = ENFORCE ? "ZabsReel didn't add this, so it doesn't use it." : "ZabsReel didn't add this.";
+  check(rowText.includes(want) && !/\d{4}/.test(rowText), `…under "Added outside ZabsReel", no date: "${rowText}"`);
+  check((await outsideRow.getByRole("button", { name: "Keep \\\\zr-evil-4.invalid…", exact: true }).count()) === 1 && (await outsideRow.getByRole("button", { name: "Remove \\\\zr-evil-4.invalid", exact: true }).count()) === 1,
+    "…with Keep… and Remove");
+  const allowedText = (await dlg.locator("table", { has: win.locator("caption", { hasText: "Allowed" }) }).innerText().catch(() => "")).replace(/\s+/g, " ");
+  check(/\\\\zr-pick\.invalid Added by you on \d+ \w+ \d{4} · You picked a file there/.test(allowedText) && /\\\\zr-evil-3\.invalid Added by you on .* · You allowed it/.test(allowedText),
+    `allowed: "${allowedText}"`);
+  await outsideRow.getByRole("button", { name: "Remove \\\\zr-evil-4.invalid", exact: true }).click();
+  check(await waitFor("zr-evil-4 removed", () => !listed("zr-evil-4.invalid"), 10000), "Remove → it is out of the store");
+  if (ENFORCE) {
+    await dlg.getByRole("button", { name: "Close" }).last().click();
+    await openViaMenu(crafted1);
+    check(await waitFor("online", async () => (await win.locator(".asset-card").count()) > 0 && (await badge.count()) === 0, 15000), "crafted1 opens with its server allowed: online");
+    await win.getByRole("button", { name: /Project/ }).click();
+    await win.getByRole("menuitem", { name: /Network computers/ }).click();
+    await dlg.getByRole("button", { name: "Remove \\\\zr-evil-1.invalid", exact: true }).click();
+    check(await waitFor("zr-evil-1 removed", () => !listed("zr-evil-1.invalid"), 10000), "Remove on an allowed server → out of the store");
+    check(await waitFor("offline again", async () => (await badge.count()) > 0, 10000), "…and its asset goes offline");
+  }
+  await dlg.getByRole("button", { name: "Close" }).last().click();
+  check(await waitFor("dialog closed", async () => (await dlg.count()) === 0, 5000), "the dialog closes");
+
+  // 9f. Save As never starts in a folder named by the project.
+  await openViaMenu(craftedName);
+  check(await waitFor("name", async () => (await win.locator(".proj-name").innerText().catch(() => "")).trim().startsWith("x"), 15000),
+    `a project named \\\\zr-evil.invalid\\s\\x opens as "${(await win.locator(".proj-name").innerText().catch(() => "")).trim()}"`);
+  const storeBefore = readFileSync(hostsFile, "utf8");
+  await stub(app, "showSaveDialog", [saveResult(null)]);
+  await win.getByRole("button", { name: /Project/ }).click();
+  await win.getByRole("menuitem", { name: /Save As/ }).click();
+  await waitFor("save dialog", async () => (await calls(app, "showSaveDialog")).length > 0, 10000);
+  check((await calls(app, "showSaveDialog"))[0]?.defaultPath === "x.aive", `Project → Save As: default ${(await calls(app, "showSaveDialog"))[0]?.defaultPath}`);
+  await stub(app, "showSaveDialog", [saveResult(null)]);
+  await win.evaluate(() => window.aive!.saveProjectAs("\\\\zr-evil.invalid\\s\\x"));
+  check((await calls(app, "showSaveDialog"))[0]?.defaultPath === "x.aive", `saveProjectAs("\\\\zr-evil.invalid\\s\\x") from the page: default ${(await calls(app, "showSaveDialog"))[0]?.defaultPath}`);
+  check(readFileSync(hostsFile, "utf8") === storeBefore && !listed("zr-evil.invalid"), "…and the store is unchanged");
+
+  await stub(app, "showMessageBoxSync", [1]); // "Don't Save" if anything is unsaved
+  const closed = new Promise<void>((res) => app.once("close", () => res()));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
+  check(await Promise.race([closed.then(() => true), sleep(30000).then(() => false)]), "closed");
+  check(await waitFor("core exit", () => !pidAlive(info.pid), 10000), "its core exited");
+  check(!/A JavaScript error occurred|ReferenceError|TypeError/.test(r.mainLog()), "no main-process errors");
+  // Once a test server is allowed (log mode: at once), the preview asks for the clip's file, which a .invalid
+  // server never has: those 404s, and only those, are expected (each a /file request for the zr-evil-1 or -3 clip).
+  const errors = r.errors.filter((e) => !/^Failed to load resource: the server responded with a status of 404/.test(e));
+  const expected404 = notFound.every((u) => /\/file\?path=\/\/zr-evil-[13]\.invalid\/s\/a\.mp4&/.test(u)) && r.errors.length - errors.length === notFound.length;
+  check(errors.length === 0 && expected404, `no renderer console errors${errors.length ? `:\n    ${errors.join("\n    ")}` : ""} (404s: ${notFound.length}, all for an allowed test server: ${expected404})`);
+  await app.close().catch(() => {});
 }
 
 main().catch(async (err) => {
