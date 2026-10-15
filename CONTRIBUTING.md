@@ -61,6 +61,34 @@ Per-feature smokes live in `packages/core/scripts/` — e.g. `smoke-effects.ts`,
 Models/binaries download on first use and cache under `~/.aive` (override with
 `AIVE_WHISPER_DIR` / `AIVE_MODELS_DIR`, etc.).
 
+## Network paths and the trust folder
+
+The core never opens a file on a network computer that the user has not
+allowed (README, "Media on a network drive"). Three rules keep it that way:
+
+1. Core code opens files only through `packages/core/src/io/gatedfs.ts` and
+   starts processes only through the helpers in `ffmpeg/executor.ts`.
+   `node scripts/check-io-imports.mjs` fails on any other `fs` or
+   `child_process` import.
+2. A new RPC parameter that takes a path goes in `RPC_PATH_PARAMS` in
+   `packages/core/src/rpc.ts`. `smoke-unc.ts` fails on a path-like parameter
+   that is not listed.
+3. Only `trusthosts.ts` opens files in `<dataDir>/trust/`. No result, log line
+   or error text may carry a stamp, the key, or the content of a file there.
+
+Run these after a change to file access, an RPC path, or the approval store
+(both use temp folders and test servers under `.invalid`, so they reach no
+network):
+
+```bash
+npx tsx packages/core/scripts/smoke-unc.ts       # unit: keys, refusals, gatedfs, the store, the trust folder
+npm run build                                    # smoke-unc-e2e runs the built core
+npx tsx packages/core/scripts/smoke-unc-e2e.ts   # a real core process with every fs and child_process call traced
+```
+
+`smoke-unc-e2e.ts` step 7 needs Windows shares, so it runs only on Windows (as
+an administrator, in the release workflow) and is skipped elsewhere.
+
 ## Packaging / building installers
 
 Distribution is **offline-first**: the installer bundles FFmpeg, whisper.cpp

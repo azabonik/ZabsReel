@@ -16,6 +16,10 @@
  *    path as a local file (accepted) vs a URL/protocol form (rejected).
  *  - {@link assertPathUsable} refuses, for any rpc path, a Windows device / NT
  *    path or a network path whose server name has no key (unc.ts).
+ *
+ * A network path with a usable server name passes here: unc.ts recognizes it,
+ * and media on a server the user has not allowed stays offline and is never
+ * opened (hosttrust.ts).
  *  - {@link sanitizeProjectIds} rewrites non-token ids on load/import.
  *  - {@link assertProjectMediaLocal} refuses a project whose media is non-local.
  *  - {@link coerceProjectNumbers} / {@link coerceProjectValues} give every
@@ -133,10 +137,8 @@ function isAbsoluteAnyOs(p: string): boolean {
  * desktop). A URL/protocol form, a path unc.ts refuses (a Windows device or NT
  * path, a server name with no key) and a bare relative path are all rejected.
  *
- * Accepted risk, until the per-server approval lands: on a Windows host, a
- * network path in a loaded .aive/.otio makes probe, thumbnail and render open
- * an SMB connection to the named host, which can send the user's NTLM
- * credentials to it. unc.ts already recognizes the host.
+ * A network path is recognized by unc.ts; media on a server the user has not
+ * allowed is offline and never opened (see hosttrust.ts).
  */
 export function isLocalMediaPath(p: unknown): p is string {
   if (typeof p !== "string" || p === "") return false;
@@ -159,7 +161,7 @@ export function isProtocolLike(p: unknown): boolean {
 /**
  * Refuse the SSRF/protocol forms and the forms unc.ts refuses for a path that
  * came from a loaded project (asset.path, effects.lut). A network path with a
- * usable server name passes (see the accepted risk at isLocalMediaPath). A
+ * usable server name passes (hosttrust.ts decides whether it is opened). A
  * relative or absolute LOCAL path passes unchanged — relative media
  * references are legitimate (a foreign OTIO's relative target_url, an old
  * project saved under a relative AIVE_DATA_DIR) and are not a network vector,

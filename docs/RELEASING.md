@@ -68,12 +68,15 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
 1. Checks out **the exact commit the tag points to**, then runs the release
    guard (below).
 2. `npm ci` → `npm run build` (core + mcp + renderer).
-3. `npm run dist -- --publish never` — electron-builder produces:
+3. The network-path gate on Windows (below): `smoke-unc.ts`,
+   `smoke-unc-e2e.ts` and `check-io-imports.mjs`. A failure stops the job
+   before anything is packaged.
+4. `npm run dist -- --publish never` — electron-builder produces:
    - `ZabsReel-<ver>.exe` — the installer
    - `ZabsReel-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
-4. Attaches **all** of those to a **published** GitHub Release.
+5. Attaches **all** of those to a **published** GitHub Release.
 
 > All three of `.exe`, `.exe.blockmap`, and `latest.yml` must be on the Release,
 > or auto-update breaks. The workflow globs them explicitly.
@@ -97,6 +100,49 @@ whose workflow has no guard, and a 1.0.5 release would rank above every 0.2.x
 release in the updater. Delete those tags (locally and on GitHub) before you push
 `main`, never run `git push --tags`, and never start the workflow on one of
 them.
+
+### The network-path gate
+
+ZabsReel opens media on a network computer only after the user allows that
+computer (README, "Media on a network drive"). The Linux CI runs the same
+smokes on every push, but only a Windows host signs in to a network computer on
+its own, so the release job runs them again on `windows-latest` before it
+packages anything:
+
+- `smoke-unc.ts` and `node scripts/check-io-imports.mjs`;
+- `smoke-unc-e2e.ts`, a real core process with every file and process call
+  traced. Its test servers are under the reserved `.invalid` domain, so a leak
+  would reach nobody. Its step 7 runs only here: it makes shares of temp
+  folders with `net share` on `\\localhost` (the runner is an administrator;
+  the shares are removed at the end) and checks that the private trust folder
+  can't be read through a second share spelling of the data folder.
+
+A failure stops the release. Fix the cause; don't skip the step.
+
+### Release text
+
+`generate_release_notes` writes the list of changes. Add the text below to the
+top of the Release body (edit the Release on GitHub after the workflow
+publishes it) for the first version that ships the network-computer approvals.
+Leave it out of later releases.
+
+> **Media on network computers now waits for your OK.** When a project uses
+> files on a network computer (`\\nas\video\…`) that you have not allowed,
+> those clips stay offline and ZabsReel does not contact that computer until
+> you click **Allow** once for it. On Windows, opening a file there can send
+> your Windows sign-in to that computer, so allow only computers you know.
+> Files you pick in ZabsReel's own dialogs work as before. Remove a computer
+> in **Project → Network computers…**. An AI client can't allow a computer;
+> ZabsReel's tools tell it which clips wait for which computer.
+>
+> **Some network paths are now refused.** A project or an import that names
+> a Windows device path in any spelling (`\\?\…`, `//./…`, `\??\…`) or a
+> server name ZabsReel can't use (web-folder forms such as `\\nas@SSL\…` or
+> `\\nas@8080\…`, names with non-ASCII letters, `…ipv6-literal.net` names,
+> or addresses not written as `a.b.c.d`, such as `\\127.1\…`) is refused.
+> Map that folder to a drive letter, or use the computer's plain name
+> (`xn--…` for an international name), then change the path in the `.aive`
+> file (a text file) and open the project again.
 
 ---
 

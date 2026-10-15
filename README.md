@@ -304,6 +304,31 @@ ZabsReel runs FFmpeg as a separate program, so the version matters. The full tes
 
 The core adapts to the differences it knows about (for example, `-filter_complex_script` no longer exists in 9.0, from 8.1 FFmpeg tracks premultiplied alpha, and the noise reduction filter changed in 5.0), so the same project exports the same picture on each tested version within a level or two of rounding, and the audio effects are tuned to match 4.4 within about 2 dB. When the core starts with a version outside this list, it logs a warning. To use a specific build, set `AIVE_FFMPEG` and `AIVE_FFPROBE` to its binaries. `docs/TESTING.md` has the per-version test results and how to run the tests against another build.
 
+## Media on a network drive
+
+ZabsReel opens files on a network computer (a NAS or a shared folder, such as `\\nas\video\clip.mp4` or `//nas/video/clip.mp4`) only after you allow that computer once.
+
+**Why it asks.** When a program opens a file on a network computer, Windows may automatically send your Windows sign-in (a scrambled copy of your password) to that computer. A project file from someone else can name a computer that they control. So when a project uses a network computer you have not allowed, its clips stay offline and ZabsReel does not contact that computer at all: no preview, thumbnail, proxy, waveform or export, and no check that the file exists. A banner above the preview and an **Offline** badge on each clip name the computer. **Review…** asks "Allow media from \\nas?". Allow it only if you know and trust that computer. The clips then come online without opening the project again. macOS and Linux ask the same way.
+
+- **Files you pick yourself just work.** A file you pick in ZabsReel's own Import, Open, Save As or Export dialog allows its computer. In the browser version, this applies to folders you opened in its file picker; a path you type there gets the question.
+- **Offline clips.** You can edit the rest of the project while clips are offline. An export or preview render that needs an offline clip stops and names the clips and the computer.
+- **Remove a computer** in **Project → Network computers…**. Its clips go offline again. ZabsReel keeps the proxies and thumbnails it made from that media but does not use them; the normal storage clean-up removes them later.
+- **The data folder.** If `AIVE_DATA_DIR` is on a network computer, ZabsReel uses that computer without asking.
+- **Which server names work.** Plain names (letters, digits, `.`, `-`, `_`, `$`), the `xn--…` form of an international name, and addresses written as `a.b.c.d`. ZabsReel refuses a project or a path with any other form: web-folder names such as `\\nas@SSL\…` or `\\nas@8080\…`, `…ipv6-literal.net` names, names with non-ASCII letters, other address spellings (`\\127.1\…`, `\\0x7f.0.0.1\…`), and device paths (`\\?\…`, `\\.\…`). Map such a folder to a drive letter, or use the computer's plain name, then change the path in the `.aive` file (a text file) and open the project again. `nas` and `nas.local` count as two computers, and ZabsReel asks for each. `\\wsl.localhost\…` and `\\wsl$\…` are asked for like any other computer.
+- **AI clients cannot allow a computer.** No MCP tool can. When a project uses media on a computer you have not allowed, the tools report the offline clips and the computer (`timeline_summary`, `list_media_servers`), and a path on such a computer is refused with `media_server_not_approved`. The AI client must ask you to allow it in the ZabsReel window.
+- **"Added outside ZabsReel".** ZabsReel keeps the allowed computers in `trust/hosts.json` in the data folder and marks each entry it writes. An entry that ZabsReel did not write (by you, another program, or an AI assistant that edited the file) is not used. It is listed as "added outside ZabsReel" in the banner and in **Project → Network computers…**, with **Keep** and **Remove**. Keep it only if you added it yourself. So editing `trust/hosts.json` by hand does not allow a computer.
+- **"ZabsReel couldn't read its list of approved computers; retrying".** Another program (for example an antivirus scanner) held the list when ZabsReel started. Until ZabsReel can read it, it uses no computer on it, so clips on network computers stay offline. It tries again every second. Nothing is lost.
+- **No screen on the editing machine.** When the editor runs on a machine without a display (for example with an AI client on a server), use the browser version from your own computer. Forward both ports over SSH with the same numbers on each end, start the web shell in that SSH session, and open the link it prints in your local browser:
+
+  ```bash
+  ssh -L 4790:127.0.0.1:4790 -L 4791:127.0.0.1:4791 you@editing-machine
+  npm run web -- --no-open        # in that SSH session, in the ZabsReel checkout
+  ```
+
+  4790 is the web shell's port and 4791 the core's. If you changed either (`--port`, `AIVE_PORT`), forward that one instead.
+
+**What this protects, and what it doesn't.** It covers what reaches ZabsReel through its own tools and files: MCP tools, project and OTIO files, and the app. It does not cover an AI assistant that can run commands on your computer (for example a coding assistant with a terminal). Such an assistant can open a network share itself, without ZabsReel, and nothing in ZabsReel can stop that. If it edits ZabsReel's list, the entry shows as "added outside ZabsReel" and is not used until you keep it. A program that reads ZabsReel's key file (`trust/hosts.key`) on purpose, or copies back an entry that ZabsReel wrote earlier, can get past that.
+
 ## Troubleshooting
 
 ### Status pill shows "Offline" / "Disconnected"

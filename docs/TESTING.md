@@ -79,10 +79,13 @@ from `scratch/`. `npm run typecheck` also type-checks these scripts (`typecheck:
 npx tsx apps/desktop/scripts/smoke-composite.ts                        # compositor plan: z-order, transitions, fades, keyframes, mute/hide, effect previews (CSS, vignette, bypass, keys), speed ramps (shared curve, a clip ends on its footprint, a paused frame is the export's, frame steps stay on the grid and a cut shows one clip, the curve editor's out-of-clip points, ramped bleep mirror), blend modes + masks in the plan, audio-effect Web Audio plan + linked carrier + live route (+ the voice-worklet route: dry until loaded, rebuilt, stopped, render-only when it fails), the WebGL2 pass plans (order, bypass, keys, uniforms, stable effect-id keys, the lens zoom pass, the denoise tables, fixed-kernel flags, fidelity), the colour maths vs graph.ts, and the status line's job state (job events → progress text, Cancel → cancel_job, no error after a user cancel, cleared on done/failed)
 npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP text tokenizer (semantic-search input)
 
-# Web shell end-to-end: serves the UI, Host/token/path guards, picker listing,
+# Web shell end-to-end: serves the UI, Host/shell-key/path guards, picker listing,
 # import + stream through the core, stopping the core it started, and a clear
 # refusal of a port that browsers block (ERR_UNSAFE_PORT, e.g. 5060) for the
-# shell or the core (needs the build)
+# shell or the core. Network computers (test servers under .invalid, traced):
+# the approve / revoke / picked routes need the shell key, the in-app Allow and
+# Keep dialogs, Save As never starts in a folder from the project's name, and
+# nothing touches a server before it is allowed (needs the build and a Chromium)
 npx tsx apps/desktop/scripts/smoke-web.ts
 npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); S/Delete after a split; path bar vs a late listing
 
@@ -128,11 +131,39 @@ npx tsx packages/core/scripts/smoke-security.ts
 # (no runtime curves plot=). AIVE_GUARD_REPORT=<file> (or 1 for stderr) logs what strict
 # mode would refuse instead of refusing it: run the matrix with it after adding
 # a filter, and add any logged name to ALLOWED_FILTERS in ffmpeg/executor.ts.
-# Accepted risk: UNC (\\server\share) and //host/share media paths are accepted
-# for NAS workflows, so on a Windows host a crafted project can make probe,
-# thumbnail and render open an SMB connection to the named host, which can send
-# the user's NTLM credentials.
+# Network paths (\\server\share, //server/share) are covered by smoke-unc and
+# smoke-unc-e2e below.
 npx tsx packages/core/scripts/smoke-safepath.ts
+
+# Network paths (no FFmpeg, no network, temp dirs; every test server is under the
+# reserved .invalid domain): one key per server, device / NT paths and server
+# names without a key refused with a message that says how to fix the path,
+# gatedfs and the FFmpeg argv check (a server not allowed is never opened),
+# graphic imports, the approval store (stamps, "added outside ZabsReel", the
+# lock, read errors and the unread state) and the private trust folder (no rpc
+# path, /file request or graphic import reaches it, in any spelling or through a
+# link, and no error quotes the key)
+npx tsx packages/core/scripts/smoke-unc.ts
+
+# Network paths end to end (needs the build and FFmpeg): a real core process with
+# every fs and child_process call traced and a logging FFmpeg stub. A crafted
+# project naming test servers in every field loads with those clips offline;
+# every tool refuses or works without opening them; no rpc or MCP tool can allow
+# a server or read the stamp key; Allow, Keep and Remove written to the store
+# (as the app does) take effect without a reload. Step 7 (a second share
+# spelling of a data folder on \\localhost, with net share) runs on Windows only,
+# as an administrator; it runs in the release workflow and is skipped elsewhere
+npx tsx packages/core/scripts/smoke-unc-e2e.ts
+
+# I/O import gate: core code opens files only through io/gatedfs.ts and starts
+# processes only through the executor helpers (--self-test checks the gate itself)
+node scripts/check-io-imports.mjs --self-test
+node scripts/check-io-imports.mjs
+
+# Launcher attach case: the app attaches to a core someone else started, and an
+# approval written to the trust folder reaches that core; a hand-written entry is
+# "outside" until it is kept (AIVE_TEST_PORT / AIVE_TEST_PORT2 pick the ports)
+node apps/desktop/electron/test-launcher.cjs
 
 # Frame picking at exact frame boundaries: get_frame(n / fps) shows frame n; GET /frames
 # (the preview's trail / denoise warm-up) returns exactly the source frames asked for,
@@ -406,7 +437,12 @@ rule as the web picker in `src/savename.ts`, a second overwrite question when
 an extension was added, the preset's container listed first), exports (no
 extension typed → `.mp4`; `.webm` typed with an MP4 preset → VP9 WebM), and the
 unsaved-changes close guard (Save → Save As cancelled keeps the window open;
-Save → saved, then quit; the core it started exits). It fails on renderer
+Save → saved, then quit; the core it started exits), and network computers
+(test servers under `.invalid`, native dialogs stubbed): the banner and
+**Offline** badges, no `/file`, `/peaks`, `/frames` or thumbnail request for an
+offline clip, Allow and Keep offline, the Keep and Remove dialog for a server
+added outside ZabsReel, picker auto-trust, the "You opened" and "The AI
+assistant asked" wording, and **Project → Network computers…**. It fails on renderer
 console errors. The app runs with its own profile (`--user-data-dir` in the
 test folder), so your ZabsReel profile and its recent projects are left alone.
 

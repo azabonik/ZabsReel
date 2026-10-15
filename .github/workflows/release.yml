@@ -38,6 +38,22 @@ jobs:
       - name: Install FFmpeg (staging source; not shipped from here — prepare-bundle copies it in)
         run: choco install ffmpeg -y --no-progress
 
+      # The network-path gate on a real Windows host, before anything is
+      # packaged (docs/RELEASING.md). Test servers are under .invalid, so a
+      # leak reaches nobody. smoke-unc-e2e's step 7 runs only on Windows: it
+      # shares temp folders on \\localhost with `net share` (the runner is an
+      # administrator) and removes the shares at the end.
+      - name: I/O import gate (core fs and child processes go through the network-path gate)
+        run: |
+          node scripts/check-io-imports.mjs --self-test
+          node scripts/check-io-imports.mjs
+
+      - name: Smoke — network paths (host keys, refusals, gatedfs, ffmpeg argv, graphic imports, approval store, trust folder)
+        run: npx tsx packages/core/scripts/smoke-unc.ts
+
+      - name: Smoke — network paths end to end (core process, traced; step 7 second share spelling on \\localhost)
+        run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
+
       - name: Stage bundled FFmpeg/whisper/YuNet/font resources
         run: npm run prepare:bundle --workspace zabsreel-desktop
 
