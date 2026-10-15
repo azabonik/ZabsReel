@@ -234,7 +234,7 @@ This builds everything, starts the editor core (or attaches to one that is alrea
 
 Browsers do not give a page the real path of a file, and the core imports and exports by path. So Import, Open, Save As and Export use an in-app file picker. It browses the machine that runs the core; on WSL that includes your Windows drives under `/mnt/c`.
 
-**UI development:** run `npm run web -- --no-open` in one terminal and `cd apps/desktop && npx vite` in another. Open the Vite page (`http://localhost:5173/`) with the `?port=…&token=…` part of the printed link added. The Vite dev server passes `/api` requests to the web shell on port 4790.
+**UI development:** run `npm run web -- --no-open` in one terminal and `cd apps/desktop && npx vite` in another. Open the Vite page (`http://localhost:5173/`) with the `?port=…&token=…&shell=…` part of the printed link added. The Vite dev server passes `/api` requests to the web shell on port 4790.
 
 ### Run on macOS & Linux (from source)
 

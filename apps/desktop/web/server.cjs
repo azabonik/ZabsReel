@@ -4,11 +4,14 @@
 //      an AI client (MCP) if present, via the same core-launcher the desktop app
 //      uses, so browser, desktop app and AI all share one live session.
 //   2. Serve the built renderer (dist/renderer) on its own localhost port.
-//   3. Stand in for the Electron preload bridge with a small token-gated /api:
-//      a directory listing for the in-app file picker (browsers never reveal
-//      absolute paths, and the core works with absolute paths) and the
-//      ready-to-paste MCP client config.
-//   4. Print — and open — the URL that hands the page the core port + token.
+//   3. Stand in for the Electron preload bridge with a small /api behind a
+//      shell-only key: a directory listing for the in-app file picker
+//      (browsers never reveal absolute paths, and the core works with absolute
+//      paths), the ready-to-paste MCP client config, and allowing or removing
+//      network computers (the core's approval store) after the page's own
+//      dialog; the core itself has no call that allows one.
+//   4. Print — and open — the URL that hands the page the core port + token
+//      and the shell key.
 //   5. Tear down the core on exit ONLY if we were the ones who started it.
 //
 // Usage:  node web/server.cjs [--port 4790] [--no-open]
@@ -20,13 +23,18 @@ const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { ensureCore, browserBlocksPort } = require("../electron/core-launcher.cjs");
+const { randomBytes } = require("node:crypto");
+const { ensureCore, browserBlocksPort, getDataDir } = require("../electron/core-launcher.cjs");
 const { PRODUCT_NAME, MCP_KEY } = require("../electron/brand.cjs");
 
 const RENDERER_DIR = path.join(__dirname, "..", "dist", "renderer");
 const DEFAULT_PORT = 4790;
 /** Cap on directory entries returned in one listing (System32 is ~5k). */
 const MAX_ENTRIES = 10000;
+/** Cap on a POST body (a host name, or the few paths of one pick). */
+const MAX_BODY = 256 * 1024;
+/** The header that carries the shell key on every /api request. */
+const SHELL_HEADER = "x-zabsreel-shell";
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -209,9 +217,17 @@ async function listPlaces() {
  * List one directory for the picker. Folders first, then files, each in
  * natural order. Only files (and symlinks) are stat'ed — for size, and to
  * resolve what a link points at — which keeps big folders on /mnt/c quick.
+ * A folder on a network computer adds that computer to `browsed` before it
+ * is listed (even when the listing then fails): the user browsed there in
+ * the picker, so a file he picks there may be allowed without asking.
  */
-async function listDir(raw) {
+async function listDir(raw, browsed) {
   if (raw && !path.isAbsolute(raw)) throw new HttpError(400, "Path must be absolute");
+  if (raw) {
+    const { unc } = await trustModules();
+    const c = unc.classifyPath(raw);
+    if (c.kind === "network") browsed.add(c.host);
+  }
   const dir = raw ? path.resolve(raw) : os.homedir();
   let dirents;
   try {
@@ -255,7 +271,155 @@ function mcpConfig() {
   return { available: !!mcpEntry, packaged: false, mcpEntry, json: JSON.stringify(config, null, 2) };
 }
 
-async function handleApi(url, res) {
+// ---- network computers (@aive/core hosttrust.ts) ------------------------------
+// As in electron/main.cjs: only the UI hosts write the approval store
+// (<dataDir>/trust), through @aive/core/trusthosts, and only after the user's
+// own gesture: Allow or Keep in the page's dialog (behind the shell key, which
+// nothing the agent can read holds), or a file picked in a folder this shell
+// listed for him. Each write is followed by recheck_offline_media with the
+// core token, so the core picks it up even where its folder watch does not fire.
+
+let coreModules = null;
+/** @aive/core's ESM modules for the store, loaded on first use. */
+function trustModules() {
+  coreModules ??= Promise.all([import("@aive/core/unc"), import("@aive/core/trusthosts")]).then(([unc, trust]) => ({ unc, trust }));
+  return coreModules;
+}
+
+const errText = (err) => (err && err.message ? err.message : String(err));
+
+/** Ask the core to re-read the store and re-check offline media; never fails the caller. */
+async function recheckOfflineMedia(core) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${core.port}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aive-token": core.token || "" },
+      body: JSON.stringify({ method: "recheck_offline_media", params: {} }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error(`[aive-web] recheck_offline_media failed: ${errText(err)}`);
+  }
+}
+
+/** The JSON body of a POST, at most MAX_BODY bytes. */
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size <= MAX_BODY) chunks.push(c);
+    });
+    req.on("end", () => {
+      if (size > MAX_BODY) {
+        reject(new HttpError(413, "Request too large"));
+        return;
+      }
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("not an object");
+        resolve(body);
+      } catch {
+        reject(new HttpError(400, "Body must be a JSON object"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+/** The server key of `host` (unc.ts normalizeHost), or a 400. */
+async function hostKey(host) {
+  const { unc } = await trustModules();
+  const h = typeof host === "string" ? unc.normalizeHost(host) : { ok: false };
+  if (!h.ok) throw new HttpError(400, "Not a network computer name.");
+  return h.key;
+}
+
+/**
+ * POST /api/media-servers/*. The page has shown its own dialog (Allow or
+ * Keep, or Remove in the Keep dialog and the Network computers list); the
+ * choice of dialog is the page's, and nothing here depends on it: Allow and
+ * Keep both stamp one server after a click behind the shell key.
+ */
+async function mediaServersPost(route, body, core, browsed) {
+  const { unc, trust } = await trustModules();
+  const dataDir = getDataDir();
+  if (route === "approve") {
+    const key = await hostKey(body.host);
+    try {
+      await trust.approveHost(dataDir, key, "prompt");
+    } catch (err) {
+      console.error(`[aive-web] allow \\\\${key}: ${errText(err)}`);
+      throw new HttpError(503, "Couldn't save; try again.");
+    }
+    await recheckOfflineMedia(core);
+    return { approved: true };
+  }
+  if (route === "revoke") {
+    // onlyIfOutside (the Keep dialog's Remove): nothing is removed when the
+    // server was kept meanwhile (another tab, or the app), and removed is false.
+    const key = await hostKey(body.host);
+    let removed;
+    try {
+      ({ removed } = await trust.revokeHost(dataDir, key, { onlyIfOutside: body.onlyIfOutside === true }));
+    } catch (err) {
+      console.error(`[aive-web] remove \\\\${key}: ${errText(err)}`);
+      throw new HttpError(503, `Couldn't remove \\\\${key}; try again.`);
+    }
+    await recheckOfflineMedia(core);
+    return { removed };
+  }
+  if (route === "picked") {
+    // Picker auto-trust: only a server this shell listed a folder of (the
+    // user browsed there); any other comes back as needsApproval and gets
+    // the dialog when the core refuses the path.
+    if (!Array.isArray(body.paths) || !body.paths.every((p) => typeof p === "string")) throw new HttpError(400, "paths must be a list of strings");
+    const hosts = new Set();
+    for (const p of body.paths) {
+      const c = unc.classifyPath(p);
+      if (c.kind === "network") hosts.add(c.host);
+    }
+    const approved = [];
+    const needsApproval = [];
+    const already = new Set(hosts.size ? trust.readTrustedHosts(dataDir).approved.map((a) => a.host) : []);
+    for (const host of hosts) {
+      if (already.has(host)) continue;
+      if (!browsed.has(host)) {
+        needsApproval.push(host);
+        continue;
+      }
+      try {
+        await trust.approveHost(dataDir, host, "picker");
+        approved.push(host);
+      } catch (err) {
+        // Not saved: the core refuses the path and the page asks instead.
+        console.error(`[aive-web] couldn't save \\\\${host} as allowed: ${errText(err)}`);
+        needsApproval.push(host);
+      }
+    }
+    if (approved.length) await recheckOfflineMedia(core);
+    return { approved, needsApproval };
+  }
+  throw new HttpError(404, "Not found");
+}
+
+const POST_ROUTES = new Set(["/api/media-servers/approve", "/api/media-servers/revoke", "/api/media-servers/picked"]);
+
+async function handleApi(req, url, res, core, browsed) {
+  if (POST_ROUTES.has(url.pathname)) {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
+      return;
+    }
+    const route = url.pathname.slice("/api/media-servers/".length);
+    sendJson(res, 200, { ok: true, ...(await mediaServersPost(route, await readJson(req), core, browsed)) });
+    return;
+  }
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
   if (url.pathname === "/api/config") {
     sendJson(res, 200, {
       ok: true,
@@ -268,7 +432,7 @@ async function handleApi(url, res) {
     return;
   }
   if (url.pathname === "/api/fs/list") {
-    sendJson(res, 200, { ok: true, ...(await listDir(url.searchParams.get("path") || "")) });
+    sendJson(res, 200, { ok: true, ...(await listDir(url.searchParams.get("path") || "", browsed)) });
     return;
   }
   sendJson(res, 404, { ok: false, error: "Not found" });
@@ -276,8 +440,16 @@ async function handleApi(url, res) {
 
 // ---- Server --------------------------------------------------------------------
 
-function createWebServer(core) {
+/**
+ * `shellKey` guards /api. It is made here, at start, and only the launch URL
+ * carries it: never server.json, the data folder, the core's environment or
+ * an error text, so neither the agent (which reads server.json) nor anything
+ * served by the core can learn it.
+ */
+function createWebServer(core, shellKey) {
   let boundPort = 0;
+  /** Network computers this shell listed a folder of (listDir): picker auto-trust. */
+  const browsed = new Set();
   const server = http.createServer(async (req, res) => {
     // DNS-rebinding guard: a hostile site can point its own hostname at
     // 127.0.0.1, so only answer requests addressed to loopback by name.
@@ -287,20 +459,22 @@ function createWebServer(core) {
       sendJson(res, 403, { ok: false, error: "Forbidden host" });
       return;
     }
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      sendJson(res, 405, { ok: false, error: "Method not allowed" });
-      return;
-    }
     const url = new URL(req.url || "/", `http://${host}`);
     try {
       if (url.pathname.startsWith("/api/")) {
-        // Same secret as the core: the page already holds it, so the picker
-        // and the core trust exactly the same callers.
-        if (req.headers["x-aive-token"] !== core.token || !core.token) {
-          sendJson(res, 401, { ok: false, error: "Unauthorized: missing or stale session token" });
+        // The shell key, not the core token: whoever holds server.json (the
+        // agent) can't list folders or allow a network computer here. A custom
+        // header also needs a CORS preflight, which this server never
+        // answers, so another site can't send one.
+        if (!shellKey || req.headers[SHELL_HEADER] !== shellKey) {
+          sendJson(res, 401, { ok: false, error: "Unauthorized: missing or stale shell key" });
           return;
         }
-        await handleApi(url, res);
+        await handleApi(req, url, res, core, browsed);
+        return;
+      }
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        sendJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
       }
       await serveStatic(url.pathname, res);
@@ -374,7 +548,8 @@ async function main() {
     process.exit(1);
   }
 
-  const web = createWebServer(core);
+  const shellKey = randomBytes(24).toString("base64url");
+  const web = createWebServer(core, shellKey);
   let port;
   try {
     port = await web.listen(opts.port);
@@ -389,7 +564,7 @@ async function main() {
     process.exit(1);
   }
 
-  const url = `http://127.0.0.1:${port}/?port=${core.port}&token=${encodeURIComponent(core.token)}`;
+  const url = `http://127.0.0.1:${port}/?port=${core.port}&token=${encodeURIComponent(core.token)}&shell=${shellKey}`;
   // Machine-readable line for scripts/tests (mirrors the core's own ready event).
   console.log(JSON.stringify({ event: "ready", url, port, corePort: core.port, coreOwned: core.owned }));
   console.error(`\n  ${PRODUCT_NAME} is running at:\n\n    ${url}\n\n  Press Ctrl+C to stop.\n`);

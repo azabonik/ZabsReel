@@ -1,4 +1,4 @@
-// The slice of playwright-core the scripts use (parity-gl.mts, smoke-electron.mts, and
+// The slice of playwright-core the scripts use (parity-gl.mts, smoke-electron.mts, smoke-web.ts and
 // packages/core/scripts/smoke-voicefx.ts). playwright-core is not a dependency: the scripts load
 // it at run time from PLAYWRIGHT_CORE or the npx cache, so its own types are not installed.
 // Declare only what the scripts call; add a member here when a script starts using it.
@@ -13,6 +13,8 @@ declare module "playwright-core" {
   }
   export interface Request {
     url(): string;
+    method(): string;
+    postData(): string | null;
     resourceType(): string;
   }
   export interface Response {
@@ -38,6 +40,8 @@ declare module "playwright-core" {
     innerText(): Promise<string>;
     allInnerTexts(): Promise<string[]>;
     inputValue(): Promise<string>;
+    fill(value: string): Promise<void>;
+    press(key: string): Promise<void>;
     focus(): Promise<void>;
     click(options?: { position?: { x: number; y: number } }): Promise<void>;
     isEnabled(): Promise<boolean>;
@@ -53,6 +57,8 @@ declare module "playwright-core" {
     on(event: "request", listener: (request: Request) => void): Page;
     on(event: "response", listener: (response: Response) => void): Page;
     goto(url: string): Promise<unknown>;
+    url(): string;
+    setDefaultTimeout(timeout: number): void;
     title(): Promise<string>;
     // A string is evaluated as an expression in the page; its result is unknown here.
     evaluate<R>(pageFunction: string | (() => R | Promise<R>)): Promise<R>;

@@ -1,12 +1,13 @@
 // Network computers in the editor (core hosttrust.ts, list_media_servers):
 // media on a server the user has not allowed is offline, and nothing in the
 // renderer asks the core for its file. This module holds the wording of the
-// banner above the preview and of the offline badges, and the LUT rule of the
-// live preview (networkcomputers.tsx draws them). The renderer never allows a
-// server itself: Review… asks the UI host (platform.approveMediaServer),
-// whose own dialog decides.
+// banner above the preview, of the offline badges and of the web shell's
+// approval dialogs, and the LUT rule of the live preview (networkcomputers.tsx
+// and reviewdialog.tsx draw them). The renderer never allows a server itself:
+// Review… asks the UI host (platform.approveMediaServer), whose own dialog
+// decides and whose own process writes the store.
 import { PRODUCT_NAME } from "@aive/core/brand";
-import { classifyPath } from "@aive/core/unc";
+import { classifyPath, examplePath } from "@aive/core/unc";
 import type { MediaAsset, MediaServers, Project } from "./types";
 
 type Pending = MediaServers["pending"][number];
@@ -103,3 +104,68 @@ function pendingWords(p: Pending, own: ReadonlySet<string>): Pick<Line, "before"
   }
   return { before: "The AI assistant asked to open a file on the network computer ", who, after: ". Nothing has been opened." };
 }
+
+// ---- the web shell's approval dialogs ----------------------------------------
+// The same wording and rules as electron/media-servers.cjs (the native
+// dialogs); smoke-savename checks that the two agree.
+
+/** An approval dialog: `buttons[0]` is the default and Esc (Keep offline, Remove), `buttons[1]` approves. */
+export type ApprovalText = { title: string; message: string; detail: string; buttons: [string, string] };
+
+/** "This project uses 3 files stored there, for example …", when the open project uses the server. */
+function projectUse(entry: Pending | undefined): string | null {
+  if (!entry || !entry.origins.includes("project") || !entry.files) return null;
+  const ex = entry.examples[0];
+  return `This project uses ${plural(entry.files, "file")} stored there${ex ? `, for example ${ex}` : ""}.`;
+}
+
+/**
+ * The path the page says the user opened, when the core agrees: `context` is
+ * `{ origin: "user", path }`, the path is on server `key`, and the core's
+ * pending entry lists it (sanitized as the core does) among the examples of a
+ * request. Otherwise null. Display-only: it never changes what Allow does.
+ */
+export function userContextPath(context: { origin?: string; path?: unknown } | undefined, key: string, entry: Pending | undefined): string | null {
+  if (!context || context.origin !== "user" || typeof context.path !== "string") return null;
+  const c = classifyPath(context.path);
+  if (c.kind !== "network" || c.host !== key) return null;
+  const shown = examplePath(context.path);
+  return entry && entry.origins.includes("request") && entry.examples.includes(shown) ? shown : null;
+}
+
+/** "Allow media from \\nas?" (Keep offline is the default and Esc). `platform` is the host's process.platform. */
+export function allowDialogText(key: string, entry: Pending | undefined, userPath: string | null, platform: string): ApprovalText {
+  const asked = entry && entry.origins.includes("request") && entry.examples[0] ? `The AI assistant asked to open ${entry.examples[0]}.` : null;
+  const first = userPath ? `You opened ${userPath}.` : projectUse(entry) ?? asked;
+  const risk = platform === "win32"
+    ? `When ${PRODUCT_NAME} opens them, Windows may automatically send your Windows sign-in (a scrambled copy of your password) to that computer. Allow it only if you know and trust this computer, for example your own network drive.`
+    : `To open them, ${PRODUCT_NAME} connects to that computer. Allow it only if you know and trust it.`;
+  const after = `Until you allow it, those clips stay offline and ${PRODUCT_NAME} does not contact that computer. You can remove it later in Project → Network computers.`;
+  return {
+    title: `Allow media from ${show(key)}?`,
+    message: `Allow ${PRODUCT_NAME} to open files on the network computer "${key}"?`,
+    detail: [first, risk, after].filter(Boolean).join("\n\n"),
+    buttons: ["Keep offline", "Allow"],
+  };
+}
+
+/** The Keep dialog for a server added outside ZabsReel (Remove is the default and Esc). */
+export function keepDialogText(key: string, entry: Pending | undefined, platform: string): ApprovalText {
+  const keepOnly = platform === "win32"
+    ? `Keep it only if you added it yourself. When ${PRODUCT_NAME} opens files there, Windows may automatically send your Windows sign-in (a scrambled copy of your password) to that computer.`
+    : `Keep it only if you added it yourself. To open files there, ${PRODUCT_NAME} connects to that computer.`;
+  return {
+    title: `Keep ${show(key)}?`,
+    message: `"${key}" was added to your allowed network computers outside ${PRODUCT_NAME}.`,
+    detail: [
+      `${PRODUCT_NAME} didn't add it. Something changed ${PRODUCT_NAME}'s settings file directly: you, another program, or an AI assistant that can run commands on this computer.`,
+      projectUse(entry),
+      keepOnly,
+      `If you remove it, those files stay offline and ${PRODUCT_NAME} asks you again if a project needs them.`,
+    ].filter(Boolean).join("\n\n"),
+    buttons: ["Remove", "Keep"],
+  };
+}
+
+/** Shown in place of any approval dialog while the store can't be read and there is no good copy yet. */
+export const UNREAD_DIALOG = `${PRODUCT_NAME} couldn't read its list of approved computers just now. Try again in a moment.`;

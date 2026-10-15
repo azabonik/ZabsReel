@@ -9,7 +9,8 @@
  * resolveSaveName; the second overwrite question; the unsaved-changes close
  * guard), electron/media-servers.cjs (the approval dialogs: the renderer's
  * display-only "You opened" context counts only when the core's pending list
- * agrees), src/editkeys.ts (S / Delete after a split) and src/pathbar.ts (a
+ * agrees; the web shell's in-app dialogs in src/mediaservers.ts say the
+ * same), src/editkeys.ts (S / Delete after a split) and src/pathbar.ts (a
  * late folder listing keeps a typed path).
  * Run: npx tsx apps/desktop/scripts/smoke-savename.ts
  */
@@ -20,6 +21,7 @@ import { clipIsLive, splitFrameFor } from "../src/editkeys.js";
 import { PathBarEdits } from "../src/pathbar.js";
 import type { Clip, Project } from "../src/types.js";
 import * as unc from "@aive/core/unc";
+import { allowDialogText, keepDialogText, userContextPath } from "../src/mediaservers.js";
 
 type Guard = { pendingSaveQuit: boolean; forceQuit: boolean };
 type GuardEvent =
@@ -166,5 +168,37 @@ eq(/scrambled copy of your password/.test(allow.detail ?? "") && !/scrambled/.te
 const keep = ms.keepDialog({ key: "evil", entry: { host: "evil", origins: ["outside", "project"], files: 2, examples: ["//evil/v/a.mp4"] }, platform: "linux" });
 eq([keep.title, keep.buttons, keep.defaultId, keep.cancelId], ["Keep \\\\evil?", ["Remove", "Keep"], 0, 0], "Keep dialog: Remove is the default and Esc");
 eq(keep.detail?.split("\n\n")[1], "This project uses 2 files stored there, for example //evil/v/a.mp4.", "…says what the project uses there");
+
+// The web shell's in-app dialogs (src/mediaservers.ts) say exactly what the native ones say, with the same buttons
+// (the first is the default and Esc), and take the page's context under the same rule.
+const pendings: ((Pending & { display: string; since: string; origins: ("project" | "request" | "outside")[] }) | undefined)[] = [
+  undefined, { ...asked, origins: ["request"], display: "\\\\nas", since: "" },
+  { ...asked, origins: ["project"], files: 1, examples: ["//nas/v/a.mp4"], display: "\\\\nas", since: "" },
+  { host: "nas", origins: ["project", "request", "outside"], files: 3, examples: ["//nas/v/a.mp4", "//nas/p/a.aive"], display: "\\\\nas", since: "" },
+  { host: "nas", origins: ["outside"], files: 0, examples: [], display: "\\\\nas", since: "" },
+];
+const contexts = [undefined, user, { origin: "user", path: "//nas/p/b.aive" }, { origin: "user", path: "//NAS/p/a.aive" }, { origin: "agent", path: "//nas/p/a.aive" }, { origin: "user", path: 7 }];
+let same = 0;
+let total = 0;
+for (const platform of ["win32", "linux", "darwin"]) {
+  for (const entry of pendings) {
+    const k = ms.keepDialog({ key: "nas", entry, platform });
+    const wk = keepDialogText("nas", entry, platform);
+    total++;
+    if (JSON.stringify([k.title, k.message, k.detail, k.buttons]) === JSON.stringify([wk.title, wk.message, wk.detail, wk.buttons])) same++;
+    else console.error("keep differs:", JSON.stringify(k), JSON.stringify(wk));
+    for (const context of contexts) {
+      const userPath = ms.userContextPath(context, "nas", entry, unc);
+      const a = ms.allowDialog({ key: "nas", entry, userPath, platform });
+      const wa = allowDialogText("nas", entry, userContextPath(context as Parameters<typeof userContextPath>[0], "nas", entry), platform);
+      total++;
+      if (JSON.stringify([a.title, a.message, a.detail, a.buttons]) === JSON.stringify([wa.title, wa.message, wa.detail, wa.buttons])) same++;
+      else console.error("allow differs:", JSON.stringify(a), JSON.stringify(wa));
+    }
+  }
+}
+eq(`${same}/${total}`, `${total}/${total}`, "web dialogs: the same title, message, detail and buttons as the native ones (Allow and Keep, every context)");
+eq(allowDialogText("nas", pendings[1], userContextPath(user, "nas", pendings[1]), "linux").detail.split("\n\n")[0], "You opened //nas/p/a.aive.", "web Allow dialog: the page's own path → \"You opened\"");
+eq(allowDialogText("nas", pendings[1], userContextPath({ origin: "user", path: "//nas/p/b.aive" }, "nas", pendings[1]), "linux").detail.split("\n\n")[0], "The AI assistant asked to open //nas/p/a.aive.", "…a path the core doesn't list → the core's wording");
 
 process.exit(failed ? 1 : 0);

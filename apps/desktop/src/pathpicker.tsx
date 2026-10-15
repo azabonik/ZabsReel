@@ -9,14 +9,16 @@ import { api, getSnapshot, subscribe, type FileFilter, type FsEntry, type FsList
 import { resolveSaveName } from "./savename";
 import { PathBarEdits } from "./pathbar";
 import { Alert, ArrowUp, File, Folder, X } from "./icons";
+import { ReviewDialog } from "./reviewdialog";
 
-/** Mounted once beside <App/>: renders the picker on demand and the expired-session notice. */
+/** Mounted once beside <App/>: renders the picker and the approval dialog on demand, and the expired-session notice. */
 export function PlatformHost() {
-  const { status, config, pending } = useSyncExternalStore(subscribe, getSnapshot);
+  const { status, config, pending, review } = useSyncExternalStore(subscribe, getSnapshot);
   return (
     <>
       {status === "expired" && <SessionNotice />}
       {pending && config && <PathPicker key={pending.id} request={pending} config={config} />}
+      {review && <ReviewDialog key={review.id} review={review} />}
     </>
   );
 }

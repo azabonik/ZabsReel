@@ -2,12 +2,15 @@
 // client config. The renderer runs under three hosts:
 //   electron — the desktop shell; native dialogs via the preload bridge (window.aive)
 //   web      — the localhost web shell (web/server.cjs); an in-app picker that
-//              browses the disk through the shell's token-gated /api
+//              browses the disk through the shell's /api (behind its shell key),
+//              and in-app dialogs to allow network computers
 //   bare     — a plain Vite page with no shell; window.prompt for paths
 // App code calls `platform.*` and never needs to know which one it got.
 
 import { PRODUCT_NAME } from "@aive/core/brand";
-import type { ApproveContext } from "./types";
+import { approvalDialogFor, bareFileName, classifyPath, normalizeHost } from "@aive/core/unc";
+import type { ApproveContext, MediaServers } from "./types";
+import { UNREAD_DIALOG, allowDialogText, keepDialogText, userContextPath, type ApprovalText } from "./mediaservers";
 
 export type McpConfig = { available: boolean; packaged: boolean; mcpEntry: string | null; json: string };
 export type FileFilter = { name: string; extensions: string[] }; // extensions without the dot; "*" = any
@@ -21,6 +24,15 @@ export type PickRequest =
   | { mode: "open"; multiple: boolean; title: string; confirmLabel: string; filters: FileFilter[]; key: string }
   | { mode: "save"; title: string; confirmLabel: string; filters: FileFilter[]; defaultName: string; key: string };
 export type PendingPick = PickRequest & { id: number; resolve: (paths: string[] | null) => void };
+/**
+ * An in-app dialog of the web shell: an approval dialog (Allow, or Keep for a
+ * server added outside ZabsReel) resolves true for its second button, false
+ * for the first (the default, and Esc); "unread" only says the list can't be
+ * read and resolves false.
+ */
+export type PendingReview =
+  | { kind: "allow" | "keep"; id: number; text: ApprovalText; resolve: (approve: boolean) => void }
+  | { kind: "unread"; id: number; text: { title: string; message: string }; resolve: (approve: boolean) => void };
 
 export type HostStatus = "detecting" | "electron" | "web" | "bare" | "expired";
 
@@ -48,8 +60,8 @@ export function exportFilters(ext = "mp4"): FileFilter[] {
 
 // ---- tiny external store (read by PlatformHost via useSyncExternalStore) ----
 
-type Snapshot = { status: HostStatus; config: WebConfig | null; pending: PendingPick | null };
-let snapshot: Snapshot = { status: "detecting", config: null, pending: null };
+type Snapshot = { status: HostStatus; config: WebConfig | null; pending: PendingPick | null; review: PendingReview | null };
+let snapshot: Snapshot = { status: "detecting", config: null, pending: null, review: null };
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<Snapshot>): void {
@@ -66,21 +78,30 @@ export function getSnapshot(): Snapshot {
 
 // ---- web shell API ----
 
-let token = "";
+/** The web shell's key (the launch URL's `shell`): it alone opens /api, the core token does not. */
+let shellKey = "";
+/** The core's list_media_servers: what the web dialogs show and pick from. */
+let listMediaServers: () => Promise<MediaServers> = () => Promise.reject(new Error("not connected"));
 
-/** GET a web-shell /api endpoint with the session token. */
-export async function api<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { "x-aive-token": token } });
-  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-  if (!res.ok || body.ok === false) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), { status: res.status });
-  return body as T;
+/** Call a web-shell /api endpoint with the shell key: GET, or POST with a JSON `body`. */
+export async function api<T>(path: string, body?: object): Promise<T> {
+  const res = await fetch(path, body === undefined
+    ? { headers: { "x-zabsreel-shell": shellKey } }
+    : { method: "POST", headers: { "x-zabsreel-shell": shellKey, "content-type": "application/json" }, body: JSON.stringify(body) });
+  const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok || out.ok === false) throw Object.assign(new Error(out.error || `HTTP ${res.status}`), { status: res.status });
+  return out as T;
 }
 
 let detected: Promise<HostStatus> | null = null;
 
-/** Work out which host we're in. Call once at startup with the core session token. */
-export function initPlatform(sessionToken: string): Promise<HostStatus> {
-  token = sessionToken;
+/**
+ * Work out which host we're in. Call once at startup with the web shell's key
+ * (empty elsewhere) and a way to read the core's list_media_servers.
+ */
+export function initPlatform(shell: string, mediaServers: () => Promise<MediaServers>): Promise<HostStatus> {
+  shellKey = shell;
+  listMediaServers = mediaServers;
   detected ??= (async (): Promise<HostStatus> => {
     if (window.aive) {
       set({ status: "electron" });
@@ -91,7 +112,7 @@ export function initPlatform(sessionToken: string): Promise<HostStatus> {
       set({ status: "web", config });
       return "web";
     } catch (err) {
-      // 401 = the web shell is there but this tab's token is missing or from an
+      // 401 = the web shell is there but this tab's key is missing or from an
       // earlier run. Anything else (404, proxy error, offline) = no shell.
       const status: HostStatus = (err as { status?: number }).status === 401 ? "expired" : "bare";
       set({ status });
@@ -102,15 +123,20 @@ export function initPlatform(sessionToken: string): Promise<HostStatus> {
 }
 
 function host(): Promise<HostStatus> {
-  return detected ?? initPlatform(token);
+  return detected ?? initPlatform(shellKey, listMediaServers);
 }
 
 let pickSeq = 0;
 
-/** Show the in-app picker; resolves with absolute paths, or null if cancelled. */
-function requestPick(req: PickRequest): Promise<string[] | null> {
+/**
+ * Show the in-app picker; resolves with absolute paths, or null if cancelled.
+ * A picked file on a network computer is allowed first (picker auto-trust),
+ * when the shell listed that folder for the user; otherwise the core refuses
+ * it and the page asks.
+ */
+async function requestPick(req: PickRequest): Promise<string[] | null> {
   snapshot.pending?.resolve(null);
-  return new Promise((resolve) => {
+  const paths = await new Promise<string[] | null>((resolve) => {
     set({
       pending: {
         ...req,
@@ -122,6 +148,56 @@ function requestPick(req: PickRequest): Promise<string[] | null> {
       },
     });
   });
+  if (paths?.some((p) => classifyPath(p).kind === "network")) {
+    await api("/api/media-servers/picked", { paths }).catch(() => { /* not saved: the core refuses, the page asks */ });
+  }
+  return paths;
+}
+
+/** Show an in-app review dialog (reviewdialog.tsx); resolves with the user's answer. */
+function requestReview(r: Omit<PendingReview, "id" | "resolve">): Promise<boolean> {
+  snapshot.review?.resolve(false);
+  return new Promise((resolve) => {
+    set({
+      review: {
+        ...r,
+        id: ++pickSeq,
+        resolve: (approve: boolean) => {
+          set({ review: null });
+          resolve(approve);
+        },
+      } as PendingReview,
+    });
+  });
+}
+
+/**
+ * The web shell's review of server `key`, as electron/main.cjs does it: the
+ * core's list picks the dialog (approvalDialogFor) and gives the counts and
+ * examples; `context` only changes the wording. The shell writes the store.
+ */
+async function reviewInPage(key: string, context: ApproveContext | undefined): Promise<boolean> {
+  const ms = await listMediaServers();
+  const which = approvalDialogFor(ms, key);
+  if (which === "unread") {
+    await requestReview({ kind: "unread", text: { title: "Network computers", message: UNREAD_DIALOG } });
+    return false;
+  }
+  if (which === "allow" && ms.approved.some((a) => a.host === key)) return true; // allowed already (another tab, or the app)
+  const entry = ms.pending.find((p) => p.host === key);
+  const os = snapshot.config?.platform ?? "";
+  if (which === "keep") {
+    if (await requestReview({ kind: "keep", text: keepDialogText(key, entry, os) })) {
+      await api("/api/media-servers/approve", { host: key });
+      return true;
+    }
+    // Remove, or Esc: only while it is still outside (another tab or the app may have kept it meanwhile).
+    const { removed } = await api<{ removed: boolean }>("/api/media-servers/revoke", { host: key, onlyIfOutside: true });
+    return !removed;
+  }
+  if (!(await requestReview({ kind: "allow", text: allowDialogText(key, entry, userContextPath(context, key, entry), os) }))) return false;
+  await api("/api/media-servers/approve", { host: key });
+  return true;
 }
 
 export const platform = {
@@ -154,7 +230,9 @@ export const platform = {
   async saveProjectAs(defaultName: string): Promise<string | null> {
     const h = await host();
     if (h === "electron") return window.aive!.saveProjectAs(defaultName);
-    const base = `${(defaultName || "Untitled").replace(/\.aive$/i, "")}.aive`;
+    // Only the bare file name: the name comes from the project (a file or the
+    // agent can set it), and must never point the picker at a folder.
+    const base = `${bareFileName(defaultName || "Untitled").replace(/\.aive$/i, "")}.aive`;
     if (h === "web") return (await requestPick({ mode: "save", title: "Save project as", confirmLabel: "Save", filters: PROJECT_FILTERS.slice(0, 1), defaultName: base, key: "project" }))?.[0] ?? null;
     if (h === "expired") return null;
     return window.prompt("Absolute path to save (.aive):");
@@ -162,10 +240,11 @@ export const platform = {
 
   /**
    * Whether this host can allow a network computer: only a UI host process
-   * can write the approval store, after its own dialog. The bare page can't.
+   * (Electron main, the web shell) can write the approval store, after its
+   * own dialog. The bare page can't.
    */
   canReviewMediaServers(): boolean {
-    return snapshot.status === "electron";
+    return snapshot.status === "electron" || snapshot.status === "web";
   },
 
   /**
@@ -176,14 +255,20 @@ export const platform = {
   async approveMediaServer(server: string, context?: ApproveContext): Promise<boolean> {
     const h = await host();
     if (h === "electron" && window.aive!.mediaServers) return window.aive!.mediaServers.approve(server, context);
-    return false;
+    if (h !== "web") return false;
+    const n = normalizeHost(server);
+    return n.ok ? reviewInPage(n.key, context) : false;
   },
 
   /** Remove `server` from the allowed list (Project → Network computers). Rejects when that could not be saved. */
   async revokeMediaServer(server: string): Promise<void> {
     const h = await host();
     if (h === "electron" && window.aive!.mediaServers) return window.aive!.mediaServers.revoke(server);
-    throw new Error(`Open ${PRODUCT_NAME} (the app) to change the network computers.`);
+    if (h === "web") {
+      await api("/api/media-servers/revoke", { host: server });
+      return;
+    }
+    throw new Error(`Open ${PRODUCT_NAME} (the app or npm run web) to change the network computers.`);
   },
 
   async getMcpConfig(): Promise<McpConfig | null> {

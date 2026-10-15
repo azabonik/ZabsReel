@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import type { CoreApi, RpcRefusal } from "./api";
 import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, MediaServers, Project, TextStyle, TranscriptHit, VisualHit } from "./types";
@@ -15,7 +15,7 @@ import {
   Film, FolderPlus, Frame, Import, Logo, Music, Pause, Play, Plus, Redo, RotateCcw, Scissors,
   Search, SkipEnd, SkipStart, Sliders, Sparkles, Trash, Type, Undo, Waveform, X,
 } from "./icons";
-import { platform } from "./platform";
+import { getSnapshot as platformSnapshot, platform, subscribe as onPlatform } from "./platform";
 import { presetForPath, presetSwapNote } from "./savename";
 import { clipIsLive, splitFrameFor } from "./editkeys";
 import type { KeyDetection, KeyPatch } from "./keyfx";
@@ -127,6 +127,8 @@ export function App({ api }: { api: CoreApi }) {
   const [dismissedServers, setDismissedServers] = useState<ReadonlySet<string>>(new Set());
   // Paths this window itself sent and the core refused (sanitized as in the pending list): "You tried…".
   const ownRequests = useRef(new Set<string>());
+  // Re-render once the host is known: the web shell can review servers too, but only after its /api answered.
+  useSyncExternalStore(onPlatform, () => platformSnapshot().status);
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("aive.recent") || "[]"); } catch { return []; }
   });

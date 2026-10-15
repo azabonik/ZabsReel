@@ -39,3 +39,8 @@
 .ms-actions .btn + .btn { margin-left: 6px; }
 .ms-note { margin: 8px 0; font-size: 12px; color: var(--warn); line-height: 1.45; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* The web shell's approval dialog (reviewdialog.tsx); its frame is .session-notice. */
+.review-dialog { width: min(520px, calc(100vw - 32px)); }
+.review-dialog .review-message { color: var(--ink); font-weight: 500; }
+.review-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
