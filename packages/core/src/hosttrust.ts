@@ -159,10 +159,22 @@ export function hasDotDot(p: string): boolean {
 }
 
 /** Store file names (and their temp, .bad-* and break-claim files), refused on any network path. */
-const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/;
+const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/i;
+/** The add-on folder's names: `addons`, then `remotion` or a name the installer owns there. */
+const ADDONS_NAME = /^addons$/i;
+const ADDON_NAME = /^(?:remotion$|\.(?:install\.lock|staging-|old-|removed-))/i;
 
-/** A path segment as the name rule compares it: without a `:` stream suffix or trailing dots and spaces, lower-cased. */
-const nameForm = (s: string) => s.replace(/:.*$/, "").replace(/[. ]+$/, "").toLowerCase();
+/** A path segment as the name rule compares it: NFKC, without a `:` stream suffix or trailing dots and spaces. */
+const nameForm = (s: string) => s.normalize("NFKC").replace(/:.*$/, "").replace(/[. ]+$/, "");
+
+/**
+ * True when name `n` is one `re` matches in any case. Windows and SMB compare
+ * names upper-cased, and toLowerCase leaves "ı" (upper-cased, I) as it is, so
+ * `n` is tested upper-cased and lower-cased (`re` has the i flag, which folds
+ * ASCII only). NFKC ({@link nameForm}) already makes "ſ" an s and fullwidth
+ * letters ASCII.
+ */
+const isName = (n: string, re: RegExp) => re.test(n.toUpperCase()) || re.test(n.toLowerCase());
 
 /** A path as shown in a message: quoted, hidden characters visible, at most 160 characters. */
 function show(p: string): string {
@@ -479,26 +491,31 @@ export class HostTrust {
   }
 
   /**
-   * The name rule, for a network path, text only (each segment without a `:`
-   * stream suffix or trailing dots and spaces, any case). It has two parts:
-   * the trust folder when the last segment is a store file; the add-on folder
-   * when a segment `addons` is followed by a segment `remotion` (anywhere, so
-   * the folders themselves too; a segment that is only dots or spaces is
-   * skipped). It covers a server that gives no file id, and another name of
-   * this computer or of the data folder's server, which is never contacted.
+   * The name rule, for a network path without a ".." segment, text only. Each
+   * segment is taken in its {@link nameForm}, in any case ({@link isName}),
+   * and a segment that is then empty (only dots or spaces) is skipped, as
+   * Windows and SMB do. It has two parts: the trust folder when the last
+   * segment is a store file; the add-on folder when a segment `addons` is
+   * followed by `remotion` or by a name the installer owns there (anywhere,
+   * so the folders themselves too). It covers a server that gives no file id,
+   * and another name of this computer or of the data folder's server, which
+   * is never contacted.
    */
   private nameRule(p: string): Area | null {
-    const segments = p.split(/[\\/]/).filter((s) => s !== "");
-    if (STORE_NAME.test(nameForm(segments.at(-1) ?? ""))) return "trust";
-    const names = segments.map(nameForm).filter((s) => s !== "");
-    return names.some((s, i) => s === "addons" && names[i + 1] === "remotion") ? "addons" : null;
+    const names = p.split(/[\\/]/).map(nameForm).filter((s) => s !== "");
+    if (isName(names.at(-1) ?? "", STORE_NAME)) return "trust";
+    return names.some((s, i) => isName(s, ADDONS_NAME) && isName(names[i + 1] ?? "", ADDON_NAME)) ? "addons" : null;
   }
 
-  /** Quick form and name rule, no I/O: the first step of a loaded field's check. */
+  /**
+   * Quick form and name rule, no I/O: the first step of a loaded field's
+   * check. As in checkPath, the name rule does not judge a path with a ".."
+   * segment: loadFieldCheck gives it EDOTDOT next (only that field offline).
+   */
   private privateAsSpelled(p: string): boolean {
     const c = classifyPath(p);
     if (c.kind === "refused") return false;
-    return this.quick(p) !== null || (c.kind === "network" && this.nameRule(p) !== null);
+    return this.quick(p) !== null || (c.kind === "network" && !hasDotDot(p) && this.nameRule(p) !== null);
   }
 
   /**
@@ -620,9 +637,10 @@ export class HostTrust {
    * resolves it: the caller passes the full path instead. Local: the
    * real-path form ({@link realCheck}: links, 8.3 names, trailing dots and
    * case on Windows). Network: the name rule's two parts (the trust store's
-   * file names, and `addons` followed by `remotion`), plus the identity check
-   * on the data folder's own server; no other server is contacted. A refused
-   * form passes (safepath's assertPathUsable refuses it with its own message).
+   * file names, and `addons` followed by `remotion` or an installer name),
+   * plus the identity check on the data folder's own server; no other server
+   * is contacted. A refused form passes (safepath's assertPathUsable refuses
+   * it with its own message).
    */
   checkPath(p: string, cache = new Map<string, FileId | null>()): PathCheck {
     if (p.includes("\0")) return NUL;

@@ -67,10 +67,14 @@
  *                            caught by the identity check and the name rule;
  *                            on an allowed server that is not the data
  *                            folder's, a path with "addons" then "remotion"
- *                            (any case, trailing dots or spaces, a stream) is
- *                            the add-on folder by name: every writer and two
- *                            readers refuse it, a loaded field with it is
- *                            private, nothing is contacted;
+ *                            or an installer name (any case, NFKC, trailing
+ *                            dots or spaces, a stream, a "." segment) is
+ *                            the add-on folder by name, and one ending in a
+ *                            store file name (also after a "." or " "
+ *                            segment) is the trust folder: every writer and
+ *                            two readers refuse it, a loaded field with it is
+ *                            private, nothing is contacted; with a ".."
+ *                            segment it is EDOTDOT (only that field offline);
  *                            a loaded field whose folder can't be checked
  *                            stays offline alone (pathCheckFailed) until a
  *                            re-check passes.
@@ -1794,7 +1798,12 @@ async function main() {
     // raw segments (no nameForm) → the case, trailing dot / space, stream and "." rows fail. Match "addons"
     // alone → the addons\other.mp4 and addons\x\remotion rows fail. Let privateAsSpelled use only the trust
     // part → the loadFieldCheck and load rows fail (the field is on a server other than the data folder's,
-    // so nothing else checks it).
+    // so nothing else checks it). Keep the empty normal forms in nameRule (the store names on the last raw
+    // segment) → the trailing "\.", " " and ".:x" trust rows and the mixed add-on row fail. Drop the
+    // upper-cased comparison from isName → the ı row fails (NFKC alone makes ſ an s). Drop NFKC from
+    // nameForm → the fullwidth rows fail. Drop the installer names from ADDON_NAME → the .install.lock,
+    // .staging-, .OLD- and .removed- rows fail. Drop !hasDotDot from privateAsSpelled → the ".." row's
+    // loadFieldCheck and load rows fail (the whole project is refused).
     const ALIAS = "zr-evil-alias.invalid";
     const cwd = process.cwd();
     process.chdir(root); // a backslash path that slips through (a mutation) is a relative name in the temp dir
@@ -1808,9 +1817,37 @@ async function main() {
       `${S}\\addons\\remotion:stream`,
       `${S}\\addons:x\\remotion::$INDEX_ALLOCATION\\x.aive`,
       `//${ALIAS}/share/addons/./remotion/x.aive`,
+      // A trailing "." / " " / ".:x" segment, and mixed forms (Windows and SMB skip such a segment).
+      `${S}\\addons\\remotion\\.`,
+      `${S}\\addons\\remotion\\ `,
+      `${S}\\addons\\remotion\\.:x`,
+      `${S}\\addons. \\. \\.:x\\Remotion. :y\\ \\.`,
+      // Case in either fold after NFKC: ſ (NFKC s, upper-cased S), ı (upper-cased I), fullwidth letters.
+      `${S}\\addon\u017f\\remotion\\x.aive`,
+      `${S}\\addons\\remot\u0131on\\x.aive`,
+      `${S}\\\uff21\uff24\uff24\uff2f\uff2e\uff33\\remotion\\x.aive`,
+      // The installer's own names in addons\.
+      `${S}\\addons\\.install.lock`,
+      `${S}\\addons\\.staging-abc\\node_modules\\x.js`,
+      `${S}\\addons\\.OLD-1`,
+      `${S}\\addons\\.removed-2\\y`,
+    ];
+    // The trust part on that server: the store's file names, the last segment after "." and " " ones are skipped.
+    const trustPaths = [
+      `${S}\\x\\trust\\hosts.json\\.`,
+      `${S}\\x\\trust\\hosts.json\\ `,
+      `${S}\\x\\trust\\hosts.json\\.:x`,
+      `${S}\\x\\trust\\hosts.key. :y\\ \\.\\.:x`,
+      `${S}\\x\\trust\\ho\u017fts.json`,
+      `${S}\\x\\trust\\HOSTS.JSON`,
+      `${S}\\x\\trust\\hosts.json.`,
+      `${S}\\x\\trust\\\uff48\uff4f\uff53\uff54\uff53.key`,
     ];
     const f = join(root, "alias-addon.aive");
     writeFixture(f, JSON.stringify(project(refusedPaths[0])));
+    const dots = `${S}\\addons\\remotion\\..\\..\\a.mp4`;
+    const fd = join(root, "alias-dotdot.aive");
+    writeFixture(fd, JSON.stringify(project(dots, { hasVideo: false, hasAudio: true })));
     const before = listing();
     const trust = (engine as unknown as { trust: HostTrust }).trust;
     // approveHost's and revokeHost's own writes of hosts.json name the host: the fixture, not the engine.
@@ -1827,6 +1864,21 @@ async function main() {
         }
         check(trust.loadFieldCheck(p) === "private", `add-on name rule: loadFieldCheck(${JSON.stringify(p)}) is "private"`);
       }
+      const TRUST = /is in ZabsReel's private settings folder, which tools can't open\.$/;
+      for (const p of trustPaths) {
+        for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["load_project", "path"], ["import_video", "path"]] as const) {
+          const e = await thrown(() => dispatch(engine, m, { [key]: p }));
+          check(!!e && TRUST.test(e.message), `trust name rule: ${m}.${key} of ${JSON.stringify(p)} on an allowed server is refused with the trust folder message (${e?.message.slice(-90)})`);
+        }
+        check(trust.loadFieldCheck(p) === "private", `trust name rule: loadFieldCheck(${JSON.stringify(p)}) is "private"`);
+      }
+      // A ".." segment: refused as EDOTDOT before the name rule, so a loaded asset with it goes offline alone.
+      const rd = trust.checkPath(dots);
+      check(!rd.ok && !rd.private && rd.code === "EDOTDOT" && trust.loadFieldCheck(dots) === "EDOTDOT",
+        `add-on name rule: ${JSON.stringify(dots)} is EDOTDOT from checkPath and loadFieldCheck (${JSON.stringify(rd)}, ${trust.loadFieldCheck(dots)})`);
+      const loadedDots = await thrown(() => engine.load(fd));
+      check(loadedDots === null && engine.getProject().assets[0].pathCheckFailed === "EDOTDOT",
+        `add-on name rule: a project with that asset path loads, the asset offline (pathCheckFailed ${engine.getProject().assets[0].pathCheckFailed}) (${loadedDots?.message})`);
       const r = (await dispatch(engine, "remember_projects", { paths: refusedPaths })) as { added: unknown[]; skipped: { reason: string }[] };
       check(r.added.length === 0 && r.skipped.length === refusedPaths.length && r.skipped.every((s) => s.reason === "in ZabsReel's graphics add-on folder"),
         `add-on name rule: remember_projects skips each one (${JSON.stringify(r.skipped.map((s) => s.reason))})`);
@@ -1835,7 +1887,8 @@ async function main() {
       const loaded = await errOf(() => engine.load(f));
       check(/^asset "asset_a1" path /.test(loaded) && / is in ZabsReel's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(loaded),
         `add-on name rule: a project whose asset path is in the add-on folder on that server does not load (${loaded.slice(-120)})`);
-      for (const p of [`${S}\\addons\\other.mp4`, `${S}\\remotion\\x.mp4`, `${S}\\addons\\x\\remotion\\y.mp4`, `${S}\\addons-remotion\\y.mp4`]) {
+      for (const p of [`${S}\\addons\\other.mp4`, `${S}\\remotion\\x.mp4`, `${S}\\addons\\x\\remotion\\y.mp4`, `${S}\\addons-remotion\\y.mp4`,
+        `${S}\\addons\\.hidden.mp4`, `${S}\\x\\remotion\\.staging-1\\y.mp4`, `${S}\\x\\trust\\hosts.mp4`, `${S}\\x\\hosts.json\\a.mp4`, `${S}\\v\\clip.mp4`]) {
         const g2 = await errOf(() => trust.assertNotPrivate(p, "path"));
         check(g2 === "(accepted)" && trust.loadFieldCheck(p) === "ok", `add-on name rule: ${JSON.stringify(p)} passes G2 and the load-field check (${g2.slice(0, 90)})`);
       }
