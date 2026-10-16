@@ -28,8 +28,9 @@
  *  P7. drift guard   — after a fixture lock change --check fails, listing the
  *                      changed, added and removed entries and each platform's
  *                      download with reuse; --accept-addon-change records the
- *                      new fingerprint and --check passes; the repository
- *                      accepts this build's fingerprint.
+ *                      new fingerprint and --check passes; --check
+ *                      --accept-addon-change is refused and records nothing;
+ *                      the repository accepts this build's fingerprint.
  *  P8. --browser     — a write fills the headless-shell table from a folder
  *                      of zips; --check --browser passes on them, and names a
  *                      changed zip's sha256 and entry count, a zip with a
@@ -89,12 +90,16 @@
  *                      of them reached an extractor.
  *  I4. tar entries   — "..", absolute, backslash, drive, symlink, hard link,
  *                      device, FIFO, pax and GNU long names with "..": refused;
- *                      pax and long names read; in an install, the message.
+ *                      pax and long names read; in an install, the message,
+ *                      for a package and for the browser zip.
  *  I5. the registry  — AIVE_ADDON_REGISTRY other than http loopback with a port
- *                      is refused before any fetch; a packaged core ignores it.
+ *                      is refused before any fetch; a packaged core ignores it,
+ *                      and refuses the installer's test seams.
  *  I6. the lock      — a live lock refuses install, Remove and recovery; a dead
  *                      pid's lock, or a live unrelated pid's 3-minute-old one,
- *                      is taken over; the heartbeat rewrites it.
+ *                      is taken over, but not a fresh lock another host wrote
+ *                      after this one read the stale one; the heartbeat
+ *                      rewrites it.
  *  I7. cancel, kill  — a cancel before or during the download leaves nothing; a
  *                      process killed before addon.json leaves "not installed",
  *                      and recovery or the next install cleans its staging.
@@ -108,16 +113,18 @@
  *  I10. the guard    — a renderer whose text the load-time rewrite doesn't know
  *                      is never activated.
  *  I11. messages     — 500, a closed socket, a timeout, nothing listening,
- *                      ENOSPC and ENAMETOOLONG give the D3.8 messages.
+ *                      ENOSPC and ENAMETOOLONG (also while taking the lock)
+ *                      give the D3.8 messages.
  *  I12. names        — Windows device names, trailing dots and spaces, refused
  *                      characters and case collisions refused for win32-x64,
  *                      case and Unicode-form collisions for darwin; written for
  *                      linux-x64.
- *  I13. reuse        — an update after a one-package change fetches only it;
- *                      a tampered or incomplete source package is fetched
+ *  I13. reuse        — an update after a one-package change fetches only it,
+ *                      a nested package's change too (its parent is reused
+ *                      around it); a tampered or incomplete source package is fetched
  *                      again; a pin move reuses from another version's folder;
  *                      a failed activation leaves the source byte-identical.
- *  I14. no route     — only addon/index.ts imports the installer, and no RPC
+ *  I14. no route     — only addon/index.ts imports or names the installer, and no RPC
  *                      method (so no MCP tool) installs, removes or recovers.
  *  Z1. the zip reader — stored, deflate and empty entries, Unix execute bits;
  *                      zip64 (end record, locator, extra field), encryption,
@@ -430,6 +437,7 @@ function p6() {
 // MUTATION: drop drift() from --check (gen-graphics-lock.mjs) → the changed-lock row passes --check. Drop the
 // "added" lines from drift() → the listing row fails. Count every package as downloaded (ignore `kept`) →
 // the per-platform download row fails. Let --accept-addon-change leave `accepted` as it was → the accept row fails.
+// Drop the --check --accept-addon-change refusal → the refusal row passes the drift guard (exit 0).
 function p7() {
   console.log("P7. the drift guard...");
   const dir = fixtureRoot("p7");
@@ -451,6 +459,12 @@ function p7() {
     `--check lists the changed, added and removed entries (${JSON.stringify(c.out.split("\n").filter((l) => /^ {2}(changed|added|removed)/.test(l)))})`);
   check(/^ {2}linux-x64: the update downloads 0\.0 MB \(2 of 14 packages, some sizes unknown\); the browser is reused$/m.test(c.out) && /^ {2}win32-x64: the update downloads 0\.0 MB \(1 of 11 packages, some sizes unknown\); the browser is reused$/m.test(c.out),
     `--check gives each platform's download with reuse (${JSON.stringify(c.out.split("\n").filter((l) => /^ {2}(linux|win32)-x64:/.test(l)))})`);
+  // --check writes nothing, so --check --accept-addon-change is refused rather than reported as accepted.
+  const dataPath = join(dir, "scripts", "graphics-lock-data.json");
+  const dataBefore = readFileSync(dataPath);
+  const both = gen(dir, "--check", "--accept-addon-change");
+  check(both.status === 2 && /--accept-addon-change writes the data file; run it without --check/.test(both.out) && !/accepted/.test(both.out.replace(/accept-addon-change/g, "")) && readFileSync(dataPath).equals(dataBefore) && gen(dir, "--check").status === 1,
+    `--check --accept-addon-change on an unaccepted pin exits 2, records nothing, and --check still fails (${both.status}: ${both.out.trim().split("\n").pop()})`);
   const acc = gen(dir, "--accept-addon-change");
   const after = gen(dir, "--check");
   const data = JSON.parse(readFileSync(join(dir, "scripts", "graphics-lock-data.json"), "utf8")) as { accepted?: { closure: string[] } };
@@ -1206,8 +1220,16 @@ const hitPaths = () => [...hits.entries()].filter(([, n]) => n > 0).map(([p]) =>
 const fsCalls: string[] = [];
 let recording = false;
 let fault: ((name: string, path: string) => NodeJS.ErrnoException | null) | null = null;
+/** Runs after each fs/promises readFile returns (I6's lock race). */
+let afterRead: ((path: string) => void) | null = null;
 {
   const fsp = createRequire(import.meta.url)("node:fs/promises") as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  const rf = fsp.readFile;
+  fsp.readFile = async (...args: unknown[]) => {
+    const got = await rf(...args);
+    afterRead?.(String(args[0]));
+    return got;
+  };
   for (const name of ["writeFile", "rename", "open", "mkdir", "link", "copyFile", "chmod", "rm"]) {
     const real = fsp[name];
     fsp[name] = async (...args: unknown[]) => {
@@ -1358,7 +1380,8 @@ async function i3() {
 }
 
 // MUTATION: drop the ".." check from entryNameProblem (names.ts) → the traversal row is written. Accept type
-// "2" in tar.ts → the symlink row is written.
+// "2" in tar.ts → the symlink row is written. Pass SHELL to archive() for the zip (install.ts) → the zip row
+// reads "The add-on's the Chrome headless shell".
 async function i4() {
   console.log("I4. tar entries the reader refuses...");
   const cases: [string, TarIn, RegExp][] = [
@@ -1397,9 +1420,16 @@ async function i4() {
   const { err } = await fixtureInstall(dataDir, buildPin(pkgs));
   check(err?.reason === "archive" && /^The add-on's a@1\.0\.0 holds an entry ZabsReel doesn't install \("package\/\.\.\/escape\.txt": a "\.\." segment\)\. Nothing was installed\.$/.test(err.message) && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir),
     `in an install: "${err?.message}"; nothing activated`);
+  // The browser zip's refusal names it the same way (the pinned bytes are the bad zip itself).
+  const zd = freshData();
+  const zip = fixtureZip(PLATFORM!, [{ name: `chrome-headless-shell-${PLATFORM}/locked.bin`, data: "x", flags: 1 }]);
+  const z = await fixtureInstall(zd, buildPin(basePkgs(POSTINSTALL), { [PLATFORM!]: zip }, "-i4zip"));
+  check(z.err?.reason === "archive" && z.err.message === `The add-on's Chrome headless shell holds an entry ZabsReel doesn't install ("chrome-headless-shell-${PLATFORM}/locked.bin": an encrypted entry). Nothing was installed.` && !existsSync(graphicsAddonDir(zd)) && clean(zd),
+    `in an install, a browser zip entry: "${z.err?.message}"; nothing activated`);
 }
 
-// MUTATION: accept any http host in registryOverride (install.ts) → the non-loopback rows fetch.
+// MUTATION: accept any http host in registryOverride (install.ts) → the non-loopback rows fetch. Ignore
+// `checkout` in seams() → the packaged-seams row installs (to the stub) and recovers.
 async function i5() {
   console.log("I5. AIVE_ADDON_REGISTRY...");
   const f = buildPin(basePkgs(POSTINSTALL));
@@ -1428,9 +1458,22 @@ async function i5() {
   const err = await thrown(() => T.install(dataDir, { fetch: stub, acceptedLicenseSha256: LICENSE, via: "web" }, { pin: f.pin, env: { AIVE_ADDON_REGISTRY: REGISTRY }, from: join(pkg, "dist", "addon", "install.js") }));
   check(err instanceof GraphicsAddonInstallError && err.reason === "http" && /^registry\.npmjs\.org answered 404 for /.test(err.message) && urls.length > 0 && urls.every((u) => u.startsWith("https://registry.npmjs.org/")) && hits.size === 0,
     `a packaged core ignores it: only registry.npmjs.org URLs, to a stub (${urls.length}); the loopback registry got nothing (${err?.message})`);
+  // A packaged core refuses the installer's test seams: install, recovery and Remove touch nothing.
+  const sd = freshData();
+  mkdirSync(join(sd, "addons", ".staging-planted"), { recursive: true });
+  urls.length = 0;
+  const packaged: AddonSeams = { pin: f.pin, platform: PLATFORM!, checkout: join(pkg, "dist", "addon", "install.js") };
+  const refused = [
+    await thrown(() => T.install(sd, { fetch: stub, acceptedLicenseSha256: LICENSE, via: "web" }, packaged)),
+    await thrown(() => T.recover(sd, packaged)),
+    await thrown(() => T.remove(sd, "web", packaged)),
+  ];
+  check(refused.every((e) => e?.message === "The add-on installer's test seams work only in a ZabsReel source checkout.") && urls.length === 0 && JSON.stringify(addonsListing(sd)) === JSON.stringify([".staging-planted"]),
+    `a packaged core refuses the test seams (platform, pin) for install, recovery and Remove; nothing fetched or deleted (${refused.map((e) => e?.message ?? "no error").join(" | ")})`);
 }
 
 // MUTATION: never treat a lock as stale (holder() stale: false) → the dead-pid and old-mtime rows refuse.
+// Delete a stale lock without reading it again (takeLock) → the race row deletes the other host's lock.
 // Drop the heartbeat timer → the heartbeat row sees the mtime unchanged.
 async function i6() {
   console.log("I6. the install lock...");
@@ -1460,6 +1503,22 @@ async function i6() {
   plant(old, process.ppid, 3 * 60_000);
   const r2 = await fixtureInstall(old, f);
   check(r2.got?.state === "ready" && !existsSync(lockAt(old)), `a lock of a live but unrelated pid (the parent, ${process.ppid}) not rewritten for 3 minutes is taken over (${r2.err?.message ?? "ready"})`);
+  // Two hosts judge the same stale lock: the other host deletes it and writes its own just after this one
+  // read it. This one must not delete that fresh lock.
+  const race = freshData();
+  plant(race, Number(deadPid));
+  const theirs = JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString(), via: "desktop", token: "taker" });
+  let swapped = false;
+  afterRead = (p) => {
+    if (swapped || p !== lockAt(race)) return;
+    swapped = true;
+    writeFileSync(lockAt(race), theirs);
+  };
+  hits.clear();
+  const r4 = await fixtureInstall(race, f);
+  afterRead = null;
+  check(swapped && r4.err?.reason === "busy" && readFileSync(lockAt(race), "utf8") === theirs && hits.size === 0,
+    `a fresh lock written after the stale one was read is kept: busy, nothing fetched (${r4.err?.message ?? r4.got?.state})`);
   // The heartbeat: a slow download (1.5 s) with a 100 ms heartbeat rewrites the lock while it waits.
   const slow = freshData();
   const a = f.pin.closure.find((e) => e.path === "node_modules/a")!;
@@ -1631,7 +1690,8 @@ async function i10() {
 }
 
 // MUTATION: map every fetch failure to "corrupted" (download) → the 500, closed-socket, timeout and offline rows
-// fail. Drop the ENOSPC branch in failure() → the disk row gives the generic message.
+// fail. Drop the ENOSPC branch in failure() → the disk row gives the generic message. Call takeLock outside
+// failure() → the lock rows get the raw fs error.
 async function i11() {
   console.log("I11. the failure messages...");
   const f = buildPin(basePkgs(POSTINSTALL));
@@ -1660,6 +1720,19 @@ async function i11() {
     const { err } = await fixtureInstall(d, f);
     fault = null;
     check(err?.reason === reason && err.message === message(d) && !existsSync(graphicsAddonDir(d)) && clean(d), `${code} while extracting: "${err?.message}"`);
+  }
+  // The same while taking the lock: creating addons/, or writing .install.lock.
+  for (const [code, reason, op, message] of [
+    ["ENOSPC", "disk", "writeFile", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
+    ["ENAMETOOLONG", "path", "mkdir", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+  ] as const) {
+    const d = freshData();
+    hits.clear();
+    fault = (name, p) => (name === op && (p.endsWith(".install.lock") || p === join(d, "addons")) ? errno(code) : null);
+    const { err } = await fixtureInstall(d, f);
+    fault = null;
+    check(err instanceof GraphicsAddonInstallError && err.reason === reason && err.message === message(d) && !existsSync(join(d, "addons", ".install.lock")) && hits.size === 0,
+      `${code} on ${op === "mkdir" ? "addons/" : ".install.lock"}: "${err?.message}"`);
   }
 }
 
@@ -1690,7 +1763,8 @@ async function i12() {
 
 // MUTATION: skip reuse (always download) → every reuse row fetches everything. Reuse without comparing the
 // digest → the tampered and missing-file rows keep the bad copy. Move (rename) the source folder instead of
-// copying → the failed-activation row finds the source changed.
+// copying → the failed-activation row finds the source changed. Walk nested package folders as part of
+// their parent (stage()'s nested callback `() => false`) → the nested row fetches a too.
 async function i13() {
   console.log("I13. reuse on update (D3.9)...");
   const pkgs = basePkgs(POSTINSTALL);
@@ -1709,6 +1783,19 @@ async function i13() {
     && readFileSync(join(graphicsAddonDir(d), "node_modules/a/node_modules/b/b.js"), "utf8") === "b\n" && clean(d),
     `an update after a one-package change fetches exactly that tarball, nothing else, the browser included (${JSON.stringify(hitPaths())})`);
   check(last?.done === total && last.total === total, `progress counts the reused bytes as done: it ends at the total, ${total}, though ${aBytes} bytes were downloaded (${last?.done} of ${last?.total})`);
+  // A change to the nested package only: a is reused around it (its digest skips a/node_modules/b), b is fetched.
+  const nestedMoved = pkgs.map((p) => (p.path === "node_modules/a/node_modules/b" ? { ...p, version: "1.0.1", files: [pkgJson("b", "1.0.1"), { name: "b.js", data: "b2\n" }] } : p));
+  const f3 = buildPin(nestedMoved);
+  const bPath = new URL(f3.pin.closure.find((e) => e.path === "node_modules/a/node_modules/b")!.resolved).pathname;
+  const dn = freshData();
+  await fixtureInstall(dn, f1);
+  hits.clear();
+  const nu = await fixtureInstall(dn, f3);
+  const nd = graphicsAddonDir(dn);
+  check(nu.got?.state === "ready" && JSON.stringify(hitPaths()) === JSON.stringify([bPath]) && readFileSync(join(nd, "node_modules/a/index.js"), "utf8") === "module.exports = 1;\n"
+    && readFileSync(join(nd, "node_modules/a/lib/deep/x.js"), "utf8") === "x\n" && readFileSync(join(nd, "node_modules/a/node_modules/b/b.js"), "utf8") === "b2\n"
+    && JSON.parse(readFileSync(join(nd, "node_modules/a/node_modules/b/package.json"), "utf8")).version === "1.0.1" && clean(dn),
+    `an update of the nested a/node_modules/b fetches exactly its tarball; a is reused around it; both hold the right bytes (${JSON.stringify(hitPaths())})`);
   // A tampered source package (one byte), and a source missing one file: re-downloaded, not reused.
   for (const [what, damage] of [
     ["one byte changed", (dir: string) => writeFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "y\n")],
@@ -1742,7 +1829,7 @@ async function i13() {
 }
 
 // MUTATION: import the installer into rpc.ts → the import row fails. Add an RPC method named install_graphics_addon
-// → the method row fails.
+// → the method row fails. Import installGraphicsAddon from "./addon/index.js" into rpc.ts → the names row fails.
 function i14() {
   console.log("I14. the core never installs...");
   const listTs = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? listTs(join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [join(dir, e.name)] : []));
@@ -1750,6 +1837,9 @@ function i14() {
   const allowed = new Set(["addon/index.ts", "addon/install.ts"].map((f) => join(REPO, "packages", "core", "src", ...f.split("/"))));
   const importers = sources.filter((f) => !allowed.has(f) && /["'][./]*(?:addon\/)?install(?:\.js)?["']/.test(readFileSync(f, "utf8")));
   check(sources.length > 50 && importers.length === 0, `no core or MCP source but addon/index.ts imports the installer (${sources.length} files; ${JSON.stringify(importers.map((f) => f.slice(REPO.length)))})`);
+  // Through addon/index.js too: no other source names the installer's functions.
+  const namers = sources.filter((f) => !allowed.has(f) && /\b(?:installGraphicsAddon|removeGraphicsAddon|recoverGraphicsAddon|addonInstallerForTests)\b/.test(readFileSync(f, "utf8")));
+  check(namers.length === 0, `no core or MCP source but addon/index.ts and addon/install.ts names installGraphicsAddon, removeGraphicsAddon, recoverGraphicsAddon or addonInstallerForTests (${JSON.stringify(namers.map((f) => f.slice(REPO.length)))})`);
   const named = Object.keys(methods).filter((m) => /install|addon|remove_graphics|recover|accept/i.test(m));
   check(named.length === 0, `no RPC method installs, removes, recovers or accepts the add-on (${JSON.stringify(named)})`);
 }

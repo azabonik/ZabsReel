@@ -23,8 +23,10 @@
  *                      resolves there, and the compositor D2 names, exist (and
  *                      are executable off Windows): no install script needed.
  *  R5. the audit     — the win32 tree under a worst-case data folder
- *                      (C:\Users\<20 characters>\.zabsreel\data\…) stays within
- *                      259 characters, and holds no device name, trailing dot
+ *                      (C:\Users\<20 characters>\.zabsreel\data\…), in the
+ *                      longest folder the installer writes it to
+ *                      (addons\.staging-<12 hex>\), stays within 259
+ *                      characters, and holds no device name, trailing dot
  *                      or space, character Windows refuses, or two names that
  *                      differ only in case; the darwin trees hold no names that
  *                      differ only in case or Unicode form, and none whose NFC
@@ -292,10 +294,13 @@ function r5(trees: Partial<Record<AddonPlatform, string>>) {
   console.log("R5. the Windows and macOS trees...");
   const win = trees["win32-x64"];
   if (win) {
-    const prefix = `C:\\Users\\${"u".repeat(20)}\\.zabsreel\\data\\addons\\remotion\\${ADDON_REMOTION_VERSION}\\`;
+    // The tree sits in addons\.staging-<12 hex>\ while an install runs (as long as .removed-<12 hex>), then in
+    // addons\remotion\<version>\: the longer of the folders the installer uses.
+    const folder = [`.staging-${"0".repeat(12)}`, `remotion\\${ADDON_REMOTION_VERSION}`].sort((a, b) => b.length - a.length)[0];
+    const prefix = `C:\\Users\\${"u".repeat(20)}\\.zabsreel\\data\\addons\\${folder}\\`;
     const paths = allPaths(win);
     const longest = paths.map((p) => prefix + p.split("/").join("\\")).sort((a, b) => b.length - a.length)[0];
-    check(longest.length <= 259, `win32-x64: ${paths.length} paths; the longest with a worst-case prefix is ${longest.length} characters (≤ 259): ${longest}`);
+    check(longest.length <= 259, `win32-x64: ${paths.length} paths; the longest with a worst-case prefix (${folder}) is ${longest.length} characters (≤ 259): ${longest}`);
     const names = paths.map((p) => p.slice(p.lastIndexOf("/") + 1));
     const reserved = names.filter((n) => /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$/i.test(n));
     const trailing = names.filter((n) => /[. ]$/.test(n));

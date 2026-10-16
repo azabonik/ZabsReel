@@ -108,6 +108,8 @@ export interface AddonSeams {
   env?: NodeJS.ProcessEnv;
   /** A core file whose package folder decides "source checkout" for AIVE_ADDON_REGISTRY. */
   from?: string;
+  /** A core file whose package folder must also be a source checkout for these seams to be honoured. */
+  checkout?: string;
   /** Retry renames as on win32. */
   windowsRenames?: boolean;
   renameWindowMs?: number;
@@ -119,7 +121,7 @@ export interface AddonSeams {
 }
 
 function seams(s: AddonSeams): AddonSeams {
-  if (Object.keys(s).length > 0 && !isSourceCheckout()) throw new Error(`The add-on installer's test seams work only in a ${PRODUCT_NAME} source checkout.`);
+  if (Object.keys(s).length > 0 && !(isSourceCheckout() && (s.checkout === undefined || isSourceCheckout(s.checkout)))) throw new Error(`The add-on installer's test seams work only in a ${PRODUCT_NAME} source checkout.`);
   return s;
 }
 
@@ -142,11 +144,13 @@ function alive(pid: number): boolean {
   }
 }
 
-/** Whether the lock at `file` is stale, and which host holds it. */
-async function holder(file: string, s: AddonSeams): Promise<{ stale: boolean; via?: string }> {
+/** Whether the lock at `file` is stale, which host holds it, and the text that was judged. */
+async function holder(file: string, s: AddonSeams): Promise<{ stale: boolean; via?: string; text?: string }> {
   let info: { pid?: unknown; via?: unknown } | undefined;
+  let text: string | undefined;
   try {
-    info = JSON.parse(await readFile(file, "utf8")) as typeof info;
+    text = await readFile(file, "utf8");
+    info = JSON.parse(text) as typeof info;
   } catch {
     /* being written, or damaged: the mtime decides */
   }
@@ -157,7 +161,7 @@ async function holder(file: string, s: AddonSeams): Promise<{ stale: boolean; vi
     return { stale: true }; // gone meanwhile
   }
   const pidGone = typeof info?.pid === "number" && !alive(info.pid);
-  return { stale: pidGone || Date.now() - mtime > (s.staleMs ?? STALE_MS), via: typeof info?.via === "string" ? info.via : undefined };
+  return { stale: pidGone || Date.now() - mtime > (s.staleMs ?? STALE_MS), via: typeof info?.via === "string" ? info.via : undefined, text };
 }
 
 /** Take `addons/.install.lock` (D3.1 step 2), or refuse while another host holds it. */
@@ -175,7 +179,8 @@ async function takeLock(addons: string, via: string, s: AddonSeams): Promise<Loc
     }
     const held = await holder(file, s);
     if (attempt === 0 && held.stale) {
-      await rm(file, { force: true });
+      // Delete only the lock that was judged stale: another host that took it over meanwhile keeps its own.
+      if (held.text !== undefined && (await readFile(file, "utf8").catch(() => undefined)) === held.text) await rm(file, { force: true });
       continue;
     }
     throw fail("busy", `Another ${PRODUCT_NAME} window is installing the graphics add-on (${held.via ?? "unknown"}). Wait for it to finish.`);
@@ -418,6 +423,7 @@ async function pool<T>(items: readonly T[], n: number, abort: AbortController, f
 /** A package as messages name it: `name@version`. */
 const label = (e: AddonLockEntry) => `${e.path.slice(e.path.lastIndexOf("node_modules/") + "node_modules/".length)}@${e.version}`;
 const SHELL = "the Chrome headless shell";
+/** `what`: a package's label, or "Chrome headless shell". */
 const archive = (what: string, err: ArchiveRefusal) => fail("archive", `The add-on's ${what} holds an entry ${PRODUCT_NAME} doesn't install (${err.message}). Nothing was installed.`);
 
 /**
@@ -547,7 +553,7 @@ async function stage(addons: string, staging: string, platform: AddonPlatform, p
     try {
       files = await extractZip(zip, join(staging, "browser"), { platform, names, prefix: "browser", signal: run.signal });
     } catch (err) {
-      throw err instanceof ArchiveRefusal ? archive(SHELL, err) : err;
+      throw err instanceof ArchiveRefusal ? archive("Chrome headless shell", err) : err;
     }
     await rm(zip, { force: true });
     browserDigest = treeDigest(files);
@@ -582,8 +588,14 @@ async function install(dataDir: string, opts: InstallOptions, s: AddonSeams): Pr
   if (opts.acceptedLicenseSha256 !== licenseSha256) throw fail("license", "Accept Remotion's license in the graphics add-on dialog first. Nothing was installed.");
   const override = registryOverride(s);
   const total = pin.lists[platform].paths.reduce((n, p) => n + (pin.closure.find((e) => e.path === p)?.bytes ?? 0), 0) + pin.shell[platform].size;
+  const mb = Math.max(1, Math.round(total / 1e6));
   const addons = join(dataDir, "addons");
-  const lock = await takeLock(addons, opts.via, s);
+  let lock: Lock;
+  try {
+    lock = await takeLock(addons, opts.via, s);
+  } catch (err) {
+    throw failure(err, dataDir, opts.signal, mb);
+  }
   let staging: string | null = null;
   try {
     opts.signal?.throwIfAborted();
@@ -626,7 +638,7 @@ async function install(dataDir: string, opts: InstallOptions, s: AddonSeams): Pr
     staging = null;
     await dropOtherVersions(addons, s);
   } catch (err) {
-    throw failure(err, dataDir, opts.signal, Math.max(1, Math.round(total / 1e6)));
+    throw failure(err, dataDir, opts.signal, mb);
   } finally {
     if (staging) await rm(staging, { recursive: true, force: true }).catch(() => {});
     await releaseLock(lock);

@@ -40,7 +40,7 @@
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --check --require-sizes
 //                                                                   also exit 1 when a platform's tarball total is unknown
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --accept-addon-change
-//                                                                   write the file and accept its fingerprint
+//                                                                   write the file and accept its fingerprint (refused with --check: exit 2)
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] [--check] --browser [--zips <dir>]
 //                                                                   also fill (or check) the headless-shell table from the zips
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --json   print the computed pin, write nothing
@@ -408,6 +408,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const check = process.argv.includes("--check");
   const accept = process.argv.includes("--accept-addon-change");
   const browser = process.argv.includes("--browser");
+  if (check && accept) {
+    // --check writes nothing, so it could not record the fingerprint it accepted.
+    console.error("[gen-graphics-lock] --accept-addon-change writes the data file; run it without --check, then run --check");
+    process.exit(2);
+  }
   const dataFile = JSON.parse(readFileSync(join(root, DATA), "utf8"));
   const zips = resolve(arg("--zips") ?? join(userInfo().homedir, ".cache", "zabsreel-addon", `cft-${dataFile.headlessShell.version}`));
   const shell = browser ? browserTable(dataFile.headlessShell.version, zips) : null;
