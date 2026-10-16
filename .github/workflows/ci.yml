@@ -132,10 +132,10 @@ jobs:
         run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
       # The graphics add-on's pin is in sync with the root lock (media-free):
-      # closure, per-platform lists, the add-on-only list, the headless-shell
-      # table against Remotion's TESTED_VERSION.
-      - name: Graphics add-on pin (gen-graphics-lock --check)
-        run: node scripts/gen-graphics-lock.mjs --check
+      # closure, per-platform lists and their tarball totals, the add-on-only
+      # list, the headless-shell table against Remotion's TESTED_VERSION.
+      - name: Graphics add-on pin (gen-graphics-lock --check --require-sizes)
+        run: node scripts/gen-graphics-lock.mjs --check --require-sizes
 
       # The pin's walk on fixture locks, and the core's side of the add-on:
       # its states, add_graphic's 409 refusals and the UI signal, the pinned

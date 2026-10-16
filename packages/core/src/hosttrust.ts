@@ -161,6 +161,9 @@ export function hasDotDot(p: string): boolean {
 /** Store file names (and their temp, .bad-* and break-claim files), refused on any network path. */
 const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/;
 
+/** A path segment as the name rule compares it: without a `:` stream suffix or trailing dots and spaces, lower-cased. */
+const nameForm = (s: string) => s.replace(/:.*$/, "").replace(/[. ]+$/, "").toLowerCase();
+
 /** A path as shown in a message: quoted, hidden characters visible, at most 160 characters. */
 function show(p: string): string {
   const s = JSON.stringify(p);
@@ -476,21 +479,26 @@ export class HostTrust {
   }
 
   /**
-   * The name rule: a network path whose last segment (without a `:` stream
-   * suffix or trailing dots and spaces, any case) is a store file. It covers a
-   * server that gives no file id, and another name of the data folder's
-   * server, where the identity check does not run.
+   * The name rule, for a network path, text only (each segment without a `:`
+   * stream suffix or trailing dots and spaces, any case). It has two parts:
+   * the trust folder when the last segment is a store file; the add-on folder
+   * when a segment `addons` is followed by a segment `remotion` (anywhere, so
+   * the folders themselves too; a segment that is only dots or spaces is
+   * skipped). It covers a server that gives no file id, and another name of
+   * this computer or of the data folder's server, which is never contacted.
    */
-  private storeName(p: string): boolean {
-    const last = p.split(/[\\/]/).filter((s) => s !== "").pop() ?? "";
-    return STORE_NAME.test(last.replace(/:.*$/, "").replace(/[. ]+$/, "").toLowerCase());
+  private nameRule(p: string): Area | null {
+    const segments = p.split(/[\\/]/).filter((s) => s !== "");
+    if (STORE_NAME.test(nameForm(segments.at(-1) ?? ""))) return "trust";
+    const names = segments.map(nameForm).filter((s) => s !== "");
+    return names.some((s, i) => s === "addons" && names[i + 1] === "remotion") ? "addons" : null;
   }
 
   /** Quick form and name rule, no I/O: the first step of a loaded field's check. */
   private privateAsSpelled(p: string): boolean {
     const c = classifyPath(p);
     if (c.kind === "refused") return false;
-    return this.quick(p) !== null || (c.kind === "network" && this.storeName(p));
+    return this.quick(p) !== null || (c.kind === "network" && this.nameRule(p) !== null);
   }
 
   /**
@@ -611,9 +619,10 @@ export class HostTrust {
    * path with a ".." segment is refused (code EDOTDOT) before anything
    * resolves it: the caller passes the full path instead. Local: the
    * real-path form ({@link realCheck}: links, 8.3 names, trailing dots and
-   * case on Windows). Network: the name rule, plus the identity check on the
-   * data folder's own server; no other server is contacted. A refused form
-   * passes (safepath's assertPathUsable refuses it with its own message).
+   * case on Windows). Network: the name rule's two parts (the trust store's
+   * file names, and `addons` followed by `remotion`), plus the identity check
+   * on the data folder's own server; no other server is contacted. A refused
+   * form passes (safepath's assertPathUsable refuses it with its own message).
    */
   checkPath(p: string, cache = new Map<string, FileId | null>()): PathCheck {
     if (p.includes("\0")) return NUL;
@@ -623,8 +632,8 @@ export class HostTrust {
     if (area) return PRIVATE(area);
     if (hasDotDot(p) || hasDotDot(text)) return DOTDOT;
     if (c.kind === "network") {
-      // The store's file names: the trust folder only.
-      if (this.storeName(text)) return { ok: false, private: true, area: "trust", rule: "the name rule" };
+      const named = this.nameRule(text);
+      if (named) return { ok: false, private: true, area: named, rule: "the name rule" };
       return c.host === this.dataFolderHost ? this.identity(text, c.host, cache) : OK;
     }
     return this.realCheck(text, cache);

@@ -15,10 +15,10 @@
 //  - the headless-shell table and the tarball sizes, from
 //    scripts/graphics-lock-data.json (the lock has no sizes). A write fills a
 //    missing size from npm's local cache (the tarball by its integrity), when
-//    it is there; --check never reads the cache. The cache holds only this
-//    machine's platform's tarballs, so another platform's total can be null;
-//    --require-sizes (the release job's tag builds) makes that a problem, so no
-//    release ships without the installer's size cap.
+//    it is there; --check never reads the cache. A cache without another
+//    platform's tarballs leaves that platform's total null; --require-sizes
+//    (CI and every release job) makes that a problem, so no release ships
+//    without the installer's size cap.
 //
 // Usage: node scripts/gen-graphics-lock.mjs [--root <dir>]          write the file
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --check  exit 1 when it is out of sync or the pin is wrong

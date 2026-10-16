@@ -65,6 +65,12 @@
  *                            calls don't; /file never serves it; on the data
  *                            folder's own server, other share spellings are
  *                            caught by the identity check and the name rule;
+ *                            on an allowed server that is not the data
+ *                            folder's, a path with "addons" then "remotion"
+ *                            (any case, trailing dots or spaces, a stream) is
+ *                            the add-on folder by name: every writer and two
+ *                            readers refuse it, a loaded field with it is
+ *                            private, nothing is contacted;
  *                            a loaded field whose folder can't be checked
  *                            stays offline alone (pathCheckFailed) until a
  *                            re-check passes.
@@ -1778,6 +1784,67 @@ async function main() {
       syncBuiltinESMExports();
       (engine as unknown as { trust: HostTrust }).trust = realTrust;
       realTrust.reload(); // publish the engine's own servers again
+      process.chdir(cwd);
+    }
+  }
+  {
+    // The name rule's add-on part: an allowed server that is another name of this computer (\\wsl.localhost,
+    // \\localhost\c$) reaches the add-on folder by text alone; it is never contacted.
+    // MUTATION: drop the add-on part of HostTrust.nameRule → every refusal and the load rows fail. Compare the
+    // raw segments (no nameForm) → the case, trailing dot / space, stream and "." rows fail. Match "addons"
+    // alone → the addons\other.mp4 and addons\x\remotion rows fail. Let privateAsSpelled use only the trust
+    // part → the loadFieldCheck and load rows fail (the field is on a server other than the data folder's,
+    // so nothing else checks it).
+    const ALIAS = "zr-evil-alias.invalid";
+    const cwd = process.cwd();
+    process.chdir(root); // a backslash path that slips through (a mutation) is a relative name in the temp dir
+    const listing = () => JSON.stringify(readdirSync(root).sort());
+    const S = `\\\\${ALIAS}\\share`;
+    const refusedPaths = [
+      `${S}\\x\\.zabsreel\\data\\addons\\remotion\\4.0.481\\node_modules\\@remotion\\renderer\\package.json`,
+      `${S}\\addons\\remotion`,
+      `${S}\\ADDONS\\Remotion\\x.aive`,
+      `${S}\\addons.\\remotion \\x.aive`,
+      `${S}\\addons\\remotion:stream`,
+      `${S}\\addons:x\\remotion::$INDEX_ALLOCATION\\x.aive`,
+      `//${ALIAS}/share/addons/./remotion/x.aive`,
+    ];
+    const f = join(root, "alias-addon.aive");
+    writeFixture(f, JSON.stringify(project(refusedPaths[0])));
+    const before = listing();
+    const trust = (engine as unknown as { trust: HostTrust }).trust;
+    // approveHost's and revokeHost's own writes of hosts.json name the host: the fixture, not the engine.
+    const mark = touched.length;
+    await approveHost(engine.dataDir, ALIAS, "prompt");
+    trust.reload();
+    touched.length = mark;
+    const AREA = /is in ZabsReel's graphics add-on folder, which tools can't open\.$/;
+    try {
+      for (const p of refusedPaths) {
+        for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["export_captions", "path"], ["export_otio", "path"], ["load_project", "path"], ["import_video", "path"]] as const) {
+          const e = await thrown(() => dispatch(engine, m, { [key]: p }));
+          check(!!e && AREA.test(e.message), `add-on name rule: ${m}.${key} of ${JSON.stringify(p)} on an allowed server is refused with the add-on folder message (${e?.message.slice(-90)})`);
+        }
+        check(trust.loadFieldCheck(p) === "private", `add-on name rule: loadFieldCheck(${JSON.stringify(p)}) is "private"`);
+      }
+      const r = (await dispatch(engine, "remember_projects", { paths: refusedPaths })) as { added: unknown[]; skipped: { reason: string }[] };
+      check(r.added.length === 0 && r.skipped.length === refusedPaths.length && r.skipped.every((s) => s.reason === "in ZabsReel's graphics add-on folder"),
+        `add-on name rule: remember_projects skips each one (${JSON.stringify(r.skipped.map((s) => s.reason))})`);
+      const logs = await logsOf(() => thrown(() => dispatch(engine, "save_project", { path: refusedPaths[0] })));
+      check(logs.some((l) => /in the private graphics add-on folder \(the name rule\)$/.test(l)), `add-on name rule: the core's log says which rule refused it (${JSON.stringify(logs)})`);
+      const loaded = await errOf(() => engine.load(f));
+      check(/^asset "asset_a1" path /.test(loaded) && / is in ZabsReel's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(loaded),
+        `add-on name rule: a project whose asset path is in the add-on folder on that server does not load (${loaded.slice(-120)})`);
+      for (const p of [`${S}\\addons\\other.mp4`, `${S}\\remotion\\x.mp4`, `${S}\\addons\\x\\remotion\\y.mp4`, `${S}\\addons-remotion\\y.mp4`]) {
+        const g2 = await errOf(() => trust.assertNotPrivate(p, "path"));
+        check(g2 === "(accepted)" && trust.loadFieldCheck(p) === "ok", `add-on name rule: ${JSON.stringify(p)} passes G2 and the load-field check (${g2.slice(0, 90)})`);
+      }
+      check(touched.length === mark && listing() === before, `add-on name rule: no fs or child_process call saw the server, nothing was created (${JSON.stringify(touched.slice(mark, mark + 5))})`);
+    } finally {
+      const seen = touched.length;
+      await revokeHost(engine.dataDir, ALIAS);
+      trust.reload();
+      touched.length = seen;
       process.chdir(cwd);
     }
   }

@@ -32,16 +32,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The graphics add-on's pin is in sync with the lock. A tag build also
-      # needs every platform's tarball total (the installer's size cap and
-      # progress): until scripts/graphics-lock-data.json has every size, a tag
-      # build stops here.
-      - name: Graphics add-on pin (gen-graphics-lock --check)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        run: node scripts/gen-graphics-lock.mjs --check
-
-      - name: Graphics add-on pin with every platform's size (gen-graphics-lock --check --require-sizes)
-        if: startsWith(github.ref, 'refs/tags/')
+      # The graphics add-on's pin is in sync with the lock, with every
+      # platform's tarball total (the installer's size cap and progress). Tag
+      # builds and dry runs alike.
+      - name: Graphics add-on pin (gen-graphics-lock --check --require-sizes)
         run: node scripts/gen-graphics-lock.mjs --check --require-sizes
 
       - name: Build core + mcp + renderer

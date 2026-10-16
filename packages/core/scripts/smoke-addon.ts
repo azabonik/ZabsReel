@@ -3,10 +3,11 @@
  * refuses Remotion. The installer's rows (slice 2) join as their own section.
  *
  * The pin (scripts/gen-graphics-lock.mjs):
- *  P1. the real lock — --check passes; closure 212, platform lists 166 / 166 /
- *                      166 / 168 (both linux-x64 compositors), add-on-only
- *                      193 (the 18 shared packages and semver@7.8.4 left out),
- *                      the headless-shell table for every platform.
+ *  P1. the real lock — --check --require-sizes passes; closure 212, platform
+ *                      lists 166 / 166 / 166 / 168 (both linux-x64
+ *                      compositors), add-on-only 193 (the 18 shared packages
+ *                      and semver@7.8.4 left out), the headless-shell table
+ *                      and the tarball total for every platform.
  *  P2. the walk      — on a fixture lock shaped like F3, each platform gets
  *                      npm's set: the wasm32-only subtree is skipped, both
  *                      linux-x64 compositors are kept; the closure has all.
@@ -227,10 +228,11 @@ function fixtureRoot(name: string, lock = fixtureLock(), opts: { remotion?: stri
 // ---- P: the pin ----------------------------------------------------------------------
 
 // MUTATION: drop the peerDependencies edges from walk() (gen-graphics-lock.mjs) → the closure is 211 and P1 fails.
+// Write the pin without the win32 and darwin tarball sizes (slice 1's data file) → the --require-sizes and totals rows fail.
 function p1() {
   console.log("P1. the real lock...");
-  const r = spawnSync(process.execPath, [GEN, "--check"], { encoding: "utf8", cwd: REPO });
-  check(r.status === 0, `gen-graphics-lock.mjs --check passes (${`${r.stdout}${r.stderr}`.trim().split("\n").pop()})`);
+  const r = spawnSync(process.execPath, [GEN, "--check", "--require-sizes"], { encoding: "utf8", cwd: REPO });
+  check(r.status === 0, `gen-graphics-lock.mjs --check --require-sizes passes (${`${r.stdout}${r.stderr}`.trim().split("\n").pop()})`);
   const counts = ADDON_PLATFORMS.map((p) => `${p} ${ADDON_PLATFORM_LISTS[p].count}`).join(", ");
   check(ADDON_CLOSURE.length === 212 && counts === "win32-x64 166, darwin-x64 166, darwin-arm64 166, linux-x64 168" && ADDON_PLATFORMS.every((p) => ADDON_PLATFORM_LISTS[p].paths.length === ADDON_PLATFORM_LISTS[p].count),
     `closure ${ADDON_CLOSURE.length}; ${counts}`);
@@ -241,8 +243,8 @@ function p1() {
   check(ADDON_ONLY.length === 193 && !shared.some((s) => ADDON_ONLY.includes(s)) && ADDON_ONLY.includes("webpack@" + ADDON_CLOSURE.find((e) => e.path === "node_modules/webpack")?.version) && ADDON_ONLY.some((s) => s.startsWith("esbuild@")),
     `add-on-only: ${ADDON_ONLY.length} name@version pairs, without the shared packages and semver@7.8.4, with webpack and esbuild`);
   check(ADDON_PLATFORMS.every((p) => /^https:\/\/storage\.googleapis\.com\/chrome-for-testing-public\/149\.0\.7790\.0\//.test(HEADLESS_SHELL.platforms[p].url) && /^[0-9a-f]{64}$/.test(HEADLESS_SHELL.platforms[p].sha256))
-    && /^[0-9a-f]{64}$/.test(ADDON_LOCK_SHA256) && ADDON_PLATFORM_LISTS["linux-x64"].bytes !== null,
-    `a Chrome for Testing ${HEADLESS_SHELL.version} zip with its sha256 for every platform; linux-x64 tarballs total ${ADDON_PLATFORM_LISTS["linux-x64"].bytes} bytes`);
+    && /^[0-9a-f]{64}$/.test(ADDON_LOCK_SHA256) && ADDON_PLATFORMS.every((p) => ADDON_PLATFORM_LISTS[p].bytes !== null),
+    `a Chrome for Testing ${HEADLESS_SHELL.version} zip with its sha256 for every platform; tarball totals ${ADDON_PLATFORMS.map((p) => `${p} ${ADDON_PLATFORM_LISTS[p].bytes}`).join(", ")} bytes`);
 }
 
 // MUTATION: make matches() (gen-graphics-lock.mjs) ignore cpu → the wasm32 subtree is in every list and P2 fails.
