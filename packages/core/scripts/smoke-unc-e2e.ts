@@ -41,6 +41,10 @@
  *  6. Revoke: the media is offline again and nothing opens it any more.
  *  7. (win32 only) A second share spelling of a data folder on \\localhost is
  *     refused by the identity check or the name rule; skipped elsewhere.
+ *  8. Without AIVE_REMOTION_ADDON and without an installed graphics add-on,
+ *     add_graphic answers 409 with code graphics_addon_missing. Every other
+ *     core gets AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo root
+ *     when unset), so step 2's graphics bundle.
  * Log mode (only if NETWORK_GATE is set back to "log"): a project naming
  * \\zr-nas.invalid\s\a.mp4 loads unchanged (not offline, nothing pending), a
  * "would block" line is logged, and the probe goes through (to the stub,
@@ -61,6 +65,7 @@ import { approveHost, revokeHost } from "../src/trusthosts.js";
 import { NETWORK_GATE } from "../src/io/gatedfs.js";
 import { projectToOtio } from "../src/interop/otio.js";
 import type { Project } from "../src/types.js";
+import { useDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -816,9 +821,24 @@ async function enforcedSteps(): Promise<void> {
   }
 }
 
+// ---- 8. no graphics add-on -----------------------------------------------------------------
+// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
+async function noAddon() {
+  console.log("8. no graphics add-on: add_graphic answers 409 graphics_addon_missing...");
+  const core = await startCore(mkdtempSync(join(root, "data-noaddon-")), { AIVE_REMOTION_ADDON: "" });
+  try {
+    const r = await rpc(core, "add_graphic", { template: "title", durationSeconds: 1 });
+    check(!r.ok && r.status === 409 && r.code === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: ${r.status} ${r.code} (${r.error?.slice(0, 100)})`);
+  } finally {
+    await stop(core);
+  }
+}
+
 async function main() {
   process.exitCode = 1; // a run that stops early (an event loop that drains) never passes
   for (const f of [cli, mcpCli]) if (!existsSync(f)) throw new Error(`${f} is missing: run npm run build first`);
+  useDevAddon();
   console.log(`(network gate: ${enforced ? "enforced" : "log mode"})`);
   check(enforced, `the gate ships enforced (NETWORK_GATE "${NETWORK_GATE}")`);
   if (enforced) await enforcedSteps();
@@ -826,6 +846,7 @@ async function main() {
     await logMode();
     console.log("(steps 1-4 and 7 need the gate enforced: in log mode it only logs)");
   }
+  await noAddon();
   rmSync(root, { recursive: true, force: true });
   console.log(failures === 0 ? "\nALL UNC E2E CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

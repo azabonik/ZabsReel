@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { EditorEngine } from "./engine.js";
 import { PRODUCT_NAME } from "./brand.js";
 import { MediaOfflineError, MediaServerNotApprovedError } from "./hosttrust.js";
+import { GraphicsAddonError, type GraphicsAddonCode } from "./addon/resolve.js";
 import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame, type Clip } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
@@ -211,6 +212,8 @@ function summarizeTimeline(engine: EditorEngine) {
     trackCount: project.tracks.length,
     // The human↔AI annotation channel: named markers with notes.
     markers: project.markers ?? [],
+    // Whether add_graphic can render now (the graphics add-on's state).
+    graphics: engine.graphicsState(),
     tracks,
     ...(offlineClips.size || music
       ? { offlineMedia: { count: offlineClips.size, servers: [...servers], ...(music ? { music: music.text } : {}) } }
@@ -228,9 +231,9 @@ const clipPlacement = {
 export const methods = {
   get_state: {
     description:
-      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers). An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
+      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers), and `graphics`: whether add_graphic can render (\"ready\", or \"not-installed\", \"update-needed\", \"broken\", \"unsupported\": the user manages the Remotion add-on in the app). An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
     schema: empty,
-    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers() }),
+    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers(), graphics: engine.graphicsState() }),
   },
 
   timeline_summary: {
@@ -1657,7 +1660,7 @@ export type MethodName = keyof typeof methods;
 export class RpcError extends Error {
   constructor(
     message: string,
-    readonly code: "unknown_method" | "invalid_params" | "handler_error" | "media_server_not_approved" | "media_offline",
+    readonly code: "unknown_method" | "invalid_params" | "handler_error" | "media_server_not_approved" | "media_offline" | GraphicsAddonCode,
     /** For media_server_not_approved: the server's key, and whether it is outside or the store is unread; for media_offline: the servers. */
     readonly details: { host?: string; outside?: boolean; unread?: boolean; hosts?: string[] } = {},
   ) {
@@ -1684,6 +1687,8 @@ export async function dispatch(engine: EditorEngine, method: string, params: unk
       throw new RpcError(err.message, "media_server_not_approved", { host: err.host, ...(err.outside ? { outside: true } : {}), ...(err.unread ? { unread: true } : {}) });
     }
     if (err instanceof MediaOfflineError) throw new RpcError(err.message, "media_offline", { hosts: err.hosts });
+    // D5.3: no ready graphics add-on, by its state.
+    if (err instanceof GraphicsAddonError) throw new RpcError(err.message, err.code);
     throw err;
   }
 }

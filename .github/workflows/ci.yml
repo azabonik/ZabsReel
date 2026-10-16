@@ -131,5 +131,19 @@ jobs:
       - name: Smoke — graphic imports and bundle reads
         run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
+      # The graphics add-on's pin is in sync with the root lock (media-free):
+      # closure, per-platform lists, the add-on-only list, the headless-shell
+      # table against Remotion's TESTED_VERSION.
+      - name: Graphics add-on pin (gen-graphics-lock --check)
+        run: node scripts/gen-graphics-lock.mjs --check
+
+      # The pin's walk on fixture locks, and the core's side of the add-on:
+      # its states, add_graphic's 409 refusals and the UI signal, the pinned
+      # browser everywhere Remotion could start one, AIVE_REMOTION_ADDON only
+      # in a source checkout, and agent tools kept out of <dataDir>/addons
+      # (Remotion stubbed, loopback port 5030).
+      - name: Smoke — graphics add-on (pin and core)
+        run: npx tsx packages/core/scripts/smoke-addon.ts
+
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts

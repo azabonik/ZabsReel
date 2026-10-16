@@ -1,10 +1,11 @@
 import { mkdir, writeFile, rm, rename, realpathNative } from "../io/gatedfs.js";
-import { join, dirname } from "node:path";
-import { createRequire } from "node:module";
+import { join } from "node:path";
 import { createServer } from "node:net";
 import type { bundle } from "@remotion/bundler";
 import type { ensureBrowser, openBrowser, renderMedia, RenderInternals } from "@remotion/renderer";
 import type { VideoConfig } from "remotion";
+import { GraphicsAddonError, type ResolvedGraphicsAddon } from "../addon/resolve.js";
+import { readGraphicsAddon } from "../addon/state.js";
 import { PRODUCT_NAME } from "../brand.js";
 import { colorTagArgs, FFMPEG_DEFAULT_CODING, h264RetagBsf, tagFramesStep } from "../ffmpeg/colorspace.js";
 import { runFfmpeg } from "../ffmpeg/executor.js";
@@ -24,9 +25,11 @@ import { loadRemotion, REMOTION_VERSION, type RemotionGuard } from "./remotionlo
  * FFmpeg's `overlay` filter (see ffmpeg/graph.ts). For STANDALONE cards the
  * component fills its own background, so alpha is irrelevant.
  *
- * Remotion drives a headless Chrome ("Chrome Headless Shell") which is
- * downloaded on first use and cached by Remotion (like our whisper/YuNet
- * binaries) — see ensureBrowser(). It runs with ZabsReel's network limits
+ * Remotion and the headless Chrome it drives ("Chrome Headless Shell") come
+ * from the graphics add-on the user installs (addon/resolve.ts): its pinned
+ * shell is passed as browserExecutable everywhere Remotion may start one,
+ * with an onBrowserDownload that throws, so no Remotion code path downloads
+ * a browser. The browser runs with ZabsReel's network limits
  * (chromeguard.ts), and the render downloads no media for the graphic
  * (refuseDownload). Remotion is loaded at render time, through
  * remotionload.ts, so importing this module loads none of it. A second layer
@@ -43,9 +46,9 @@ import { loadRemotion, REMOTION_VERSION, type RemotionGuard } from "./remotionlo
  * they depend only on where the scaffold and the core are.
  *
  * NOTE on licensing: Remotion is source-available under the Remotion License
- * (not OSI open-source); companies of 4+ people need a paid license. It is the
- * only such dependency in the project and is isolated to this module. See
- * docs/PROJECT_STATUS.md / THIRD_PARTY notes.
+ * (not OSI open-source); companies of 4+ people need a paid license. ZabsReel
+ * does not ship it: the user installs it as the graphics add-on, under its own
+ * licence. See THIRD_PARTY notes.
  */
 
 export interface RenderGraphicOptions {
@@ -75,14 +78,6 @@ export interface RenderGraphicOptions {
   workDir: string;
   /** Optional progress callback, 0..1. */
   onProgress?: (fraction: number) => void;
-}
-
-const req = createRequire(import.meta.url);
-
-/** node_modules dir that resolves `react`/`remotion` for the bundler. */
-function nodeModulesDir(): string {
-  // .../node_modules/react/package.json -> .../node_modules
-  return dirname(dirname(req.resolve("react/package.json")));
 }
 
 /**
@@ -177,8 +172,8 @@ export interface GraphicRemotion {
   guard: () => RemotionGuard;
 }
 
-/** Remotion as remotionload.ts loads it from `root` (default: ZabsReel's own copy). */
-export async function graphicRemotion(root?: string): Promise<GraphicRemotion> {
+/** Remotion as remotionload.ts loads it from `root` (the graphics add-on's folder). */
+export async function graphicRemotion(root: string): Promise<GraphicRemotion> {
   const { renderer, bundler, bundlerModules, guard } = await loadRemotion(root);
   const { ensureBrowser, openBrowser, renderMedia, RenderInternals } = renderer;
   return { bundle: bundler.bundle, bundlerModules, ensureBrowser, openBrowser, renderMedia, RenderInternals, guard };
@@ -199,16 +194,39 @@ import { RemotionRoot } from "./Root";
 registerRoot(RemotionRoot);
 `;
 
+/** Remotion's onBrowserDownload while the add-on supplies the browser: never download one. */
+export const refuseBrowserDownload = (): never => {
+  throw new Error(`The graphics add-on's browser is missing. Reinstall the add-on in the ${PRODUCT_NAME} window (Help → Graphics add-on).`);
+};
+
+/** What a render whose add-on was replaced or removed meanwhile fails with. */
+export const ADDON_CHANGED = "The graphics add-on was changed while this graphic rendered. Try again.";
+
 /**
- * Render an AI-authored Remotion component to an alpha video file. The scaffold
- * is written under `workDir`, bundled, rendered, and then cleaned up. Refuses
- * (fails closed), before writing anything, when the loaded Remotion does not
- * carry ZabsReel's same-as refusal (remotionload.ts) or the /proxy guard does
- * not work on this Node (proxyguard.ts), or when its browser did not start
- * through the network limits (chromeguard.ts).
+ * Render an AI-authored Remotion component to an alpha video file, with the
+ * Remotion of `addon`. The scaffold is written under `workDir`, bundled,
+ * rendered, and then cleaned up. Refuses (fails closed), before writing
+ * anything, when the loaded Remotion does not carry ZabsReel's same-as
+ * refusal (remotionload.ts) or the /proxy guard does not work on this Node
+ * (proxyguard.ts), or when its browser did not start through the network
+ * limits (chromeguard.ts). When it fails and the installed add-on now has
+ * another installedAt (or is gone), it fails with {@link ADDON_CHANGED}; when
+ * the same add-on is now broken, with a GraphicsAddonError.
  */
-export async function renderGraphic(opts: RenderGraphicOptions, remotion?: GraphicRemotion): Promise<void> {
-  remotion ??= await graphicRemotion();
+export async function renderGraphic(opts: RenderGraphicOptions, addon: ResolvedGraphicsAddon, remotion?: GraphicRemotion): Promise<void> {
+  try {
+    await renderIn(opts, addon, remotion);
+  } catch (err) {
+    if (!addon.installed) throw err;
+    const now = readGraphicsAddon(addon.installed.dataDir);
+    if (now.state === "not-installed" || JSON.stringify(now.installedAt) !== JSON.stringify(addon.installed.installedAt)) throw new Error(ADDON_CHANGED);
+    if (now.state === "broken") throw new GraphicsAddonError("broken");
+    throw err;
+  }
+}
+
+async function renderIn(opts: RenderGraphicOptions, addon: ResolvedGraphicsAddon, remotion?: GraphicRemotion): Promise<void> {
+  remotion ??= await graphicRemotion(addon.root);
   const guard = remotion.guard();
   if (!guard.ok) throw new Error(guardRefusal(guard.reason));
   if (!(await proxyGuardWorks())) {
@@ -223,7 +241,10 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion?: Graph
   const publicDir = join(opts.workDir, "public");
   await mkdir(publicDir, { recursive: true });
 
-  const modulesDir = nodeModulesDir();
+  // react and remotion resolve from the add-on's tree, the one Remotion loaded from.
+  const modulesDir = join(addon.root, "node_modules");
+  // The add-on's browser for every launch, the relaunch after a crash included; never a download.
+  const pinned = addon.browserExecutable ? { browserExecutable: addon.browserExecutable, onBrowserDownload: refuseBrowserDownload } : {};
   // The scaffold's files as written and as webpack sees them (it resolves links).
   const realWorkDir = realpathNative(opts.workDir);
   const both = (name: string) => [join(opts.workDir, name), join(realWorkDir, name)];
@@ -240,8 +261,8 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion?: Graph
       // directory in the middle of other requests.
       entryPoint: join(opts.workDir, "index.ts"),
       publicDir,
-      // The scaffold lives outside the repo's node_modules tree, so point
-      // webpack at the installed node_modules so `react`/`remotion` resolve.
+      // The scaffold lives outside the add-on's node_modules tree, so point
+      // webpack at it so `react`/`remotion` resolve.
       // GateNetworkFsPlugin (G9): webpack reads through its own file system,
       // so the agent's imports can't name a network path, and it reads no
       // file outside `files`. GraphicImportsPlugin (I9): Graphic.tsx may
@@ -256,8 +277,9 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion?: Graph
       }),
     });
 
-    // Downloads Chrome Headless Shell on first use (cached by Remotion).
-    await remotion.ensureBrowser();
+    // The add-on's browser; without one (a source checkout's AIVE_REMOTION_ADDON
+    // alone) Remotion's own cache, downloaded on first use.
+    await remotion.ensureBrowser(pinned);
 
     // Remotion's server takes exactly this port (or fails), so the /proxy guard
     // is on it alone. Remotion closes that server after renderMedia settles
@@ -268,12 +290,12 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion?: Graph
     try {
       // Our own browser, started through the network limits, for the whole render.
       installChromeGuard(remotion.RenderInternals);
-      const browser = await remotion.openBrowser("chrome", { chromeMode: "headless-shell" });
+      const browser = await remotion.openBrowser("chrome", { ...pinned, chromeMode: "headless-shell" });
       try {
         if (!isGuardedBrowser(browser)) {
           throw new Error(`Graphics are turned off: ${PRODUCT_NAME} couldn't start the graphics browser with its network limits.`);
         }
-        await renderWith(remotion, opts, serveUrl, browser, port);
+        await renderWith(remotion, opts, serveUrl, browser, port, pinned);
       } finally {
         await browser.close({ silent: true }).catch(() => {});
       }
@@ -287,8 +309,15 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion?: Graph
   }
 }
 
-/** The renderMedia call of {@link renderGraphic}, in `browser`, with Remotion's server on `port`. */
-async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions, serveUrl: string, browser: Awaited<ReturnType<typeof openBrowser>>, port: number): Promise<void> {
+/** The renderMedia call of {@link renderGraphic}, in `browser`, with Remotion's server on `port`; `pinned`: the add-on's browser for a relaunch. */
+async function renderWith(
+  remotion: GraphicRemotion,
+  opts: RenderGraphicOptions,
+  serveUrl: string,
+  browser: Awaited<ReturnType<typeof openBrowser>>,
+  port: number,
+  pinned: { browserExecutable?: string; onBrowserDownload?: () => never },
+): Promise<void> {
   const composition = graphicComposition(opts);
   const inputProps = composition.props;
   const alpha = opts.alpha !== false;
@@ -297,6 +326,8 @@ async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions,
     serveUrl,
     port,
     puppeteerInstance: browser,
+    // A browser that closes mid-render is replaced (F12) with this one, never a download.
+    ...pinned,
     onDownload: refuseDownload,
     // A graphic has no sound (every media source is refused). Muted, Remotion
     // opens no audio source the page reports, a same-as path included; without

@@ -8,6 +8,9 @@
  * graphic is visible, and the frame returns to the dark background colour before
  * and after the window. A no-op composite (or broken alpha) would fail this.
  * The baked graphic has no audio stream (renderGraphic renders muted).
+ * Remotion comes from AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo
+ * root when unset); without it and without an installed add-on, add_graphic
+ * refuses with graphics_addon_missing.
  *
  * Run: npx tsx packages/core/scripts/smoke-motion.ts
  *
@@ -15,6 +18,8 @@
  * first execution is slow; subsequent runs are fast.
  */
 import { EditorEngine } from "../src/engine.js";
+import { dispatch, RpcError } from "../src/rpc.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg, FFMPEG_BIN } from "../src/ffmpeg/executor.js";
 import { GRAPHIC_TEMPLATES } from "../src/motion/templates.js";
@@ -37,6 +42,7 @@ async function maxLuma(file: string, t: number): Promise<number> {
 }
 
 async function main() {
+  useDevAddon();
   const dataDir = mkdtempSync(join(tmpdir(), "aive-motion-"));
   const engine = new EditorEngine(dataDir);
 
@@ -94,6 +100,13 @@ async function main() {
   const plainDuring = await maxLuma(plain, 2.0);
   console.log(`   peak luma during(2.0s) after clear = ${plainDuring} (expect background <130)`);
   if (plainDuring > 130) throw new Error(`graphic still present after clear_graphics (peak luma ${plainDuring})`);
+
+  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this step renders and fails.
+  console.log("5. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic refuses...");
+  const bare = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-motion-bare-")));
+  const refused = await withoutDevAddon(() => dispatch(bare, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
+  console.log(`   ${refused}`);
+  if (refused !== "graphics_addon_missing") throw new Error(`expected graphics_addon_missing, got ${refused}`);
 
   console.log("\nMOTION GRAPHICS SMOKE TEST PASSED");
 }

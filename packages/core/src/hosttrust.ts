@@ -1,7 +1,8 @@
 /**
  * The core's side of the approval store (trusthosts.ts): which network
  * computers it may open files on, and the guard that keeps every rpc read or
- * write out of the private trust folder (G2).
+ * write out of the private areas (G2): the trust folder and the graphics
+ * add-on folder (<dataDir>/addons, which the UI hosts install into).
  *
  * One HostTrust per engine. It holds the approved servers (valid stamps only)
  * plus the data folder's own server, and publishes them to io/gatedfs.ts
@@ -41,7 +42,6 @@ import {
   setTrustDir,
   statSync,
   watch,
-  type TrustPathContext,
 } from "./io/gatedfs.js";
 import type { Project } from "./types.js";
 
@@ -124,7 +124,7 @@ export interface HostTrustOptions {
   realpath?: (p: string) => string;
 }
 
-/** An rpc path G2 refused: it is in the private trust folder, or its folder could not be checked. */
+/** An rpc path G2 refused: it is in a private area, or its folder could not be checked. */
 export class PrivatePathError extends Error {
   constructor(message: string) {
     super(message);
@@ -132,11 +132,15 @@ export class PrivatePathError extends Error {
   }
 }
 
+/** A private area: the trust folder (the approval store) or the graphics add-on folder. */
+type Area = "trust" | "addons";
 /** Why a path may not be used, or ok. */
-type PathCheck = { ok: true } | { ok: false; private: true; rule?: string } | { ok: false; private: false; code: string; host?: string };
+type PathCheck = { ok: true } | { ok: false; private: true; area: Area; rule?: string } | { ok: false; private: false; code: string; host?: string };
 const OK: PathCheck = { ok: true };
-const PRIVATE: PathCheck = { ok: false, private: true };
-const IDENTITY: PathCheck = { ok: false, private: true, rule: "the identity check" };
+const PRIVATE = (area: Area): PathCheck => ({ ok: false, private: true, area });
+const IDENTITY = (area: Area): PathCheck => ({ ok: false, private: true, area, rule: "the identity check" });
+/** How a message names each private area. */
+const AREA_NAME: Record<Area, string> = { trust: `${PRODUCT_NAME}'s private settings folder`, addons: `${PRODUCT_NAME}'s graphics add-on folder` };
 /** A path with a ".." segment: never resolved, so a link before the ".." can't lead into the trust folder. */
 const DOTDOT: PathCheck = { ok: false, private: false, code: "EDOTDOT" };
 /** A path with a NUL character: no file name can hold one, and Node refuses it with a raw error. */
@@ -170,6 +174,8 @@ function errCode(err: unknown): string {
 export class HostTrust {
   /** The trust folder, spelled for this platform. */
   readonly trustDir: string;
+  /** The graphics add-on folder, spelled for this platform (D5.4: private like the trust folder; gatedfs stays trust-only). */
+  readonly addonsDir: string;
   /** The data folder's own server, trusted implicitly when the data folder is on a share. */
   readonly dataFolderHost?: string;
   private approved = new Map<string, ApprovedHost>();
@@ -196,6 +202,7 @@ export class HostTrust {
     private readonly opts: HostTrustOptions = {},
   ) {
     this.trustDir = this.opts.platform === undefined ? trustDir(dataDir) : this.P.join(dataDir, "trust");
+    this.addonsDir = this.P.join(dataDir, "addons");
     const c = classifyPath(dataDir);
     if (c.kind === "network") this.dataFolderHost = c.host;
   }
@@ -453,10 +460,19 @@ export class HostTrust {
     return this.pathRefusal(p);
   }
 
-  // ---- the private trust folder (G2) ------------------------------------------------
+  // ---- the private areas (G2) ------------------------------------------------------
 
-  private quick(p: string, ctx: TrustPathContext = {}): boolean {
-    return isTrustPath(p, { platform: this.platform, realpath: this.opts.realpath, trustDir: this.trustDir, ...ctx });
+  /** Each private area and its folder. */
+  private get areas(): [Area, string][] {
+    return [["trust", this.trustDir], ["addons", this.addonsDir]];
+  }
+
+  /** The quick form: the private area `p` is in (`folders`: the areas' folders, default as spelled), or null. */
+  private quick(p: string, folders: [Area, string][] = this.areas): Area | null {
+    for (const [area, dir] of folders) {
+      if (isTrustPath(p, { platform: this.platform, realpath: this.opts.realpath, trustDir: dir })) return area;
+    }
+    return null;
   }
 
   /**
@@ -474,7 +490,7 @@ export class HostTrust {
   private privateAsSpelled(p: string): boolean {
     const c = classifyPath(p);
     if (c.kind === "refused") return false;
-    return this.quick(p) || (c.kind === "network" && this.storeName(p));
+    return this.quick(p) !== null || (c.kind === "network" && this.storeName(p));
   }
 
   /**
@@ -514,28 +530,31 @@ export class HostTrust {
   }
 
   /**
-   * G2's real-path form for a local path without a ".." segment: `p` and the
-   * trust folder each resolved with {@link realResolve}, then compared with
-   * the quick form, so a link, `/proc/self/root/…` or `/proc/<pid>/cwd/…`
-   * that leads into the trust folder is caught. On Linux the same letters in
-   * another case are the trust folder on a case-insensitive mount (drvfs,
-   * ext4 casefold) when that folder has the trust folder's file id, or when
-   * neither exists yet (a write would create it). One realpath per path.
+   * G2's real-path form for a local path without a ".." segment: `p` and each
+   * private area's folder resolved with {@link realResolve}, then compared
+   * with the quick form, so a link, `/proc/self/root/…` or `/proc/<pid>/cwd/…`
+   * that leads into a private area is caught. On Linux the same letters in
+   * another case are that folder on a case-insensitive mount (drvfs, ext4
+   * casefold) when the level has the folder's file id, or when neither exists
+   * yet (a write would create it). One realpath per path and per area.
    */
   private realCheck(p: string, cache: Map<string, FileId | null>): PathCheck {
     try {
       const real = this.realResolve(p);
-      const trust = this.realResolve(this.trustDir);
-      if (this.quick(real, { trustDir: trust })) return PRIVATE;
+      const folders = this.areas.map(([area, dir]): [Area, string] => [area, this.realResolve(dir)]);
+      const found = this.quick(real, folders);
+      if (found) return PRIVATE(found);
       if (this.platform === "win32" || this.platform === "darwin") return OK; // the quick form folds case there
       const lower = real.toLowerCase();
-      const folder = trust.toLowerCase();
-      if (lower !== folder && !lower.startsWith(folder.endsWith("/") ? folder : `${folder}/`)) return OK;
-      const level = real.split("/").slice(0, trust.split("/").length).join("/");
-      const a = this.idOf(level, cache);
-      const b = this.idOf(trust, cache);
-      if (a && b) return a.ino !== 0n && (a.dev !== b.dev || a.ino !== b.ino) ? OK : PRIVATE;
-      return a || b ? OK : PRIVATE;
+      for (const [area, dir] of folders) {
+        const folder = dir.toLowerCase();
+        if (lower !== folder && !lower.startsWith(folder.endsWith("/") ? folder : `${folder}/`)) continue;
+        const level = real.split("/").slice(0, dir.split("/").length).join("/");
+        const a = this.idOf(level, cache);
+        const b = this.idOf(dir, cache);
+        if (a && b ? a.ino === 0n || (a.dev === b.dev && a.ino === b.ino) : !a && !b) return PRIVATE(area);
+      }
+      return OK;
     } catch (code) {
       return { ok: false, private: false, code: String(code) };
     }
@@ -560,8 +579,8 @@ export class HostTrust {
   /**
    * The identity check, for a path on the data folder's own server: the path
    * and each folder above it up to the share root are stat'ed. A level that is
-   * the trust folder means the path is in it; a level that is the data folder
-   * means the rest below it is judged by the quick form as if under
+   * a private area's folder means the path is in it; a level that is the data
+   * folder means the rest below it is judged by the quick form as if under
    * `<dataDir>`, so `\\nas\d$\zr\trust\…` is caught as well as `\\nas\zr\trust\…`.
    * A level that can't be stat'ed (other than "not found") fails closed.
    */
@@ -570,12 +589,16 @@ export class HostTrust {
     const same = (a: FileId | null, b: FileId | null) => !!a && !!b && a.ino !== 0n && a.dev === b.dev && a.ino === b.ino;
     try {
       const data = this.idOf(this.dataDir, cache);
-      const trust = this.idOf(this.trustDir, cache);
+      const folders = this.areas.map(([area, dir]) => [area, this.idOf(dir, cache)] as const);
       const target = P.resolve(p);
       for (let level = target; ; level = P.dirname(level)) {
         const id = this.idOf(level, cache);
-        if (same(id, trust)) return IDENTITY;
-        if (same(id, data)) return this.quick(P.join(this.dataDir, P.relative(level, target))) ? IDENTITY : OK;
+        const inside = folders.find(([, folder]) => same(id, folder));
+        if (inside) return IDENTITY(inside[0]);
+        if (same(id, data)) {
+          const area = this.quick(P.join(this.dataDir, P.relative(level, target)));
+          return area ? IDENTITY(area) : OK;
+        }
         if (P.dirname(level) === level) return OK;
       }
     } catch (code) {
@@ -596,10 +619,12 @@ export class HostTrust {
     if (p.includes("\0")) return NUL;
     const { text, c } = classifyFsText(p, { platform: this.platform });
     if (c.kind === "refused") return OK;
-    if (this.quick(text)) return PRIVATE;
+    const area = this.quick(text);
+    if (area) return PRIVATE(area);
     if (hasDotDot(p) || hasDotDot(text)) return DOTDOT;
     if (c.kind === "network") {
-      if (this.storeName(text)) return { ok: false, private: true, rule: "the name rule" };
+      // The store's file names: the trust folder only.
+      if (this.storeName(text)) return { ok: false, private: true, area: "trust", rule: "the name rule" };
       return c.host === this.dataFolderHost ? this.identity(text, c.host, cache) : OK;
     }
     return this.realCheck(text, cache);
@@ -609,21 +634,21 @@ export class HostTrust {
   pathRefusal(p: string): string | null {
     const r = this.checkPath(p);
     if (r.ok) return null;
-    if (r.private) return `in ${PRODUCT_NAME}'s private settings folder`;
+    if (r.private) return `in ${AREA_NAME[r.area]}`;
     if (r.code === "EDOTDOT") return `it has a ".." segment, which ${PRODUCT_NAME} doesn't follow; pass the full path without ".."`;
     if (r.code === "EDANGLING") return `it goes through a link whose target does not exist; pass the path of the real file`;
     if (r.code === "ENUL") return "it contains a NUL character, which no file name can hold";
     return `${PRODUCT_NAME} couldn't check this path${r.host ? ` on \\\\${r.host}` : ""} (${r.code}); try again`;
   }
 
-  /** G2: throw PrivatePathError when rpc path `p` (`field` names it) is in the trust folder, has a ".." segment, or can't be checked. */
+  /** G2: throw PrivatePathError when rpc path `p` (`field` names it) is in a private area, has a ".." segment, or can't be checked. */
   assertNotPrivate(p: unknown, field: string): void {
     if (typeof p !== "string" || p === "") return;
     const r = this.checkPath(p);
     if (r.ok) return;
     // Which rule caught a network spelling (a server that gives no file ids still has the name rule).
-    if (r.private && r.rule) console.error(`[aive-core] refused ${show(p)}: in the private trust folder (${r.rule})`);
-    if (r.private) throw new PrivatePathError(`${field} ${show(p)} is in ${PRODUCT_NAME}'s private settings folder, which tools can't open.`);
+    if (r.private && r.rule) console.error(`[aive-core] refused ${show(p)}: in the private ${r.area === "trust" ? "trust" : "graphics add-on"} folder (${r.rule})`);
+    if (r.private) throw new PrivatePathError(`${field} ${show(p)} is in ${AREA_NAME[r.area]}, which tools can't open.`);
     if (r.code === "EDOTDOT") {
       throw new PrivatePathError(`${field} ${show(p)} has a ".." segment. ${PRODUCT_NAME} doesn't follow ".." in a path (a linked folder can make it lead somewhere else), so nothing was opened. Pass the full path without "..".`);
     }
@@ -635,7 +660,7 @@ export class HostTrust {
   }
 
   /**
-   * One loaded field: "ok", "private" (in the trust folder, by the quick
+   * One loaded field: "ok", "private" (in a private area, by the quick
    * form, the real-path form, the name rule or the identity check),
    * "EDOTDOT" (a ".." segment, never resolved), or the error code of a
    * folder that could not be checked. A local field gets the real-path form
@@ -657,7 +682,7 @@ export class HostTrust {
 
   /**
    * The load-field check (P16): a project whose asset path, cutout colour
-   * path, LUT or text or caption font is in the trust folder does not load; a
+   * path, LUT or text or caption font is in a private area does not load; a
    * proxy or preview path there is dropped. For an .otio import (`otio`), an
    * asset path there stays an offline placeholder (its import already
    * skipped the probe), flagged "private". A field with a ".." segment
@@ -669,7 +694,9 @@ export class HostTrust {
    */
   checkLoadedProject(project: Project, opts: { otio?: boolean } = {}): Map<string, string> {
     const refuse = (field: string, p: string) => {
-      throw new PrivatePathError(`${field} ${show(p)} is in ${PRODUCT_NAME}'s private settings folder, which tools can't open. Change this path in the project file and open the project again.`);
+      const r = this.checkPath(p);
+      const where = AREA_NAME[!r.ok && r.private ? r.area : "trust"];
+      throw new PrivatePathError(`${field} ${show(p)} is in ${where}, which tools can't open. Change this path in the project file and open the project again.`);
     };
     const cache = new Map<string, FileId | null>();
     const unchecked = new Map<string, string>();

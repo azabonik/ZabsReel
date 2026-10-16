@@ -134,15 +134,14 @@ export interface LoadedRemotion {
   guard: () => RemotionGuard;
 }
 
-/** ZabsReel's own folder: Remotion resolves from here unless a caller passes another root. */
-const OWN_ROOT = dirname(fileURLToPath(import.meta.url));
-
 /**
  * Register the hook (once), then load @remotion/renderer's ESM build and
  * @remotion/bundler as resolved from `root` (a folder; node_modules is looked
- * up from it).
+ * up from it): the graphics add-on (addon/resolve.ts). ZabsReel's own folder
+ * is never a default, so Remotion loads only from a copy the user installed
+ * or a source checkout named.
  */
-export async function loadRemotion(root: string = OWN_ROOT): Promise<LoadedRemotion> {
+export async function loadRemotion(root: string): Promise<LoadedRemotion> {
   guardLoads();
   const from = createRequire(join(root, "noop.js"));
   const esm = join(dirname(from.resolve("@remotion/renderer/package.json")), "dist", "esm", "index.mjs");

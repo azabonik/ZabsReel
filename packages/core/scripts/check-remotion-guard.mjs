@@ -7,18 +7,26 @@
 // runs) through Remotion's own stitchFramesToVideo, which hands an audio asset
 // to downloadAsset before it starts any process. It also checks that the /proxy guard (proxyguard.js) works in this
 // runtime: Node's request channel rewrites a /proxy request before the
-// handler (over an in-memory stream). It starts no server, browser or core
-// (opens no port), and needs `npm run build`.
+// handler (over an in-memory stream). Remotion loads from AIVE_REMOTION_ADDON
+// (graphics-addon-env.mjs: the repo root when unset). Last, without that
+// variable and without an installed add-on, graphics refuse with
+// graphics_addon_missing. It starts no server, browser or core (opens no
+// port), and needs `npm run build`.
 //
 // Usage: node packages/core/scripts/check-remotion-guard.mjs
 //        ELECTRON_RUN_AS_NODE=1 <electron> packages/core/scripts/check-remotion-guard.mjs
 // Exits 0 when all hold, 1 otherwise.
+import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "motion", "remotionload.js");
 const PROXY_GUARD = join(dirname(DIST), "proxyguard.js");
+const RESOLVE = join(dirname(DIST), "..", "addon", "resolve.js");
+const ROOT = useDevAddon();
 const runtime = process.versions.electron ? `Electron ${process.versions.electron} (Node ${process.versions.node})` : `Node ${process.versions.node}`;
 let failures = 0;
 const check = (ok, msg) => {
@@ -28,10 +36,10 @@ const check = (ok, msg) => {
 
 console.log(`[check-remotion-guard] ${runtime}`);
 const { loadRemotion } = await import(pathToFileURL(DIST).href);
-const remotion = await loadRemotion();
+const remotion = await loadRemotion(ROOT);
 check(remotion.guard().ok === true, `the guard is ok after loading Remotion (${JSON.stringify(remotion.guard())})`);
 
-const require = createRequire(DIST);
+const require = createRequire(join(ROOT, "noop.js"));
 const dir = dirname(require.resolve("@remotion/renderer/package.json"));
 const cjs = require(join(dir, "dist", "assets", "download-and-map-assets-to-file.js"));
 let message = "returned the source";
@@ -61,6 +69,16 @@ check(message === "ZabsReel refuses same-as sources", `downloadAsset (ESM, throu
 
 const { proxyGuardWorks } = await import(pathToFileURL(PROXY_GUARD).href);
 check((await proxyGuardWorks()) === true, "the /proxy guard works here (a /proxy request reaches the handler rewritten)");
+
+const { resolveGraphicsAddon, GraphicsAddonError } = await import(pathToFileURL(RESOLVE).href);
+const dataDir = mkdtempSync(join(tmpdir(), "aive-guard-data-"));
+try {
+  const r = await withoutDevAddon(() => resolveGraphicsAddon(dataDir));
+  const code = r.ok ? "ready" : new GraphicsAddonError(r.state).code;
+  check(code === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on, graphics refuse with graphics_addon_missing (${code})`);
+} finally {
+  rmSync(dataDir, { recursive: true, force: true });
+}
 
 console.log(failures ? `[check-remotion-guard] FAILED: ${failures} check(s)` : "[check-remotion-guard] ok");
 process.exit(failures ? 1 : 0);

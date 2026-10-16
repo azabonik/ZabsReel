@@ -98,6 +98,9 @@
  *  18. /file and playlists — a file that starts with #EXTM3U answers 415.
  *  19. the probe message   — a refused format reads "ZabsReel can't open this
  *                            kind of file…" on import_video and import_otio.
+ *  20. no graphics add-on  — without AIVE_REMOTION_ADDON and without an
+ *                            installed add-on, add_graphic refuses with
+ *                            graphics_addon_missing (graphics-addon-env.mjs).
  *
  * The network-path gate ships enforced (io/gatedfs.ts NETWORK_GATE). Rows 5
  * and 6 also say what its "log" setting would do, which only a change of that
@@ -141,6 +144,7 @@ import { HostTrust } from "../src/hosttrust.js";
 import { StorageJanitor, storageUsage } from "../src/storage.js";
 import { dispatch, methods, RpcError, RPC_PATH_PARAMS } from "../src/rpc.js";
 import { isOffline, type Project } from "../src/types.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -2354,6 +2358,17 @@ async function main() {
     const asset19 = engine.getProject().assets.find((a) => a.path === playlist);
     check(!!asset19?.missing && imported.missing.includes(playlist) && imported.warnings.includes(`Can't import "clip.m3u8": ${NOT_MEDIA_TEXT}`),
       `import_otio of a clip whose file is a playlist: the asset is missing, and the warning says why (${JSON.stringify(imported.warnings)})`);
+  }
+
+  // ---- 20. no graphics add-on ------------------------------------------------------------
+  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+  // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
+  console.log("20. no graphics add-on: add_graphic refuses with graphics_addon_missing...");
+  {
+    useDevAddon();
+    const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));
+    const code = e instanceof RpcError ? e.code : e?.message;
+    check(code === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing (${code})`);
   }
 
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);

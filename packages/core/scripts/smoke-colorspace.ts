@@ -33,7 +33,10 @@
  *  7. preview proxies keep the source's reading with complete tags (a
  *     downscaled copy of untagged HD would otherwise be read as SD), and a
  *     file whose incomplete tags Chromium ignores gets one on import, as does
- *     untagged VP9 (Chromium 149+ reads it as BT.709, the export as BT.601).
+ *     untagged VP9 (Chromium 149+ reads it as BT.709, the export as BT.601);
+ *  8. without AIVE_REMOTION_ADDON and without an installed graphics add-on,
+ *     add_graphic refuses with graphics_addon_missing (3d's graphics are
+ *     fixtures; graphics-addon-env.mjs defaults the variable otherwise).
  *
  * Run: npx tsx packages/core/scripts/smoke-colorspace.ts   (no arguments)
  */
@@ -42,6 +45,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EditorEngine } from "../src/engine.js";
+import { dispatch, RpcError } from "../src/rpc.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { detectKeyColor } from "../src/media/keycolor.js";
 import { graphicPreviewProxy, tagGraphicColor } from "../src/motion/render.js";
@@ -491,6 +496,15 @@ async function main() {
     check(!!p.proxyPath && previewColorFix(p, true) === null && p.proxyColor?.space === "smpte170m",
       `…so import makes it a completely tagged proxy, read alike by every version (${p.proxyPath ? tagsOf(p.proxyPath) : p.proxyError ?? "none"})`);
     check(!needsTaggedProxy(await probeAsset(untagHD)), "untagged H.264 HD gets none (every version reads it as the export does)");
+  }
+
+  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this row fails.
+  console.log("8. no graphics add-on: add_graphic refuses...");
+  {
+    useDevAddon();
+    const engine = new EditorEngine(mkdtempSync(join(dir, "data-")));
+    const refused = await withoutDevAddon(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
+    check(refused === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing (${refused})`);
   }
 
   console.log(failures === 0 ? "\nCOLORSPACE SMOKE TEST PASSED" : `\nCOLORSPACE SMOKE TEST FAILED (${failures})`);

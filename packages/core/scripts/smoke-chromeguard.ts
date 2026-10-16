@@ -79,7 +79,11 @@
  *                      wait keeps the guard until it closes. A port that never
  *                      closes (shortened interval and cap): the background
  *                      check stops at its cap and the guard stays on.
+ *  M8. no add-on     — without AIVE_REMOTION_ADDON and without an installed
+ *                      add-on, add_graphic refuses with graphics_addon_missing.
  *
+ * Remotion loads from AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo
+ * root when unset), with Remotion's own headless-shell cache.
  * No network: the hosts are loopback (ports 5031-5036, and the port
  * renderGraphic picks for Remotion's server in M6a and M7) or under .invalid.
  * Run: npx tsx packages/core/scripts/smoke-chromeguard.ts
@@ -97,6 +101,10 @@ import { graphicComposition, graphicRemotion, refuseDownload, renderGraphic, roo
 import { loadRemotion, type LoadedRemotion, type RemotionGuard } from "../src/motion/remotionload.js";
 import { guardRemotionProxy, releaseWhenClosed } from "../src/motion/proxyguard.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
+import type { ResolvedGraphicsAddon } from "../src/addon/resolve.js";
+import { EditorEngine } from "../src/engine.js";
+import { dispatch, RpcError } from "../src/rpc.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -114,6 +122,9 @@ const thrown = async (fn: () => unknown): Promise<Error | null> => {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
+/** The dev add-on: Remotion from the checkout's node_modules, Remotion's own browser cache. */
+const DEV_ROOT = useDevAddon();
+const DEV: ResolvedGraphicsAddon = { ok: true, root: DEV_ROOT };
 const require = createRequire(import.meta.url);
 const RENDERER_DIR = dirname(require.resolve("@remotion/renderer/package.json"));
 const CJS_FILE = "dist/assets/download-and-map-assets-to-file.js";
@@ -143,7 +154,7 @@ let mode: "refuse" | "fake" | "real" = "refuse";
 
 /** Load Remotion as renderGraphic does (remotionload.ts) and put the stand-in in place. */
 async function setup() {
-  remotion = await loadRemotion();
+  remotion = await loadRemotion(DEV_ROOT);
   browserClass = remotion.renderer.RenderInternals.HeadlessBrowser as unknown as { create: Create };
   realCreate = browserClass.create;
   browserClass.create = async function (this: unknown, opts) {
@@ -165,6 +176,7 @@ async function main() {
     m5Parent();
     m6(work);
     await m7(work);
+    await m8(work);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -247,14 +259,14 @@ async function m2(work: string) {
     }) as unknown as GraphicRemotion["renderMedia"],
   });
 
-  const plain = await thrown(() => renderGraphic(opts("plain"), stub(async () => ({ close: async () => {} }))));
+  const plain = await thrown(() => renderGraphic(opts("plain"), DEV, stub(async () => ({ close: async () => {} }))));
   check(plain?.message === "Graphics are turned off: ZabsReel couldn't start the graphics browser with its network limits." && !calls.includes("renderMedia") && calls.some((c) => c.startsWith("close")),
     `a browser that did not come through the wrapper: refused and closed, nothing rendered (${plain?.message}; ${calls.join(", ")})`);
 
   calls.length = 0;
   mode = "fake";
   let opened: object | undefined;
-  const ok = await thrown(() => renderGraphic(opts("ok"), stub(async () => (opened = await browserClass.create({ args: ["--x"] })))));
+  const ok = await thrown(() => renderGraphic(opts("ok"), DEV, stub(async () => (opened = await browserClass.create({ args: ["--x"] })))));
   check(ok === null && !!rendered && rendered.puppeteerInstance === opened && isGuardedBrowser(opened!), `rendered in the browser it opened, through the wrapper (${ok?.message})`);
   check(calls.at(-1) === 'close {"silent":true}' && calls.indexOf("renderMedia") < calls.length - 1 && calls.filter((c) => c === "openBrowser").length === 1,
     `…one browser, closed after the render (${calls.join(", ")})`);
@@ -385,7 +397,7 @@ function child(name: string, root = "", how = "", trace = ""): Record<string, un
   }
 }
 
-/** A `--child` case (see {@link child}); `root` "" is ZabsReel's own copy. */
+/** A `--child` case (see {@link child}); `root` "" is the dev add-on. */
 async function childCase(name: string, root: string, how: string): Promise<Record<string, unknown>> {
   const from = root ? createRequire(join(root, "noop.js")) : require;
   if (how === "esm") await import("@remotion/renderer");
@@ -398,18 +410,19 @@ async function childCase(name: string, root: string, how: string): Promise<Recor
     return proxyCase(name);
   }
   if (name === "cjs") {
-    const loaded = await loadRemotion(root || undefined);
+    const loaded = await loadRemotion(root || DEV_ROOT);
     const dir = dirname(from.resolve("@remotion/renderer/package.json"));
     const cjs = from(join(dir, CJS_FILE)) as { downloadAsset: (o: Record<string, unknown>) => Promise<string> };
     const map = { downloadDir: join(tmpdir(), "aive-chromeguard-no-downloads"), hasBeenDownloadedMap: {}, isDownloadingMap: {} };
     const e = await thrown(() => cjs.downloadAsset({ src: "same-as-x.m3u8-0", downloadMap: map, indent: false, logLevel: "error", shouldAnalyzeAudioImmediately: false, binariesDirectory: null }));
     return { message: e?.message ?? null, guard: loaded.guard() };
   }
-  const r = await graphicRemotion(root || undefined);
+  const r = await graphicRemotion(root || DEV_ROOT);
   let bundled = false;
   const workDir = join(mkdtempSync(join(tmpdir(), "aive-chromeguard-child-")), "scaffold");
   const e = await thrown(() => renderGraphic(
     { code: "export default () => null;\n", width: 64, height: 64, fps: 30, durationInFrames: 1, outPath: join(workDir, "x.mov"), workDir },
+    { ok: true, root: root || DEV_ROOT },
     { ...r, bundle: (async () => ((bundled = true), Promise.reject(new Error("smoke: bundle reached")))) as unknown as GraphicRemotion["bundle"] },
   ));
   const wrote = existsSync(workDir);
@@ -426,7 +439,7 @@ function m4() {
   const self = run(["--self-test"]);
   const cases = [
     "render.ts without installChromeGuard( fails", "render.ts without isGuardedBrowser( fails", "render.ts without puppeteerInstance fails",
-    "render.ts without onDownload fails", "render.ts without muted: true fails", "render.ts without proxyGuardWorks( fails",
+    "render.ts without onDownload fails", "render.ts without onBrowserDownload fails", "render.ts without muted: true fails", "render.ts without proxyGuardWorks( fails",
     "render.ts without guardRemotionProxy( fails", "render.ts with selectComposition fails", "Remotion loaded outside remotionload.ts (a named import) fails",
     "motion/render.ts with a value import of @remotion/renderer fails", "motion/chromeguard.ts with a value import of @remotion/renderer fails",
     "remotionload.ts with a static import of Remotion fails", "render.ts without the I9 plugin fails", "render.ts without its own publicDir fails",
@@ -541,7 +554,7 @@ export default function Probe() {
 `;
     const base = { width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false };
     launches.length = 0;
-    const e1 = await thrown(() => renderGraphic({ ...base, code, outPath: join(work, "probe.mp4"), workDir: join(work, "probe") }));
+    const e1 = await thrown(() => renderGraphic({ ...base, code, outPath: join(work, "probe.mp4"), workDir: join(work, "probe") }, DEV));
     check(e1 === null && existsSync(join(work, "probe.mp4")), `the probe graphic renders (${e1?.message.slice(0, 160)})`);
     check(launches.length >= 1 && launches.every((a) => JSON.stringify(a.slice(-2)) === JSON.stringify(GRAPHICS_CHROME_SWITCHES)), `every Chrome it started had the switches (${launches.length})`);
     check(hits.control >= 1 && hits.other === 0, `the 127.0.0.1 control server saw ${hits.control} connection(s), 127.0.0.2 saw ${hits.other}`);
@@ -554,11 +567,11 @@ export default function Sound() {
   return <AbsoluteFill><Audio src="data:audio/x-mpegurl;base64,I0VYVE0zVQojRVhUSU5GOjEuMCwKLy96ci1ldmlsLW01LmludmFsaWQvcy9zZWcudHMK" /></AbsoluteFill>;
 }
 `;
-    const e2 = await thrown(() => renderGraphic({ ...base, code: audio, outPath: join(work, "audio.mp4"), workDir: join(work, "audio") }));
+    const e2 = await thrown(() => renderGraphic({ ...base, code: audio, outPath: join(work, "audio.mp4"), workDir: join(work, "audio") }, DEV));
     check(!!e2?.message.includes(`${SENTENCE_HEAD}data:audio/x-mpegurl;`) && e2.message.includes(SENTENCE_TAIL), `a data: <Audio> fails with the message (${e2?.message.slice(0, 160)})`);
     check(written.length === 0, `nothing is written to Remotion's asset folder (${JSON.stringify(written.slice(0, 3))})`);
     // The page reports the asset to Remotion (M6b's graphic); the M3 rewrite refuses it.
-    const e3 = await thrown(() => renderGraphic({ ...base, code: sameAsGraphic(ASSET_SRC), outPath: join(work, "same-as.mp4"), workDir: join(work, "same-as") }));
+    const e3 = await thrown(() => renderGraphic({ ...base, code: sameAsGraphic(ASSET_SRC), outPath: join(work, "same-as.mp4"), workDir: join(work, "same-as") }, DEV));
     check(!!e3?.message.includes(REFUSAL), `a graphic that reports a same-as asset fails with the refusal (${e3?.message.slice(0, 160)})`);
   } finally {
     control.close();
@@ -623,9 +636,10 @@ async function proxyCase(name: string): Promise<Record<string, unknown>> {
     if (name === "proxy-open") return { rewrite, ...(await proxyRequests(5035, bundleDir, work, false)) };
     mode = "fake";
     let during: Record<string, unknown> = {};
-    const r = await graphicRemotion();
+    const r = await graphicRemotion(DEV_ROOT);
     const e = await thrown(() => renderGraphic(
       { code: "export default () => null;\n", width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(work, "x.mp4"), workDir: join(work, "scaffold") },
+      DEV,
       {
         ...r,
         guard: () => ({ ok: true }), // the rewrite is off here: the /proxy guard alone
@@ -701,7 +715,7 @@ async function m7(work: string) {
   writeFileSync(join(bundleDir, "index.html"), "<!doctype html><title>x</title>");
   writeFileSync(join(bundleDir, "bundle.js"), "");
   mode = "fake";
-  const r = await graphicRemotion();
+  const r = await graphicRemotion(DEV_ROOT);
   for (const closeAfterMs of [1000, 5000]) {
     let port = 0;
     let closed: Promise<unknown> = Promise.resolve();
@@ -709,6 +723,7 @@ async function m7(work: string) {
     const t0 = Date.now();
     const e = await thrown(() => renderGraphic(
       { code: "export default () => null;\n", width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(work, "m7.mp4"), workDir: join(work, "m7") },
+      DEV,
       {
         ...r,
         bundle: (async () => bundleDir) as unknown as GraphicRemotion["bundle"],
@@ -791,10 +806,11 @@ async function m6b() {
   nodeModule.syncBuiltinESMExports();
   const work = mkdtempSync(join(tmpdir(), "aive-chromeguard-m6b-"));
   try {
-    const r = await graphicRemotion();
+    const r = await graphicRemotion(DEV_ROOT);
     check(JSON.stringify(r.guard()) === '{"ok":false,"reason":"loaded-before"}', `(b) the rewrite is off in this process (${JSON.stringify(r.guard())})`);
     const e = await thrown(() => renderGraphic(
       { code: sameAsGraphic(ASSET_SRC), width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(work, "same-as.mp4"), workDir: join(work, "same-as") },
+      DEV,
       { ...r, guard: () => ({ ok: true }) }, // muted alone
     ));
     const named = spawned.filter((c) => c.includes(ASSET_HOST));
@@ -805,6 +821,19 @@ async function m6b() {
     rmSync(work, { recursive: true, force: true });
   }
   process.exit(failures === 0 ? 0 : 1);
+}
+
+// ---- M8 ------------------------------------------------------------------------
+// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
+async function m8(work: string) {
+  console.log("M8. no add-on: add_graphic refuses with graphics_addon_missing...");
+  const dataDir = mkdtempSync(join(work, "m8-data-"));
+  const engine = new EditorEngine(dataDir);
+  const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));
+  const code = e instanceof RpcError ? e.code : e?.message;
+  check(code === "graphics_addon_missing" && !existsSync(join(dataDir, "motion")) && !existsSync(join(dataDir, "baked")),
+    `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing, nothing written (${code})`);
 }
 
 if (process.argv[2] === "--child") {

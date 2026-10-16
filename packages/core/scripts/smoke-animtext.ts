@@ -6,10 +6,15 @@
  * Remotion graphic is attempted opportunistically (skipped if bundling is slow/
  * unavailable; it's already covered by smoke-motion).
  *
+ * Remotion comes from AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo
+ * root when unset); without it and without an installed add-on, add_graphic
+ * refuses with graphics_addon_missing (row 4).
+ *
  * Run: npx tsx packages/core/scripts/smoke-animtext.ts [clipA]
  *   Without clipA it synthesizes a 4 s 1280x720 test clip with a tone.
  */
-import { methods } from "../src/rpc.js";
+import { dispatch, methods, RpcError } from "../src/rpc.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 import { EditorEngine } from "../src/engine.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg } from "../src/ffmpeg/executor.js";
@@ -18,6 +23,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 
 async function main() {
+  useDevAddon();
   const dataDir = mkdtempSync(join(tmpdir(), "aive-animtext-"));
   let clipA = process.argv[2];
   if (!clipA) {
@@ -78,6 +84,12 @@ async function main() {
   } catch (e) {
     console.log(`   (skipped: ${(e as Error).message.split("\n")[0]})`);
   }
+
+  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this row fails.
+  console.log("4. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic refuses...");
+  const bare = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-animtext-bare-")));
+  const refused = await withoutDevAddon(() => dispatch(bare, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
+  check(refused === "graphics_addon_missing", `add_graphic refuses with graphics_addon_missing (${refused})`);
 
   console.log(failures === 0 ? "\nANIM-TEXT SMOKE TEST PASSED" : `\nANIM-TEXT SMOKE TEST FAILED (${failures})`);
   process.exit(failures === 0 ? 0 : 1);

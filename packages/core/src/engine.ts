@@ -50,7 +50,9 @@ import { trackSubject, buildCropPlan, cropPlanToSendcmd } from "./reframe/refram
 import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { bakeReversed, bakeSmoothSlow, grabFrame, probeFrameClock, probeVideoFormat } from "./ffmpeg/timefx.js";
 import { alphaProxyArgs, cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
-import { graphicPreviewProxy, renderGraphic, tagGraphicColor } from "./motion/render.js";
+import { graphicPreviewProxy, renderGraphic, tagGraphicColor, type GraphicRemotion } from "./motion/render.js";
+import { GraphicsAddonError, resolveGraphicsAddon, type GraphicsAddonRefusal, type GraphicsAddonResolution, type ResolvedGraphicsAddon } from "./addon/resolve.js";
+import type { GraphicsAddonState } from "./addon/state.js";
 import { findProfanity } from "./audio/profanity.js";
 import { SFX_NAMES, ensureSfxFile, type SfxName } from "./audio/sfx.js";
 import { BLEEP_DEFAULT_SOUND, BLEEP_DEFAULT_VOLUME, BLEEP_MIN_WINDOW, bleepMuteSpans, expandBleeps, type BleepLayer } from "./audio/bleeps.js";
@@ -464,6 +466,8 @@ export interface EngineEvents {
   job: (job: Job) => void;
   /** Emitted when only the network computers changed (an rpc request made one pending). */
   "media-servers": (servers: MediaServers) => void;
+  /** Emitted when add_graphic was refused for the graphics add-on's state (the UI offers the add-on dialog). */
+  "graphics-addon": (info: { state: GraphicsAddonRefusal }) => void;
 }
 
 function defaultProject(): Project {
@@ -546,6 +550,10 @@ export class EditorEngine extends EventEmitter {
   readonly trust: HostTrust;
   /** Files the last load()/importOtio() moved back out of the storage trash. */
   lastRestoredFromTrash: string[] = [];
+  /** Where add_graphic loads Remotion from (addon/resolve.ts); tests replace it. */
+  graphicsAddon: () => GraphicsAddonResolution = () => resolveGraphicsAddon(this.dataDir);
+  /** Test seam: a stand-in for the Remotion add_graphic loads from the add-on. */
+  graphicRemotion?: GraphicRemotion;
   /**
    * A loaded LUT or font path on the data folder's server whose folder could
    * not be checked (path → error code, or "private" once a re-check found it
@@ -6391,10 +6399,19 @@ export class EditorEngine extends EventEmitter {
   }
 
   // ---- motion graphics (Remotion) -------------------------------------------
+  /** The graphics add-on's state for get_state and timeline_summary, read when asked (never per broadcast). */
+  graphicsState(): GraphicsAddonState {
+    const r = this.graphicsAddon();
+    return r.ok ? "ready" : r.state;
+  }
+
   /**
    * Render an AI-authored Remotion component (TSX) to a baked alpha video and
    * attach it to a clip as a motion-graphic overlay, OR (standalone / no clip)
-   * insert it as its own clip. Frame windows are in project frames.
+   * insert it as its own clip. Frame windows are in project frames. Without a
+   * ready graphics add-on it refuses before anything is written (a
+   * GraphicsAddonError); that, and a render that finds the add-on broken, tell
+   * the UI clients ("graphics-addon").
    */
   async addGraphic(
     clipId: string | undefined,
@@ -6408,10 +6425,16 @@ export class EditorEngine extends EventEmitter {
       standalone?: boolean;
     },
   ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset }> {
+    const told = (err: unknown): never => {
+      if (err instanceof GraphicsAddonError) this.emit("graphics-addon", { state: err.state });
+      throw err;
+    };
+    const addon = this.graphicsAddon();
+    if (!addon.ok) return told(new GraphicsAddonError(addon.state));
     const { promise } = this.jobs.start("graphic", "Render motion graphic", (signal) =>
-      this.addGraphicRun(clipId, opts, signal),
+      this.addGraphicRun(clipId, opts, addon, signal),
     );
-    return promise;
+    return promise.catch(told);
   }
 
   private async addGraphicRun(
@@ -6425,6 +6448,7 @@ export class EditorEngine extends EventEmitter {
       opacity?: number;
       standalone?: boolean;
     },
+    addon: ResolvedGraphicsAddon,
     signal: AbortSignal,
   ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset }> {
     const clip = clipId ? this.findClip(clipId).clip : undefined;
@@ -6452,17 +6476,21 @@ export class EditorEngine extends EventEmitter {
     const outPath = join(bakedDir, `${id}-graphic.${asNewClip ? "mp4" : "mov"}`);
     const workDir = join(this.dataDir, "motion", id);
 
-    await renderGraphic({
-      code: opts.code,
-      props: opts.props,
-      width,
-      height,
-      fps,
-      durationInFrames,
-      outPath,
-      alpha: !asNewClip,
-      workDir,
-    });
+    await renderGraphic(
+      {
+        code: opts.code,
+        props: opts.props,
+        width,
+        height,
+        fps,
+        durationInFrames,
+        outPath,
+        alpha: !asNewClip,
+        workDir,
+      },
+      addon,
+      this.graphicRemotion,
+    );
 
     if (signal.aborted) throw new Error("Motion-graphic render canceled");
     // Remotion's BT.601 says so in complete tags (motion/render.ts).

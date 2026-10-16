@@ -77,9 +77,19 @@ async function isHlsPlaylist(path: string, size: number, mtimeMs: number): Promi
   return answer;
 }
 
-/** The fields an rpc error carries besides its message: G1e's code and its server(s) (rpc.ts). */
+/** The rpc error codes the body carries: G1e's network refusals (403), and the graphics add-on's states (409). */
+const FORWARDED_CODES: ReadonlyMap<string, number> = new Map([
+  ["media_server_not_approved", 403],
+  ["media_offline", 403],
+  ["graphics_addon_missing", 409],
+  ["graphics_addon_update", 409],
+  ["graphics_addon_broken", 409],
+  ["graphics_addon_unsupported", 409],
+]);
+
+/** The fields an rpc error carries besides its message: its code and, for G1e, its server(s) (rpc.ts). */
 function errorFields(err: unknown): Record<string, unknown> {
-  if (!(err instanceof RpcError) || (err.code !== "media_server_not_approved" && err.code !== "media_offline")) return {};
+  if (!(err instanceof RpcError) || !FORWARDED_CODES.has(err.code)) return {};
   return { code: err.code, ...err.details };
 }
 
@@ -159,6 +169,8 @@ export class EditorServer {
     );
     // Only the network computers changed (an rpc request made one pending).
     this.engine.on("media-servers", (mediaServers) => this.broadcast({ type: "media-servers", mediaServers }));
+    // add_graphic was refused for the graphics add-on: only its state (the UI offers the add-on dialog).
+    this.engine.on("graphics-addon", ({ state }) => this.broadcast({ type: "graphics-addon", state }));
     this.engine.on("progress", (info) => this.broadcast({ type: "progress", ...info }));
     this.engine.on("job", (job) => this.broadcast({ type: "job", job }));
   }
@@ -350,9 +362,10 @@ export class EditorServer {
           const result = await dispatch(this.engine, parsed.method, parsed.params);
           respond(200, { ok: true, result });
         } catch (err) {
-          // G1e: a server not allowed or offline media is a refusal (403), not a server error.
+          // G1e: a server not allowed or offline media is a refusal (403), and no ready
+          // graphics add-on a conflict with the add-on's state (409), not a server error.
           const fields = errorFields(err);
-          const status = fields.code ? 403 : err instanceof RpcError && err.code !== "handler_error" ? 400 : 500;
+          const status = fields.code ? FORWARDED_CODES.get(fields.code as string)! : err instanceof RpcError && err.code !== "handler_error" ? 400 : 500;
           respond(status, { ok: false, error: err instanceof Error ? err.message : String(err), ...fields });
         }
         return;

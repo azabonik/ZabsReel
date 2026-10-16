@@ -46,6 +46,10 @@
       "types": "./dist/datadir.d.ts",
       "default": "./dist/datadir.js"
     },
+    "./addon": {
+      "types": "./dist/addon/index.d.ts",
+      "default": "./dist/addon/index.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {
@@ -60,22 +64,22 @@
     "start": "tsx src/cli.ts"
   },
   "dependencies": {
-    "@remotion/bundler": "4.0.481",
-    "@remotion/renderer": "4.0.481",
     "execa": "^9.5.2",
     "nanoid": "^5.0.9",
     "onnxruntime-node": "^1.26.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "remotion": "4.0.481",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@remotion/bundler": "4.0.481",
+    "@remotion/renderer": "4.0.481",
     "@types/node": "^22.10.5",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@types/ws": "^8.5.13",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.481",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

@@ -25,7 +25,11 @@
  *  G5. public/   — a public/ folder in the core's working directory, or next
  *                  to a package.json above the scaffold, is not copied into
  *                  the bundle (renderGraphic passes its own empty publicDir).
+ *  G6. no add-on — without AIVE_REMOTION_ADDON and without an installed
+ *                  add-on, add_graphic refuses with graphics_addon_missing.
  *
+ * Remotion loads from AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo
+ * root when unset).
  * No network: the only host is under .invalid, and G2 refuses it before any
  * file call. Real-render checks of allowed graphics are smoke-motion and
  * smoke-chromeguard M5 (they need Chrome).
@@ -40,6 +44,10 @@ import { pathToFileURL } from "node:url";
 import { graphicRemotion, renderGraphic, type GraphicRemotion } from "../src/motion/render.js";
 import { GraphicImportsPlugin } from "../src/motion/netgate.js";
 import { TITLE_CARD_TSX } from "../src/motion/templates.js";
+import type { ResolvedGraphicsAddon } from "../src/addon/resolve.js";
+import { EditorEngine } from "../src/engine.js";
+import { dispatch, RpcError } from "../src/rpc.js";
+import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -102,6 +110,7 @@ interface Bundled {
 
 let remotion: GraphicRemotion;
 let n = 0;
+const DEV: ResolvedGraphicsAddon = { ok: true, root: useDevAddon() };
 
 /**
  * renderGraphic of `code`, stopped after bundle(); `withImportsRule: false` takes
@@ -127,7 +136,7 @@ async function bundleGraphic(code: string, o: { withImportsRule?: boolean; workD
   const workDir = o.workDir ?? join(root, "work", `g${n++}`);
   let error: string | null = null;
   try {
-    await renderGraphic({ code, width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(workDir, "x.mp4"), workDir }, { ...remotion, bundle });
+    await renderGraphic({ code, width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(workDir, "x.mp4"), workDir }, DEV, { ...remotion, bundle });
     error = "renderGraphic returned";
   } catch (err) {
     error = (err as Error).message === BUNDLED ? null : (err as Error).message;
@@ -146,13 +155,14 @@ async function main() {
   writeFileSync(secret("secret.json"), JSON.stringify({ k: TOKEN }));
   writeFileSync(secret("secret.png"), Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.from(TOKEN)]));
   writeFileSync(secret("secret.css"), `.a { content: "${TOKEN}"; }\n`);
-  remotion = await graphicRemotion();
+  remotion = await graphicRemotion(DEV.root);
   try {
     await g1();
     await g2();
     await g3();
     await g4();
     await g5();
+    await g6();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -290,6 +300,26 @@ async function g5() {
   dropOut(q);
   check(q.error === null && !qp.files.includes("zr-public.txt") && !qp.named,
     `public/ next to a package.json above the scaffold: not in the bundle (${q.error?.split("\n")[0].slice(0, 120) ?? "bundled"}; public/ holds ${JSON.stringify(qp.files)})`);
+}
+
+// ---- G6 ------------------------------------------------------------------------
+// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
+async function g6() {
+  console.log("G6. no add-on: add_graphic refuses with graphics_addon_missing...");
+  const dataDir = mkdtempSync(join(root, "g6-data-"));
+  const engine = new EditorEngine(dataDir);
+  let code: string | undefined;
+  await withoutDevAddon(async () => {
+    try {
+      await dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 });
+      code = "added";
+    } catch (err) {
+      code = err instanceof RpcError ? err.code : (err as Error).message;
+    }
+  });
+  check(code === "graphics_addon_missing" && !existsSync(join(dataDir, "motion")) && !existsSync(join(dataDir, "baked")),
+    `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing, nothing written (${code})`);
 }
 
 main().catch((err) => {
