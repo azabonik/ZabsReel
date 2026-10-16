@@ -10,8 +10,12 @@ import { platformLabel, readGraphicsAddon, type GraphicsAddonState } from "./sta
  * behaves like the packaged app unless it opts in.
  */
 
-/** The variables only a source checkout honours: tests and dev runs. */
-export type DevVariable = "AIVE_REMOTION_ADDON" | "AIVE_REMOTION_BROWSER" | "AIVE_ADDON_REGISTRY";
+/**
+ * The variables only a source checkout honours: tests and dev runs.
+ * AIVE_ADDON_TEST_PIN (a JSON pin file) is read by the UI hosts only, for
+ * their smokes' fixture add-on.
+ */
+export type DevVariable = "AIVE_REMOTION_ADDON" | "AIVE_REMOTION_BROWSER" | "AIVE_ADDON_REGISTRY" | "AIVE_ADDON_TEST_PIN";
 
 /** Test seams: the environment, and a file of the core whose package folder decides "source checkout". */
 export interface DevOptions {

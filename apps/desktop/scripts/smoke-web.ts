@@ -33,6 +33,19 @@
 // another computer, raises a media-src violation and makes no request. /file
 // answers 415 for a playlist.
 //
+// The graphics add-on (ADDON-PLAN D8.5; a fixture closure from a loopback
+// registry on port 5033 through AIVE_ADDON_REGISTRY, the pin from
+// AIVE_ADDON_TEST_PIN, its URLs on hosts under .invalid): /api/graphics-addon/*
+// answers only with the shell key (not without, not with the core token), and
+// nothing is installed or fetched then. In the page: Help → Graphics add-on…
+// shows the core's notice and licence, another window's install lock its
+// message and no install button; Accept and install shows progress and
+// Cancel, and Cancel leaves nothing; the next install ends "ready" with only
+// the platform's list fetched; a fixture job of type "graphic" disables Remove
+// and Reinstall; Remove; a copy whose browser is gone shows Reinstall; with no
+// add-on, an add_graphic over the core's HTTP RPC brings the banner, whose
+// Set up… opens the dialog. The shell fetches nothing but loopback (traced).
+//
 // No core is left running: stopping the shell must end its core's process
 // (not only its port), and at the end, also after a failure, any core this
 // smoke started that still runs is stopped by its exact pid (leftover-cores.ts).
@@ -169,6 +182,16 @@ for (const [name, mod] of [["fs", fs], ["fs/promises", fs.promises], ["child_pro
   }
 }
 syncBuiltinESMExports();
+// Every fetch to anything but loopback (the add-on's downloads go to the fixture registry only).
+const realFetch = globalThis.fetch;
+const loopback = (u) => { try { return ["127.0.0.1", "localhost"].includes(new URL(u).hostname); } catch { return false; } };
+globalThis.fetch = function (input, init) {
+  const u = String(input && input.url ? input.url : input);
+  if (!loopback(u)) {
+    try { append(out, JSON.stringify({ fn: "fetch", args: [u], main: process.argv[1] }) + "\\n"); } catch {}
+  }
+  return realFetch.call(this, input, init);
+};
 `;
 
 async function main() {
@@ -187,10 +210,22 @@ async function main() {
     process.exit(1);
   }
 
+  // The graphics add-on's fixture closure, its registry and its pin (step 7b).
+  const { basePkgs, buildPin, fixtureRegistry } = await import("../../../packages/core/scripts/addon-fixture.ts");
+  const fixture = buildPin(basePkgs(join(root, "addon-postinstall-ran")), {}, "", { registry: "https://zr-addon-registry.invalid", storage: "https://zr-addon-storage.invalid" });
+  const registry = fixtureRegistry(5033);
+  registry.publish(fixture);
+  await registry.start();
+  const pinFile = join(root, "addon-pin.json");
+  writeFileSync(pinFile, JSON.stringify(fixture.pin));
+
   // apps/desktop is CommonJS (no "type": "module"), so tsx runs this as CJS.
   const serverPath = join(__dirname, "..", "web", "server.cjs");
   const shell = spawn(process.execPath, [serverPath, "--port", "0", "--no-open"], {
-    env: { ...process.env, AIVE_DATA_DIR: dataDir, AIVE_PORT: "0", NODE_OPTIONS: `--import ${pathToFileURL(join(root, "trace.mjs")).href}`, ZR_TRACE: traceFile },
+    env: {
+      ...process.env, AIVE_DATA_DIR: dataDir, AIVE_PORT: "0", NODE_OPTIONS: `--import ${pathToFileURL(join(root, "trace.mjs")).href}`, ZR_TRACE: traceFile,
+      AIVE_ADDON_REGISTRY: registry.url, AIVE_ADDON_TEST_PIN: pinFile,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let shellLog = "";
@@ -289,6 +324,7 @@ async function main() {
     check("/file answers 415 for a playlist, whatever its name", hls.status === 415 && json(hls).error === "ZabsReel can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.", `${hls.status} ${hls.body.slice(0, 160)}`);
 
     await networkComputers({ port, corePort, token, shellKey, ready, root, dataDir, traceFile, clip });
+    await graphicsAddon({ port, corePort, token, shellKey, ready, root, dataDir, traceFile, registry, fixture });
 
     console.log("8. shutdown");
     shell.kill("SIGTERM");
@@ -323,6 +359,7 @@ async function main() {
     }
     check("…and stops the core it started", blockedCoreGone);
   } finally {
+    await registry.stop();
     if (shell.exitCode === null) shell.kill("SIGKILL");
     // A failure part way (or the SIGKILL above) leaves the shell's core running: stop it by its pid.
     const cores = await stopLeftoverCores([dataDir, join(root, "data-blocked"), join(root, "data-blocked-core")]);
@@ -604,6 +641,168 @@ async function networkComputers(o: {
     expect(pick.length > 0 && pick.every((t) => t.main.endsWith("server.cjs") && /readdir/.test(t.fn)),
       `zr-pick.invalid: only the shell's listing of the folder sent to the picker (${pick.map((t) => `${t.fn} ${t.args[0]}`).join(", ")})`);
     expect(pageErrors.length === 0, `no page errors (${pageErrors.join(" | ")})`);
+  } finally {
+    await browser.close();
+  }
+}
+
+/** Step 7b: the graphics add-on through the shell (ADDON-PLAN D8.5). */
+async function graphicsAddon(o: {
+  port: number; corePort: number; token: string; shellKey: string; ready: { url: string };
+  root: string; dataDir: string; traceFile: string;
+  registry: import("../../../packages/core/scripts/addon-fixture.ts").FixtureRegistry;
+  fixture: import("../../../packages/core/scripts/addon-fixture.ts").Fixture;
+}) {
+  const { port, corePort, token, shellKey, ready, dataDir, traceFile, registry, fixture } = o;
+  const { addonPlatform, graphicsAddonDir, graphicsAddonTerms, readGraphicsAddon } = await import("@aive/core/addon");
+  const platform = addonPlatform();
+  console.log("7b. the graphics add-on: the shell key, then the dialog in the page");
+  if (!platform) {
+    console.log(`  skip: ${process.platform}-${process.arch} has no add-on`);
+    return;
+  }
+  const terms = graphicsAddonTerms(platform);
+  const state = () => readGraphicsAddon(dataDir, { pin: fixture.pin }).state;
+  const zipPath = new URL(fixture.pin.shell[platform].url).pathname;
+  const wanted = [...fixture.pin.lists[platform].paths.map((p) => new URL(fixture.pin.closure.find((e) => e.path === p)!.resolved).pathname), zipPath].sort();
+  const shellAuth = { "x-zabsreel-shell": shellKey };
+  const post = (path: string, body: unknown, headers: Record<string, string>) =>
+    request(port, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  // MUTATION: serve /api/graphics-addon/* before the shell-key check in server.cjs → the 401 rows fail.
+  for (const [what, headers] of [["without the shell key", {}], ["with only the core token", { "x-aive-token": token }]] as const) {
+    const st = await request(port, "/api/graphics-addon/status", { headers });
+    const tm = await request(port, "/api/graphics-addon/terms", { headers });
+    const ins = await post("/api/graphics-addon/install", { acceptedLicenseSha256: terms.sha256 }, headers);
+    const rem = await post("/api/graphics-addon/remove", {}, headers);
+    await sleep(500);
+    check(`GET status and terms, POST install and remove ${what} → 401; nothing installed or fetched`,
+      [st, tm, ins, rem].every((r) => r.status === 401) && registry.hits.size === 0 && !existsSync(join(dataDir, "addons")), [st, tm, ins, rem].map((r) => r.status).join());
+  }
+  const st = await request(port, "/api/graphics-addon/status", { headers: shellAuth });
+  check("GET status with the shell key → not installed", st.status === 200 && json(st).state === "not-installed" && json(st).version === "4.0.481", st.body.slice(0, 200));
+  check("GET install → 405", (await request(port, "/api/graphics-addon/install", { headers: shellAuth })).status === 405);
+
+  // A new project: the one step 7 left names files on test servers, which the page would ask for.
+  const fresh = await request(corePort, "/rpc", { method: "POST", headers: { "x-aive-token": token, "content-type": "application/json" }, body: JSON.stringify({ method: "new_project", params: {} }) });
+  check("a new project in the core", fresh.status === 200, fresh.body.slice(0, 120));
+  const pw = await loadPlaywright();
+  const exe = chromiumPath();
+  const browser = await pw.chromium.launch({ ...(exe ? { executablePath: exe } : {}), args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-audio-output"] });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
+    const errors: string[] = [];
+    page.on("response", (r) => { if (r.status() >= 400) errors.push(`${r.status()} ${r.url()}`); });
+    page.on("pageerror", (e) => errors.push(e.message));
+    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    // The page's own socket, for the fixture job below.
+    await page.addInitScript(`(() => {
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (d) { window.__ws = this; return send.call(this, d); };
+    })()`);
+    await page.goto(ready.url);
+    check("the page connects", await waitFor("Core pill", async () => (await page.locator(".statuspill.ok").count()) > 0));
+    const dlg = page.getByRole("dialog", { name: /Graphics add-on/ });
+    const button = (name: string) => dlg.getByRole("button", { name, exact: true });
+    const text = () => dlg.innerText().catch(() => "");
+    const openDialog = async () => {
+      await page.getByRole("button", { name: "Help", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Graphics add-on…" }).click();
+      return waitFor("add-on dialog", async () => (await dlg.count()) > 0 && !(await text()).includes("Loading…"), 10000);
+    };
+    const closeDialog = async () => {
+      await button("Close").last().click();
+      await waitFor("dialog closed", async () => (await dlg.count()) === 0, 5000);
+    };
+
+    check("Help → Graphics add-on… opens the dialog", await openDialog());
+    const notice = await dlg.locator(".ga-notice").allTextContents();
+    const license = await dlg.locator(".ga-license").textContent();
+    check("it shows the notice and Remotion's licence exactly as the core gives them, and Accept and install",
+      JSON.stringify(notice) === JSON.stringify(terms.notice.split("\n\n").filter((p) => p.trim())) && license === terms.license && (await button("Accept and install").count()) === 1,
+      `${notice.length} paragraphs, ${license?.length ?? 0} characters`);
+    check("…and nothing is fetched before Accept", registry.hits.size === 0 && state() === "not-installed");
+
+    // Another window holds the install lock (a live pid): its message, and no install button until it clears.
+    // MUTATION: report no `busy` from graphics-addon.cjs status() → this row fails.
+    mkdirSync(join(dataDir, "addons"), { recursive: true });
+    const lock = join(dataDir, "addons", ".install.lock");
+    writeFileSync(lock, `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), via: "desktop", token: "zr-fixture" })}\n`);
+    await closeDialog();
+    await openDialog();
+    check("another window's install lock: its message, and no install button",
+      (await text()).includes("Another ZabsReel window is installing the graphics add-on (desktop). Wait for it to finish.") && (await button("Accept and install").count()) === 0,
+      (await text()).replace(/\s+/g, " ").slice(0, 160));
+    rmSync(lock);
+    check("…until the lock clears", await waitFor("lock cleared", async () => (await button("Accept and install").count()) === 1, 10000));
+
+    // MUTATION: make /api/graphics-addon/cancel do nothing in server.cjs → the cancel row ends "ready".
+    registry.answers.set(zipPath, "hold");
+    await button("Accept and install").click();
+    check("Accept and install shows its progress and Cancel",
+      await waitFor("progress", async () => /Installing… \d+ MB of \d+ MB/.test(await dlg.locator(".ga-progress").innerText().catch(() => "")), 10000) && (await button("Cancel").count()) === 1,
+      (await dlg.locator(".ga-progress").innerText().catch(() => "")).replace(/\s+/g, " "));
+    await button("Cancel").click();
+    check("Cancel → \"cancelled\", nothing installed",
+      await waitFor("cancelled", async () => (await text()).includes("The graphics add-on install was cancelled. Nothing was installed."), 10000) && state() === "not-installed"
+      && JSON.stringify(readdirSync(join(dataDir, "addons"))) === "[]", (await text()).replace(/\s+/g, " ").slice(0, 200));
+    registry.answers.clear();
+    registry.hits.clear();
+    await button("Accept and install").click();
+    check("Accept and install → \"Graphics are ready.\" and ready", await waitFor("ready", async () => (await text()).includes("Graphics are ready."), 20000) && state() === "ready", state());
+    check("…fetching exactly the platform's tarballs and its browser zip", JSON.stringify(registry.hitPaths()) === JSON.stringify(wanted), JSON.stringify(registry.hitPaths()));
+    const manifest = JSON.parse(readFileSync(join(graphicsAddonDir(dataDir), "addon.json"), "utf8"));
+    check("addon.json: via web, the accepted terms' hash", manifest.via === "web" && manifest.licenseSha256 === terms.sha256, `${manifest.via}`);
+    check("ready: the version, Remove and Reinstall", (await button("Remove").count()) === 1 && (await button("Reinstall").count()) === 1 && (await text()).includes(`Remotion ${manifest.remotion} is installed`));
+
+    // A graphic renders (a fixture job of type "graphic" on the page's own socket).
+    // MUTATION: drop `blocked` from the Reinstall button in graphicsaddon.tsx → the disabled row fails.
+    const job = (status: string) => page.evaluate((status) => {
+      const job = { id: "zr-fixture-graphic", type: "graphic", label: "Render motion graphic", status, fraction: 0.3, startedAt: Date.now() };
+      (window as unknown as { __ws: WebSocket }).__ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "job", job }) }));
+    }, status);
+    await job("running");
+    check("while a graphic renders, Remove and Reinstall are disabled: \"Wait for the graphic to finish.\"",
+      await waitFor("disabled", async () => (await button("Remove").isDisabled()) && (await button("Reinstall").isDisabled()), 5000) && (await text()).includes("Wait for the graphic to finish."));
+    await job("done");
+    check("…and enabled once it is done", await waitFor("enabled", async () => (await button("Remove").isEnabled()) && (await button("Reinstall").isEnabled()), 5000));
+
+    await button("Remove").click();
+    check("Remove → not installed, its folder gone", await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)));
+
+    // A copy whose browser went missing: "damaged", with Reinstall.
+    await button("Accept and install").click();
+    await waitFor("ready again", async () => (await text()).includes("Graphics are ready."), 20000);
+    await closeDialog();
+    rmSync(join(graphicsAddonDir(dataDir), "browser", fixture.pin.shell[platform].executable));
+    await openDialog();
+    check("a copy whose browser is gone: \"damaged\" and Reinstall",
+      state() === "broken" && (await text()).includes("The graphics add-on is damaged (missing files).") && (await button("Reinstall").count()) === 1 && (await button("Remove").count()) === 0);
+    await button("Reinstall").click();
+    check("Reinstall repairs it", await waitFor("repaired", async () => (await text()).includes("Graphics are ready."), 20000) && state() === "ready");
+    await button("Remove").click();
+    await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000);
+    await closeDialog();
+
+    // The agent's add_graphic with no add-on: refused, and the banner offers the dialog.
+    // MUTATION: render no GraphicsAddonBanner in App.tsx → the banner row fails.
+    const res = await request(corePort, "/rpc", {
+      method: "POST", headers: { "x-aive-token": token, "content-type": "application/json" },
+      body: JSON.stringify({ method: "add_graphic", params: { code: "export default () => null;", durationSeconds: 1 } }),
+    });
+    check("add_graphic over the core's HTTP RPC with no add-on → 409 graphics_addon_missing", res.status === 409 && json(res).code === "graphics_addon_missing", `${res.status} ${res.body.slice(0, 120)}`);
+    const banner = page.locator(".ga-banner");
+    check("…and the page shows the banner",
+      await waitFor("banner", async () => (await banner.count()) > 0, 10000) && (await banner.innerText()).includes("The AI asked for a graphic. Graphics need the Remotion add-on."),
+      (await banner.innerText().catch(() => "")).replace(/\s+/g, " "));
+    await banner.getByRole("button", { name: "Set up…" }).click();
+    check("Set up… opens the dialog (and the banner goes)", await waitFor("dialog from banner", async () => (await button("Accept and install").count()) === 1, 10000) && (await banner.count()) === 0);
+    await closeDialog();
+
+    const outside = readFileSync(traceFile, "utf8").split("\n").filter((l) => l.includes('"fn":"fetch"'));
+    check("the shell and its core fetched nothing but loopback (the pin's .invalid hosts never)", outside.length === 0, outside.slice(0, 3).join(" | "));
+    check("no page errors or console errors", errors.length === 0, errors.join(" | "));
   } finally {
     await browser.close();
   }

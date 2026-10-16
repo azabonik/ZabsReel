@@ -87,6 +87,11 @@ export function platformLabel(key = `${process.platform}-${process.arch}`): stri
   return key === "linux-x64" && !hasGlibc() ? "linux-x64 without glibc" : key;
 }
 
+/** The D2 message for a platform without the add-on. `key`: a test seam. */
+export function unsupportedMessage(key?: string): string {
+  return `The graphics add-on isn't available for ${platformLabel(key)}.`;
+}
+
 /** addon.json at `file` as an object, or undefined when it is missing or does not parse. */
 export function readManifest(file: string): Record<string, unknown> | undefined {
   try {

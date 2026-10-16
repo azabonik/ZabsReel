@@ -1,7 +1,9 @@
 /* Network computers (networkcomputers.tsx): the banner above the preview, the
    offline badges and the Project → Network computers dialog. The dialog's
-   frame reuses .scrim, .exact-modal and .exact-head. */
-.ms-banner {
+   frame reuses .scrim, .exact-modal and .exact-head. The graphics add-on's
+   banner (graphicsaddon.tsx) looks the same. */
+.ms-banner,
+.ga-banner {
   display: flex;
   flex-direction: column;
   gap: 4px;

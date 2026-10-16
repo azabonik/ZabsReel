@@ -1,9 +1,13 @@
-import type { JobInfo, MediaServers, Project } from "./types";
+import type { GraphicsAddonState, JobInfo, MediaServers, Project } from "./types";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 /** An rpc refusal's fields besides its message (core G1e): media_server_not_approved or media_offline. */
 export type RpcRefusal = Error & { code?: string; host?: string; hosts?: string[]; outside?: boolean; unread?: boolean };
+
+/** The add-on states add_graphic is refused for (the core's `graphics-addon` broadcast). */
+export type GraphicsAddonRefusal = Exclude<GraphicsAddonState, "ready">;
+const REFUSALS = new Set<string>(["not-installed", "update-needed", "broken", "unsupported"]);
 
 /**
  * Client for the editor core. Holds a live WebSocket for state + job
@@ -21,6 +25,8 @@ export class CoreApi {
   private jobCb?: (j: JobInfo) => void;
   private statusCb?: (connected: boolean) => void;
   private serversCb?: (s: MediaServers) => void;
+  private addonCb?: (state: GraphicsAddonRefusal) => void;
+  private readonly jobListeners = new Set<(j: JobInfo) => void>();
   private closed = false;
   private attempts = 0;
   // The socket can open — and deliver the first state — before React's effects
@@ -52,9 +58,23 @@ export class CoreApi {
     this.serversCb = cb;
     if (this.lastServers) cb(this.lastServers);
   }
+  /**
+   * add_graphic was refused because the graphics add-on is not ready (an
+   * agent's call, which only the agent sees): its state, and nothing else.
+   */
+  onGraphicsAddon(cb: (state: GraphicsAddonRefusal) => void): void {
+    this.addonCb = cb;
+  }
   /** Every job change (start, progress, done, error, canceled); undefined unsubscribes. */
   onJob(cb: ((j: JobInfo) => void) | undefined): void {
     this.jobCb = cb;
+  }
+  /** One more listener for every job change, besides onJob's (the add-on dialog); returns its unsubscribe. */
+  subscribeJobs(cb: (j: JobInfo) => void): () => void {
+    this.jobListeners.add(cb);
+    return () => {
+      this.jobListeners.delete(cb);
+    };
   }
   onStatus(cb: (connected: boolean) => void): void {
     this.statusCb = cb;
@@ -123,6 +143,10 @@ export class CoreApi {
           break;
         case "job":
           this.jobCb?.(msg.job as JobInfo);
+          for (const l of this.jobListeners) l(msg.job as JobInfo);
+          break;
+        case "graphics-addon":
+          if (typeof msg.state === "string" && REFUSALS.has(msg.state)) this.addonCb?.(msg.state as GraphicsAddonRefusal);
           break;
         case "rpc_result": {
           const p = this.pending.get(msg.id as number);

@@ -106,7 +106,16 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
   words: cheap, instant, keyframe x/y/opacity with easing. drawtext expressions
   are auto-handled; keyframes are CLIP-LOCAL frames.
 - **Coded graphics** (`add_graphic`, Remotion TSX) for anything designed: badges,
-  brand pops, end cards, count-ups, 3D. Rules that make them look professional:
+  brand pops, end cards, count-ups, 3D. They need the **Remotion add-on**, which
+  the user installs in the ZabsReel window (Help → Graphics add-on) under
+  Remotion's own license; `get_state`'s `graphics` says whether it is ready.
+  Without it `add_graphic` writes nothing and refuses with
+  `graphics_addon_missing`, `graphics_addon_update`, `graphics_addon_broken` or
+  `graphics_addon_unsupported`, and the message says what to ask the user. Ask
+  them, then try again. Never try to install, update or repair the add-on
+  yourself (no npm, no downloads, no edits in ZabsReel's data folder): only the
+  user can, and no tool does. Native text needs no add-on. Rules that make
+  coded graphics look professional:
   - Spring entrances (`spring({damping:11–13, stiffness:140–170})`), explicit
     exit fades in the last 10–14 frames of the window. Nothing pops in/out raw.
   - Transparent background for overlays; `standalone:true` + `background` for

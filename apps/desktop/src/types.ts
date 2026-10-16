@@ -375,6 +375,38 @@ export interface MediaServers {
   dataFolderHost?: string;
 }
 
+/** The graphics add-on's state (core addon/state.ts, ADDON-PLAN D1). */
+export type GraphicsAddonState = "ready" | "not-installed" | "update-needed" | "broken" | "unsupported";
+
+/** What a UI host says of the add-on (electron/graphics-addon.cjs status()). */
+export interface GraphicsAddonStatus {
+  state: GraphicsAddonState;
+  /** Remotion's version (the pin). */
+  version: string;
+  /** The D2 message where the add-on isn't offered. */
+  unsupported: string | null;
+  installedAt: string | null;
+  /** The installed copy's size on disk, when ready. */
+  bytes: number | null;
+  /** The installed (or earlier) copy was accepted with the terms shown now. */
+  licenseAccepted: boolean;
+  /** Another window holds the install lock: its message. */
+  busy: string | null;
+  /** This host's running install or removal. */
+  job: { id: number; kind: "install" | "remove"; done: number; total: number } | null;
+  last: { id: number; kind: "install" | "remove"; ok: boolean; error: string | null; cancelled: boolean } | null;
+}
+
+/** The notice and Remotion's licence the user accepts, and their hash (core addon/terms.ts). */
+export interface GraphicsAddonTerms {
+  notice: string;
+  license: string;
+  sha256: string;
+}
+
+/** How an install or removal ended. */
+export type GraphicsAddonResult = { ok: boolean; error?: string | null; cancelled?: boolean };
+
 /** Display-only context for the approval dialog: the user opened this path himself. */
 export type ApproveContext = { origin: "user"; path: string };
 
@@ -393,6 +425,14 @@ declare global {
       mediaServers?: {
         approve: (host: string, context?: ApproveContext) => Promise<boolean>;
         revoke: (host: string) => Promise<void>;
+      };
+      graphicsAddon?: {
+        status: () => Promise<GraphicsAddonStatus>;
+        terms: () => Promise<GraphicsAddonTerms | null>;
+        install: (acceptedLicenseSha256: string) => Promise<GraphicsAddonResult>;
+        cancel: () => Promise<boolean>;
+        remove: () => Promise<GraphicsAddonResult>;
+        onProgress: (cb: (p: { done: number; total: number }) => void) => () => void;
       };
     };
   }

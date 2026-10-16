@@ -34,7 +34,8 @@
  *  P8. --browser     — a write fills the headless-shell table from a folder
  *                      of zips; --check --browser passes on them, and names a
  *                      changed zip's sha256 and entry count, a zip with a
- *                      symlink, and a missing zip.
+ *                      symlink, and a missing zip. A write whose pin then
+ *                      fails writes neither file.
  * The core:
  *  C1. states        — readGraphicsAddon on fixture folders: ready; no or
  *                      unparsable addon.json: not-installed; lock hash,
@@ -113,8 +114,9 @@
  *  I10. the guard    — a renderer whose text the load-time rewrite doesn't know
  *                      is never activated.
  *  I11. messages     — 500, a closed socket, a timeout, nothing listening,
- *                      ENOSPC and ENAMETOOLONG (also while taking the lock)
- *                      give the D3.8 messages.
+ *                      ENOSPC and ENAMETOOLONG (also while taking the lock,
+ *                      for an install and for Remove) give the D3.8 messages;
+ *                      a cancel while a download is failing gives "cancelled".
  *  I12. names        — Windows device names, trailing dots and spaces, refused
  *                      characters and case collisions refused for win32-x64,
  *                      case and Unicode-form collisions for darwin; written for
@@ -123,9 +125,13 @@
  *                      a nested package's change too (its parent is reused
  *                      around it); a tampered or incomplete source package is fetched
  *                      again; a pin move reuses from another version's folder;
- *                      a failed activation leaves the source byte-identical.
+ *                      a failed activation leaves the source byte-identical;
+ *                      a reused package's names count in the win32 collision
+ *                      check.
  *  I14. no route     — only addon/index.ts imports or names the installer, and no RPC
- *                      method (so no MCP tool) installs, removes or recovers.
+ *                      method (so no MCP tool) installs, removes or recovers;
+ *                      the MCP instructions, SKILL.md and add_graphic's
+ *                      description tell the agent to ask the user instead.
  *  Z1. the zip reader — stored, deflate and empty entries, Unix execute bits;
  *                      zip64 (end record, locator, extra field), encryption,
  *                      another method, symlink, FIFO, "..", absolute, drive,
@@ -145,10 +151,9 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { crc32, deflateRawSync, gzipSync } from "node:zlib";
 import { WebSocket } from "ws";
 import type { RenderInternals } from "@remotion/renderer";
-import { readGraphicsAddon, addonPlatform, graphicsAddonDir, platformLabel, type AddonPin } from "../src/addon/state.js";
+import { readGraphicsAddon, addonPlatform, graphicsAddonDir, platformLabel } from "../src/addon/state.js";
 import { addonInstallerForTests, GraphicsAddonInstallError, type AddonSeams, type InstallFailure, type InstallOptions, type InstallProgress } from "../src/addon/install.js";
 import { NameSet } from "../src/addon/names.js";
 import { ArchiveRefusal, extractTarball } from "../src/addon/tar.js";
@@ -162,6 +167,7 @@ import { FFMPEG_BIN } from "../src/ffmpeg/executor.js";
 import { ADDON_CLOSURE, ADDON_LOCK_SHA256, ADDON_ONLY, ADDON_PLATFORM_LISTS, ADDON_PLATFORMS, ADDON_REMOTION_VERSION, HEADLESS_SHELL, type AddonPlatform } from "../src/motion/addonlock.js";
 import { loadRemotion } from "../src/motion/remotionload.js";
 import { ADDON_CHANGED, graphicRemotion, refuseBrowserDownload, renderGraphic, type GraphicRemotion } from "../src/motion/render.js";
+import { basePkgs, buildPin, CFT_EXE, fixtureRegistry, fixtureZip, makeTar, makeZip, pkgJson, RAN, reg, sha256hex, type Fixture, type TarIn, type ZipIn } from "./addon-fixture.js";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -200,6 +206,14 @@ const BROWSER_MISSING = "The graphics add-on's browser is missing. Reinstall the
 
 // ---- fixtures ----------------------------------------------------------------------
 
+/** Every engine the C rows make: their storage heartbeats (run/core-*.json, every 30 s) stop before the installer rows record fs calls. */
+const engines: EditorEngine[] = [];
+const newEngine = (dataDir: string) => {
+  const e = new EditorEngine(dataDir);
+  engines.push(e);
+  return e;
+};
+
 const PLATFORM = addonPlatform();
 let dataN = 0;
 const freshData = () => mkdtempSync(join(root, `data-${dataN++}-`));
@@ -231,7 +245,6 @@ function gen(rootDir: string, ...args: string[]) {
   return { status: r.status, out: `${r.stdout}${r.stderr}`, json: args.includes("--json") && r.status === 0 ? JSON.parse(r.stdout) : undefined };
 }
 
-const reg = (name: string, version: string) => `https://registry.npmjs.org/${name}/-/${name.split("/").pop()}-${version}.tgz`;
 /** A lock entry for `path` (a fixture integrity from the path). */
 function entry(path: string, version: string, extra: Record<string, unknown> = {}) {
   const name = path.slice(path.lastIndexOf("node_modules/") + 13);
@@ -496,6 +509,18 @@ function p8() {
     && table["linux-x64"].url === `https://storage.googleapis.com/chrome-for-testing-public/${HEADLESS_SHELL.version}/linux64/chrome-headless-shell-linux64.zip`,
     `a write with --browser fills the table from the zips (${filled.out.trim().split("\n").pop()})`);
   check(gen(dir, "--check", "--browser", "--zips", zips).status === 0, "--check --browser passes on the zips it was filled from");
+  // A write with another zip whose pin then fails (remotionload.ts guards another version) writes neither
+  // file: the data file keeps its old table.
+  const files = [join(dir, "scripts", "graphics-lock-data.json"), join(dir, "packages", "core", "src", "motion", "addonlock.ts")];
+  const before = files.map((f) => readFileSync(f, "utf8"));
+  const loadTs = join(dir, "packages", "core", "src", "motion", "remotionload.ts");
+  writeFileSync(loadTs, 'export const REMOTION_VERSION = "4.0.480";\n');
+  put("linux-x64", [{ name: "chrome-headless-shell-linux64/extra.txt", data: "x" }]);
+  const refused = gen(dir, "--browser", "--zips", zips);
+  check(refused.status === 1 && /nothing written/.test(refused.out) && files.every((f, i) => readFileSync(f, "utf8") === before[i]),
+    `a --browser write whose pin fails changes neither the data file nor addonlock.ts (${refused.out.trim().split("\n").pop()})`);
+  writeFileSync(loadTs, 'export const REMOTION_VERSION = "4.0.481";\n');
+  put("linux-x64");
   put("darwin-arm64", [{ name: "chrome-headless-shell-mac-arm64/extra.txt", data: "x" }]);
   const changed = gen(dir, "--check", "--browser", "--zips", zips);
   check(changed.status === 1 && /^darwin-arm64: the headless-shell table's sha256 is "[0-9a-f]{64}", and the zip in .* gives "[0-9a-f]{64}"$/m.test(changed.out) && /^darwin-arm64: the headless-shell table's entries is 2, and the zip in .* gives 3$/m.test(changed.out),
@@ -651,7 +676,7 @@ const writeVideo = (o: Record<string, any>) => {
 async function c2c3() {
   console.log("C2/C3. add_graphic refusals over HTTP, and the UI signal...");
   const dataDir = freshData();
-  const engine = new EditorEngine(dataDir);
+  const engine = newEngine(dataDir);
   const s = await serve(engine, dataDir);
   try {
     const listing = () => readdirSync(dataDir).filter((f) => f !== "server.json").sort();
@@ -853,7 +878,7 @@ async function c6() {
   }
   // MUTATION: drop the catch in EditorEngine.graphicsState → get_state and timeline_summary throw.
   // A typo in the variable takes away add_graphic only; the state tools still answer.
-  const engine = new EditorEngine(freshData());
+  const engine = newEngine(freshData());
   process.env.AIVE_REMOTION_ADDON = "node_modules";
   try {
     const answers: unknown[] = [];
@@ -903,7 +928,7 @@ async function c6() {
 async function c7() {
   console.log("C7. agent tools can't open the add-on folder...");
   const dataDir = freshData();
-  const engine = new EditorEngine(dataDir);
+  const engine = newEngine(dataDir);
   if (PLATFORM) installFixture(dataDir);
   const AREA = /is in ZabsReel's graphics add-on folder, which tools can't open\.$/;
   const minimal = (schema: unknown): Record<string, unknown> => {
@@ -967,254 +992,13 @@ async function c7() {
 
 // ---- I: the installer ----------------------------------------------------------------
 
-/** A tar entry: a file (type "0", the default) or anything else, with pax records or a GNU long name. */
-interface TarIn {
-  name: string;
-  type?: string;
-  data?: string | Buffer;
-  mode?: number;
-  pax?: Record<string, string>;
-  long?: boolean;
-  linkname?: string;
-}
-
-function tarHeader(name: string, type: string, size: number, mode: number, linkname = ""): Buffer {
-  const h = Buffer.alloc(512);
-  const octal = (n: number, len: number) => `${n.toString(8).padStart(len - 1, "0")}\0`;
-  h.write(name.slice(0, 100), 0, "utf8");
-  h.write(octal(mode, 8), 100);
-  h.write(octal(0, 8), 108);
-  h.write(octal(0, 8), 116);
-  h.write(octal(size, 12), 124);
-  h.write(octal(0, 12), 136);
-  h.write("        ", 148);
-  h.write(type, 156);
-  h.write(linkname, 157);
-  h.write("ustar\0", 257);
-  h.write("00", 263);
-  let sum = 0;
-  for (const b of h) sum += b;
-  h.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
-  return h;
-}
-const padded = (b: Buffer) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
-
-/** A gzipped tarball of `entries`. */
-function makeTar(entries: TarIn[]): Buffer {
-  const parts: Buffer[] = [];
-  for (const e of entries) {
-    const data = Buffer.from(e.data ?? "");
-    if (e.pax) {
-      const recs = Object.entries(e.pax).map(([k, v]) => {
-        const body = ` ${k}=${v}\n`;
-        let len = body.length + 1;
-        while (`${len}${body}`.length !== len) len++;
-        return `${len}${body}`;
-      });
-      const pax = Buffer.from(recs.join(""));
-      parts.push(tarHeader("PaxHeader", "x", pax.length, 0o644), padded(pax));
-    }
-    if (e.long) {
-      const long = Buffer.from(`${e.name}\0`);
-      parts.push(tarHeader("././@LongLink", "L", long.length, 0o644), padded(long));
-    }
-    parts.push(tarHeader(e.name, e.type ?? "0", e.type && e.type !== "0" ? 0 : data.length, e.mode ?? 0o644, e.linkname), padded(data));
-  }
-  parts.push(Buffer.alloc(1024));
-  return gzipSync(Buffer.concat(parts));
-}
-
-/** A zip entry: a folder when the name ends in "/"; `mode` the Unix mode (made on Unix unless `host`). */
-interface ZipIn {
-  name: string;
-  data?: string;
-  method?: number;
-  mode?: number;
-  host?: number;
-  flags?: number;
-  extra?: Buffer;
-  crc?: number;
-}
-
-/** A zip of `entries` (deflate unless `method` 0); `zip64`: a zip64 locator before the end record. */
-function makeZip(entries: ZipIn[], opts: { zip64?: boolean } = {}): Buffer {
-  const locals: Buffer[] = [];
-  const central: Buffer[] = [];
-  let offset = 0;
-  for (const e of entries) {
-    const data = Buffer.from(e.data ?? "");
-    const method = e.method ?? (e.name.endsWith("/") ? 0 : 8);
-    const comp = method === 8 ? deflateRawSync(data) : data;
-    const name = Buffer.from(e.name);
-    const extra = e.extra ?? Buffer.alloc(0);
-    const crc = e.crc ?? crc32(data);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(e.flags ?? 0, 6);
-    local.writeUInt16LE(method, 8);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(comp.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(name.length, 26);
-    const c = Buffer.alloc(46);
-    c.writeUInt32LE(0x02014b50, 0);
-    c.writeUInt16LE(((e.host ?? 3) << 8) | 20, 4);
-    c.writeUInt16LE(20, 6);
-    c.writeUInt16LE(e.flags ?? 0, 8);
-    c.writeUInt16LE(method, 10);
-    c.writeUInt32LE(crc, 16);
-    c.writeUInt32LE(comp.length, 20);
-    c.writeUInt32LE(data.length, 24);
-    c.writeUInt16LE(name.length, 28);
-    c.writeUInt16LE(extra.length, 30);
-    c.writeUInt32LE(((e.mode ?? (e.name.endsWith("/") ? 0o40755 : 0o100644)) << 16) >>> 0, 38);
-    c.writeUInt32LE(offset, 42);
-    locals.push(local, name, comp);
-    central.push(c, name, extra);
-    offset += 30 + name.length + comp.length;
-  }
-  const dir = Buffer.concat(central);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(dir.length, 12);
-  end.writeUInt32LE(offset, 16);
-  const locator = Buffer.alloc(opts.zip64 ? 20 : 0);
-  if (opts.zip64) locator.writeUInt32LE(0x07064b50, 0);
-  return Buffer.concat([...locals, dir, locator, end]);
-}
-
-const sha512b64 = (b: Buffer) => createHash("sha512").update(b).digest("base64");
-const sha256hex = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
-
-/** A fixture package: lock path, version, its files (without npm's `package/`), the platforms that install it (all by default). */
-interface FixturePkg {
-  path: string;
-  version: string;
-  files: TarIn[];
-  only?: AddonPlatform[];
-}
-
-const RENDERER = join(REPO, "node_modules", "@remotion", "renderer", "dist");
-/** Marks that add-on code ran in this process (the fixture's remotion and renderer set it when loaded). */
-const RAN = "__zrAddonRan";
-const pkgJson = (name: string, version: string, extra: Record<string, unknown> = {}) => ({ name: "package.json", data: JSON.stringify({ name, version, ...extra }) });
-
-/** The fixture closure: Remotion's three packages (the renderer with the real rewrite targets), a compositor per platform, a and its nested b. */
-function basePkgs(postinstallMarker: string): FixturePkg[] {
-  const compositor = (p: AddonPlatform): FixturePkg => {
-    const [dir, bin] = ADDON_PLATFORM_LISTS[p].compositor.split(/\/(?=[^/]+$)/);
-    return { path: `node_modules/${dir}`, version: "4.0.481", only: [p], files: [pkgJson(dir, "4.0.481"), { name: bin, data: `compositor ${p}`, mode: 0o755 }] };
-  };
-  return [
-    { path: "node_modules/remotion", version: "4.0.481", files: [
-      pkgJson("remotion", "4.0.481", { main: "index.js", scripts: { postinstall: `node -e "require('fs').writeFileSync(${JSON.stringify(postinstallMarker)}, '')"` } }),
-      { name: "index.js", data: `globalThis.${RAN} = "remotion";\n` },
-    ] },
-    { path: "node_modules/@remotion/renderer", version: "4.0.481", files: [
-      pkgJson("@remotion/renderer", "4.0.481"),
-      { name: "dist/esm/index.mjs", data: `globalThis.${RAN} = "renderer";\n${readFileSync(join(RENDERER, "esm", "index.mjs"), "utf8")}` },
-      { name: "dist/assets/download-and-map-assets-to-file.js", data: readFileSync(join(RENDERER, "assets", "download-and-map-assets-to-file.js"), "utf8") },
-    ] },
-    { path: "node_modules/@remotion/bundler", version: "4.0.481", files: [pkgJson("@remotion/bundler", "4.0.481", { bin: { "remotion-bundle": "./bin/cli.js" } }), { name: "bin/cli.js", data: "#!/usr/bin/env node\n", mode: 0o644 }] },
-    ...ADDON_PLATFORMS.map(compositor),
-    { path: "node_modules/a", version: "1.0.0", files: [pkgJson("a", "1.0.0"), { name: "index.js", data: "module.exports = 1;\n" }, { name: "lib/deep/x.js", data: "x\n" }] },
-    { path: "node_modules/a/node_modules/b", version: "1.0.0", files: [pkgJson("b", "1.0.0"), { name: "b.js", data: "b\n" }] },
-  ];
-}
-
-const CFT_EXE = (p: AddonPlatform) => `chrome-headless-shell-${p}/chrome-headless-shell${p === "win32-x64" ? ".exe" : ""}`;
-/** The fixture browser zip for `p`: a folder, the executable (deflate, 0755), a stored file, a nested deflated one. */
-const fixtureZip = (p: AddonPlatform, extra: ZipIn[] = []) => makeZip([
-  { name: `chrome-headless-shell-${p}/` },
-  { name: CFT_EXE(p), data: `#!/bin/sh\necho headless ${p}\n`, mode: 0o100755 },
-  { name: `chrome-headless-shell-${p}/resources.pak`, data: "stored bytes", method: 0 },
-  { name: `chrome-headless-shell-${p}/locales/en-US.pak`, data: "x".repeat(5000) },
-  ...extra,
-]);
-
-interface Fixture {
-  pin: AddonPin;
-  /** URL path → the bytes the fixture registry serves. */
-  blobs: Map<string, Buffer>;
-}
-
-/** A pin over `pkgs` and a zip per platform, and what the registry serves for it. */
-function buildPin(pkgs: FixturePkg[], zips: Partial<Record<AddonPlatform, Buffer>> = {}, tag = ""): Fixture {
-  const blobs = new Map<string, Buffer>();
-  const closure = pkgs.map((p) => {
-    const name = p.path.slice(p.path.lastIndexOf("node_modules/") + 13);
-    const gz = makeTar(p.files.map((f) => ({ ...f, name: `package/${f.name}` })));
-    const resolved = reg(name, p.version);
-    blobs.set(new URL(resolved).pathname, gz);
-    return { path: p.path, version: p.version, resolved, integrity: `sha512-${sha512b64(gz)}`, optional: false, bytes: gz.length };
-  });
-  const lists = Object.fromEntries(ADDON_PLATFORMS.map((plat) => {
-    const paths = pkgs.filter((p) => !p.only || p.only.includes(plat)).map((p) => p.path).sort();
-    return [plat, { count: paths.length, bytes: paths.reduce((n, x) => n + closure.find((e) => e.path === x)!.bytes, 0), compositor: ADDON_PLATFORM_LISTS[plat].compositor, paths }];
-  })) as unknown as AddonPin["lists"];
-  const shell = Object.fromEntries(ADDON_PLATFORMS.map((plat) => {
-    const zip = zips[plat] ?? fixtureZip(plat);
-    const url = `https://storage.googleapis.com/chrome-for-testing-public/fixture${tag}/${plat}/chrome-headless-shell-${plat}.zip`;
-    blobs.set(new URL(url).pathname, zip);
-    return [plat, { url, sha256: sha256hex(zip), size: zip.length, executable: CFT_EXE(plat), entries: 4 }];
-  })) as unknown as AddonPin["shell"];
-  return { pin: { lockSha256: sha256hex(JSON.stringify({ closure, lists, shell, tag })), closure, lists, shell }, blobs };
-}
-
-// The fixture registry (loopback, port 5031): serves the blobs; counts requests; a path can answer 500,
-// close the socket mid-body, serve changed bytes or an endless body, hold the answer, or wait.
+// The fixture registry (loopback, port 5031): addon-fixture.ts.
 const REG_PORT = 5031;
-const REGISTRY = `http://127.0.0.1:${REG_PORT}`;
-type Answer = "500" | "close" | "wrong" | "big" | "hold" | { delay: number };
-const served = new Map<string, Buffer>();
-const hits = new Map<string, number>();
-const answers = new Map<string, Answer>();
-const sockets = new Set<import("node:net").Socket>();
-let registryServer: http.Server | undefined;
-
-function startRegistry(): Promise<void> {
-  registryServer = http.createServer((req, res) => {
-    const path = new URL(req.url ?? "/", "http://x").pathname;
-    hits.set(path, (hits.get(path) ?? 0) + 1);
-    const blob = served.get(path);
-    const a = answers.get(path);
-    if (!blob) return void res.writeHead(404).end();
-    if (a === "500") return void res.writeHead(500).end();
-    if (a === "hold") return void res.writeHead(200, { "content-length": blob.length }).flushHeaders();
-    if (a === "close") {
-      res.writeHead(200, { "content-length": blob.length });
-      res.write(blob.subarray(0, blob.length >> 1));
-      setTimeout(() => res.socket?.destroy(), 20);
-      return;
-    }
-    if (a === "big") {
-      res.writeHead(200);
-      const more = setInterval(() => res.write(blob), 5);
-      res.on("close", () => clearInterval(more));
-      return;
-    }
-    const body = a === "wrong" ? Buffer.from(blob.map((b, i) => (i === blob.length >> 1 ? b ^ 1 : b))) : blob;
-    const send = () => res.writeHead(200, { "content-length": body.length }).end(body);
-    if (typeof a === "object") setTimeout(send, a.delay);
-    else send();
-  });
-  registryServer.on("connection", (s) => {
-    sockets.add(s);
-    s.on("close", () => sockets.delete(s));
-  });
-  return new Promise((r) => registryServer!.listen(REG_PORT, "127.0.0.1", () => r()));
-}
-async function stopRegistry() {
-  for (const s of sockets) s.destroy();
-  await new Promise((r) => registryServer?.close(r));
-}
-const publish = (f: Fixture) => {
-  for (const [k, v] of f.blobs) served.set(k, v);
-};
-const hitPaths = () => [...hits.entries()].filter(([, n]) => n > 0).map(([p]) => p).sort();
+const registry = fixtureRegistry(REG_PORT);
+const REGISTRY = registry.url;
+const { served, hits, answers, publish, hitPaths } = registry;
+const startRegistry = registry.start;
+const stopRegistry = registry.stop;
 
 /** Every fs call of the installer's kinds while `recording`, and an optional fault to inject (gatedfs looks the functions up per call). */
 const fsCalls: string[] = [];
@@ -1734,6 +1518,33 @@ async function i11() {
     check(err instanceof GraphicsAddonInstallError && err.reason === reason && err.message === message(d) && !existsSync(join(d, "addons", ".install.lock")) && hits.size === 0,
       `${code} on ${op === "mkdir" ? "addons/" : ".install.lock"}: "${err?.message}"`);
   }
+  // Remove takes the same lock, with the same messages; the add-on stays.
+  for (const [code, reason, message] of [
+    ["ENOSPC", "disk", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
+    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+  ] as const) {
+    const d = freshData();
+    await fixtureInstall(d, f);
+    fault = (name, p) => (name === "writeFile" && p.endsWith(".install.lock") ? errno(code) : null);
+    const err = await thrown(() => T.remove(d, "web", { pin: f.pin }));
+    fault = null;
+    check(err instanceof GraphicsAddonInstallError && err.reason === reason && err.message === message(d) && readGraphicsAddon(d, { pin: f.pin }).state === "ready" && clean(d),
+      `Remove with ${code} on .install.lock: "${err?.message}", the add-on is still ready`);
+  }
+  // The user's cancel lands while a download is already failing (its 500's body being discarded): "cancelled".
+  {
+    const d = freshData();
+    const ctl = new AbortController();
+    const failing: typeof fetch = async (url, init) => {
+      const res = await fetch(url, init);
+      if (new URL(String(url)).pathname !== a) return res;
+      await res.body?.cancel();
+      return { ok: false, status: 500, body: { cancel: async () => ctl.abort() } } as unknown as Response;
+    };
+    const { err } = await fixtureInstall(d, f, {}, { fetch: failing, signal: ctl.signal });
+    check(err?.reason === "cancelled" && err.message === "The graphics add-on install was cancelled. Nothing was installed." && !existsSync(graphicsAddonDir(d)) && clean(d),
+      `a cancel while a download is failing: "${err?.message}"`);
+  }
 }
 
 // MUTATION: skip the Windows rules in entryNameProblem (platform check) → the win32 rows extract. Make NameSet
@@ -1796,6 +1607,17 @@ async function i13() {
     && readFileSync(join(nd, "node_modules/a/lib/deep/x.js"), "utf8") === "x\n" && readFileSync(join(nd, "node_modules/a/node_modules/b/b.js"), "utf8") === "b2\n"
     && JSON.parse(readFileSync(join(nd, "node_modules/a/node_modules/b/package.json"), "utf8")).version === "1.0.1" && clean(dn),
     `an update of the nested a/node_modules/b fetches exactly its tarball; a is reused around it; both hold the right bytes (${JSON.stringify(hitPaths())})`);
+  // A reused package's names count as a download's (win32, darwin): an update adding node_modules/A next to
+  // the reused node_modules/a is refused for win32-x64, and the installed copy stays.
+  const dw = freshData();
+  const win = { acceptedLicenseSha256: graphicsAddonTerms("win32-x64").sha256 };
+  const firstWin = await fixtureInstall(dw, f1, { platform: "win32-x64" }, win);
+  const fA = buildPin([...pkgs, { path: "node_modules/A", version: "1.0.0", files: [pkgJson("A", "1.0.0")] }]);
+  hits.clear();
+  const upA = await fixtureInstall(dw, fA, { platform: "win32-x64" }, win);
+  check(firstWin.got?.state === "ready" && upA.err?.reason === "archive" && /the names "a" and "A", which are the same name on win32-x64/.test(upA.err.message)
+    && !hitPaths().includes(aPath(fA)) && manifestOf(dw).lockSha256 === f1.pin.lockSha256 && clean(dw),
+    `win32-x64: a downloaded node_modules/A beside the reused node_modules/a is refused (${upA.err?.message ?? upA.got?.state}); the old copy stays`);
   // A tampered source package (one byte), and a source missing one file: re-downloaded, not reused.
   for (const [what, damage] of [
     ["one byte changed", (dir: string) => writeFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "y\n")],
@@ -1842,6 +1664,17 @@ function i14() {
   check(namers.length === 0, `no core or MCP source but addon/index.ts and addon/install.ts names installGraphicsAddon, removeGraphicsAddon, recoverGraphicsAddon or addonInstallerForTests (${JSON.stringify(namers.map((f) => f.slice(REPO.length)))})`);
   const named = Object.keys(methods).filter((m) => /install|addon|remove_graphics|recover|accept/i.test(m));
   check(named.length === 0, `no RPC method installs, removes, recovers or accepts the add-on (${JSON.stringify(named)})`);
+  // The agent's text (D7): the four refusals, ask the user, never install it.
+  const codes = Object.values(CODES);
+  const guide = readFileSync(join(REPO, "packages", "mcp", "src", "guide.ts"), "utf8");
+  const instructions = guide.slice(guide.indexOf("export const PLATFORM_INSTRUCTIONS"), guide.indexOf("export const EDITING_GUIDE"));
+  check(codes.every((c) => instructions.includes(c)) && instructions.includes("Ask them, and try again once they say it is done.") && instructions.includes("You cannot install, update or repair the add-on, and no tool can: never try"),
+    "the MCP instructions name the four graphics_addon_* refusals, say to ask the user, and never to install the add-on");
+  const skill = readFileSync(join(REPO, "packages", "skill-installer", "skill", "SKILL.md"), "utf8");
+  check(codes.every((c) => skill.includes(`\`${c}\``)) && skill.includes("Never try to install, update or repair the add-on") && skill.includes("Help → Graphics add-on"),
+    "SKILL.md names the four refusals, where the user installs the add-on, and never to install it");
+  check(/Needs the Remotion graphics add-on, which only the user installs in the ZabsReel window \(Help → Graphics add-on\).*no tool can install it\.$/.test(methods.add_graphic.description),
+    "add_graphic's description says the user installs the add-on and no tool can");
 }
 
 // ---- Z: the zip reader -----------------------------------------------------------------
@@ -1903,6 +1736,7 @@ async function main() {
     await c5();
     await c6();
     await c7();
+    for (const e of engines) await e.storage.dispose();
     if (PLATFORM) {
       await startRegistry();
       try {

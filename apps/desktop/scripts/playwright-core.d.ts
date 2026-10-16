@@ -39,12 +39,15 @@ declare module "playwright-core" {
     count(): Promise<number>;
     innerText(): Promise<string>;
     allInnerTexts(): Promise<string[]>;
+    allTextContents(): Promise<string[]>;
+    textContent(): Promise<string | null>;
     inputValue(): Promise<string>;
     fill(value: string): Promise<void>;
     press(key: string): Promise<void>;
     focus(): Promise<void>;
     click(options?: { position?: { x: number; y: number } }): Promise<void>;
     isEnabled(): Promise<boolean>;
+    isDisabled(): Promise<boolean>;
     boundingBox(): Promise<Box | null>;
     getByRole(role: string, options?: RoleOptions): Locator;
     evaluate<R>(pageFunction: (element: Element) => R | Promise<R>): Promise<R>;
@@ -60,6 +63,7 @@ declare module "playwright-core" {
     url(): string;
     setDefaultTimeout(timeout: number): void;
     title(): Promise<string>;
+    addInitScript(script: string): Promise<void>;
     // A string is evaluated as an expression in the page; its result is unknown here.
     evaluate<R>(pageFunction: string | (() => R | Promise<R>)): Promise<R>;
     evaluate<R, Arg>(pageFunction: (arg: Arg) => R | Promise<R>, arg: Arg): Promise<R>;

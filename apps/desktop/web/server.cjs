@@ -7,9 +7,10 @@
 //   3. Stand in for the Electron preload bridge with a small /api behind a
 //      shell-only key: a directory listing for the in-app file picker
 //      (browsers never reveal absolute paths, and the core works with absolute
-//      paths), the ready-to-paste MCP client config, and allowing or removing
+//      paths), the ready-to-paste MCP client config, allowing or removing
 //      network computers (the core's approval store) after the page's own
-//      dialog; the core itself has no call that allows one.
+//      dialog, and installing or removing the graphics add-on from the
+//      page's add-on dialog; the core itself has no call that does either.
 //   4. Print — and open — the URL that hands the page the core port + token
 //      and the shell key.
 //   5. Tear down the core on exit ONLY if we were the ones who started it.
@@ -27,6 +28,7 @@ const { randomBytes } = require("node:crypto");
 const { ensureCore, browserBlocksPort, getDataDir } = require("../electron/core-launcher.cjs");
 const { PRODUCT_NAME, MCP_KEY } = require("../electron/brand.cjs");
 const { rendererCsp } = require("../electron/net-guard.cjs");
+const { createGraphicsAddonHost } = require("../electron/graphics-addon.cjs");
 
 const RENDERER_DIR = path.join(__dirname, "..", "dist", "renderer");
 const DEFAULT_PORT = 4790;
@@ -411,16 +413,50 @@ async function mediaServersPost(route, body, core, browsed) {
   throw new HttpError(404, "Not found");
 }
 
+// ---- the graphics add-on (@aive/core/addon, electron/graphics-addon.cjs) -----
+// As in electron/main.cjs: the page's add-on dialog shows the terms this
+// shell reads from the core's licence file, and its Accept button posts their
+// hash here, behind the shell key. The downloads use Node's fetch, which
+// honours HTTPS_PROXY only with NODE_USE_ENV_PROXY=1. An install runs in the
+// background; the page follows it through GET status.
+
+const graphicsAddon = createGraphicsAddonHost({
+  via: "web",
+  fetch: (url, init) => fetch(url, init),
+  dataDir: getDataDir,
+  log: (text) => console.error(`[aive-web] ${text}`),
+});
+
+/** POST /api/graphics-addon/*. */
+async function graphicsAddonPost(route, body) {
+  if (route === "install") {
+    const { id } = graphicsAddon.install(body.acceptedLicenseSha256);
+    if (id === null) throw new HttpError(409, "The graphics add-on is busy in this window. Wait for it to finish.");
+    return { id };
+  }
+  if (route === "cancel") return { cancelled: graphicsAddon.cancel() };
+  if (route === "remove") {
+    const r = await graphicsAddon.remove().result;
+    if (!r.ok) throw new HttpError(409, r.error);
+    return {};
+  }
+  throw new HttpError(404, "Not found");
+}
+
 const POST_ROUTES = new Set(["/api/media-servers/approve", "/api/media-servers/revoke", "/api/media-servers/picked"]);
+const ADDON_POST_ROUTES = new Set(["/api/graphics-addon/install", "/api/graphics-addon/cancel", "/api/graphics-addon/remove"]);
 
 async function handleApi(req, url, res, core, browsed) {
-  if (POST_ROUTES.has(url.pathname)) {
+  if (POST_ROUTES.has(url.pathname) || ADDON_POST_ROUTES.has(url.pathname)) {
     if (req.method !== "POST") {
       sendJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
-    const route = url.pathname.slice("/api/media-servers/".length);
-    sendJson(res, 200, { ok: true, ...(await mediaServersPost(route, await readJson(req), core, browsed)) });
+    const body = await readJson(req);
+    const result = POST_ROUTES.has(url.pathname)
+      ? await mediaServersPost(url.pathname.slice("/api/media-servers/".length), body, core, browsed)
+      : await graphicsAddonPost(url.pathname.slice("/api/graphics-addon/".length), body);
+    sendJson(res, 200, { ok: true, ...result });
     return;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -436,6 +472,14 @@ async function handleApi(req, url, res, core, browsed) {
       places: await listPlaces(),
       mcp: mcpConfig(),
     });
+    return;
+  }
+  if (url.pathname === "/api/graphics-addon/status") {
+    sendJson(res, 200, { ok: true, ...(await graphicsAddon.status()) });
+    return;
+  }
+  if (url.pathname === "/api/graphics-addon/terms") {
+    sendJson(res, 200, { ok: true, terms: await graphicsAddon.terms() });
     return;
   }
   if (url.pathname === "/api/fs/list") {
@@ -556,6 +600,9 @@ async function main() {
     if (core.owned && core.child) core.child.kill();
     process.exit(1);
   }
+
+  // An add-on install that stopped part way (power loss, a crash) is finished or cleaned up first.
+  await graphicsAddon.recover();
 
   const shellKey = randomBytes(24).toString("base64url");
   const web = createWebServer(core, shellKey);

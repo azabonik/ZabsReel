@@ -27,4 +27,19 @@ contextBridge.exposeInMainWorld("aive", {
     /** Remove server `host` from the allowed list (no dialog); rejects when that could not be saved. */
     revoke: (host) => ipcRenderer.invoke("media-servers:revoke", host),
   },
+  /** The graphics add-on (Help → Graphics add-on…): main installs it only from the dialog's buttons. */
+  graphicsAddon: {
+    status: () => ipcRenderer.invoke("graphics-addon:status"),
+    terms: () => ipcRenderer.invoke("graphics-addon:terms"),
+    /** Resolves with { ok, error?, cancelled? } when the install ends; progress comes to onProgress. */
+    install: (acceptedLicenseSha256) => ipcRenderer.invoke("graphics-addon:install", acceptedLicenseSha256),
+    cancel: () => ipcRenderer.invoke("graphics-addon:cancel"),
+    remove: () => ipcRenderer.invoke("graphics-addon:remove"),
+    /** `cb({ done, total })` during an install; returns the unsubscribe. */
+    onProgress: (cb) => {
+      const fn = (_e, p) => cb(p);
+      ipcRenderer.on("graphics-addon:progress", fn);
+      return () => ipcRenderer.removeListener("graphics-addon:progress", fn);
+    },
+  },
 });

@@ -9,7 +9,7 @@
 
 import { PRODUCT_NAME } from "@aive/core/brand";
 import { approvalDialogFor, bareFileName, classifyPath, normalizeHost } from "@aive/core/unc";
-import type { ApproveContext, MediaServers } from "./types";
+import type { ApproveContext, GraphicsAddonResult, GraphicsAddonStatus, GraphicsAddonTerms, MediaServers } from "./types";
 import { UNREAD_DIALOG, allowDialogText, keepDialogText, userContextPath, type ApprovalText } from "./mediaservers";
 
 export type McpConfig = { available: boolean; packaged: boolean; mcpEntry: string | null; json: string };
@@ -206,6 +206,80 @@ async function reviewInPage(key: string, context: ApproveContext | undefined): P
 /** The web shell's reviews, one after another; each reads the core's list when its turn comes. */
 let reviews: Promise<unknown> = Promise.resolve();
 
+const NO_ADDON_HOST = `Open ${PRODUCT_NAME} (the app or npm run web) to install the graphics add-on.`;
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The graphics add-on (Help → Graphics add-on…). Only a UI host process
+ * (Electron main, the web shell behind its shell key) installs or removes it,
+ * and only from the add-on dialog's buttons; the core can't.
+ */
+const graphicsAddon = {
+  /** Whether this host can install the add-on (the bare page can't). */
+  available(): boolean {
+    return snapshot.status === "electron" || snapshot.status === "web";
+  },
+
+  async status(): Promise<GraphicsAddonStatus> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) return window.aive!.graphicsAddon.status();
+    if (h === "web") return api<GraphicsAddonStatus>("/api/graphics-addon/status");
+    throw new Error(NO_ADDON_HOST);
+  },
+
+  /** The notice and licence to show before an install, or null where the add-on isn't offered. */
+  async terms(): Promise<GraphicsAddonTerms | null> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) return window.aive!.graphicsAddon.terms();
+    if (h === "web") return (await api<{ terms: GraphicsAddonTerms | null }>("/api/graphics-addon/terms")).terms;
+    throw new Error(NO_ADDON_HOST);
+  },
+
+  /**
+   * Install, with the hash of the terms the user accepted (the dialog's
+   * Accept button). Resolves when it ends; `onProgress` gets the bytes. The
+   * web shell runs it in the background, and this follows its status.
+   */
+  async install(acceptedLicenseSha256: string, onProgress: (p: { done: number; total: number }) => void): Promise<GraphicsAddonResult> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) {
+      const off = window.aive!.graphicsAddon.onProgress(onProgress);
+      try {
+        return await window.aive!.graphicsAddon.install(acceptedLicenseSha256);
+      } finally {
+        off();
+      }
+    }
+    if (h !== "web") throw new Error(NO_ADDON_HOST);
+    const { id } = await api<{ id: number }>("/api/graphics-addon/install", { acceptedLicenseSha256 });
+    for (;;) {
+      await pause(300);
+      const s = await graphicsAddon.status();
+      if (s.job?.id === id) onProgress({ done: s.job.done, total: s.job.total });
+      else if (s.last?.id === id) return { ok: s.last.ok, error: s.last.error, cancelled: s.last.cancelled };
+      else if (!s.job) return { ok: false, error: "The web shell lost track of the install. Open the dialog again." };
+    }
+  },
+
+  async cancel(): Promise<void> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) await window.aive!.graphicsAddon.cancel();
+    else if (h === "web") await api("/api/graphics-addon/cancel", {});
+  },
+
+  async remove(): Promise<GraphicsAddonResult> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) return window.aive!.graphicsAddon.remove();
+    if (h !== "web") throw new Error(NO_ADDON_HOST);
+    try {
+      await api("/api/graphics-addon/remove", {});
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
 export const platform = {
   async pickFiles(): Promise<string[]> {
     const h = await host();
@@ -280,6 +354,8 @@ export const platform = {
     }
     throw new Error(`Open ${PRODUCT_NAME} (the app or npm run web) to change the network computers.`);
   },
+
+  graphicsAddon,
 
   async getMcpConfig(): Promise<McpConfig | null> {
     const h = await host();

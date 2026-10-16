@@ -257,10 +257,9 @@ export function drift(pin, acc) {
  * besides an out-of-date file. `fillSizes`: take a missing tarball size from
  * npm's cache (a write; --check never does).
  */
-export function compute(root, { fillSizes = false } = {}) {
+export function compute(root, { fillSizes = false, data = JSON.parse(readFileSync(join(root, DATA), "utf8")) } = {}) {
   const problems = [];
   const packages = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8")).packages;
-  const data = JSON.parse(readFileSync(join(root, DATA), "utf8"));
   const remotion = /export const REMOTION_VERSION = "([^"]+)";/.exec(readFileSync(join(root, REMOTION_LOAD), "utf8"))?.[1];
   if (!remotion) problems.push(`${REMOTION_LOAD}: no REMOTION_VERSION`);
 
@@ -416,11 +415,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const dataFile = JSON.parse(readFileSync(join(root, DATA), "utf8"));
   const zips = resolve(arg("--zips") ?? join(userInfo().homedir, ".cache", "zabsreel-addon", `cft-${dataFile.headlessShell.version}`));
   const shell = browser ? browserTable(dataFile.headlessShell.version, zips) : null;
-  if (shell && !check && shell.problems.length === 0) {
-    // Fill the table from the zips, then compute the pin with it.
-    writeFileSync(join(root, DATA), `${JSON.stringify({ ...dataFile, headlessShell: shell.table }, null, 2)}\n`);
-  }
-  const pin = compute(root, { fillSizes: !check });
+  // A write fills the table from the zips and computes the pin with it; both
+  // files are written at the end, or neither when anything fails.
+  const filled = shell && !check && shell.problems.length === 0 ? { ...dataFile, headlessShell: shell.table } : dataFile;
+  const pin = compute(root, { fillSizes: !check, data: filled });
   if (shell) {
     pin.problems.push(...shell.problems);
     for (const [k, v] of Object.entries(shell.table.platforms)) {

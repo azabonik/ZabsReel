@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
-import type { CoreApi, RpcRefusal } from "./api";
+import type { CoreApi, GraphicsAddonRefusal, RpcRefusal } from "./api";
 import type { Bleep, BleepSound, Clip, ColorInspection, KeyframeProperty, Marker, MediaAsset, MediaServers, Project, TextStyle, TranscriptHit, VisualHit } from "./types";
 import { clipDurationFrames, isOffline } from "./types";
 import { SpeedPanel, type SpeedRampParams } from "./speedramp";
@@ -28,6 +28,7 @@ import { BLEEP_DEFAULT_VOLUME, BLEEP_SOUND_LABELS, expandBleeps } from "./bleeps
 import { StorageDialog } from "./storagedialog";
 import { lutGateFor, offlineState, ownRecentPaths } from "./mediaservers";
 import { MediaServerBanner, NetworkComputersDialog } from "./networkcomputers";
+import { GraphicsAddonBanner, GraphicsAddonDialog } from "./graphicsaddon";
 import { setLutGate } from "./gl/runtime";
 import { examplePath } from "@aive/core/unc";
 import { StatusLine } from "./jobstatus";
@@ -70,7 +71,11 @@ const TRANSITION_GROUPS: { label: string; types: string[] }[] = [
 // Motion graphics are AUTHORED BY THE AI via the MCP `add_graphic` tool (it reads
 // the clip with inspect_clip / get_frame, writes a Remotion component, and places
 // it at an exact frame window). There is intentionally no human code-entry UI —
-// the inspector only lists/removes the graphics the AI created.
+// the inspector only lists/removes the graphics the AI created. They render with
+// the Remotion add-on, which only the user installs (Help → Graphics add-on…,
+// graphicsaddon.tsx; the UI host downloads it): when add_graphic is refused for
+// it, the core says so with the add-on's state alone, and the banner offers the
+// dialog.
 
 const CAPTION_MODELS = ["tiny.en", "base.en", "small.en", "medium.en", "large-v3-turbo"];
 const TEXT_POSITIONS = ["bottom", "top", "center", "topleft", "topright", "bottomleft", "bottomright"];
@@ -127,6 +132,12 @@ export function App({ api }: { api: CoreApi }) {
   const [dismissedServers, setDismissedServers] = useState<ReadonlySet<string>>(new Set());
   // Paths this window itself sent and the core refused (sanitized as in the pending list): "You tried…".
   const ownRequests = useRef(new Set<string>());
+  // ---- the graphics add-on (graphicsaddon.tsx) ----
+  const [showHelpMenu, setShowHelpMenu] = useState(false);
+  const [showAddon, setShowAddon] = useState(false);
+  const closeAddon = useCallback(() => setShowAddon(false), []);
+  // The state add_graphic was last refused for (the core's broadcast), until Set up… or Hide.
+  const [addonBanner, setAddonBanner] = useState<GraphicsAddonRefusal | null>(null);
   // Re-render once the host is known: the web shell can review servers too, but only after its /api answered.
   useSyncExternalStore(onPlatform, () => platformSnapshot().status);
   const [recents, setRecents] = useState<string[]>(() => {
@@ -151,6 +162,7 @@ export function App({ api }: { api: CoreApi }) {
       setLutGate(lutGateFor(s));
       setMediaServers(s);
     });
+    api.onGraphicsAddon(setAddonBanner);
   }, [api]);
 
   useEffect(() => setDismissedServers(new Set()), [projectPath]);
@@ -785,6 +797,17 @@ export function App({ api }: { api: CoreApi }) {
         </div>
         <div className="topbar-right">
           <StatusPill connected={connected} port={api.port} />
+          <div className="proj-ctl">
+            <button className="btn btn-sm" onClick={() => setShowHelpMenu((v) => !v)} aria-haspopup="menu" aria-expanded={showHelpMenu}>Help</button>
+            {showHelpMenu && (
+              <>
+                <div className="menu-scrim" onClick={() => setShowHelpMenu(false)} />
+                <div className="proj-menu help-menu" role="menu">
+                  <button role="menuitem" className="proj-menu-item" onClick={() => { setShowHelpMenu(false); setShowAddon(true); }}><Sparkles size={13} /> Graphics add-on…</button>
+                </div>
+              </>
+            )}
+          </div>
           <button className="btn" onClick={() => setShowConnect((v) => !v)}>
             <Bot /> Connect AI
           </button>
@@ -798,6 +821,12 @@ export function App({ api }: { api: CoreApi }) {
         onDismiss={(host) => setDismissedServers((d) => new Set([...d, host]))}
       />
 
+      <GraphicsAddonBanner
+        state={addonBanner}
+        onSetUp={() => { setAddonBanner(null); setShowAddon(true); }}
+        onDismiss={() => setAddonBanner(null)}
+      />
+
       {showConnect && (
         <>
           <div className="scrim" onClick={() => setShowConnect(false)} />
@@ -806,6 +835,7 @@ export function App({ api }: { api: CoreApi }) {
       )}
 
       {showStorage && <StorageDialog api={api} onClose={closeStorage} />}
+      {showAddon && <GraphicsAddonDialog api={api} connected={connected} onClose={closeAddon} />}
       {showServers && (
         <NetworkComputersDialog
           ms={mediaServers} canReview={platform.canReviewMediaServers()} busy={serversBusy} error={serversError}

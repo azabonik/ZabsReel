@@ -7,7 +7,7 @@ import { ADDON_REMOTION_VERSION, type AddonLockEntry, type AddonPlatform, type H
 import { rewriteTargetsMatch } from "../motion/remotionload.js";
 import { NameSet } from "./names.js";
 import { devVariable, isSourceCheckout } from "./resolve.js";
-import { ADDON_PIN, addonPlatform, addonStateAt, graphicsAddonDir, platformLabel, readManifest, type AddonManifest, type AddonPin, type GraphicsAddon } from "./state.js";
+import { ADDON_PIN, addonPlatform, addonStateAt, graphicsAddonDir, readManifest, unsupportedMessage, type AddonManifest, type AddonPin, type GraphicsAddon } from "./state.js";
 import { ArchiveRefusal, extractTarball } from "./tar.js";
 import { graphicsAddonTerms } from "./terms.js";
 import { copyTree, execBit, treeDigest, walkTree, type ExtractedFile } from "./tree.js";
@@ -164,6 +164,8 @@ async function holder(file: string, s: AddonSeams): Promise<{ stale: boolean; vi
   return { stale: pidGone || Date.now() - mtime > (s.staleMs ?? STALE_MS), via: typeof info?.via === "string" ? info.via : undefined, text };
 }
 
+const busyMessage = (via: string | undefined) => `Another ${PRODUCT_NAME} window is installing the graphics add-on (${via ?? "unknown"}). Wait for it to finish.`;
+
 /** Take `addons/.install.lock` (D3.1 step 2), or refuse while another host holds it. */
 async function takeLock(addons: string, via: string, s: AddonSeams): Promise<Lock> {
   await mkdir(addons, { recursive: true });
@@ -183,7 +185,7 @@ async function takeLock(addons: string, via: string, s: AddonSeams): Promise<Loc
       if (held.text !== undefined && (await readFile(file, "utf8").catch(() => undefined)) === held.text) await rm(file, { force: true });
       continue;
     }
-    throw fail("busy", `Another ${PRODUCT_NAME} window is installing the graphics add-on (${held.via ?? "unknown"}). Wait for it to finish.`);
+    throw fail("busy", busyMessage(held.via));
   }
   const timer = setInterval(() => {
     void readFile(file, "utf8")
@@ -485,6 +487,8 @@ async function reuse(
   rel: string,
   staging: string,
   run: Run,
+  names: NameSet,
+  what: string,
   record: (src: Source) => { digest?: unknown } | undefined,
   nested: (src: Source, sub: string) => boolean,
 ): Promise<string | null> {
@@ -494,6 +498,11 @@ async function reuse(
     const dir = join(src.dir, ...rel.split("/"));
     const files = await walkTree(dir, (sub) => nested(src, sub), run.signal);
     if (!files || treeDigest(files) !== r.digest) continue;
+    // A reused copy's names count as a download's do: no name may fold to another's on win32 or darwin.
+    for (const f of files) {
+      const problem = names.add(`${rel}/${f.path}`);
+      if (problem) throw archive(what, new ArchiveRefusal(`${JSON.stringify(f.path)}: ${problem}`));
+    }
     await copyTree(dir, join(staging, ...rel.split("/")), files, run.signal);
     return r.digest;
   }
@@ -521,6 +530,8 @@ async function stage(addons: string, staging: string, platform: AddonPlatform, p
       e.path,
       staging,
       run,
+      names,
+      label(e),
       (src) => (src.entries[e.path]?.integrity === e.integrity ? src.entries[e.path] : undefined),
       (src, sub) => listed.has(`${e.path}/${sub}`) || `${e.path}/${sub}` in src.entries,
     );
@@ -544,7 +555,7 @@ async function stage(addons: string, staging: string, platform: AddonPlatform, p
     entries[e.path] = { integrity: e.integrity, digest: treeDigest(files) };
   });
 
-  let browserDigest = await reuse(from, "browser", staging, run, (src) => (src.browser?.sha256 === shell.sha256 ? src.browser : undefined), () => false);
+  let browserDigest = await reuse(from, "browser", staging, run, names, "Chrome headless shell", (src) => (src.browser?.sha256 === shell.sha256 ? src.browser : undefined), () => false);
   if (browserDigest !== null) run.progress(shell.size);
   else {
     const zip = join(staging, "browser.zip");
@@ -572,23 +583,29 @@ function text(file: string): string | null {
 
 /** The user-facing error for anything that stopped an install. */
 function failure(err: unknown, dataDir: string, cancel: AbortSignal | undefined, mb: number): unknown {
-  if (err instanceof GraphicsAddonInstallError) return err;
+  // The user's cancel wins over a download that was failing at the same moment.
   if (cancel?.aborted) return fail("cancelled", "The graphics add-on install was cancelled. Nothing was installed.");
+  if (err instanceof GraphicsAddonInstallError) return err;
   if (code(err) === "ENOSPC") return fail("disk", `Not enough disk space: the add-on needs about ${mb} MB in ${dataDir}.`);
   if (code(err) === "ENAMETOOLONG") return fail("path", `A path in the add-on is too long for this folder (${dataDir}). Move ${PRODUCT_NAME}'s data folder to a shorter path and try again.`);
   return fail("failed", `The graphics add-on couldn't be installed: ${(err as Error)?.message ?? String(err)}`);
 }
 
+/** The platform's tarballs and browser zip, in bytes (D2): progress, and the disk-space message. */
+const totalBytes = (pin: AddonPin, platform: AddonPlatform) =>
+  pin.lists[platform].paths.reduce((n, p) => n + (pin.closure.find((e) => e.path === p)?.bytes ?? 0), 0) + pin.shell[platform].size;
+const megabytes = (bytes: number) => Math.max(1, Math.round(bytes / 1e6));
+
 async function install(dataDir: string, opts: InstallOptions, s: AddonSeams): Promise<GraphicsAddon> {
   const acceptedAt = new Date().toISOString();
   const pin = s.pin ?? ADDON_PIN;
   const platform = addonPlatform(s.platform);
-  if (!platform) throw fail("unsupported", `The graphics add-on isn't available for ${platformLabel(s.platform)}.`);
+  if (!platform) throw fail("unsupported", unsupportedMessage(s.platform));
   const licenseSha256 = graphicsAddonTerms(platform).sha256;
   if (opts.acceptedLicenseSha256 !== licenseSha256) throw fail("license", "Accept Remotion's license in the graphics add-on dialog first. Nothing was installed.");
   const override = registryOverride(s);
-  const total = pin.lists[platform].paths.reduce((n, p) => n + (pin.closure.find((e) => e.path === p)?.bytes ?? 0), 0) + pin.shell[platform].size;
-  const mb = Math.max(1, Math.round(total / 1e6));
+  const total = totalBytes(pin, platform);
+  const mb = megabytes(total);
   const addons = join(dataDir, "addons");
   let lock: Lock;
   try {
@@ -667,7 +684,14 @@ async function recoverAddon(dataDir: string, s: AddonSeams): Promise<boolean> {
 async function remove(dataDir: string, via: InstallVia, s: AddonSeams): Promise<void> {
   const addons = join(dataDir, "addons");
   if (!(await exists(addons))) return;
-  const lock = await takeLock(addons, via, s);
+  let lock: Lock;
+  try {
+    lock = await takeLock(addons, via, s);
+  } catch (err) {
+    // The install's messages (D3.8): ENOSPC or ENAMETOOLONG while creating the lock.
+    const platform = addonPlatform(s.platform);
+    throw failure(err, dataDir, undefined, platform ? megabytes(totalBytes(s.pin ?? ADDON_PIN, platform)) : 1);
+  }
   try {
     const live = graphicsAddonDir(dataDir);
     if (await exists(live)) {
@@ -683,6 +707,18 @@ async function remove(dataDir: string, via: InstallVia, s: AddonSeams): Promise<
   } finally {
     await releaseLock(lock);
   }
+}
+
+/**
+ * The "another window is installing" message while a live install lock is in
+ * `<dataDir>/addons` (D4.2: the dialog offers no install until it clears), or
+ * null when there is none or it is stale. Reads only.
+ */
+export async function graphicsAddonBusy(dataDir: string): Promise<string | null> {
+  const file = join(dataDir, "addons", LOCK);
+  if (!(await exists(file))) return null;
+  const held = await holder(file, {});
+  return held.stale ? null : busyMessage(held.via);
 }
 
 /**

@@ -1,0 +1,16 @@
+/* Help → Graphics add-on… (graphicsaddon.tsx). The frame reuses .scrim,
+   .exact-modal and .exact-head, the banner .ms-banner, the lines and buttons
+   the Storage dialog's classes; only the body and the licence are styled here. */
+.exact-modal.ga-modal { width: min(600px, calc(100vw - 48px)); }
+.ga-body { padding: 12px 16px 16px; overflow-y: auto; font-size: 13px; color: var(--ink-2); }
+.ga-notice { margin: 8px 0; line-height: 1.5; }
+.ga-license {
+  max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-md);
+  font: 11.5px/1.5 var(--mono); color: var(--ink-3); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ga-progress { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.ga-progress .prog-bar { flex: none; }
+
+/* The Help menu opens to the left: it sits at the right end of the top bar. */
+.proj-menu.help-menu { left: auto; right: 0; }

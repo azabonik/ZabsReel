@@ -6,6 +6,9 @@
 //   3a. Allow or remove network computers (the core's approval store) after a
 //      native dialog (Review…, or a file picked on a server not allowed yet);
 //      the core itself has no call that allows one.
+//   3b. Install, remove and recover the graphics add-on (graphics-addon.cjs)
+//      after the user's click in the add-on dialog; no RPC method or MCP tool
+//      can.
 //   4. Tear down the core on quit ONLY if we were the ones who started it.
 //
 // Written in CommonJS so it runs directly under Electron with no build step.
@@ -18,6 +21,7 @@ const { finalSavePath: decideSavePath, closeGuard } = require("./save-rules.cjs"
 const { PRODUCT_NAME, MCP_KEY, APP_ID, APP_ID_DEV } = require("./brand.cjs");
 const { reviewServer, askPicked } = require("./media-servers.cjs");
 const { isAllowedRendererUrl, isAppPage, devOriginOf, shownOrigin } = require("./net-guard.cjs");
+const { createGraphicsAddonHost } = require("./graphics-addon.cjs");
 
 // Windows signs in automatically to "intranet" servers. A non-empty list that
 // matches no real host turns that off; an empty value would turn it back on.
@@ -301,6 +305,36 @@ ipcMain.handle("media-servers:revoke", async (_e, host) => {
   await recheckOfflineMedia();
 });
 
+// ---- the graphics add-on (@aive/core/addon, graphics-addon.cjs) ---------------
+// Help → Graphics add-on…: the renderer's dialog shows the terms main reads
+// from the core's licence file, and installs only on its Accept button. The
+// downloads use Chromium's network stack (the system proxy) through a session
+// of their own: the default session's request guard lets the renderer reach
+// only its own files and the core.
+
+/** The add-on's downloads: a session apart from the window's (in memory). */
+const addonSession = () => session.fromPartition("zabsreel-graphics-addon");
+const graphicsAddon = createGraphicsAddonHost({
+  via: "desktop",
+  fetch: (url, init) => addonSession().fetch(url, init),
+  dataDir: getDataDir,
+  log: (text) => console.error(`[aive] ${text}`),
+});
+
+ipcMain.handle("graphics-addon:status", () => graphicsAddon.status());
+ipcMain.handle("graphics-addon:terms", () => graphicsAddon.terms());
+// Progress goes to the window that asked, at most every 100 ms (and the last one).
+ipcMain.handle("graphics-addon:install", (e, acceptedLicenseSha256) => {
+  let sent = 0;
+  return graphicsAddon.install(acceptedLicenseSha256, (p) => {
+    if (e.sender.isDestroyed() || (p.done < p.total && Date.now() - sent < 100)) return;
+    sent = Date.now();
+    e.sender.send("graphics-addon:progress", p);
+  }).result;
+});
+ipcMain.handle("graphics-addon:cancel", () => graphicsAddon.cancel());
+ipcMain.handle("graphics-addon:remove", () => graphicsAddon.remove().result);
+
 ipcMain.handle("dialog:openFiles", async () => {
   const result = await dialog.showOpenDialog({
     title: "Import media",
@@ -455,6 +489,8 @@ app.whenReady().then(async () => {
       }
       callback({ cancel: !ok });
     });
+    // An install that stopped part way (power loss, a crash) is finished or cleaned up first.
+    await graphicsAddon.recover();
     buildMenu();
     createWindow(corePort, coreToken);
     setupAutoUpdate();
