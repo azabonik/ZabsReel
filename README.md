@@ -242,7 +242,8 @@ There is **no packaged installer for macOS or Linux yet** — the current releas
 
 ```bash
 # 1. Prerequisites
-#    • Node.js >= 20        (https://nodejs.org  — or `brew install node`)
+#    • Node.js >= 22.12; motion graphics need 22.15 or later
+#                           (https://nodejs.org  — or `brew install node`)
 #    • Git
 #    • FFmpeg + ffprobe on your PATH, a tested version (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 —
 #      see "Supported FFmpeg versions" below):
@@ -287,7 +288,7 @@ The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run 
 ## Requirements
 
 - **Packaged app:** none — everything needed is bundled (first run is offline).
-- **From source:** Node.js ≥ 20, plus FFmpeg + ffprobe on `PATH`.
+- **From source:** Node.js ≥ 22.12, plus FFmpeg + ffprobe on `PATH`. Motion graphics need Node.js 22.15 or later: ZabsReel gives Remotion its safety check as Remotion loads (`module.registerHooks`), and turns graphics off on an older Node. The packaged app's Electron runs Node 24.
 
 ### Supported FFmpeg versions
 

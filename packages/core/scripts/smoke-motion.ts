@@ -7,6 +7,7 @@
  * and really gated*: the white title text pushes peak luma high while the
  * graphic is visible, and the frame returns to the dark background colour before
  * and after the window. A no-op composite (or broken alpha) would fail this.
+ * The baked graphic has no audio stream (renderGraphic renders muted).
  *
  * Run: npx tsx packages/core/scripts/smoke-motion.ts
  *
@@ -64,6 +65,9 @@ async function main() {
   });
   console.log(`   baked alpha graphic: ${r.asset.name} ${r.asset.duration.toFixed(2)}s  in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   if (!r.graphic) throw new Error("expected an overlay graphic to be created");
+  // MUTATION: drop muted: true from renderWith (motion/render.ts) → Remotion adds a silent track and this fails.
+  console.log(`   baked graphic streams (ffprobe): video=${r.asset.hasVideo} audio=${r.asset.hasAudio}`);
+  if (!r.asset.hasVideo || r.asset.hasAudio) throw new Error("the baked graphic must have a video stream and no audio stream (renderGraphic renders muted)");
 
   console.log("2. export the composited video...");
   const out = join(dataDir, "out.mp4");

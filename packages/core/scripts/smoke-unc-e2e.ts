@@ -454,7 +454,7 @@ async function enforcedSteps(): Promise<void> {
     check(io.ok && ioAssets.length === 2 && ioAssets.every((a) => a.missing === true && a.awaitingServer === H(5)) && /\\\\zr-evil-5\.invalid, which the user hasn't allowed/.test(io.result.notice ?? ""),
       `import_otio: both media paths on ${H(5)} are offline placeholders, with the notice (${io.error ?? JSON.stringify(ioAssets.map((a) => [a.path, a.missing, a.awaitingServer]))})`);
     // Graphics never import a network file (G9), standalone so no clip is needed.
-    const G9 = /graphics can only import local files and installed packages/;
+    const G9 = /graphics can't open network paths or ZabsReel's private files/;
     for (const code of [
       // Each import is used: the TypeScript loader drops an unused one before webpack resolves it.
       `import x from "//${H(6)}/s/x";\nexport default () => String(x);`,
@@ -482,8 +482,10 @@ async function enforcedSteps(): Promise<void> {
     // MUTATION: remove G2 from save → the save rows change the store. Remove it
     // from load → the error quotes the start of the key. Drop the trust/ rule
     // from G6 → /file streams the key. Drop privatePath from rememberMany →
-    // storage_report's reason holds the key. Drop the trust/ rule from the G9
-    // wrapper → the add_graphic error quotes the key.
+    // storage_report's reason holds the key. Drop GraphicImportsPlugin (I9)
+    // from render.ts → the add_graphic rows get another message (the I8 and
+    // trust rules of the G9 wrapper still keep the key out; smoke-unc row 11
+    // and smoke-graphicimports test those alone).
     console.log("4. no rpc call can allow a server or read the key...");
     const hostile = projectFile("hostile.aive", {
       version: 2, servers: [{ host: H(1), via: "prompt", added, stamp: forged }],
@@ -556,7 +558,7 @@ async function enforcedSteps(): Promise<void> {
     for (const code of [`import k from ${JSON.stringify(join(trustDir, "hosts.key"))};\nexport default () => k;`, `import k from "../../trust/hosts.key";\nexport default () => k;`]) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       responses.push(r.text);
-      check(!r.ok && G9.test(r.error ?? ""), `add_graphic importing the key fails with the G9 message (${r.error?.slice(0, 120)})`);
+      check(!r.ok && /graphics can only import 'react' and 'remotion': /.test(r.error ?? ""), `add_graphic importing the key fails with the I9 message, before it is resolved (${r.error?.slice(0, 120)})`);
     }
     const fontKey = projectFile("fontkey.aive", {
       assets: [asset("asset_l", local)],

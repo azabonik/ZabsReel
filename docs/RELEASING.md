@@ -67,7 +67,10 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
 
 1. Checks out **the exact commit the tag points to**, then runs the release
    guard (below).
-2. `npm ci` → `npm run build` (core + mcp + renderer).
+2. `npm ci` → `npm run build` (core + mcp + renderer), then the graphics
+   guards on Windows paths: `check-remotion-guard.mjs` under Node and under
+   Electron's Node, `smoke-chromeguard.ts` (its strace, network-namespace and
+   real-render parts skip there) and `smoke-graphicimports.ts`.
 3. The network-path gate on Windows (below): `smoke-unc.ts`,
    `smoke-unc-e2e.ts` and `check-io-imports.mjs`. A failure stops the job
    before anything is packaged.

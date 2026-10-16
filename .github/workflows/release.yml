@@ -35,6 +35,28 @@ jobs:
       - name: Build core + mcp + renderer
         run: npm run build
 
+      # Remotion's same-as refusal and the /proxy guard on Windows paths, before
+      # anything is packaged: the load hook matches the files it rewrites by the
+      # path of the loaded module (fileURLToPath of its URL), so a drive-letter,
+      # junction or real-path difference here turns graphics off, and a rewrite
+      # that misses leaves them open. One command per step (pwsh, see below).
+      - name: Remotion guard in the built core (Node)
+        run: node packages/core/scripts/check-remotion-guard.mjs
+
+      - name: Remotion guard in the built core (Electron's Node)
+        env:
+          ELECTRON_RUN_AS_NODE: "1"
+        run: '& (node -p "require(''electron'')") packages/core/scripts/check-remotion-guard.mjs'
+
+      # strace and the network namespace are Linux-only and skip here; no
+      # headless shell is cached, so the real renders (M5, M6b) skip and are
+      # listed in the step summary. Nothing is downloaded.
+      - name: Smoke — graphics browser network limits (no Chrome download)
+        run: npx tsx packages/core/scripts/smoke-chromeguard.ts
+
+      - name: Smoke — graphic imports and bundle reads
+        run: npx tsx packages/core/scripts/smoke-graphicimports.ts
+
       - name: Install FFmpeg (staging source; not shipped from here — prepare-bundle copies it in)
         run: choco install ffmpeg -y --no-progress
 

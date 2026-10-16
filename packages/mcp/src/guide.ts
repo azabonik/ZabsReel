@@ -82,7 +82,7 @@ export const PLATFORM_INSTRUCTIONS = `You are the chief video editor. This MCP s
 
 ## Motion graphics (add_graphic)
 - You author a Remotion React component as a TSX module that default-exports a component and uses Remotion APIs (useCurrentFrame, useVideoConfig, interpolate, spring, AbsoluteFill). It renders headlessly to an alpha video composited over the clip.
-- Only import from 'react' and 'remotion'. Self-contained component, valid TSX, no external packages, no network/font fetches. For an OVERLAY keep the background transparent; for a standalone card set standalone=true and paint a background.
+- Only import from 'react' and 'remotion' (any other import, a local file or another package included, is refused). Self-contained component, valid TSX, no external packages, no network/font fetches. For an OVERLAY keep the background transparent; for a standalone card set standalone=true and paint a background.
 - If add_graphic errors, READ the returned error (it carries the real bundler/render message) and fix the code, then retry.
 
 ## Render vs export
@@ -270,8 +270,9 @@ with FFmpeg.
 - Reframe/crop are aspect-dependent: set the canvas first.
 - Text/caption colors are FFmpeg colors only (named, #RRGGBB, name@alpha) — not
   CSS rgb()/hsl()/#fff/gradients, which fail the render.
-- Motion-graphic code may only import 'react' and 'remotion' and must be valid,
-  self-contained TSX. Read any error it returns and fix the code.
+- Motion-graphic code may only import 'react' and 'remotion' (any other import
+  is refused) and must be valid, self-contained TSX. Read any error it returns
+  and fix the code.
 - Timing is in FRAMES, not seconds: convert with frames = round(seconds × fps),
   reading fps from the canvas in timeline_summary.
 - Layering is by video trackIndex (higher = on top). For B-roll over A-roll, add

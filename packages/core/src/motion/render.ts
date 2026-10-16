@@ -1,16 +1,18 @@
-import { mkdir, writeFile, rm, rename } from "../io/gatedfs.js";
+import { mkdir, writeFile, rm, rename, realpathNative } from "../io/gatedfs.js";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { bundle } from "@remotion/bundler";
-import { ensureBrowser, openBrowser, renderMedia } from "@remotion/renderer";
+import type { bundle } from "@remotion/bundler";
+import type { ensureBrowser, openBrowser, renderMedia, RenderInternals } from "@remotion/renderer";
 import type { VideoConfig } from "remotion";
 import { PRODUCT_NAME } from "../brand.js";
 import { colorTagArgs, FFMPEG_DEFAULT_CODING, h264RetagBsf, tagFramesStep } from "../ffmpeg/colorspace.js";
 import { runFfmpeg } from "../ffmpeg/executor.js";
 import { examplePath } from "../unc.js";
-import { installChromeGuard, isGuardedBrowser, remotionPatched } from "./chromeguard.js";
-import { GateNetworkFsPlugin } from "./netgate.js";
+import { installChromeGuard, isGuardedBrowser } from "./chromeguard.js";
+import { GateNetworkFsPlugin, GraphicImportsPlugin, type GraphicFiles } from "./netgate.js";
+import { guardRemotionProxy, proxyGuardWorks, releaseWhenClosed } from "./proxyguard.js";
+import { loadRemotion, REMOTION_VERSION, type RemotionGuard } from "./remotionload.js";
 
 /**
  * Headless motion-graphics renderer (Remotion).
@@ -26,7 +28,19 @@ import { GateNetworkFsPlugin } from "./netgate.js";
  * downloaded on first use and cached by Remotion (like our whisper/YuNet
  * binaries) — see ensureBrowser(). It runs with ZabsReel's network limits
  * (chromeguard.ts), and the render downloads no media for the graphic
- * (refuseDownload).
+ * (refuseDownload). Remotion is loaded at render time, through
+ * remotionload.ts, so importing this module loads none of it. A second layer
+ * uses no Remotion internals: the render is muted (Remotion opens no audio
+ * source), and proxyguard.ts refuses /proxy on Remotion's server. The AI's
+ * component may import only react and remotion, and webpack's file system
+ * reads no file outside the scaffold and node_modules (netgate.ts). Two reads
+ * of bundle() do not go through that file system, both at fixed paths: Remotion's
+ * esbuild-loader reads the compiler options in <remotionRoot>/tsconfig.json
+ * through TypeScript, and webpack's cache lives in node_modules/.cache under
+ * the nearest package.json at or above <remotionRoot> (else <remotionRoot>/.cache).
+ * remotionRoot is the folder of the nearest package.json above the scaffold,
+ * else the core's working directory. The AI's code cannot change either path:
+ * they depend only on where the scaffold and the core are.
  *
  * NOTE on licensing: Remotion is source-available under the Remotion License
  * (not OSI open-source); companies of 4+ people need a paid license. It is the
@@ -154,12 +168,31 @@ export const refuseDownload = (src: string): never => {
 /** The Remotion calls renderGraphic makes (smoke-chromeguard passes stubs). */
 export interface GraphicRemotion {
   bundle: typeof bundle;
+  /** The node_modules folder @remotion/bundler is installed in. */
+  bundlerModules: string;
   ensureBrowser: typeof ensureBrowser;
   openBrowser: typeof openBrowser;
   renderMedia: typeof renderMedia;
-  remotionPatched: () => boolean;
+  RenderInternals: typeof RenderInternals;
+  guard: () => RemotionGuard;
 }
-const REMOTION: GraphicRemotion = { bundle, ensureBrowser, openBrowser, renderMedia, remotionPatched };
+
+/** Remotion as remotionload.ts loads it from `root` (default: ZabsReel's own copy). */
+export async function graphicRemotion(root?: string): Promise<GraphicRemotion> {
+  const { renderer, bundler, bundlerModules, guard } = await loadRemotion(root);
+  const { ensureBrowser, openBrowser, renderMedia, RenderInternals } = renderer;
+  return { bundle: bundler.bundle, bundlerModules, ensureBrowser, openBrowser, renderMedia, RenderInternals, guard };
+}
+
+/** Why graphics are off, for each guard reason. */
+function guardRefusal(reason: Exclude<RemotionGuard, { ok: true }>["reason"]): string {
+  const why = {
+    node: `graphics need Node.js 22.15 or later, and ${PRODUCT_NAME} is running on Node.js ${process.versions.node}.`,
+    "loaded-before": `Remotion was loaded before ${PRODUCT_NAME} could guard it. Restart ${PRODUCT_NAME}.`,
+    version: `${PRODUCT_NAME} works with Remotion ${REMOTION_VERSION}, and this copy of Remotion is a version it doesn't know.`,
+  }[reason];
+  return `Graphics are turned off: ${why}`;
+}
 
 const ENTRY_SOURCE = `import { registerRoot } from "remotion";
 import { RemotionRoot } from "./Root";
@@ -169,50 +202,83 @@ registerRoot(RemotionRoot);
 /**
  * Render an AI-authored Remotion component to an alpha video file. The scaffold
  * is written under `workDir`, bundled, rendered, and then cleaned up. Refuses
- * (fails closed) when the installed Remotion lacks ZabsReel's patch, or when
- * its browser did not start through the network limits (chromeguard.ts).
+ * (fails closed), before writing anything, when the loaded Remotion does not
+ * carry ZabsReel's same-as refusal (remotionload.ts) or the /proxy guard does
+ * not work on this Node (proxyguard.ts), or when its browser did not start
+ * through the network limits (chromeguard.ts).
  */
-export async function renderGraphic(opts: RenderGraphicOptions, remotion: GraphicRemotion = REMOTION): Promise<void> {
-  if (!remotion.remotionPatched()) {
-    throw new Error(`Graphics are turned off: this copy of Remotion is missing ${PRODUCT_NAME}'s safety patch. Run npm install again.`);
+export async function renderGraphic(opts: RenderGraphicOptions, remotion?: GraphicRemotion): Promise<void> {
+  remotion ??= await graphicRemotion();
+  const guard = remotion.guard();
+  if (!guard.ok) throw new Error(guardRefusal(guard.reason));
+  if (!(await proxyGuardWorks())) {
+    throw new Error(`Graphics are turned off: ${PRODUCT_NAME} couldn't guard Remotion's server on Node.js ${process.versions.node}.`);
   }
   await mkdir(opts.workDir, { recursive: true });
   await writeFile(join(opts.workDir, "Graphic.tsx"), opts.code, "utf8");
   await writeFile(join(opts.workDir, "Root.tsx"), rootSource(opts), "utf8");
   await writeFile(join(opts.workDir, "index.ts"), ENTRY_SOURCE, "utf8");
+  // Remotion copies its public folder into the bundle (and serves it): an empty
+  // one of ours, never a folder next to the core's working directory.
+  const publicDir = join(opts.workDir, "public");
+  await mkdir(publicDir, { recursive: true });
 
   const modulesDir = nodeModulesDir();
+  // The scaffold's files as written and as webpack sees them (it resolves links).
+  const realWorkDir = realpathNative(opts.workDir);
+  const both = (name: string) => [join(opts.workDir, name), join(realWorkDir, name)];
+  const files: GraphicFiles = {
+    graphic: both("Graphic.tsx"),
+    scaffold: [...both("Root.tsx"), ...both("index.ts")],
+    modules: [modulesDir, remotion.bundlerModules],
+  };
 
   try {
     const serveUrl = await remotion.bundle({
+      // No rootDir: bundle() chdirs the whole core process to it while it
+      // bundles, so the scaffold as rootDir would move the server's working
+      // directory in the middle of other requests.
       entryPoint: join(opts.workDir, "index.ts"),
+      publicDir,
       // The scaffold lives outside the repo's node_modules tree, so point
-      // webpack at the installed node_modules so `react`/`remotion`/the AI's
-      // imports resolve. GateNetworkFsPlugin (G9): webpack reads through its
-      // own file system, so the agent's imports can't name a network path.
+      // webpack at the installed node_modules so `react`/`remotion` resolve.
+      // GateNetworkFsPlugin (G9): webpack reads through its own file system,
+      // so the agent's imports can't name a network path, and it reads no
+      // file outside `files`. GraphicImportsPlugin (I9): Graphic.tsx may
+      // import only react and remotion.
       webpackOverride: (config) => ({
         ...config,
         resolve: {
           ...config.resolve,
           modules: [modulesDir, ...((config.resolve && config.resolve.modules) || ["node_modules"])],
         },
-        plugins: [...(config.plugins ?? []), new GateNetworkFsPlugin()],
+        plugins: [...(config.plugins ?? []), new GateNetworkFsPlugin(files), new GraphicImportsPlugin(files)],
       }),
     });
 
     // Downloads Chrome Headless Shell on first use (cached by Remotion).
     await remotion.ensureBrowser();
 
-    // Our own browser, started through the network limits, for the whole render.
-    installChromeGuard();
-    const browser = await remotion.openBrowser("chrome", { chromeMode: "headless-shell" });
+    // Remotion's server takes exactly this port (or fails), so the /proxy guard
+    // is on it alone. Remotion closes that server after renderMedia settles
+    // without awaiting it, so the guard is held for the browser's whole life
+    // and released only once the port refuses connections.
+    const port = await freePort();
+    const releaseProxyGuard = guardRemotionProxy(port);
     try {
-      if (!isGuardedBrowser(browser)) {
-        throw new Error(`Graphics are turned off: ${PRODUCT_NAME} couldn't start the graphics browser with its network limits.`);
+      // Our own browser, started through the network limits, for the whole render.
+      installChromeGuard(remotion.RenderInternals);
+      const browser = await remotion.openBrowser("chrome", { chromeMode: "headless-shell" });
+      try {
+        if (!isGuardedBrowser(browser)) {
+          throw new Error(`Graphics are turned off: ${PRODUCT_NAME} couldn't start the graphics browser with its network limits.`);
+        }
+        await renderWith(remotion, opts, serveUrl, browser, port);
+      } finally {
+        await browser.close({ silent: true }).catch(() => {});
       }
-      await renderWith(remotion, opts, serveUrl, browser);
     } finally {
-      await browser.close({ silent: true }).catch(() => {});
+      await releaseWhenClosed(port, releaseProxyGuard);
     }
   } finally {
     // Best-effort cleanup of the scaffold (the bundle lives in a temp dir
@@ -221,11 +287,10 @@ export async function renderGraphic(opts: RenderGraphicOptions, remotion: Graphi
   }
 }
 
-/** The renderMedia call of {@link renderGraphic}, in `browser`. */
-async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions, serveUrl: string, browser: Awaited<ReturnType<typeof openBrowser>>): Promise<void> {
+/** The renderMedia call of {@link renderGraphic}, in `browser`, with Remotion's server on `port`. */
+async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions, serveUrl: string, browser: Awaited<ReturnType<typeof openBrowser>>, port: number): Promise<void> {
   const composition = graphicComposition(opts);
   const inputProps = composition.props;
-  const port = await freePort();
   const alpha = opts.alpha !== false;
   await remotion.renderMedia({
     composition,
@@ -233,6 +298,10 @@ async function renderWith(remotion: GraphicRemotion, opts: RenderGraphicOptions,
     port,
     puppeteerInstance: browser,
     onDownload: refuseDownload,
+    // A graphic has no sound (every media source is refused). Muted, Remotion
+    // opens no audio source the page reports, a same-as path included; without
+    // it Remotion writes a silent audio track.
+    muted: true,
     // Alpha overlay: ProRes 4444 keeps an alpha channel so the graphic can be
     // composited over footage (transparent wherever the component doesn't
     // paint). This needs BOTH an alpha-carrying pixelFormat AND PNG frames —

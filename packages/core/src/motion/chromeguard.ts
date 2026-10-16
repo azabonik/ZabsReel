@@ -1,7 +1,4 @@
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { RenderInternals } from "@remotion/renderer";
-import { readFileSync } from "../io/gatedfs.js";
+import type { RenderInternals } from "@remotion/renderer";
 
 /**
  * The network limits of the graphics browser (Remotion's Chrome Headless
@@ -37,9 +34,9 @@ export function guardedChromeArgs(args: readonly string[]): string[] {
   return [...args.filter((a) => a !== "--disable-web-security" && !DROP.some((p) => a.startsWith(p))), ...GRAPHICS_CHROME_SWITCHES];
 }
 
-/** Replace RenderInternals.HeadlessBrowser.create once; idempotent. */
-export function installChromeGuard(): void {
-  const browserClass = RenderInternals.HeadlessBrowser as unknown as { create: Create & { [INSTALLED]?: true } };
+/** Replace HeadlessBrowser.create of the loaded Remotion (remotionload.ts) once; idempotent. */
+export function installChromeGuard(internals: typeof RenderInternals): void {
+  const browserClass = internals.HeadlessBrowser as unknown as { create: Create & { [INSTALLED]?: true } };
   if (browserClass.create[INSTALLED]) return;
   const original = browserClass.create;
   const create = async (opts: { args: string[] } & Record<string, unknown>) => {
@@ -53,28 +50,4 @@ export function installChromeGuard(): void {
 /** True when `b` was started through the guard. */
 export function isGuardedBrowser(b: object): boolean {
   return guarded.has(b);
-}
-
-/** The text ZabsReel's patch (patches/@remotion+renderer+*.patch) puts in both of Remotion's builds. */
-const PATCH_MARKER = "/* zabsreel: same-as refused */";
-let patched: boolean | undefined;
-
-/**
- * True when the installed @remotion/renderer carries ZabsReel's patch, in its
- * CommonJS and its ESM build: `downloadAsset` refuses a `same-as` source
- * instead of handing it, as a bare relative path and without asking
- * onDownload, to the compositor (Remotion's /proxy reaches it from the page).
- * Read once. `dir` (the package folder) is for tests.
- */
-export function remotionPatched(dir?: string): boolean {
-  if (dir === undefined && patched !== undefined) return patched;
-  const root = dir ?? dirname(createRequire(import.meta.url).resolve("@remotion/renderer/package.json"));
-  let ok: boolean;
-  try {
-    ok = ["dist/assets/download-and-map-assets-to-file.js", "dist/esm/index.mjs"].every((f) => readFileSync(join(root, f), "utf8").includes(PATCH_MARKER));
-  } catch {
-    ok = false;
-  }
-  if (dir === undefined) patched = ok;
-  return ok;
 }

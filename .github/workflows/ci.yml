@@ -41,6 +41,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The built core's Remotion guard under Node and under Electron's Node
+      # (the app's core child): Remotion loads with the same-as refusal, and the
+      # /proxy guard works.
+      - name: Remotion guard (built core, Node and Electron's Node)
+        run: |
+          node packages/core/scripts/check-remotion-guard.mjs
+          ELECTRON_RUN_AS_NODE=1 "$(node -p "require('electron')")" packages/core/scripts/check-remotion-guard.mjs
+
       # The media-free / self-synthesizing smoke subset (no model downloads).
       - name: Smoke — brand constants and the data-dir rule (temp HOME)
         run: npx tsx packages/core/scripts/smoke-brand.ts
@@ -109,10 +117,19 @@ jobs:
         run: npx tsx packages/core/scripts/smoke-ramps.ts
 
       # The graphics browser's switches, its media downloads refused, Remotion's
-      # same-as patch (applied by npm ci's postinstall) and the render.ts lint.
-      # Its real-Chrome part runs only where the headless shell is cached.
+      # same-as refusal (remotionload.ts's load hook, in memory: npm ci leaves
+      # Remotion unpatched), the second layer (the /proxy guard, traced with
+      # strace; muted renders) and the render.ts lint. Its real-Chrome parts
+      # run only where the headless shell is cached; here they skip, and each
+      # skip is written to this job's step summary.
       - name: Smoke — graphics browser network limits (no Chrome download)
         run: npx tsx packages/core/scripts/smoke-chromeguard.ts
+
+      # Graphic code may import only react and remotion, and webpack's file
+      # system reads no file outside the scaffold and node_modules (real
+      # bundles, no browser).
+      - name: Smoke — graphic imports and bundle reads
+        run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts

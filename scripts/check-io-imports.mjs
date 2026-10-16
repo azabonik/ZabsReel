@@ -15,21 +15,31 @@
 //    servers), or takes gatedfs as a whole, which would hide it: a namespace
 //    import, `export * from`, `export * as … from`, or a dynamic import(…) /
 //    require(…) of it;
-//  - motion/render.ts no longer passes GateNetworkFsPlugin (G9) to bundle(),
-//    or mentions disableWebSecurity (Chromium would then load file:// from the
+//  - motion/render.ts no longer passes GateNetworkFsPlugin (G9, I8) and
+//    GraphicImportsPlugin (I9) to bundle(), or its own publicDir, or mentions
+//    disableWebSecurity (Chromium would then load file:// from the
 //    graphic) or rspack (it resolves in native code, outside G9's wrapper);
 //  - motion/render.ts no longer starts its browser through the network limits
 //    and renders in it (installChromeGuard(, isGuardedBrowser(,
 //    puppeteerInstance), or no longer refuses Remotion's media downloads
-//    (onDownload), or mentions selectComposition / getCompositions (they open
-//    a browser whose downloads nothing refuses), chromiumOptions or
-//    browserExecutable;
-//  - a packages/core/src file outside motion/ imports @remotion/renderer.
+//    (onDownload), or no longer mutes the render and refuses Remotion's /proxy
+//    (muted: true, proxyGuardWorks(, guardRemotionProxy(), or mentions
+//    selectComposition / getCompositions (they open a browser whose downloads
+//    nothing refuses), chromiumOptions or browserExecutable;
+//  - a packages/core/src file other than motion/remotionload.ts loads remotion
+//    or @remotion/* at run time (a value import or re-export, `import "…"`,
+//    import(…), require(…) or a createRequire call); `import type` is
+//    allowed. remotionload.ts registers the load hook that gives Remotion
+//    ZabsReel's same-as refusal, so a load anywhere else could come first and
+//    miss it; for the same reason remotionload.ts itself may not import
+//    Remotion statically (a static import loads before its hook exists).
+//    This rule parses with the installed typescript package (npm ci first).
 //
 // It only reads. Usage: node scripts/check-io-imports.mjs [--root <dir>]
 //                       node scripts/check-io-imports.mjs --self-test
 // Exits 0 when clean, 1 otherwise.
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,17 +66,40 @@ const GATEDFS_SPEC = String.raw`[./]*(?:[\w-]+\/)*io\/gatedfs(?:\.js)?`;
 const GATEDFS = new RegExp(String.raw`\b(import|export)\s+(?!type\b)([^;'"\`]*?)\bfrom\s*(['"])${GATEDFS_SPEC}\3`, "g");
 /** io/gatedfs.js as the only argument of a call: import("…"), require("…"). */
 const GATEDFS_CALL = new RegExp(String.raw`\(\s*(['"\`])${GATEDFS_SPEC}\1\s*\)`, "g");
-/** @remotion/renderer (or a file in it) imported in any of the forms above. */
-const RENDERER_SPEC = String.raw`@remotion\/renderer(?:\/[^'"\`]*)?`;
-const RENDERER = new RegExp(
-  String.raw`\b(?:import|export)\s+(?!type\b)[^;'"\`]*?\bfrom\s*(['"])${RENDERER_SPEC}\1|\bimport\s*(['"])${RENDERER_SPEC}\2|\(\s*(['"\`])${RENDERER_SPEC}\3\s*\)`,
-  "g",
-);
+/** remotion or @remotion/* (or a file in one). */
+const REMOTION_MODULE = /^(?:remotion|@remotion\/[^/]+)(?:\/.*)?$/;
 /** What motion/render.ts must contain (the browser through the network limits, no downloads), and must not. */
-const RENDER_MUST = ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload"];
+const RENDER_MUST = ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload", "muted: true", "proxyGuardWorks(", "guardRemotionProxy("];
 const RENDER_MUST_NOT = ["selectComposition", "getCompositions", "chromiumOptions", "browserExecutable"];
 
 const bareName = (m) => m.replace(/^node:/, "");
+let ts;
+
+/**
+ * Where `text` loads Remotion at run time, as { index, statically } entries:
+ * an import or export … from (not `import type` / `export type`), an
+ * import-equals require, or a call whose only argument is the module name
+ * (import(), require(), createRequire(…)(…)). Parsed with TypeScript, so the
+ * graphic source render.ts writes out (template literals) and comments that
+ * name "remotion" don't count.
+ */
+function remotionLoads(text, fileName) {
+  ts ??= createRequire(import.meta.url)("typescript");
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const found = [];
+  const names = (n) => !!n && ts.isStringLiteralLike(n) && REMOTION_MODULE.test(n.text);
+  const visit = (node) => {
+    let statically;
+    if (ts.isImportDeclaration(node)) statically = !node.importClause?.isTypeOnly && names(node.moduleSpecifier) ? true : undefined;
+    else if (ts.isExportDeclaration(node)) statically = !node.isTypeOnly && names(node.moduleSpecifier) ? true : undefined;
+    else if (ts.isImportEqualsDeclaration(node)) statically = !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference) && names(node.moduleReference.expression) ? true : undefined;
+    else if (ts.isCallExpression(node) && node.arguments.length === 1 && names(node.arguments[0])) statically = false;
+    if (statically !== undefined) found.push({ index: node.getStart(sf), statically });
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
 const lineOf = (text, index) => text.slice(0, index).split("\n").length;
 
 function listTs(dir) {
@@ -115,18 +148,27 @@ export function scan(root) {
       }
     }
     if (rel === "motion/render.ts") {
-      if (!/import\s*\{[^}]*\bGateNetworkFsPlugin\b[^}]*\}\s*from\s*(['"])\.\/netgate\.js\1/.test(text) || !/\bplugins\s*:\s*\[[^;]*?\bnew\s+GateNetworkFsPlugin\s*\(\s*\)/.test(text)) {
-        problems.push(`${shown}: bundle() must get plugins: [..., new GateNetworkFsPlugin()] from ./netgate.js (G9)`);
+      for (const plugin of ["GateNetworkFsPlugin", "GraphicImportsPlugin"]) {
+        const imported = new RegExp(`import\\s*\\{[^}]*\\b${plugin}\\b[^}]*\\}\\s*from\\s*(['"])\\.\\/netgate\\.js\\1`);
+        const passed = new RegExp(`\\bplugins\\s*:\\s*\\[[^;]*?\\bnew\\s+${plugin}\\s*\\(`);
+        if (!imported.test(text) || !passed.test(text)) {
+          problems.push(`${shown}: bundle() must get plugins: [..., new ${plugin}(files)] from ./netgate.js (G9, I8, I9)`);
+        }
       }
+      if (!/\bbundle\s*\(\s*\{[^;]*?\bpublicDir\b/.test(text)) problems.push(`${shown}: bundle() must get its own publicDir (Remotion copies the folder into the bundle)`);
       if (/disableWebSecurity/.test(text)) problems.push(`${shown}: mentions disableWebSecurity; the graphic's Chromium must keep web security on`);
       if (/rspack/i.test(text)) problems.push(`${shown}: mentions rspack, which resolves outside G9's file-system wrapper`);
       for (const m of RENDER_MUST.filter((w) => !text.includes(w))) {
-        problems.push(`${shown}: has no ${m}; the graphic must render in a browser started through chromeguard.ts, with every media download refused`);
+        problems.push(`${shown}: has no ${m}; the graphic must render in a browser started through chromeguard.ts, with every media download refused, muted, and /proxy refused (proxyguard.ts)`);
       }
       for (const m of RENDER_MUST_NOT.filter((w) => text.includes(w))) problems.push(`${shown}: mentions ${m}, which bypasses the graphics browser's limits`);
     }
-    if (!rel.startsWith("motion/")) {
-      for (const m of text.matchAll(RENDERER)) problems.push(`${shown}:${lineOf(text, m.index)}: imports @remotion/renderer; only motion/ may (chromeguard.ts limits its browser)`);
+    for (const { index, statically } of /remotion/.test(text) ? remotionLoads(text, path) : []) {
+      if (rel !== "motion/remotionload.ts") {
+        problems.push(`${shown}:${lineOf(text, index)}: loads Remotion; only motion/remotionload.ts may (its load hook gives Remotion the same-as refusal), use import type here`);
+      } else if (statically) {
+        problems.push(`${shown}:${lineOf(text, index)}: imports Remotion statically, which loads it before the load hook is registered; use import()`);
+      }
     }
   }
   return problems;
@@ -138,15 +180,17 @@ function selfTest() {
   const dir = mkdtempSync(join(tmpdir(), "check-io-imports-"));
   let failures = 0;
   /** The browser through chromeguard.ts, every download refused. */
-  const GUARDED_RENDER = `installChromeGuard();\nconst b = await openBrowser("chrome");\nif (!isGuardedBrowser(b)) throw new Error("x");\nrenderMedia({ puppeteerInstance: b, onDownload: refuse });\n`;
+  const GUARDED_RENDER = `installChromeGuard();\nconst b = await openBrowser("chrome");\nif (!isGuardedBrowser(b)) throw new Error("x");\nif (!(await proxyGuardWorks())) throw new Error("x");\nguardRemotionProxy(port);\nrenderMedia({ puppeteerInstance: b, onDownload: refuse, muted: true });\n`;
   const GOOD_RENDER =
-    `import { bundle } from "@remotion/bundler";\nimport { openBrowser, renderMedia } from "@remotion/renderer";\nimport { GateNetworkFsPlugin } from "./netgate.js";\n` +
-    `bundle({ webpackOverride: (c) => ({ ...c, plugins: [...(c.plugins ?? []), new GateNetworkFsPlugin()] }) });\n${GUARDED_RENDER}`;
+    `import type { bundle } from "@remotion/bundler";\nimport type { openBrowser, renderMedia } from "@remotion/renderer";\nimport { loadRemotion } from "./remotionload.js";\nimport { GateNetworkFsPlugin, GraphicImportsPlugin } from "./netgate.js";\n` +
+    `const ENTRY = \`import { registerRoot } from "remotion";\nregisterRoot(Root);\n\`;\n` +
+    `bundle({ publicDir, webpackOverride: (c) => ({ ...c, plugins: [...(c.plugins ?? []), new GateNetworkFsPlugin(files), new GraphicImportsPlugin(files)] }) });\n${GUARDED_RENDER}`;
   const base = {
     "io/gatedfs.ts": `import * as fs from "node:fs";\nimport * as fsp from "node:fs/promises";\n`,
     "ffmpeg/executor.ts": `import { execa } from "execa";\nimport { readFileSync } from "../io/gatedfs.js";\n`,
     "datadir.ts": `import { bootstrap } from "./io/gatedfs.js";\n`,
     "motion/render.ts": GOOD_RENDER,
+    "motion/remotionload.ts": `import type * as Renderer from "@remotion/renderer";\nconst renderer = (await import(esmUrl)) as typeof Renderer;\nconst bundler = createRequire(root)("@remotion/bundler");\n`,
   };
   /** Write `files` over the base tree; `expect` is a regex every problem must match, or null for clean. */
   const run = (name, files, expect) => {
@@ -202,16 +246,22 @@ function selfTest() {
     run("a re-export of a gated function passes", { "barrel.ts": `export { stat, readFile } from "./io/gatedfs.js";\nexport type { BlockedPathError } from "./io/gatedfs.js";\n` }, null);
     run("datadir.ts may re-export bootstrap", { "datadir.ts": `import { bootstrap } from "./io/gatedfs.js";\nexport { bootstrap } from "./io/gatedfs.js";\n` }, null);
     run("render.ts without the G9 plugin fails", {
-      "motion/render.ts": `import { bundle } from "@remotion/bundler";\nbundle({ webpackOverride: (c) => c });\n${GUARDED_RENDER}`,
-    }, /motion\/render\.ts: bundle\(\) must get plugins/);
+      "motion/render.ts": `import { GraphicImportsPlugin } from "./netgate.js";\nbundle({ publicDir, webpackOverride: (c) => ({ ...c, plugins: [new GraphicImportsPlugin(files)] }) });\n${GUARDED_RENDER}`,
+    }, /motion\/render\.ts: bundle\(\) must get plugins: \[\.\.\., new GateNetworkFsPlugin/);
     run("render.ts that imports the plugin but does not pass it fails", {
-      "motion/render.ts": `import { GateNetworkFsPlugin } from "./netgate.js";\nbundle({ webpackOverride: (c) => ({ ...c, plugins: c.plugins }) });\nvoid GateNetworkFsPlugin;\n${GUARDED_RENDER}`,
+      "motion/render.ts": `import { GateNetworkFsPlugin, GraphicImportsPlugin } from "./netgate.js";\nbundle({ publicDir, webpackOverride: (c) => ({ ...c, plugins: c.plugins }) });\nvoid GateNetworkFsPlugin, GraphicImportsPlugin;\n${GUARDED_RENDER}`,
     }, /motion\/render\.ts: bundle\(\) must get plugins/);
+    run("render.ts without the I9 plugin fails", {
+      "motion/render.ts": GOOD_RENDER.replace(", new GraphicImportsPlugin(files)", ""),
+    }, /motion\/render\.ts: bundle\(\) must get plugins: \[\.\.\., new GraphicImportsPlugin/);
+    run("render.ts without its own publicDir fails", {
+      "motion/render.ts": GOOD_RENDER.replace("bundle({ publicDir, ", "bundle({ "),
+    }, /motion\/render\.ts: bundle\(\) must get its own publicDir/);
     run("render.ts with disableWebSecurity fails", {
       "motion/render.ts": `${GOOD_RENDER}const options = { disableWebSecurity: true };\n`,
     }, /motion\/render\.ts: mentions disableWebSecurity/);
     run("render.ts with rspack fails", { "motion/render.ts": `${GOOD_RENDER}bundle({ rspack: true });\n` }, /motion\/render\.ts: mentions rspack/);
-    for (const must of ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload"]) {
+    for (const must of ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload", "muted: true", "proxyGuardWorks(", "guardRemotionProxy("]) {
       run(`render.ts without ${must} fails`, { "motion/render.ts": GOOD_RENDER.split(must).join("x") }, new RegExp(`motion/render\\.ts: has no ${must.replace("(", "\\(")}`));
     }
     for (const [what, line] of [
@@ -227,12 +277,29 @@ function selfTest() {
       ["a file in it", `import { downloadAsset } from "@remotion/renderer/dist/assets/download-and-map-assets-to-file.js";\n`],
       ["a dynamic import", `const r = await import("@remotion/renderer");\n`],
       ["a require", `const r = require('@remotion/renderer');\n`],
+      ["a createRequire call", `const r = createRequire(import.meta.url)("@remotion/renderer");\n`],
+      ["a side-effect import of remotion", `import "remotion";\n`],
+      ["a re-export of @remotion/bundler", `export { bundle } from "@remotion/bundler";\n`],
+      ["a type and value import", `import { type HeadlessBrowser, RenderInternals } from "@remotion/renderer";\n`],
+      ["a dynamic import with a template literal", "const r = await import(`@remotion/bundler`);\n"],
+      ["a TypeScript import-equals", `import r = require("@remotion/renderer");\n`],
     ]) {
-      run(`@remotion/renderer outside motion/ (${form}) fails`, { "engine.ts": body }, /engine\.ts:1: imports @remotion\/renderer/);
+      run(`Remotion loaded outside remotionload.ts (${form}) fails`, { "engine.ts": body }, /engine\.ts:1: loads Remotion; only motion\/remotionload\.ts may/);
     }
-    run("@remotion/renderer in motion/ and a type-only import elsewhere pass", {
-      "motion/chromeguard.ts": `import { RenderInternals } from "@remotion/renderer";\n`,
-      "engine.ts": `import type { HeadlessBrowser } from "@remotion/renderer";\n`,
+    for (const file of ["motion/render.ts", "motion/chromeguard.ts"]) {
+      run(`${file} with a value import of @remotion/renderer fails`, {
+        [file]: `import { RenderInternals } from "@remotion/renderer";\n${file === "motion/render.ts" ? GOOD_RENDER : ""}`,
+      }, new RegExp(`${file.replace(".", "\\.")}:1: loads Remotion; only motion/remotionload\\.ts may`));
+    }
+    run("render.ts with an import() of @remotion/bundler fails", {
+      "motion/render.ts": `${GOOD_RENDER}const { bundle: b } = await import("@remotion/bundler");\n`,
+    }, /motion\/render\.ts:\d+: loads Remotion; only motion\/remotionload\.ts may/);
+    run("remotionload.ts with a static import of Remotion fails", {
+      "motion/remotionload.ts": `import { renderMedia } from "@remotion/renderer";\n`,
+    }, /motion\/remotionload\.ts:1: imports Remotion statically/);
+    run("type-only Remotion imports, Remotion in graphic source and comments pass", {
+      "motion/chromeguard.ts": `import type { RenderInternals } from "@remotion/renderer";\n// RenderInternals from "@remotion/renderer" is passed in\n`,
+      "engine.ts": `import type { HeadlessBrowser } from "@remotion/renderer";\nexport type { VideoConfig } from "remotion";\n/* import { x } from "remotion" */\nconst TSX = String.raw\`import { AbsoluteFill } from "remotion";\n\`;\n`,
     }, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });

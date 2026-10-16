@@ -20,7 +20,7 @@ Plus how to test the **packaged installer** offline.
 
 | Need | Check | Install |
 |---|---|---|
-| Node.js ≥ 20 | `node --version` | https://nodejs.org |
+| Node.js ≥ 22.12 (motion graphics need 22.15 or later, for `module.registerHooks`) | `node --version` | https://nodejs.org |
 | FFmpeg + ffprobe on PATH (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | (AI testing) Claude Desktop | — | https://claude.ai/download |
 
@@ -159,11 +159,49 @@ npx tsx packages/core/scripts/smoke-demuxers.ts
 
 # The graphics browser (Remotion): every Chrome it starts gets the resolver rule
 # and the sign-in sentinel, renderGraphic renders only in such a browser and
-# refuses every media download, the same-as patch is applied (npm install's
-# postinstall), and the render.ts lint. With Remotion's headless shell already
-# cached it also renders real graphics (in an empty network namespace when
-# `unshare -rn` works); it never downloads one
+# refuses every media download, motion/remotionload.ts's load hook gives the
+# installed Remotion the same-as refusal in memory (and graphics are turned off
+# when it can't: another Remotion version, Remotion loaded before the hook, a
+# Node without module.registerHooks), and the render.ts lint. M6 checks the
+# second layer, which uses no Remotion internals, with the load hook's rewrite
+# off in its own process: motion/proxyguard.ts refuses /proxy on Remotion's own
+# server during a render (fetch and WebSocket handshake; the compositor gets no
+# command, and strace, where there is one, sees no file naming the source
+# opened), graphics are turned off when Node's request channel doesn't work,
+# and a positive control with the guard off too shows the same requests reach
+# the compositor. With Remotion's headless shell already cached it also renders
+# real graphics (in an empty network namespace when `unshare -rn` works): the
+# H.264 has no audio stream, and with the rewrite off a graphic that reports a
+# same-as asset starts no ffprobe or ffmpeg that names it (renders are muted);
+# it never downloads one. M7: when Remotion closes its server after the render
+# (1 s, then 5 s later), /proxy on that port is refused or finds no server
+# right after renderGraphic returns, and the guard stays until the port closes
+# (a port that never closes: the background check stops at its cap and the
+# guard stays on). Without a cached shell (CI caches none) M5 and M6b print a
+# skip line; on GitHub Actions each skip is also written to the job's step
+# summary, so every CI run shows that no real graphic render ran there
 npx tsx packages/core/scripts/smoke-chromeguard.ts
+
+# What graphic code can import and read while it is bundled (real bundles, no
+# browser): Graphic.tsx may import only react (and its JSX runtimes) and
+# remotion; a relative or absolute file, .json, .png, .css, another package, a
+# remotion subpath, require.context, require(), import() of an expression,
+# new URL(…, import.meta.url), file: and data: URLs and loader! prefixes are
+# refused before they are resolved, nothing reads the secret file and no error
+# quotes it; a network import still gets G9's message; with that rule taken out
+# of the bundle, webpack's file system alone still reads nothing outside the
+# scaffold and node_modules (Remotion's tsconfig.json lookup and webpack's
+# cache are at fixed paths outside it; motion/render.ts names them); a public/ folder in the working directory (or
+# next to a package.json above the scaffold) is not copied into the bundle
+npx tsx packages/core/scripts/smoke-graphicimports.ts
+
+# The same guards in the built core (needs the build), under Node and under
+# Electron's Node: Remotion loads with the refusal (downloadAsset refuses a
+# same-as source in the CommonJS build and, through stitchFramesToVideo, in the
+# ESM build), and the /proxy guard works (checked over an in-memory stream).
+# Starts no server or browser
+node packages/core/scripts/check-remotion-guard.mjs
+ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts/check-remotion-guard.mjs
 
 # The desktop window's request guard and CSP (electron/net-guard.cjs, plain logic)
 npx tsx apps/desktop/scripts/smoke-netguard.ts
@@ -441,7 +479,7 @@ npx tsx packages/core/scripts/smoke-toolsurface.ts scratch/a.mp4 scratch/b.mp4
 npx tsx packages/core/scripts/smoke-export.ts      scratch/a.mp4
 npx tsx packages/core/scripts/smoke-proxy.ts                           # self-synthesizes a "4K-ish" source; a proxy has a keyframe every second
 
-# Remotion motion graphics
+# Remotion motion graphics (the baked graphic has no audio stream: renders are muted)
 npx tsx packages/core/scripts/smoke-motion.ts
 ```
 

@@ -20,8 +20,7 @@
     "web": "npm run build && npm run web --workspace zabsreel-desktop --",
     "core": "npm run start --workspace @aive/core",
     "mcp": "npm run start --workspace @aive/mcp",
-    "clean": "node -e \"require('fs').rmSync('node_modules',{recursive:true,force:true})\"",
-    "postinstall": "patch-package"
+    "clean": "node -e \"require('fs').rmSync('node_modules',{recursive:true,force:true})\""
   },
   "keywords": [
     "video-editor",
@@ -30,8 +29,5 @@
     "model-context-protocol",
     "ai",
     "electron"
-  ],
-  "devDependencies": {
-    "patch-package": "8.0.1"
-  }
+  ]
 }

@@ -37,7 +37,10 @@
  *                            hosted file: imports; the webpack input file
  *                            system wrapper never calls the real reads for a
  *                            network path, nor its content reads for a path
- *                            in the trust folder; the plugin taps both factories.
+ *                            in the trust folder; the plugin taps both
+ *                            factories. I8: given the scaffold's files, the
+ *                            wrapper's content reads of any other path fail
+ *                            as a missing file (smoke-graphicimports bundles).
  *  3. the approval store   — trusthosts.ts: round trip, a corrupt or unknown
  *                            list, hand-edited and invalid entries, atomic
  *                            writes (a reader process never sees half a
@@ -132,7 +135,7 @@ import {
 } from "../src/ffmpeg/executor.js";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { EditorServer } from "../src/server.js";
-import { GateNetworkFsPlugin, gateInputFileSystem, graphicRequestRefusal } from "../src/motion/netgate.js";
+import { GateNetworkFsPlugin, gateInputFileSystem, graphicImportRefusal, graphicRequestRefusal } from "../src/motion/netgate.js";
 import { approveHost, readTrustedHosts, revokeHost, TrustStoreError, withTrustLock, type ReadErrorInjection } from "../src/trusthosts.js";
 import { HostTrust } from "../src/hosttrust.js";
 import { StorageJanitor, storageUsage } from "../src/storage.js";
@@ -693,7 +696,7 @@ async function main() {
   // the read.
   console.log("11. G9: graphic imports and webpack's file system...");
   touched.length = 0;
-  const G9 = /^graphics can only import local files and installed packages: /;
+  const G9 = /^graphics can't open network paths or ZabsReel's private files: /;
   for (const r of [
     "//zr-evil-6.invalid/s/x",
     "\\\\zr-evil-6.invalid\\s\\x",
@@ -710,8 +713,16 @@ async function main() {
     const why = graphicRequestRefusal(r);
     check(why !== null && G9.test(why), `refused: ${JSON.stringify(r)} (${why})`);
   }
+  // Local requests pass G9 (it refuses network paths only); from Graphic.tsx, I9 refuses all but react and remotion.
+  // MUTATION: let GRAPHIC_IMPORTS (netgate.ts) take "./x" → its row fails.
+  const I9 = /^graphics can only import 'react' and 'remotion': /;
   for (const r of ["./x", "react", "/tmp/x.png", "file:///tmp/x.png", "file://localhost/tmp/x.png", "!!raw-loader!./x.txt?raw", "C:\\v\\x.png"]) {
-    check(graphicRequestRefusal(r) === null, `allowed: ${JSON.stringify(r)}`);
+    const i9 = graphicImportRefusal(r);
+    check(graphicRequestRefusal(r) === null && (r === "react" ? i9 === null : i9 !== null && I9.test(i9)), `G9 lets ${JSON.stringify(r)} through; I9 ${r === "react" ? "too" : `refuses it (${i9})`}`);
+  }
+  for (const r of ["react/jsx-runtime", "react/jsx-dev-runtime", "remotion", "react-dom", "remotion/no-react", "react?raw", " react", "REACT"]) {
+    const ok = ["react/jsx-runtime", "react/jsx-dev-runtime", "remotion"].includes(r);
+    check(ok ? graphicImportRefusal(r) === null : I9.test(graphicImportRefusal(r) ?? ""), `I9 ${ok ? "allows" : "refuses"} ${JSON.stringify(r)}`);
   }
   const fakeCalls: string[] = [];
   const fakeFs: Record<string, unknown> = {};
@@ -750,7 +761,7 @@ async function main() {
   const taps: ((d: { request?: unknown } | undefined) => unknown)[] = [];
   const factory = { hooks: { beforeResolve: { tap: (_n: string, fn: (d: { request?: unknown } | undefined) => unknown) => void taps.push(fn) } } };
   const compilerFs: Record<string, unknown> = { stat: (_p: string, cb: (e: Error | null) => void) => cb(null) };
-  new GateNetworkFsPlugin().apply({
+  new GateNetworkFsPlugin({ graphic: [], scaffold: [], modules: [] }).apply({
     inputFileSystem: compilerFs,
     hooks: { normalModuleFactory: { tap: (_n, fn) => void fn(factory) }, contextModuleFactory: { tap: (_n, fn) => void fn(factory) } },
   });
@@ -777,6 +788,36 @@ async function main() {
     const r = await viaFs(name, join(qTrust, "hosts.key"));
     check(r.err === null && fakeCalls.length === 1, `trust folder: wrapped ${name} still calls through (${r.err?.message}; ${JSON.stringify(fakeCalls)})`);
   }
+  // I8: with the scaffold's files, a content read elsewhere fails as a missing file; the real read is never called.
+  // MUTATION: make readable() in netgate.ts true for every path → the "elsewhere" rows call through.
+  const scopedCalls: string[] = [];
+  const scopedFs: Record<string, unknown> = {};
+  for (const name of ["stat", "readFile", "readJson"]) {
+    scopedFs[name] = (p: string, ...rest: unknown[]) => (scopedCalls.push(`${name}(${p})`), (rest[rest.length - 1] as (e: Error | null, v?: unknown) => void)(null, "real"));
+    scopedFs[`${name}Sync`] = (p: string) => (scopedCalls.push(`${name}Sync(${p})`), "real");
+  }
+  const work = join(root, "g9-work");
+  gateInputFileSystem(scopedFs, { graphic: [join(work, "Graphic.tsx")], scaffold: [join(work, "index.ts")], modules: [join(root, "g9-modules"), ""] });
+  const viaScoped = (name: string, p: string) =>
+    new Promise<{ err: (Error & { code?: string }) | null; value: unknown }>((res) => (scopedFs[name] as (...a: unknown[]) => void)(p, (err: Error | null, value: unknown) => res({ err, value })));
+  for (const p of [join(root, "secret.txt"), join(work, "other.tsx"), `${join(root, "g9-modules")}/../secret.txt`, join(process.cwd(), "package.json")]) {
+    for (const name of ["readFile", "readJson"]) {
+      scopedCalls.length = 0;
+      const r = await viaScoped(name, p);
+      const syncErr = (await thrown(() => (scopedFs[`${name}Sync`] as (p: string) => unknown)(p))) as (Error & { code?: string }) | null;
+      check(r.err?.code === "ENOENT" && syncErr?.code === "ENOENT" && scopedCalls.length === 0, `I8: ${name} / ${name}Sync(${JSON.stringify(p)}) fail as a missing file, the real read is never called (${r.err?.message}; ${JSON.stringify(scopedCalls)})`);
+    }
+  }
+  for (const p of [join(work, "Graphic.tsx"), join(work, "index.ts"), join(root, "g9-modules", "react", "index.js")]) {
+    scopedCalls.length = 0;
+    const r = await viaScoped("readFile", p);
+    check(r.err === null && scopedCalls.length === 1, `I8: readFile(${JSON.stringify(p)}) goes to the real file system (${r.err?.message})`);
+  }
+  scopedCalls.length = 0;
+  const scopedStat = await viaScoped("stat", join(root, "secret.txt"));
+  const scopedNet = await viaScoped("readFile", "//zr-evil-6.invalid/s/x");
+  check(scopedStat.err === null && scopedCalls.length === 1 && scopedNet.err !== null && G9.test(scopedNet.err.message),
+    `I8: a stat elsewhere still calls through; a network path still gets the G9 error first (${scopedNet.err?.message.slice(0, 80)})`);
   check(touched.length === 0, `no fs or child_process call saw a test host (${JSON.stringify(touched.slice(0, 5))})`);
 
   // ---- shared by rows 3, 4, 12 and 13 ------------------------------------------------
