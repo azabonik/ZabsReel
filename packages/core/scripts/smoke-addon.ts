@@ -1,6 +1,6 @@
 /**
- * The graphics add-on (ADDON-PLAN D8.1): the pin, and how the core finds and
- * refuses Remotion. The installer's rows (slice 2) join as their own section.
+ * The graphics add-on (ADDON-PLAN D8.1): the pin, how the core finds and
+ * refuses Remotion, and the installer the UI hosts run.
  *
  * The pin (scripts/gen-graphics-lock.mjs):
  *  P1. the real lock — --check --require-sizes passes; closure 212, platform
@@ -25,6 +25,15 @@
  *  P6. sizes         — --check --require-sizes fails while a platform's
  *                      tarball total is unknown, and passes once every size
  *                      is in the data file.
+ *  P7. drift guard   — after a fixture lock change --check fails, listing the
+ *                      changed, added and removed entries and each platform's
+ *                      download with reuse; --accept-addon-change records the
+ *                      new fingerprint and --check passes; the repository
+ *                      accepts this build's fingerprint.
+ *  P8. --browser     — a write fills the headless-shell table from a folder
+ *                      of zips; --check --browser passes on them, and names a
+ *                      changed zip's sha256 and entry count, a zip with a
+ *                      symlink, and a missing zip.
  * The core:
  *  C1. states        — readGraphicsAddon on fixture folders: ready; no or
  *                      unparsable addon.json: not-installed; lock hash,
@@ -66,22 +75,78 @@
  *                      remember_projects skips it; a project whose asset,
  *                      cutout colour, LUT or font path is in the add-on folder
  *                      does not load, with the add-on folder's message.
+ * The installer (addon/install.ts; fixture tarballs and zips written here,
+ * served by a loopback registry on port 5031 through AIVE_ADDON_REGISTRY):
+ *  I1. an install    — ready; addon.json's fields; exactly the platform's
+ *                      tarballs and zip fetched (not another platform's);
+ *                      bytes and execute bits, a `bin` target made executable;
+ *                      no add-on code or install script ran; nothing written
+ *                      outside <dataDir>/addons; progress in pinned bytes.
+ *  I2. the licence   — another hash is refused before anything is fetched; the
+ *                      terms are Remotion's LICENSE.md and the notice.
+ *  I3. pinned bytes  — another tarball, changed zip bytes, an endless body (the
+ *                      size cap): "corrupted", nothing activated, and no byte
+ *                      of them reached an extractor.
+ *  I4. tar entries   — "..", absolute, backslash, drive, symlink, hard link,
+ *                      device, FIFO, pax and GNU long names with "..": refused;
+ *                      pax and long names read; in an install, the message.
+ *  I5. the registry  — AIVE_ADDON_REGISTRY other than http loopback with a port
+ *                      is refused before any fetch; a packaged core ignores it.
+ *  I6. the lock      — a live lock refuses install, Remove and recovery; a dead
+ *                      pid's lock, or a live unrelated pid's 3-minute-old one,
+ *                      is taken over; the heartbeat rewrites it.
+ *  I7. cancel, kill  — a cancel before or during the download leaves nothing; a
+ *                      process killed before addon.json leaves "not installed",
+ *                      and recovery or the next install cleans its staging.
+ *  I8. activation    — a first rename busy past the retry window keeps the old
+ *                      copy; a failed second rename puts it back; win32 retries,
+ *                      elsewhere not; recovery restores one ready .old-*, never
+ *                      two, never a .removed-*.
+ *  I9. versions, Remove — 4.0.480 goes after activation and with Remove; a
+ *                      busy Remove changes nothing; Remove of nothing creates
+ *                      nothing.
+ *  I10. the guard    — a renderer whose text the load-time rewrite doesn't know
+ *                      is never activated.
+ *  I11. messages     — 500, a closed socket, a timeout, nothing listening,
+ *                      ENOSPC and ENAMETOOLONG give the D3.8 messages.
+ *  I12. names        — Windows device names, trailing dots and spaces, refused
+ *                      characters and case collisions refused for win32-x64,
+ *                      case and Unicode-form collisions for darwin; written for
+ *                      linux-x64.
+ *  I13. reuse        — an update after a one-package change fetches only it;
+ *                      a tampered or incomplete source package is fetched
+ *                      again; a pin move reuses from another version's folder;
+ *                      a failed activation leaves the source byte-identical.
+ *  I14. no route     — only addon/index.ts imports the installer, and no RPC
+ *                      method (so no MCP tool) installs, removes or recovers.
+ *  Z1. the zip reader — stored, deflate and empty entries, Unix execute bits;
+ *                      zip64 (end record, locator, extra field), encryption,
+ *                      another method, symlink, FIFO, "..", absolute, drive,
+ *                      backslash and a wrong CRC-32 refused.
  *
- * No network: loopback on port 5030, fixture locks, and Remotion stubbed
- * except in C4's last rows (which start no browser). FFmpeg makes C3's video.
+ * No network: loopback on ports 5030 and 5031 (5039 must be free: I11's
+ * "nothing listens"), fixture locks, and Remotion stubbed except in C4's last
+ * rows (which start no browser). FFmpeg makes C3's video.
  * Run: npx tsx packages/core/scripts/smoke-addon.ts
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { crc32, deflateRawSync, gzipSync } from "node:zlib";
 import { WebSocket } from "ws";
 import type { RenderInternals } from "@remotion/renderer";
-import { readGraphicsAddon, addonPlatform, graphicsAddonDir, platformLabel } from "../src/addon/state.js";
+import { readGraphicsAddon, addonPlatform, graphicsAddonDir, platformLabel, type AddonPin } from "../src/addon/state.js";
+import { addonInstallerForTests, GraphicsAddonInstallError, type AddonSeams, type InstallFailure, type InstallOptions, type InstallProgress } from "../src/addon/install.js";
+import { NameSet } from "../src/addon/names.js";
+import { ArchiveRefusal, extractTarball } from "../src/addon/tar.js";
+import { graphicsAddonTerms } from "../src/addon/terms.js";
+import { extractZip } from "../src/addon/zip.js";
 import { devVariable, GraphicsAddonError, isSourceCheckout, resolveGraphicsAddon, type ResolvedGraphicsAddon } from "../src/addon/resolve.js";
 import { EditorEngine } from "../src/engine.js";
 import { EditorServer } from "../src/server.js";
@@ -251,7 +316,8 @@ function p1() {
 function p2() {
   console.log("P2. the walk on a fixture lock shaped like F3...");
   const dir = fixtureRoot("p2");
-  const w = gen(dir);
+  // The fixture's own fingerprint is accepted with the write (the drift guard, P7).
+  const w = gen(dir, "--accept-addon-change");
   const j = gen(dir, "--json").json as { closure: { path: string }[]; platforms: Record<string, { paths: string[] }> } | undefined;
   const roots = ["node_modules/remotion", "node_modules/react", "node_modules/loose-envify", "node_modules/react-dom", "node_modules/scheduler", "node_modules/@remotion/bundler", "node_modules/@rspack/core", "node_modules/a", "node_modules/a/node_modules/semver", "node_modules/@remotion/renderer"];
   const want: Record<string, string[]> = {
@@ -305,7 +371,7 @@ function p3() {
   check(c.status === 1 && /addonlock\.ts is out of sync with package-lock\.json/.test(c.out), `a lock changed after the file was written: out of sync (${c.out.trim().split("\n")[0]})`);
   // A Windows checkout (core.autocrlf, the release job): the same file with CRLF line endings.
   const crlf = fixtureRoot("p3-crlf");
-  gen(crlf);
+  gen(crlf, "--accept-addon-change");
   const out = join(crlf, "packages/core/src/motion/addonlock.ts");
   const lf = readFileSync(out, "utf8");
   writeFileSync(out, lf.replace(/\n/g, "\r\n"));
@@ -344,7 +410,7 @@ function p5() {
 function p6() {
   console.log("P6. --require-sizes and the platform totals...");
   const dir = fixtureRoot("p6");
-  gen(dir);
+  gen(dir, "--accept-addon-change");
   const plain = gen(dir, "--check");
   const strict = gen(dir, "--check", "--require-sizes");
   check(plain.status === 0 && strict.status === 1 && ADDON_PLATFORMS.every((p) => new RegExp(`^${p}: the tarball total is unknown \\(\\d+ of \\d+ sizes missing\\)`, "m").test(strict.out)),
@@ -359,6 +425,74 @@ function p6() {
   const totals = (gen(dir, "--json").json as { platforms: Record<string, { bytes: number | null; count: number }> } | undefined)?.platforms;
   check(sized.status === 0 && ADDON_PLATFORMS.every((p) => totals?.[p]?.bytes === (totals?.[p]?.count ?? -1) * 1000),
     `every size in the data file: --require-sizes passes, each total is the sum (${sized.out.trim().split("\n").pop()})`);
+}
+
+// MUTATION: drop drift() from --check (gen-graphics-lock.mjs) → the changed-lock row passes --check. Drop the
+// "added" lines from drift() → the listing row fails. Count every package as downloaded (ignore `kept`) →
+// the per-platform download row fails. Let --accept-addon-change leave `accepted` as it was → the accept row fails.
+function p7() {
+  console.log("P7. the drift guard...");
+  const dir = fixtureRoot("p7");
+  const first = gen(dir, "--accept-addon-change");
+  const accepted = gen(dir, "--check");
+  check(first.status === 0 && /fingerprint [0-9a-f]{12}… accepted/.test(first.out) && accepted.status === 0, `a written and accepted fixture pin passes --check (${accepted.out.trim().split("\n").pop()})`);
+  // a@1.0.0 → 1.0.1, a new package c (linux-x64 only: os/cpu), @emnapi/core gone.
+  const lock = fixtureLock();
+  lock.packages["node_modules/a"] = entry("node_modules/a", "1.0.1", { dependencies: { semver: "^7.0.0" }, optionalDependencies: { c: "1.0.0" } });
+  lock.packages["node_modules/c"] = entry("node_modules/c", "1.0.0", { ...OPT, ...os("linux", "x64") });
+  delete lock.packages["node_modules/@emnapi/core"];
+  delete lock.packages["node_modules/@napi-rs/wasm-runtime"].dependencies;
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify(lock));
+  const wrote = gen(dir);
+  const c = gen(dir, "--check");
+  check(wrote.status === 0 && /the fingerprint is not accepted/.test(wrote.out) && c.status === 1 && /^the graphics add-on's fingerprint changed \(accepted [0-9a-f]{12}…, now [0-9a-f]{12}…\): every user has to update the add-on/m.test(c.out),
+    `a lock change after the accept: the write says it is not accepted, --check fails (${c.out.trim().split("\n")[0].slice(0, 120)})`);
+  check(/^ {2}changed node_modules\/a: 1\.0\.0 → 1\.0\.1$/m.test(c.out) && /^ {2}added node_modules\/c@1\.0\.0$/m.test(c.out) && /^ {2}removed node_modules\/@emnapi\/core@1\.0\.0$/m.test(c.out) && !/addonlock\.ts is out of sync/.test(c.out),
+    `--check lists the changed, added and removed entries (${JSON.stringify(c.out.split("\n").filter((l) => /^ {2}(changed|added|removed)/.test(l)))})`);
+  check(/^ {2}linux-x64: the update downloads 0\.0 MB \(2 of 14 packages, some sizes unknown\); the browser is reused$/m.test(c.out) && /^ {2}win32-x64: the update downloads 0\.0 MB \(1 of 11 packages, some sizes unknown\); the browser is reused$/m.test(c.out),
+    `--check gives each platform's download with reuse (${JSON.stringify(c.out.split("\n").filter((l) => /^ {2}(linux|win32)-x64:/.test(l)))})`);
+  const acc = gen(dir, "--accept-addon-change");
+  const after = gen(dir, "--check");
+  const data = JSON.parse(readFileSync(join(dir, "scripts", "graphics-lock-data.json"), "utf8")) as { accepted?: { closure: string[] } };
+  check(acc.status === 0 && after.status === 0 && !!data.accepted?.closure.some((x) => x.startsWith("node_modules/a@1.0.1@sha512-")) && !data.accepted.closure.some((x) => x.startsWith("node_modules/@emnapi/core@")),
+    `--accept-addon-change records the new fingerprint and closure; --check passes (${after.out.trim().split("\n").pop()})`);
+  // The real pin: today's fingerprint is the accepted one.
+  const real = JSON.parse(readFileSync(join(REPO, "scripts", "graphics-lock-data.json"), "utf8")) as { accepted?: { lockSha256: string; closure: string[] } };
+  check(real.accepted?.lockSha256 === ADDON_LOCK_SHA256 && real.accepted.closure.length === ADDON_CLOSURE.length, `the repository's data file accepts this build's fingerprint ${ADDON_LOCK_SHA256.slice(0, 12)}…`);
+}
+
+// MUTATION: compare only the sha256 in --browser's check (gen-graphics-lock.mjs) → the entries row passes.
+// Drop the symlink problem from zipListing → the symlink row passes.
+function p8() {
+  console.log("P8. --browser: the headless-shell table against a folder of zips...");
+  const dir = fixtureRoot("p8");
+  const zips = join(dir, "zips");
+  mkdirSync(zips);
+  const cft = { "win32-x64": "win64", "darwin-x64": "mac-x64", "darwin-arm64": "mac-arm64", "linux-x64": "linux64" } as const;
+  const put = (p: AddonPlatform, extra: ZipIn[] = []) => {
+    const c = cft[p];
+    const exe = `chrome-headless-shell-${c}/chrome-headless-shell${p === "win32-x64" ? ".exe" : ""}`;
+    writeFileSync(join(zips, `chrome-headless-shell-${c}.zip`), makeZip([{ name: `chrome-headless-shell-${c}/` }, { name: exe, data: `exe ${p}`, mode: 0o100755 }, ...extra]));
+  };
+  for (const p of ADDON_PLATFORMS) put(p);
+  const filled = gen(dir, "--browser", "--zips", zips, "--accept-addon-change");
+  const table = (JSON.parse(readFileSync(join(dir, "scripts", "graphics-lock-data.json"), "utf8")) as { headlessShell: { platforms: Record<string, { sha256: string; entries: number; url: string; size: number }> } }).headlessShell.platforms;
+  const linux = readFileSync(join(zips, "chrome-headless-shell-linux64.zip"));
+  check(filled.status === 0 && table["linux-x64"].sha256 === createHash("sha256").update(linux).digest("hex") && table["linux-x64"].size === linux.length && table["linux-x64"].entries === 2
+    && table["linux-x64"].url === `https://storage.googleapis.com/chrome-for-testing-public/${HEADLESS_SHELL.version}/linux64/chrome-headless-shell-linux64.zip`,
+    `a write with --browser fills the table from the zips (${filled.out.trim().split("\n").pop()})`);
+  check(gen(dir, "--check", "--browser", "--zips", zips).status === 0, "--check --browser passes on the zips it was filled from");
+  put("darwin-arm64", [{ name: "chrome-headless-shell-mac-arm64/extra.txt", data: "x" }]);
+  const changed = gen(dir, "--check", "--browser", "--zips", zips);
+  check(changed.status === 1 && /^darwin-arm64: the headless-shell table's sha256 is "[0-9a-f]{64}", and the zip in .* gives "[0-9a-f]{64}"$/m.test(changed.out) && /^darwin-arm64: the headless-shell table's entries is 2, and the zip in .* gives 3$/m.test(changed.out),
+    `another zip: --check --browser names its sha256 and entry count (${changed.out.trim().split("\n")[0].slice(0, 100)})`);
+  put("darwin-arm64", [{ name: "chrome-headless-shell-mac-arm64/link", data: "chrome-headless-shell", mode: 0o120777 }]);
+  const linked = gen(dir, "--check", "--browser", "--zips", zips);
+  check(linked.status === 1 && /^darwin-arm64: .*chrome-headless-shell-mac-arm64\.zip: chrome-headless-shell-mac-arm64\/link: a symlink, which the add-on's zip reader refuses$/m.test(linked.out),
+    `a zip with a symlink: --check --browser says the zip reader refuses it (${linked.out.trim().split("\n")[0].slice(0, 120)})`);
+  rmSync(join(zips, "chrome-headless-shell-win64.zip"));
+  const gone = gen(dir, "--check", "--browser", "--zips", zips);
+  check(gone.status === 1 && /^win32-x64: .*chrome-headless-shell-win64\.zip is missing \(download https:\/\/storage\.googleapis\.com\/.* there first\)$/m.test(gone.out), "a zip missing: --check --browser says which one to download");
 }
 
 // ---- C: the core ---------------------------------------------------------------------
@@ -817,6 +951,852 @@ async function c7() {
   }
 }
 
+// ---- I: the installer ----------------------------------------------------------------
+
+/** A tar entry: a file (type "0", the default) or anything else, with pax records or a GNU long name. */
+interface TarIn {
+  name: string;
+  type?: string;
+  data?: string | Buffer;
+  mode?: number;
+  pax?: Record<string, string>;
+  long?: boolean;
+  linkname?: string;
+}
+
+function tarHeader(name: string, type: string, size: number, mode: number, linkname = ""): Buffer {
+  const h = Buffer.alloc(512);
+  const octal = (n: number, len: number) => `${n.toString(8).padStart(len - 1, "0")}\0`;
+  h.write(name.slice(0, 100), 0, "utf8");
+  h.write(octal(mode, 8), 100);
+  h.write(octal(0, 8), 108);
+  h.write(octal(0, 8), 116);
+  h.write(octal(size, 12), 124);
+  h.write(octal(0, 12), 136);
+  h.write("        ", 148);
+  h.write(type, 156);
+  h.write(linkname, 157);
+  h.write("ustar\0", 257);
+  h.write("00", 263);
+  let sum = 0;
+  for (const b of h) sum += b;
+  h.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
+  return h;
+}
+const padded = (b: Buffer) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
+
+/** A gzipped tarball of `entries`. */
+function makeTar(entries: TarIn[]): Buffer {
+  const parts: Buffer[] = [];
+  for (const e of entries) {
+    const data = Buffer.from(e.data ?? "");
+    if (e.pax) {
+      const recs = Object.entries(e.pax).map(([k, v]) => {
+        const body = ` ${k}=${v}\n`;
+        let len = body.length + 1;
+        while (`${len}${body}`.length !== len) len++;
+        return `${len}${body}`;
+      });
+      const pax = Buffer.from(recs.join(""));
+      parts.push(tarHeader("PaxHeader", "x", pax.length, 0o644), padded(pax));
+    }
+    if (e.long) {
+      const long = Buffer.from(`${e.name}\0`);
+      parts.push(tarHeader("././@LongLink", "L", long.length, 0o644), padded(long));
+    }
+    parts.push(tarHeader(e.name, e.type ?? "0", e.type && e.type !== "0" ? 0 : data.length, e.mode ?? 0o644, e.linkname), padded(data));
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+}
+
+/** A zip entry: a folder when the name ends in "/"; `mode` the Unix mode (made on Unix unless `host`). */
+interface ZipIn {
+  name: string;
+  data?: string;
+  method?: number;
+  mode?: number;
+  host?: number;
+  flags?: number;
+  extra?: Buffer;
+  crc?: number;
+}
+
+/** A zip of `entries` (deflate unless `method` 0); `zip64`: a zip64 locator before the end record. */
+function makeZip(entries: ZipIn[], opts: { zip64?: boolean } = {}): Buffer {
+  const locals: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const data = Buffer.from(e.data ?? "");
+    const method = e.method ?? (e.name.endsWith("/") ? 0 : 8);
+    const comp = method === 8 ? deflateRawSync(data) : data;
+    const name = Buffer.from(e.name);
+    const extra = e.extra ?? Buffer.alloc(0);
+    const crc = e.crc ?? crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(e.flags ?? 0, 6);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(comp.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0);
+    c.writeUInt16LE(((e.host ?? 3) << 8) | 20, 4);
+    c.writeUInt16LE(20, 6);
+    c.writeUInt16LE(e.flags ?? 0, 8);
+    c.writeUInt16LE(method, 10);
+    c.writeUInt32LE(crc, 16);
+    c.writeUInt32LE(comp.length, 20);
+    c.writeUInt32LE(data.length, 24);
+    c.writeUInt16LE(name.length, 28);
+    c.writeUInt16LE(extra.length, 30);
+    c.writeUInt32LE(((e.mode ?? (e.name.endsWith("/") ? 0o40755 : 0o100644)) << 16) >>> 0, 38);
+    c.writeUInt32LE(offset, 42);
+    locals.push(local, name, comp);
+    central.push(c, name, extra);
+    offset += 30 + name.length + comp.length;
+  }
+  const dir = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(dir.length, 12);
+  end.writeUInt32LE(offset, 16);
+  const locator = Buffer.alloc(opts.zip64 ? 20 : 0);
+  if (opts.zip64) locator.writeUInt32LE(0x07064b50, 0);
+  return Buffer.concat([...locals, dir, locator, end]);
+}
+
+const sha512b64 = (b: Buffer) => createHash("sha512").update(b).digest("base64");
+const sha256hex = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
+
+/** A fixture package: lock path, version, its files (without npm's `package/`), the platforms that install it (all by default). */
+interface FixturePkg {
+  path: string;
+  version: string;
+  files: TarIn[];
+  only?: AddonPlatform[];
+}
+
+const RENDERER = join(REPO, "node_modules", "@remotion", "renderer", "dist");
+/** Marks that add-on code ran in this process (the fixture's remotion and renderer set it when loaded). */
+const RAN = "__zrAddonRan";
+const pkgJson = (name: string, version: string, extra: Record<string, unknown> = {}) => ({ name: "package.json", data: JSON.stringify({ name, version, ...extra }) });
+
+/** The fixture closure: Remotion's three packages (the renderer with the real rewrite targets), a compositor per platform, a and its nested b. */
+function basePkgs(postinstallMarker: string): FixturePkg[] {
+  const compositor = (p: AddonPlatform): FixturePkg => {
+    const [dir, bin] = ADDON_PLATFORM_LISTS[p].compositor.split(/\/(?=[^/]+$)/);
+    return { path: `node_modules/${dir}`, version: "4.0.481", only: [p], files: [pkgJson(dir, "4.0.481"), { name: bin, data: `compositor ${p}`, mode: 0o755 }] };
+  };
+  return [
+    { path: "node_modules/remotion", version: "4.0.481", files: [
+      pkgJson("remotion", "4.0.481", { main: "index.js", scripts: { postinstall: `node -e "require('fs').writeFileSync(${JSON.stringify(postinstallMarker)}, '')"` } }),
+      { name: "index.js", data: `globalThis.${RAN} = "remotion";\n` },
+    ] },
+    { path: "node_modules/@remotion/renderer", version: "4.0.481", files: [
+      pkgJson("@remotion/renderer", "4.0.481"),
+      { name: "dist/esm/index.mjs", data: `globalThis.${RAN} = "renderer";\n${readFileSync(join(RENDERER, "esm", "index.mjs"), "utf8")}` },
+      { name: "dist/assets/download-and-map-assets-to-file.js", data: readFileSync(join(RENDERER, "assets", "download-and-map-assets-to-file.js"), "utf8") },
+    ] },
+    { path: "node_modules/@remotion/bundler", version: "4.0.481", files: [pkgJson("@remotion/bundler", "4.0.481", { bin: { "remotion-bundle": "./bin/cli.js" } }), { name: "bin/cli.js", data: "#!/usr/bin/env node\n", mode: 0o644 }] },
+    ...ADDON_PLATFORMS.map(compositor),
+    { path: "node_modules/a", version: "1.0.0", files: [pkgJson("a", "1.0.0"), { name: "index.js", data: "module.exports = 1;\n" }, { name: "lib/deep/x.js", data: "x\n" }] },
+    { path: "node_modules/a/node_modules/b", version: "1.0.0", files: [pkgJson("b", "1.0.0"), { name: "b.js", data: "b\n" }] },
+  ];
+}
+
+const CFT_EXE = (p: AddonPlatform) => `chrome-headless-shell-${p}/chrome-headless-shell${p === "win32-x64" ? ".exe" : ""}`;
+/** The fixture browser zip for `p`: a folder, the executable (deflate, 0755), a stored file, a nested deflated one. */
+const fixtureZip = (p: AddonPlatform, extra: ZipIn[] = []) => makeZip([
+  { name: `chrome-headless-shell-${p}/` },
+  { name: CFT_EXE(p), data: `#!/bin/sh\necho headless ${p}\n`, mode: 0o100755 },
+  { name: `chrome-headless-shell-${p}/resources.pak`, data: "stored bytes", method: 0 },
+  { name: `chrome-headless-shell-${p}/locales/en-US.pak`, data: "x".repeat(5000) },
+  ...extra,
+]);
+
+interface Fixture {
+  pin: AddonPin;
+  /** URL path → the bytes the fixture registry serves. */
+  blobs: Map<string, Buffer>;
+}
+
+/** A pin over `pkgs` and a zip per platform, and what the registry serves for it. */
+function buildPin(pkgs: FixturePkg[], zips: Partial<Record<AddonPlatform, Buffer>> = {}, tag = ""): Fixture {
+  const blobs = new Map<string, Buffer>();
+  const closure = pkgs.map((p) => {
+    const name = p.path.slice(p.path.lastIndexOf("node_modules/") + 13);
+    const gz = makeTar(p.files.map((f) => ({ ...f, name: `package/${f.name}` })));
+    const resolved = reg(name, p.version);
+    blobs.set(new URL(resolved).pathname, gz);
+    return { path: p.path, version: p.version, resolved, integrity: `sha512-${sha512b64(gz)}`, optional: false, bytes: gz.length };
+  });
+  const lists = Object.fromEntries(ADDON_PLATFORMS.map((plat) => {
+    const paths = pkgs.filter((p) => !p.only || p.only.includes(plat)).map((p) => p.path).sort();
+    return [plat, { count: paths.length, bytes: paths.reduce((n, x) => n + closure.find((e) => e.path === x)!.bytes, 0), compositor: ADDON_PLATFORM_LISTS[plat].compositor, paths }];
+  })) as unknown as AddonPin["lists"];
+  const shell = Object.fromEntries(ADDON_PLATFORMS.map((plat) => {
+    const zip = zips[plat] ?? fixtureZip(plat);
+    const url = `https://storage.googleapis.com/chrome-for-testing-public/fixture${tag}/${plat}/chrome-headless-shell-${plat}.zip`;
+    blobs.set(new URL(url).pathname, zip);
+    return [plat, { url, sha256: sha256hex(zip), size: zip.length, executable: CFT_EXE(plat), entries: 4 }];
+  })) as unknown as AddonPin["shell"];
+  return { pin: { lockSha256: sha256hex(JSON.stringify({ closure, lists, shell, tag })), closure, lists, shell }, blobs };
+}
+
+// The fixture registry (loopback, port 5031): serves the blobs; counts requests; a path can answer 500,
+// close the socket mid-body, serve changed bytes or an endless body, hold the answer, or wait.
+const REG_PORT = 5031;
+const REGISTRY = `http://127.0.0.1:${REG_PORT}`;
+type Answer = "500" | "close" | "wrong" | "big" | "hold" | { delay: number };
+const served = new Map<string, Buffer>();
+const hits = new Map<string, number>();
+const answers = new Map<string, Answer>();
+const sockets = new Set<import("node:net").Socket>();
+let registryServer: http.Server | undefined;
+
+function startRegistry(): Promise<void> {
+  registryServer = http.createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://x").pathname;
+    hits.set(path, (hits.get(path) ?? 0) + 1);
+    const blob = served.get(path);
+    const a = answers.get(path);
+    if (!blob) return void res.writeHead(404).end();
+    if (a === "500") return void res.writeHead(500).end();
+    if (a === "hold") return void res.writeHead(200, { "content-length": blob.length }).flushHeaders();
+    if (a === "close") {
+      res.writeHead(200, { "content-length": blob.length });
+      res.write(blob.subarray(0, blob.length >> 1));
+      setTimeout(() => res.socket?.destroy(), 20);
+      return;
+    }
+    if (a === "big") {
+      res.writeHead(200);
+      const more = setInterval(() => res.write(blob), 5);
+      res.on("close", () => clearInterval(more));
+      return;
+    }
+    const body = a === "wrong" ? Buffer.from(blob.map((b, i) => (i === blob.length >> 1 ? b ^ 1 : b))) : blob;
+    const send = () => res.writeHead(200, { "content-length": body.length }).end(body);
+    if (typeof a === "object") setTimeout(send, a.delay);
+    else send();
+  });
+  registryServer.on("connection", (s) => {
+    sockets.add(s);
+    s.on("close", () => sockets.delete(s));
+  });
+  return new Promise((r) => registryServer!.listen(REG_PORT, "127.0.0.1", () => r()));
+}
+async function stopRegistry() {
+  for (const s of sockets) s.destroy();
+  await new Promise((r) => registryServer?.close(r));
+}
+const publish = (f: Fixture) => {
+  for (const [k, v] of f.blobs) served.set(k, v);
+};
+const hitPaths = () => [...hits.entries()].filter(([, n]) => n > 0).map(([p]) => p).sort();
+
+/** Every fs call of the installer's kinds while `recording`, and an optional fault to inject (gatedfs looks the functions up per call). */
+const fsCalls: string[] = [];
+let recording = false;
+let fault: ((name: string, path: string) => NodeJS.ErrnoException | null) | null = null;
+{
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  for (const name of ["writeFile", "rename", "open", "mkdir", "link", "copyFile", "chmod", "rm"]) {
+    const real = fsp[name];
+    fsp[name] = async (...args: unknown[]) => {
+      const p = String(args[0]);
+      if (recording) fsCalls.push(`${name} ${p}${name === "rename" || name === "link" || name === "copyFile" ? ` ${String(args[1])}` : ""}`);
+      const e = fault?.(name, p);
+      if (e) throw e;
+      return real(...args);
+    };
+  }
+  const fsc = createRequire(import.meta.url)("node:fs") as Record<string, (...a: unknown[]) => unknown>;
+  const cws = fsc.createWriteStream;
+  fsc.createWriteStream = (...args: unknown[]) => {
+    if (recording) fsCalls.push(`createWriteStream ${String(args[0])}`);
+    return cws(...args);
+  };
+  syncBuiltinESMExports();
+}
+const errno = (code: string) => Object.assign(new Error(`${code}: injected`), { code }) as NodeJS.ErrnoException;
+
+const T = addonInstallerForTests;
+const LICENSE = PLATFORM ? graphicsAddonTerms(PLATFORM).sha256 : "";
+const POSTINSTALL = join(root, "postinstall-ran");
+
+/** Install `f` into `dataDir` from the fixture registry; the result or the error. */
+async function fixtureInstall(dataDir: string, f: Fixture, s: AddonSeams = {}, opts: Partial<InstallOptions> = {}) {
+  publish(f);
+  const progress: InstallProgress[] = [];
+  try {
+    const got = await T.install(dataDir, { fetch: globalThis.fetch, acceptedLicenseSha256: LICENSE, via: "web", onProgress: (p) => progress.push(p), ...opts }, { pin: f.pin, env: { AIVE_ADDON_REGISTRY: REGISTRY }, ...s });
+    return { got, err: null, progress };
+  } catch (err) {
+    return { got: null, err: err as GraphicsAddonInstallError, progress };
+  }
+}
+const addonsListing = (dataDir: string) => (existsSync(join(dataDir, "addons")) ? readdirSync(join(dataDir, "addons")).sort() : []);
+/** The live addon.json, or {} when there is none (a row then fails instead of throwing). */
+const manifestOf = (dataDir: string): Record<string, any> => {
+  try {
+    return JSON.parse(readFileSync(join(graphicsAddonDir(dataDir), "addon.json"), "utf8")) as Record<string, any>;
+  } catch {
+    return {};
+  }
+};
+/** The add-on's own folder left exactly as it was: addons/ holds only remotion (no lock, staging, .old-*, .removed-*). */
+const clean = (dataDir: string) => JSON.stringify(addonsListing(dataDir)) === JSON.stringify(existsSync(join(dataDir, "addons", "remotion")) ? ["remotion"] : []);
+/** Every file below `dir` with its bytes' hash (to see a copy left exactly as it was). */
+const treeHash = (dir: string): string => {
+  const h = createHash("sha256");
+  const walk = (d: string) => {
+    for (const n of readdirSync(d).sort()) {
+      const p = join(d, n);
+      const st = lstatSync(p);
+      h.update(`${p.slice(dir.length)} ${st.mode & 0o777}\n`);
+      if (st.isDirectory()) walk(p);
+      else h.update(readFileSync(p));
+    }
+  };
+  walk(dir);
+  return h.digest("hex");
+};
+
+// MUTATION: fetch every closure entry instead of the platform's list (install.ts stage) → the other-platform
+// row fails. Drop markBins → the bin row fails. Import the staged renderer before activation → the
+// no-add-on-code row fails. Write addon.json before the packages → I7's kill row finds it ready.
+async function i1() {
+  console.log("I1. a fixture install...");
+  const dataDir = freshData();
+  const f = buildPin(basePkgs(POSTINSTALL));
+  hits.clear();
+  recording = true;
+  fsCalls.length = 0;
+  const { got, err, progress } = await fixtureInstall(dataDir, f);
+  recording = false;
+  const dir = graphicsAddonDir(dataDir);
+  const list = f.pin.lists[PLATFORM!];
+  const m = existsSync(join(dir, "addon.json")) ? manifestOf(dataDir) : {};
+  check(!err && got?.state === "ready" && readGraphicsAddon(dataDir, { pin: f.pin }).state === "ready", `the add-on is ready (${got?.state ?? err?.message})`);
+  check(m.schema === 1 && m.remotion === ADDON_REMOTION_VERSION && m.lockSha256 === f.pin.lockSha256 && m.platform === PLATFORM && m.browserExecutable === CFT_EXE(PLATFORM!)
+    && m.licenseSha256 === LICENSE && m.via === "web" && Date.parse(m.acceptedAt) <= Date.parse(m.installedAt)
+    && JSON.stringify(Object.keys(m.entries ?? {}).sort()) === JSON.stringify(list.paths) && list.paths.every((p) => m.entries[p].integrity === f.pin.closure.find((e) => e.path === p)!.integrity && /^[0-9a-f]{64}$/.test(m.entries[p].digest))
+    && m.browser?.sha256 === f.pin.shell[PLATFORM!].sha256 && /^[0-9a-f]{64}$/.test(m.browser?.digest),
+    `addon.json: schema, version, the pin's hash, platform, browser, the licence hash, via, times, each package's integrity and digest, the zip's sha256 and digest`);
+  const other = f.pin.closure.filter((e) => !list.paths.includes(e.path)).map((e) => new URL(e.resolved).pathname);
+  const want = [...list.paths.map((p) => new URL(f.pin.closure.find((e) => e.path === p)!.resolved).pathname), new URL(f.pin.shell[PLATFORM!].url).pathname].sort();
+  check(JSON.stringify(hitPaths()) === JSON.stringify(want) && other.length === 3 && other.every((p) => !hits.has(p)),
+    `the registry got exactly this platform's ${list.count} tarballs and its zip; the other platforms' compositors never (${other.map((p) => p.split("/").pop()).join(", ")})`);
+  const exe = (p: string) => (lstatSync(join(dir, p)).mode & 0o111) !== 0;
+  check(readFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "utf8") === "x\n" && readFileSync(join(dir, "node_modules/a/node_modules/b/b.js"), "utf8") === "b\n"
+    && exe(`node_modules/${ADDON_PLATFORM_LISTS[PLATFORM!].compositor}`) && !exe("node_modules/a/index.js") && exe(`browser/${CFT_EXE(PLATFORM!)}`) && !exe(`browser/chrome-headless-shell-${PLATFORM}/resources.pak`)
+    && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/locales/en-US.pak`), "utf8") === "x".repeat(5000) && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/resources.pak`), "utf8") === "stored bytes",
+    "files, nested packages and the zip's stored and deflated entries hold their bytes; execute bits as the archives give them");
+  check(exe("node_modules/@remotion/bundler/bin/cli.js"), "a file the package's `bin` names is executable (npm's bin-links does this without a script)");
+  check(!(RAN in globalThis) && !existsSync(POSTINSTALL), "no add-on code ran in the installer's process, and no install script ran");
+  const outside = fsCalls.filter((c) => c.split(" ").slice(1).some((p) => !p.startsWith(join(dataDir, "addons"))));
+  check(outside.length === 0 && JSON.stringify(readdirSync(dataDir)) === JSON.stringify(["addons"]) && clean(dataDir),
+    `nothing outside <dataDir>/addons was written; addons/ holds only remotion (${JSON.stringify(outside.slice(0, 3))} ${JSON.stringify(addonsListing(dataDir))})`);
+  const total = list.bytes! + f.pin.shell[PLATFORM!].size;
+  check(progress.length > 2 && progress[0].done === 0 && progress.every((p, i) => p.total === total && (i === 0 || p.done >= progress[i - 1].done)) && progress[progress.length - 1].done === total,
+    `progress in bytes against the pinned total ${total}, from 0 to the total (${progress.length} reports)`);
+}
+
+// MUTATION: drop the licence check (install.ts) → the licence row installs.
+async function i2() {
+  console.log("I2. the licence...");
+  const dataDir = freshData();
+  const f = buildPin(basePkgs(POSTINSTALL));
+  hits.clear();
+  const { err } = await fixtureInstall(dataDir, f, {}, { acceptedLicenseSha256: "0".repeat(64) });
+  check(err?.reason === "license" && err.message === "Accept Remotion's license in the graphics add-on dialog first. Nothing was installed." && hits.size === 0 && !existsSync(join(dataDir, "addons")),
+    `another licence hash: refused before anything is fetched or created (${err?.message})`);
+  const t = graphicsAddonTerms(PLATFORM!);
+  const file = readFileSync(join(REPO, "packages", "core", "licenses", "remotion-4.0.481-LICENSE.md"));
+  check(sha256hex(file) === "bd65083b940f61904f6ef298aade918a7cad72a3e35bc406e36fab365844b673" && t.license === file.toString("utf8") && t.sha256 === sha256hex(t.notice + t.license)
+    && /Remotion is free for individuals, non-profit organizations and companies of up to three people\. Larger companies need their own Remotion license\./.test(t.notice)
+    && /is not covered by ZabsReel's GPL license/.test(t.notice) && new RegExp(`downloads about ${Math.round(ADDON_PLATFORM_LISTS[PLATFORM!].bytes! / 1e6)} MB of packages from registry\\.npmjs\\.org and the Chrome headless shell \\(about ${Math.round(HEADLESS_SHELL.platforms[PLATFORM!].size / 1e6)} MB\\) from Google`).test(t.notice),
+    `the terms: Remotion's LICENSE.md at v4.0.481 (sha256 bd65083b…), the notice with this platform's sizes, and sha256(notice + licence) (${t.sha256.slice(0, 12)}…)`);
+}
+
+// MUTATION: return the bytes before the hash check (install.ts download) → the EVIL row sees the marker
+// written. Drop the size cap → the endless body is read until the row's 10 s deadline cancels it.
+async function i3() {
+  console.log("I3. a download that is not the pinned bytes...");
+  const evil = buildPin(basePkgs(POSTINSTALL));
+  const a = evil.pin.closure.find((e) => e.path === "node_modules/a")!;
+  // The registry serves a valid tarball with a marker file in place of a.
+  const swapped = makeTar([{ name: "package/package.json", data: "{}" }, { name: "package/EVIL-marker.txt", data: "evil" }]);
+  for (const [what, setup, want] of [
+    ["another tarball for a@1.0.0", () => served.set(new URL(a.resolved).pathname, swapped), "a@1.0.0"],
+    ["changed bytes for the zip", () => answers.set(new URL(evil.pin.shell[PLATFORM!].url).pathname, "wrong"), "the Chrome headless shell"],
+    ["an endless body for a@1.0.0 (the size cap)", () => answers.set(new URL(a.resolved).pathname, "big"), "a@1.0.0"],
+  ] as const) {
+    const dataDir = freshData();
+    publish(evil);
+    answers.clear();
+    setup();
+    recording = true;
+    fsCalls.length = 0;
+    const opts = { fetch: globalThis.fetch, acceptedLicenseSha256: LICENSE, via: "web" as const, signal: AbortSignal.timeout(10_000) };
+    const { err } = await T.install(dataDir, opts, { pin: evil.pin, env: { AIVE_ADDON_REGISTRY: REGISTRY } }).then(() => ({ err: null }), (e: GraphicsAddonInstallError) => ({ err: e }));
+    recording = false;
+    answers.clear();
+    check(err?.reason === "corrupted" && err.message === `A download was corrupted or changed (${want}). Nothing was installed. Try again.`
+      && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir) && readGraphicsAddon(dataDir, { pin: evil.pin }).state === "not-installed" && !fsCalls.some((c) => c.includes("EVIL")),
+      `${what}: "${err?.message}"; nothing activated, no staging or lock left, no byte of it extracted`);
+  }
+  publish(evil);
+}
+
+// MUTATION: drop the ".." check from entryNameProblem (names.ts) → the traversal row is written. Accept type
+// "2" in tar.ts → the symlink row is written.
+async function i4() {
+  console.log("I4. tar entries the reader refuses...");
+  const cases: [string, TarIn, RegExp][] = [
+    ["a .. segment", { name: "package/../escape.txt", data: "x" }, /"package\/\.\.\/escape\.txt": a "\.\." segment/],
+    ["an absolute path", { name: "package//etc/x", data: "x" }, /an absolute path|a "" segment/],
+    ["a backslash", { name: "package/a\\b.txt", data: "x" }, /a backslash/],
+    ["a drive letter", { name: "package/C:/x.txt", data: "x" }, /a ':' \(a drive letter or a stream\)/],
+    ["a symlink", { name: "package/link", type: "2", linkname: "../../../../etc/passwd" }, /an entry of type "2"/],
+    ["a hard link", { name: "package/hard", type: "1", linkname: "package/index.js" }, /an entry of type "1"/],
+    ["a character device", { name: "package/dev", type: "3" }, /an entry of type "3"/],
+    ["a FIFO", { name: "package/fifo", type: "6" }, /an entry of type "6"/],
+    ["a pax path with ..", { name: "package/ok.txt", pax: { path: "package/../../pax-escape.txt" }, data: "x" }, /a "\.\." segment/],
+    ["a GNU long name with ..", { name: `package/${"d/".repeat(60)}../../${"e/".repeat(60)}x.txt`, long: true, data: "x" }, /a "\.\." segment/],
+  ];
+  for (const [what, e, want] of cases) {
+    const dest = join(root, `i4-${what.replace(/\W+/g, "-")}`, "pkg");
+    const err = await thrown(() => extractTarball(makeTar([{ name: "package/index.js", data: "1" }, e]), dest, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
+    check(err instanceof ArchiveRefusal && want.test(err.message) && !existsSync(join(dirname(dest), "escape.txt")) && !existsSync(join(root, "pax-escape.txt")),
+      `${what}: refused (${err?.message.slice(0, 90)}), nothing written outside the package`);
+  }
+  const ok = join(root, "i4-ok", "pkg");
+  const files = await extractTarball(makeTar([
+    { name: "package/", type: "5" },
+    { name: "package/index.js", data: "1", mode: 0o755 },
+    { name: "package/p.txt", pax: { path: "package/pax/long-name.txt" }, data: "pax" },
+    { name: `package/${"n".repeat(120)}.txt`, long: true, data: "long" },
+    { name: "top-level-file", data: "skipped as npm does" },
+  ]), ok, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" });
+  check(JSON.stringify(files.map((f) => f.path).sort()) === JSON.stringify(["index.js", `${"n".repeat(120)}.txt`, "pax/long-name.txt"].sort()) && readFileSync(join(ok, "pax", "long-name.txt"), "utf8") === "pax"
+    && (lstatSync(join(ok, "index.js")).mode & 0o111) !== 0 && files.find((f) => f.path === "index.js")!.sha256 === sha256hex("1"),
+    `a pax path and a GNU long name are read, package/ is stripped, an entry outside it skipped (${files.map((f) => f.path.slice(0, 20)).join(", ")})`);
+  // The same refusal through a full install: the pinned bytes are the bad tarball itself.
+  const dataDir = freshData();
+  const pkgs = basePkgs(POSTINSTALL);
+  pkgs.find((p) => p.path === "node_modules/a")!.files.push({ name: "../escape.txt", data: "x" });
+  const { err } = await fixtureInstall(dataDir, buildPin(pkgs));
+  check(err?.reason === "archive" && /^The add-on's a@1\.0\.0 holds an entry ZabsReel doesn't install \("package\/\.\.\/escape\.txt": a "\.\." segment\)\. Nothing was installed\.$/.test(err.message) && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir),
+    `in an install: "${err?.message}"; nothing activated`);
+}
+
+// MUTATION: accept any http host in registryOverride (install.ts) → the non-loopback rows fetch.
+async function i5() {
+  console.log("I5. AIVE_ADDON_REGISTRY...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  for (const value of ["https://127.0.0.1:5031", "http://10.0.0.1:5031", "http://zr-evil-1.invalid:5031", "http://127.0.0.1", "http://127.0.0.1:5031/x", "http://u@127.0.0.1:5031", "http://[::1]:5031", "file:///tmp/x"]) {
+    const dataDir = freshData();
+    const urls: string[] = [];
+    const stub = (async (u: string | URL | Request) => {
+      urls.push(String(u));
+      throw new Error("no network in this row");
+    }) as typeof fetch;
+    const err = await thrown(() => T.install(dataDir, { fetch: stub, acceptedLicenseSha256: LICENSE, via: "web" }, { pin: f.pin, env: { AIVE_ADDON_REGISTRY: value } }));
+    check(err instanceof GraphicsAddonInstallError && err.reason === "registry" && err.message === `AIVE_ADDON_REGISTRY must be http://127.0.0.1:<port> or http://localhost:<port> (it is ${JSON.stringify(value)}).` && urls.length === 0 && !existsSync(join(dataDir, "addons")),
+      `${value}: refused before anything is fetched or created`);
+  }
+  // A packaged core (its package folder has no src/) ignores the variable: the pinned URLs, here to a stub.
+  const pkg = join(root, "i5-packaged");
+  mkdirSync(join(pkg, "dist", "addon"), { recursive: true });
+  writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@aive/core" }));
+  const urls: string[] = [];
+  const stub = (async (u: string | URL | Request) => {
+    urls.push(String(u));
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  hits.clear();
+  const dataDir = freshData();
+  const err = await thrown(() => T.install(dataDir, { fetch: stub, acceptedLicenseSha256: LICENSE, via: "web" }, { pin: f.pin, env: { AIVE_ADDON_REGISTRY: REGISTRY }, from: join(pkg, "dist", "addon", "install.js") }));
+  check(err instanceof GraphicsAddonInstallError && err.reason === "http" && /^registry\.npmjs\.org answered 404 for /.test(err.message) && urls.length > 0 && urls.every((u) => u.startsWith("https://registry.npmjs.org/")) && hits.size === 0,
+    `a packaged core ignores it: only registry.npmjs.org URLs, to a stub (${urls.length}); the loopback registry got nothing (${err?.message})`);
+}
+
+// MUTATION: never treat a lock as stale (holder() stale: false) → the dead-pid and old-mtime rows refuse.
+// Drop the heartbeat timer → the heartbeat row sees the mtime unchanged.
+async function i6() {
+  console.log("I6. the install lock...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  const lockAt = (d: string) => join(d, "addons", ".install.lock");
+  const plant = (d: string, pid: number, ageMs = 0) => {
+    mkdirSync(join(d, "addons"), { recursive: true });
+    writeFileSync(lockAt(d), JSON.stringify({ pid, startedAt: new Date().toISOString(), via: "desktop", token: "other" }));
+    if (ageMs) utimesSync(lockAt(d), new Date(Date.now() - ageMs), new Date(Date.now() - ageMs));
+  };
+  const live = freshData();
+  plant(live, process.ppid);
+  const before = readFileSync(lockAt(live), "utf8");
+  hits.clear();
+  const { err } = await fixtureInstall(live, f);
+  check(err?.reason === "busy" && err.message === "Another ZabsReel window is installing the graphics add-on (desktop). Wait for it to finish." && readFileSync(lockAt(live), "utf8") === before && hits.size === 0,
+    `a live lock (another pid, fresh): "${err?.message}"; the lock is untouched, nothing fetched`);
+  const removed = await thrown(() => T.remove(live, "web", {}));
+  check(removed instanceof GraphicsAddonInstallError && removed.reason === "busy" && (await T.recover(live, {})) === false && readFileSync(lockAt(live), "utf8") === before,
+    "Remove refuses with the same message, and recovery skips (returns false) while it is held");
+  const deadPid = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  const dead = freshData();
+  plant(dead, Number(deadPid));
+  const r1 = await fixtureInstall(dead, f);
+  check(r1.got?.state === "ready" && !existsSync(lockAt(dead)), `a lock whose pid (${deadPid}) is gone is taken over; the install's own lock is released (${r1.err?.message ?? "ready"})`);
+  const old = freshData();
+  plant(old, process.ppid, 3 * 60_000);
+  const r2 = await fixtureInstall(old, f);
+  check(r2.got?.state === "ready" && !existsSync(lockAt(old)), `a lock of a live but unrelated pid (the parent, ${process.ppid}) not rewritten for 3 minutes is taken over (${r2.err?.message ?? "ready"})`);
+  // The heartbeat: a slow download (1.5 s) with a 100 ms heartbeat rewrites the lock while it waits.
+  const slow = freshData();
+  const a = f.pin.closure.find((e) => e.path === "node_modules/a")!;
+  answers.set(new URL(a.resolved).pathname, { delay: 1500 });
+  const mtimes = new Set<number>();
+  const watch = setInterval(() => {
+    try {
+      mtimes.add(statSync(lockAt(slow)).mtimeMs);
+    } catch {
+      /* not yet, or gone */
+    }
+  }, 50);
+  const r3 = await fixtureInstall(slow, f, { heartbeatMs: 100 });
+  clearInterval(watch);
+  answers.clear();
+  check(r3.got?.state === "ready" && mtimes.size >= 5, `the holder rewrites the lock while a slow download runs (${mtimes.size} distinct mtimes)`);
+}
+
+// MUTATION: keep the staging folder on failure (install.ts finally) → the cancel rows find .staging-*. Skip
+// recover() → the kill row's staging stays.
+async function i7() {
+  console.log("I7. cancel, a kill before addon.json, stale staging...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  const zipPath = new URL(f.pin.shell[PLATFORM!].url).pathname;
+  for (const [what, when] of [["before it starts", "now"], ["mid-download", "zip"]] as const) {
+    const dataDir = freshData();
+    const ctl = new AbortController();
+    if (when === "now") ctl.abort();
+    else answers.set(zipPath, "hold");
+    const poll = setInterval(() => {
+      if ((hits.get(zipPath) ?? 0) > 0) ctl.abort();
+    }, 20);
+    hits.clear();
+    const { err } = await fixtureInstall(dataDir, f, {}, { signal: ctl.signal });
+    clearInterval(poll);
+    answers.clear();
+    check(err?.reason === "cancelled" && err.message === "The graphics add-on install was cancelled. Nothing was installed." && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir),
+      `cancel ${what}: "${err?.message}"; no add-on, no staging, the lock released (${JSON.stringify(addonsListing(dataDir))})`);
+  }
+  // A process killed after the rewrite-target check, before addon.json.
+  const dataDir = freshData();
+  const pinFile = join(root, "i7-pin.json");
+  writeFileSync(pinFile, JSON.stringify(f.pin));
+  const marker = join(root, "i7-marker");
+  const child = spawn(process.execPath, [...process.execArgv, join(dirname(fileURLToPath(import.meta.url)), "addon-child.ts"), "before-manifest", dataDir, pinFile, REGISTRY, marker], { stdio: "ignore" });
+  for (let i = 0; i < 600 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 50));
+  child.kill("SIGKILL");
+  await new Promise((r) => child.once("exit", r));
+  const left = addonsListing(dataDir);
+  check(existsSync(marker) && readGraphicsAddon(dataDir, { pin: f.pin }).state === "not-installed" && left.includes(".install.lock") && left.some((n) => n.startsWith(".staging-")) && !existsSync(graphicsAddonDir(dataDir)),
+    `killed just before addon.json: not installed; its lock and staging stay behind (${JSON.stringify(left)})`);
+  const recovered = await T.recover(dataDir, { pin: f.pin });
+  check(recovered && clean(dataDir) && addonsListing(dataDir).length === 0, `recoverGraphicsAddon takes over the dead pid's lock and deletes the stale staging (${JSON.stringify(addonsListing(dataDir))})`);
+  mkdirSync(join(dataDir, "addons", ".staging-stale1", "node_modules"), { recursive: true });
+  mkdirSync(join(dataDir, "addons", ".removed-stale2"), { recursive: true });
+  const again = await fixtureInstall(dataDir, f);
+  check(again.got?.state === "ready" && clean(dataDir), `an install deletes stale .staging-* and .removed-* folders first (${JSON.stringify(addonsListing(dataDir))})`);
+}
+
+// MUTATION: rename .old-* back only on success (drop the rollback in activate) → the second-rename row finds no
+// live copy. Retry on every platform's EBUSY without the window (no `until`) → the first-rename row hangs (timeout).
+// Restore a ready .removed-* in recover() → the .removed row is restored.
+async function i8() {
+  console.log("I8. activation and recovery...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  const installed = async () => {
+    const d = freshData();
+    await fixtureInstall(d, f);
+    return { d, at: manifestOf(d).installedAt as string, hash: treeHash(graphicsAddonDir(d)) };
+  };
+  const live = (d: string) => join(d, "addons", "remotion", ADDON_REMOTION_VERSION);
+  const win = { windowsRenames: true, renameWindowMs: 300 };
+  {
+    const { d, at, hash } = await installed();
+    fault = (name, p) => (name === "rename" && p === live(d) ? errno("EBUSY") : null);
+    const t0 = Date.now();
+    const { err } = await fixtureInstall(d, f, win);
+    fault = null;
+    check(err?.reason === "in-use" && err.message === "Graphics are rendering or the add-on's files are in use. Try again when the graphic finishes." && Date.now() - t0 >= 300
+      && manifestOf(d).installedAt === at && treeHash(live(d)) === hash && clean(d),
+      `the first rename fails past the retry window (EBUSY): "${err?.message}"; the old copy stays live and whole, staging deleted`);
+  }
+  {
+    const { d, at, hash } = await installed();
+    fault = (name, p) => (name === "rename" && p.includes(".staging-") ? errno("EPERM") : null);
+    const { err } = await fixtureInstall(d, f, win);
+    fault = null;
+    check(err?.reason === "in-use" && manifestOf(d).installedAt === at && treeHash(live(d)) === hash && clean(d),
+      `the second rename fails (EPERM): the .old-* copy is renamed back, live and whole; no .old-* or staging left (${JSON.stringify(addonsListing(d))})`);
+  }
+  {
+    const { d, at } = await installed();
+    let busy = 2;
+    fault = (name, p) => (name === "rename" && p === live(d) && busy-- > 0 ? errno("EACCES") : null);
+    const { got } = await fixtureInstall(d, f, { windowsRenames: true });
+    fault = null;
+    check(got?.state === "ready" && manifestOf(d).installedAt !== at && clean(d), "on win32 a rename that fails twice (EACCES) and then works is retried: the new copy is live");
+  }
+  {
+    const { d, at } = await installed();
+    let busy = 1;
+    fault = (name, p) => (name === "rename" && p === live(d) && busy-- > 0 ? errno("EBUSY") : null);
+    const { err } = await fixtureInstall(d, f, { windowsRenames: false });
+    fault = null;
+    check(err?.reason === "in-use" && manifestOf(d).installedAt === at, "off win32 a rename is not retried: one EBUSY gives the message, the old copy stays");
+  }
+  // Recovery: live missing, exactly one ready .old-*.
+  {
+    const { d, hash } = await installed();
+    renameSync(live(d), join(d, "addons", ".old-a1"));
+    check((await T.recover(d, { pin: f.pin })) && readGraphicsAddon(d, { pin: f.pin }).state === "ready" && treeHash(live(d)) === hash && clean(d), "live missing, one ready .old-*: recoverGraphicsAddon puts it back");
+  }
+  {
+    const { d } = await installed();
+    cpSync(live(d), join(d, "addons", ".old-a1"), { recursive: true });
+    renameSync(live(d), join(d, "addons", ".old-a2"));
+    await T.recover(d, { pin: f.pin });
+    check(!existsSync(live(d)) && clean(d), "live missing, two ready .old-*: neither is restored (which one is unknown), both deleted");
+  }
+  {
+    const { d } = await installed();
+    renameSync(live(d), join(d, "addons", ".removed-a1"));
+    await T.recover(d, { pin: f.pin });
+    check(!existsSync(live(d)) && clean(d), "a ready .removed-* (the user removed it) is deleted, never restored");
+  }
+}
+
+// MUTATION: skip dropOtherVersions after activation → the 4.0.480 row keeps it. Remove only the live
+// folder → Remove's 4.0.480 row keeps it.
+async function i9() {
+  console.log("I9. other versions, and Remove...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  const plantOld = (d: string) => {
+    mkdirSync(join(d, "addons", "remotion", "4.0.480", "node_modules"), { recursive: true });
+    writeFileSync(join(d, "addons", "remotion", "4.0.480", "addon.json"), JSON.stringify({ schema: 1, remotion: "4.0.480" }));
+  };
+  const d = freshData();
+  plantOld(d);
+  check(readGraphicsAddon(d, { pin: f.pin }).state === "update-needed", "only 4.0.480 installed: update-needed");
+  const { got } = await fixtureInstall(d, f);
+  check(got?.state === "ready" && JSON.stringify(readdirSync(join(d, "addons", "remotion"))) === JSON.stringify([ADDON_REMOTION_VERSION]) && clean(d),
+    `after activation the 4.0.480 folder is gone (${JSON.stringify(readdirSync(join(d, "addons", "remotion")))})`);
+  plantOld(d);
+  await T.remove(d, "web", {});
+  check(readGraphicsAddon(d, { pin: f.pin }).state === "not-installed" && readdirSync(join(d, "addons", "remotion")).length === 0 && clean(d),
+    `Remove deletes this version's folder and 4.0.480, and releases its lock (${JSON.stringify(addonsListing(d))})`);
+  const busy = freshData();
+  await fixtureInstall(busy, f);
+  const at = manifestOf(busy).installedAt;
+  fault = (name, p) => (name === "rename" && p === graphicsAddonDir(busy) ? errno("EBUSY") : null);
+  const err = await thrown(() => T.remove(busy, "web", { windowsRenames: true, renameWindowMs: 200 }));
+  fault = null;
+  check(err instanceof GraphicsAddonInstallError && err.reason === "in-use" && manifestOf(busy).installedAt === at && clean(busy), `Remove whose rename stays busy: "${err?.message}"; nothing changed`);
+  const none = freshData();
+  await T.remove(none, "web", {});
+  check(!existsSync(join(none, "addons")), "Remove with nothing installed creates nothing");
+}
+
+// MUTATION: return true from rewriteTargetsMatch (remotionload.ts) → the changed-renderer row activates.
+async function i10() {
+  console.log("I10. the rewrite-target check...");
+  const pkgs = basePkgs(POSTINSTALL);
+  const esm = pkgs.find((p) => p.path === "node_modules/@remotion/renderer")!.files.find((x) => x.name === "dist/esm/index.mjs")!;
+  esm.data = String(esm.data).replace("  if (isAssetCompressed(src)) {\n    return src;", "  if (isAssetCompressed(src)) {\n    return src ;");
+  const d = freshData();
+  const { err } = await fixtureInstall(d, buildPin(pkgs));
+  check(String(esm.data).includes("return src ;") && err?.reason === "guard" && err.message === "This add-on doesn't match the Remotion version ZabsReel guards. Nothing was installed." && !existsSync(graphicsAddonDir(d)) && clean(d),
+    `a renderer whose text the guard doesn't know: "${err?.message}"; nothing activated`);
+}
+
+// MUTATION: map every fetch failure to "corrupted" (download) → the 500, closed-socket, timeout and offline rows
+// fail. Drop the ENOSPC branch in failure() → the disk row gives the generic message.
+async function i11() {
+  console.log("I11. the failure messages...");
+  const f = buildPin(basePkgs(POSTINSTALL));
+  const a = new URL(f.pin.closure.find((e) => e.path === "node_modules/a")!.resolved).pathname;
+  const host = `127.0.0.1:${REG_PORT}`;
+  const cases: [string, () => void, AddonSeams, InstallFailure, string][] = [
+    ["the registry answers 500", () => answers.set(a, "500"), {}, "http", `${host} answered 500 for a@1.0.0. Try again later.`],
+    ["the socket closes mid-body", () => answers.set(a, "close"), {}, "network", `ZabsReel couldn't reach ${host}. Check the connection and try again.`],
+    ["no answer within the request timeout", () => answers.set(a, "hold"), { requestTimeoutMs: 300 }, "network", `ZabsReel couldn't reach ${host}. Check the connection and try again.`],
+    ["nothing listens (offline)", () => {}, { env: { AIVE_ADDON_REGISTRY: "http://127.0.0.1:5039" } }, "network", "ZabsReel couldn't reach 127.0.0.1:5039. Check the connection and try again."],
+  ];
+  for (const [what, setup, s, reason, message] of cases) {
+    const d = freshData();
+    setup();
+    const { err } = await fixtureInstall(d, f, s);
+    answers.clear();
+    check(err?.reason === reason && err.message === message && !existsSync(graphicsAddonDir(d)) && clean(d), `${what}: "${err?.message}"`);
+  }
+  const mb = Math.max(1, Math.round((f.pin.lists[PLATFORM!].bytes! + f.pin.shell[PLATFORM!].size) / 1e6));
+  for (const [code, reason, message] of [
+    ["ENOSPC", "disk", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
+    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+  ] as const) {
+    const d = freshData();
+    fault = (name, p) => (name === "writeFile" && p.includes(".staging-") && p.endsWith("x.js") ? errno(code) : null);
+    const { err } = await fixtureInstall(d, f);
+    fault = null;
+    check(err?.reason === reason && err.message === message(d) && !existsSync(graphicsAddonDir(d)) && clean(d), `${code} while extracting: "${err?.message}"`);
+  }
+}
+
+// MUTATION: skip the Windows rules in entryNameProblem (platform check) → the win32 rows extract. Make NameSet
+// compare case-sensitively → the collision rows extract.
+async function i12() {
+  console.log("I12. names Windows and macOS can't hold...");
+  const tarWith = (name: string) => makeTar([{ name: `package/${name}`, data: "x" }]);
+  const winNames = ["CON", "aux.js", "Com1.txt", "lpt9", "nul.tar.gz", "dot.", "space ", "lt<.js", 'q".js', "pipe|.js", "ask?.js", "star*.js", "ctl\u0001.js", "dir./x.js"];
+  for (const n of winNames) {
+    const e = await thrown(() => extractTarball(tarWith(n), join(root, "i12", `w-${createHash("md5").update(n).digest("hex")}`), { platform: "win32-x64", names: new NameSet("win32-x64"), prefix: "node_modules/x" }));
+    const l = await thrown(() => extractTarball(tarWith(n), join(root, "i12", `l-${createHash("md5").update(n).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
+    check(e instanceof ArchiveRefusal && /device name|ends in a dot or a space|a character Windows refuses/.test(e.message) && l === null, `${JSON.stringify(n)}: refused for win32-x64 (${e?.message.slice(0, 80)}), written for linux-x64`);
+  }
+  const pairs: [string, string, AddonPlatform][] = [["README.md", "readme.md", "win32-x64"], ["Lib/a.js", "lib/b.js", "win32-x64"], ["caf\u00e9.txt", "cafe\u0301.txt", "darwin-x64"], ["A.js", "a.js", "darwin-arm64"]];
+  for (const [x, y, p] of pairs) {
+    const tar = makeTar([{ name: `package/${x}`, data: "1" }, { name: `package/${y}`, data: "2" }]);
+    const e = await thrown(() => extractTarball(tar, join(root, "i12", `c-${p}-${createHash("md5").update(x + y).digest("hex")}`), { platform: p, names: new NameSet(p), prefix: "node_modules/x" }));
+    const l = await thrown(() => extractTarball(tar, join(root, "i12", `cl-${createHash("md5").update(x + y).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
+    check(e instanceof ArchiveRefusal && /which are the same name on/.test(e.message) && l === null, `${JSON.stringify(x)} and ${JSON.stringify(y)}: refused for ${p} (${e?.message.slice(0, 90)}), both written for linux-x64`);
+  }
+  const zip = makeZip([{ name: "x/CON.txt", data: "x" }]);
+  const zf = join(root, "i12-win.zip");
+  writeFileSync(zf, zip);
+  const z = await thrown(() => extractZip(zf, join(root, "i12", "zw"), { platform: "win32-x64", names: new NameSet("win32-x64"), prefix: "browser" }));
+  check(z instanceof ArchiveRefusal && /the Windows device name "CON\.txt"/.test(z.message), `the zip reader applies the same rules (${z?.message})`);
+}
+
+// MUTATION: skip reuse (always download) → every reuse row fetches everything. Reuse without comparing the
+// digest → the tampered and missing-file rows keep the bad copy. Move (rename) the source folder instead of
+// copying → the failed-activation row finds the source changed.
+async function i13() {
+  console.log("I13. reuse on update (D3.9)...");
+  const pkgs = basePkgs(POSTINSTALL);
+  const f1 = buildPin(pkgs);
+  const moved = pkgs.map((p) => (p.path === "node_modules/a" ? { ...p, version: "1.0.1", files: [pkgJson("a", "1.0.1"), { name: "index.js", data: "module.exports = 2;\n" }, { name: "lib/deep/x.js", data: "x\n" }] } : p));
+  const f2 = buildPin(moved);
+  const aPath = (f: Fixture) => new URL(f.pin.closure.find((e) => e.path === "node_modules/a")!.resolved).pathname;
+  const d = freshData();
+  await fixtureInstall(d, f1);
+  hits.clear();
+  const up = await fixtureInstall(d, f2);
+  const last = up.progress[up.progress.length - 1];
+  const aBytes = f2.pin.closure.find((e) => e.path === "node_modules/a")!.bytes!;
+  const total = f2.pin.lists[PLATFORM!].bytes! + f2.pin.shell[PLATFORM!].size;
+  check(up.got?.state === "ready" && JSON.stringify(hitPaths()) === JSON.stringify([aPath(f2)]) && readFileSync(join(graphicsAddonDir(d), "node_modules/a/index.js"), "utf8") === "module.exports = 2;\n"
+    && readFileSync(join(graphicsAddonDir(d), "node_modules/a/node_modules/b/b.js"), "utf8") === "b\n" && clean(d),
+    `an update after a one-package change fetches exactly that tarball, nothing else, the browser included (${JSON.stringify(hitPaths())})`);
+  check(last?.done === total && last.total === total, `progress counts the reused bytes as done: it ends at the total, ${total}, though ${aBytes} bytes were downloaded (${last?.done} of ${last?.total})`);
+  // A tampered source package (one byte), and a source missing one file: re-downloaded, not reused.
+  for (const [what, damage] of [
+    ["one byte changed", (dir: string) => writeFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "y\n")],
+    ["one file missing", (dir: string) => rmSync(join(dir, "node_modules/a/lib/deep/x.js"))],
+  ] as const) {
+    const dd = freshData();
+    await fixtureInstall(dd, f1);
+    damage(graphicsAddonDir(dd));
+    hits.clear();
+    const again = await fixtureInstall(dd, buildPin(pkgs, {}, "-reinstall"));
+    check(again.got?.state === "ready" && JSON.stringify(hitPaths()) === JSON.stringify([aPath(f1)]) && readFileSync(join(graphicsAddonDir(dd), "node_modules/a/lib/deep/x.js"), "utf8") === "x\n",
+      `a source with ${what}: that package is downloaded again and correct; the rest and the browser reused (${JSON.stringify(hitPaths().map((p) => p.split("/").pop()))})`);
+  }
+  // A pin move: the copy is under another version's folder; its packages and browser are reused, then it goes.
+  const dm = freshData();
+  await fixtureInstall(dm, f1);
+  renameSync(graphicsAddonDir(dm), join(dm, "addons", "remotion", "4.0.480"));
+  hits.clear();
+  const pm = await fixtureInstall(dm, f2);
+  check(pm.got?.state === "ready" && JSON.stringify(hitPaths()) === JSON.stringify([aPath(f2)]) && JSON.stringify(readdirSync(join(dm, "addons", "remotion"))) === JSON.stringify([ADDON_REMOTION_VERSION]),
+    `a pin move reuses the unchanged packages and the browser from remotion/4.0.480, which is then deleted (${JSON.stringify(hitPaths())})`);
+  // A failed activation after reuse leaves the source copy byte-identical.
+  const df = freshData();
+  await fixtureInstall(df, f1);
+  const before = treeHash(graphicsAddonDir(df));
+  fault = (name, p) => (name === "rename" && p.includes(".staging-") ? errno("EBUSY") : null);
+  const failed = await fixtureInstall(df, f2, { windowsRenames: true, renameWindowMs: 200 });
+  fault = null;
+  check(failed.err?.reason === "in-use" && treeHash(graphicsAddonDir(df)) === before && manifestOf(df).lockSha256 === f1.pin.lockSha256 && clean(df),
+    "a failed activation after reuse leaves the source copy byte-identical (hard links or copies, never a move)");
+}
+
+// MUTATION: import the installer into rpc.ts → the import row fails. Add an RPC method named install_graphics_addon
+// → the method row fails.
+function i14() {
+  console.log("I14. the core never installs...");
+  const listTs = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? listTs(join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [join(dir, e.name)] : []));
+  const sources = [join(REPO, "packages", "core", "src"), join(REPO, "packages", "mcp", "src")].flatMap(listTs);
+  const allowed = new Set(["addon/index.ts", "addon/install.ts"].map((f) => join(REPO, "packages", "core", "src", ...f.split("/"))));
+  const importers = sources.filter((f) => !allowed.has(f) && /["'][./]*(?:addon\/)?install(?:\.js)?["']/.test(readFileSync(f, "utf8")));
+  check(sources.length > 50 && importers.length === 0, `no core or MCP source but addon/index.ts imports the installer (${sources.length} files; ${JSON.stringify(importers.map((f) => f.slice(REPO.length)))})`);
+  const named = Object.keys(methods).filter((m) => /install|addon|remove_graphics|recover|accept/i.test(m));
+  check(named.length === 0, `no RPC method installs, removes, recovers or accepts the add-on (${JSON.stringify(named)})`);
+}
+
+// ---- Z: the zip reader -----------------------------------------------------------------
+
+// MUTATION: drop the zip64 checks (zip.ts) → the zip64 rows extract. Drop the encryption check → its row
+// extracts. Drop the CRC comparison → the CRC row passes.
+async function z1() {
+  console.log("Z1. the zip reader...");
+  const ok = join(root, "z1-ok.zip");
+  writeFileSync(ok, makeZip([
+    { name: "d/" },
+    { name: "d/stored.txt", data: "stored", method: 0 },
+    { name: "d/deflated.bin", data: "y".repeat(100_000), mode: 0o100755 },
+    { name: "d/empty.txt", data: "", method: 0 },
+    { name: "dos.txt", data: "dos", host: 0, mode: 0 },
+  ]));
+  const dest = join(root, "z1-ok");
+  const files = await extractZip(ok, dest, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "browser" });
+  const mode = (p: string) => lstatSync(join(dest, p)).mode & 0o777;
+  check(readFileSync(join(dest, "d/stored.txt"), "utf8") === "stored" && readFileSync(join(dest, "d/deflated.bin"), "utf8") === "y".repeat(100_000) && readFileSync(join(dest, "d/empty.txt"), "utf8") === ""
+    && (mode("d/deflated.bin") & 0o111) !== 0 && (mode("d/stored.txt") & 0o111) === 0 && (mode("dos.txt") & 0o111) === 0 && files.length === 4 && files.find((x) => x.path === "d/deflated.bin")!.exec,
+    `stored, deflated and empty entries hold their bytes; a Unix 0755 entry is executable, a 0644 or DOS one not (${files.map((x) => x.path).join(", ")})`);
+  const cases: [string, Buffer, RegExp][] = [
+    ["a zip64 end record (count 0xffff)", (() => { const z = makeZip([{ name: "a.txt", data: "a" }]); z.writeUInt16LE(0xffff, z.length - 12); z.writeUInt16LE(0xffff, z.length - 14); return z; })(), /a zip64 archive/],
+    ["a zip64 locator", makeZip([{ name: "a.txt", data: "a" }], { zip64: true }), /a zip64 archive/],
+    ["a zip64 extra field", makeZip([{ name: "a.txt", data: "a", extra: Buffer.from([1, 0, 0, 0]) }]), /"a\.txt": a zip64 entry/],
+    ["an encrypted entry", makeZip([{ name: "a.txt", data: "a", flags: 1 }]), /"a\.txt": an encrypted entry/],
+    ["another method (bzip2)", makeZip([{ name: "a.txt", data: "a", method: 12 }]), /"a\.txt": compression method 12/],
+    ["a symlink", makeZip([{ name: "link", data: "/etc/passwd", mode: 0o120777 }]), /"link": a symlink/],
+    ["a FIFO", makeZip([{ name: "fifo", mode: 0o010644 }]), /"fifo": a special file/],
+    ["an entry with ..", makeZip([{ name: "../out.txt", data: "x" }]), /"\.\.\/out\.txt": a "\.\." segment/],
+    ["an absolute entry", makeZip([{ name: "/abs.txt", data: "x" }]), /"\/abs\.txt": an absolute path/],
+    ["a drive letter", makeZip([{ name: "C:/x.txt", data: "x" }]), /a ':' \(a drive letter or a stream\)/],
+    ["a backslash", makeZip([{ name: "a\\..\\..\\x.txt", data: "x" }]), /a backslash/],
+    ["a wrong CRC-32", makeZip([{ name: "a.txt", data: "a", crc: 1 }]), /"a\.txt": its size or CRC-32 does not match/],
+  ];
+  for (const [what, buf, want] of cases) {
+    const zf = join(root, `z1-${what.replace(/\W+/g, "-")}.zip`);
+    writeFileSync(zf, buf);
+    const out = join(root, `z1-${what.replace(/\W+/g, "-")}`, "browser");
+    const e = await thrown(() => extractZip(zf, out, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "browser" }));
+    check(e instanceof ArchiveRefusal && want.test(e.message) && !existsSync(join(dirname(out), "out.txt")), `${what}: refused (${e?.message})`);
+  }
+}
+
 async function main() {
   try {
     p1();
@@ -825,12 +1805,36 @@ async function main() {
     p4();
     p5();
     p6();
+    p7();
+    p8();
     c1();
     await c2c3();
     await c4();
     await c5();
     await c6();
     await c7();
+    if (PLATFORM) {
+      await startRegistry();
+      try {
+        await i1();
+        await i2();
+        await i3();
+        await i4();
+        await i5();
+        await i6();
+        await i7();
+        await i8();
+        await i9();
+        await i10();
+        await i11();
+        await i12();
+        await i13();
+        i14();
+      } finally {
+        await stopRegistry();
+      }
+    } else console.log(`I. skip: ${process.platform}-${process.arch} has no add-on`);
+    await z1();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1866,7 +1866,7 @@ async function main() {
       }
       const TRUST = /is in ZabsReel's private settings folder, which tools can't open\.$/;
       for (const p of trustPaths) {
-        for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["load_project", "path"], ["import_video", "path"]] as const) {
+        for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["export_captions", "path"], ["export_otio", "path"], ["load_project", "path"], ["import_video", "path"]] as const) {
           const e = await thrown(() => dispatch(engine, m, { [key]: p }));
           check(!!e && TRUST.test(e.message), `trust name rule: ${m}.${key} of ${JSON.stringify(p)} on an allowed server is refused with the trust folder message (${e?.message.slice(-90)})`);
         }

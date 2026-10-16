@@ -137,12 +137,16 @@ jobs:
       - name: Graphics add-on pin (gen-graphics-lock --check --require-sizes)
         run: node scripts/gen-graphics-lock.mjs --check --require-sizes
 
-      # The pin's walk on fixture locks, and the core's side of the add-on:
-      # its states, add_graphic's 409 refusals and the UI signal, the pinned
-      # browser everywhere Remotion could start one, AIVE_REMOTION_ADDON only
-      # in a source checkout, and agent tools kept out of <dataDir>/addons
-      # (Remotion stubbed, loopback port 5030).
-      - name: Smoke — graphics add-on (pin and core)
+      # The pin's walk on fixture locks and its drift guard, and the core's side
+      # of the add-on: its states, add_graphic's 409 refusals and the UI signal,
+      # the pinned browser everywhere Remotion could start one,
+      # AIVE_REMOTION_ADDON only in a source checkout, and agent tools kept out
+      # of <dataDir>/addons; then the installer the UI hosts run (fixture
+      # tarballs and zips from a loopback registry): hashes before extraction,
+      # the tar and zip readers, the install lock, cancel, activation and
+      # recovery, reuse on update (Remotion stubbed, loopback ports 5030-5031).
+      # smoke-addon-real.ts (the real closure from npm's cache) is not run here.
+      - name: Smoke — graphics add-on (pin, core and installer)
         run: npx tsx packages/core/scripts/smoke-addon.ts
 
       - name: Smoke — desktop window request guard and CSP (pure logic)

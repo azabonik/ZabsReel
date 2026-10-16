@@ -1,6 +1,17 @@
 import { join, posix, relative, win32, isAbsolute } from "node:path";
 import { existsSync, readdirSync, readFileSync, realpathNative } from "../io/gatedfs.js";
-import { ADDON_LOCK_SHA256, ADDON_PLATFORM_LISTS, ADDON_PLATFORMS, ADDON_REMOTION_VERSION, type AddonPlatform } from "../motion/addonlock.js";
+import {
+  ADDON_CLOSURE,
+  ADDON_LOCK_SHA256,
+  ADDON_PLATFORM_LISTS,
+  ADDON_PLATFORMS,
+  ADDON_REMOTION_VERSION,
+  HEADLESS_SHELL,
+  type AddonLockEntry,
+  type AddonPlatform,
+  type AddonPlatformList,
+  type HeadlessShellZip,
+} from "../motion/addonlock.js";
 
 /**
  * The graphics add-on on disk (ADDON-PLAN D1): the pinned Remotion tree and
@@ -30,7 +41,22 @@ export interface AddonManifest {
   acceptedAt: string;
   installedAt: string;
   via: "desktop" | "web";
+  /** Each installed package (lock path) and the digest of its extracted files, for reuse on update (D3.9). */
+  entries?: Record<string, { integrity: string; digest: string }>;
+  /** The headless-shell zip's sha256 and the digest of browser/. */
+  browser?: { sha256: string; digest: string };
 }
+
+/** The pin an add-on is checked and installed against: this build's, or a test's fixture. */
+export interface AddonPin {
+  lockSha256: string;
+  closure: readonly AddonLockEntry[];
+  lists: Readonly<Record<AddonPlatform, AddonPlatformList>>;
+  shell: Readonly<Record<AddonPlatform, HeadlessShellZip>>;
+}
+
+/** This build's pin (motion/addonlock.ts). */
+export const ADDON_PIN: AddonPin = { lockSha256: ADDON_LOCK_SHA256, closure: ADDON_CLOSURE, lists: ADDON_PLATFORM_LISTS, shell: HEADLESS_SHELL.platforms };
 
 /** What {@link readGraphicsAddon} found; `installedAt` whenever addon.json parsed. */
 export type GraphicsAddon =
@@ -62,7 +88,7 @@ export function platformLabel(key = `${process.platform}-${process.arch}`): stri
 }
 
 /** addon.json at `file` as an object, or undefined when it is missing or does not parse. */
-function readManifest(file: string): Record<string, unknown> | undefined {
+export function readManifest(file: string): Record<string, unknown> | undefined {
   try {
     const m: unknown = JSON.parse(readFileSync(file, "utf8"));
     return m !== null && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : undefined;
@@ -117,15 +143,24 @@ function browserPath(dir: string, rel: unknown): string | null {
   }
 }
 
-/** The add-on's state in `dataDir` (D1). `platform`: a test seam for the platform key. */
-export function readGraphicsAddon(dataDir: string, opts: { platform?: string } = {}): GraphicsAddon {
+/** The add-on's state in `dataDir` (D1). `platform`, `pin`: test seams. */
+export function readGraphicsAddon(dataDir: string, opts: { platform?: string; pin?: AddonPin } = {}): GraphicsAddon {
   const platform = addonPlatform(opts.platform);
   if (!platform) return { state: "unsupported" };
-  const dir = graphicsAddonDir(dataDir);
+  const got = addonStateAt(graphicsAddonDir(dataDir), platform, opts.pin);
+  return got.state === "not-installed" && otherVersion(dataDir) ? { ...got, state: "update-needed" } : got;
+}
+
+/**
+ * The state of the add-on folder `dir` for `platform` and `pin`, by D1's
+ * rules: what readGraphicsAddon says of the live folder, and what the
+ * installer's recovery says of a `.old-*` copy.
+ */
+export function addonStateAt(dir: string, platform: AddonPlatform, pin: AddonPin = ADDON_PIN): GraphicsAddon {
   const m = readManifest(join(dir, "addon.json"));
-  if (!m) return { state: otherVersion(dataDir) ? "update-needed" : "not-installed", dir };
+  if (!m) return { state: "not-installed", dir };
   const installedAt = m.installedAt;
-  if (m.schema !== 1 || m.remotion !== ADDON_REMOTION_VERSION || m.lockSha256 !== ADDON_LOCK_SHA256 || m.platform !== platform) {
+  if (m.schema !== 1 || m.remotion !== ADDON_REMOTION_VERSION || m.lockSha256 !== pin.lockSha256 || m.platform !== platform) {
     return { state: "update-needed", dir, installedAt };
   }
   const exe = browserPath(dir, m.browserExecutable);
@@ -133,7 +168,7 @@ export function readGraphicsAddon(dataDir: string, opts: { platform?: string } =
   const keys = [
     join(modules, "@remotion", "renderer", "dist", "esm", "index.mjs"),
     join(modules, "@remotion", "bundler", "package.json"),
-    join(modules, ...ADDON_PLATFORM_LISTS[platform].compositor.split("/")),
+    join(modules, ...pin.lists[platform].compositor.split("/")),
   ];
   if (exe === null || ![...keys, exe].every((k) => existsSync(k))) return { state: "broken", dir, installedAt };
   return { state: "ready", dir, installedAt, browserExecutable: exe };

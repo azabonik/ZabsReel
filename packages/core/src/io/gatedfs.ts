@@ -304,6 +304,7 @@ const BOTH_CONTENT = { paths: [0, 1], content: true } as const;
 export const access = gatedAsync<typeof fsp.access>("access");
 export const chmod = gatedAsync<typeof fsp.chmod>("chmod", CONTENT);
 export const copyFile = gatedAsync<typeof fsp.copyFile>("copyFile", BOTH_CONTENT);
+export const link = gatedAsync<typeof fsp.link>("link", BOTH_CONTENT);
 export const lstat = gatedAsync<typeof fsp.lstat>("lstat");
 export const mkdir = gatedAsync<typeof fsp.mkdir>("mkdir", CONTENT);
 export const mkdtemp = gatedAsync<typeof fsp.mkdtemp>("mkdtemp", CONTENT);

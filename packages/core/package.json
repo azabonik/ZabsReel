@@ -56,7 +56,8 @@
     "aive-core": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "licenses"
   ],
   "scripts": {
     "build": "tsc -b",

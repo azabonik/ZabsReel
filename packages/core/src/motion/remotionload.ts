@@ -81,6 +81,16 @@ function rewrite(source: string | null, target: (typeof TARGETS)[number]): { sta
   return { state: "no-match" };
 }
 
+/**
+ * True when both target files carry exactly the text the hook rewrites
+ * ("rewritten"): the installer's check before it activates an add-on
+ * (ADDON-PLAN D3.1 step 6). `read` gives a file's text by its path under
+ * node_modules (`@remotion/renderer/dist/…`), or null; nothing is loaded or run.
+ */
+export function rewriteTargetsMatch(read: (rel: string) => string | null): boolean {
+  return TARGETS.every((t) => rewrite(read(t.suffix.slice(1)), t).state === "rewritten");
+}
+
 /** Register the load hook once per process; false when this Node has no module.registerHooks. */
 function guardLoads(): boolean {
   if (hooked !== undefined) return hooked;
