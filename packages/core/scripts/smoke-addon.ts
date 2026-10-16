@@ -13,7 +13,8 @@
  *  P3. --check fails — a walk that skips a non-optional entry; a resolved off
  *                      registry.npmjs.org; remotion not REMOTION_VERSION;
  *                      Remotion's TESTED_VERSION not the table's; the file out
- *                      of sync.
+ *                      of sync. A CRLF copy of the file (a Windows checkout)
+ *                      passes; a changed one in CRLF still fails.
  *  P4. add-on-only   — an add-on path (a/node_modules/semver) with the
  *                      name@version of a production path (b/node_modules/semver)
  *                      is left out of the list.
@@ -29,7 +30,8 @@
  *                      version, platform, schema, or only another version's
  *                      folder: update-needed; each missing key file, and a
  *                      browserExecutable with "..", absolute, or a link out of
- *                      browser/: broken; another platform: unsupported.
+ *                      browser/, or a browser/ that links out of the add-on
+ *                      folder: broken; another platform: unsupported.
  *  C2. refusals      — add_graphic over HTTP /rpc for each state: 409 with
  *                      graphics_addon_missing / _update / _broken /
  *                      _unsupported and the D5.3 message, nothing written, no
@@ -42,7 +44,10 @@
  *                      throws the D5.2 message (a recording stub); without one
  *                      (AIVE_REMOTION_ADDON alone) neither; Remotion's own
  *                      ensureBrowser with them and a missing file downloads
- *                      nothing.
+ *                      nothing. With Remotion's own ensureBrowser queue, a
+ *                      browser gone before ensureBrowser or before openBrowser
+ *                      fails that render with the D5.2 message, and the next
+ *                      render, browser back, succeeds.
  *  C5. failures      — a render whose add-on got another installedAt, or was
  *                      removed, fails with "changed while this graphic
  *                      rendered"; one whose add-on lost a key file with
@@ -62,7 +67,7 @@
  *                      does not load, with the add-on folder's message.
  *
  * No network: loopback on port 5030, fixture locks, and Remotion stubbed
- * except in C4's last row (which starts no browser). FFmpeg makes C3's video.
+ * except in C4's last rows (which start no browser). FFmpeg makes C3's video.
  * Run: npx tsx packages/core/scripts/smoke-addon.ts
  */
 import { execFileSync, spawnSync } from "node:child_process";
@@ -72,7 +77,7 @@ import http from "node:http";
 import https from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import type { RenderInternals } from "@remotion/renderer";
 import { readGraphicsAddon, addonPlatform, graphicsAddonDir, platformLabel } from "../src/addon/state.js";
@@ -296,6 +301,17 @@ function p3() {
   writeFileSync(join(dir, "package-lock.json"), JSON.stringify(lock));
   const c = gen(dir, "--check");
   check(c.status === 1 && /addonlock\.ts is out of sync with package-lock\.json/.test(c.out), `a lock changed after the file was written: out of sync (${c.out.trim().split("\n")[0]})`);
+  // A Windows checkout (core.autocrlf, the release job): the same file with CRLF line endings.
+  const crlf = fixtureRoot("p3-crlf");
+  gen(crlf);
+  const out = join(crlf, "packages/core/src/motion/addonlock.ts");
+  const lf = readFileSync(out, "utf8");
+  writeFileSync(out, lf.replace(/\n/g, "\r\n"));
+  const same = gen(crlf, "--check");
+  check(lf.includes("\n") && same.status === 0, `the written file with CRLF line endings passes --check (${same.out.trim().split("\n")[0]})`);
+  writeFileSync(out, lf.replace("node_modules/a", "node_modules/z").replace(/\n/g, "\r\n"));
+  const changed = gen(crlf, "--check");
+  check(lf.includes("node_modules/a") && changed.status === 1 && /addonlock\.ts is out of sync/.test(changed.out), `a changed file with CRLF line endings still fails --check (${changed.out.trim().split("\n")[0]})`);
 }
 
 // MUTATION: let the production walk ship nothing (gen-graphics-lock.mjs `shipped`) → semver@7.8.4 is in the list.
@@ -409,6 +425,16 @@ function c1() {
     }
     check(state(d) === "broken", `a browserExecutable that leaves browser/ (${what}): broken (${state(d)})`);
   }
+  // browser/ itself a link to a folder outside the add-on, the executable inside that folder.
+  const linked = freshData();
+  const la = installFixture(linked);
+  const outsideBrowser = join(root, "outside-browser");
+  const exeRel = HEADLESS_SHELL.platforms[PLATFORM].executable;
+  mkdirSync(dirname(join(outsideBrowser, exeRel)), { recursive: true });
+  writeFileSync(join(outsideBrowser, exeRel), "");
+  rmSync(join(la, "browser"), { recursive: true, force: true });
+  symlinkSync(outsideBrowser, join(la, "browser"), "dir");
+  check(existsSync(join(la, "browser", exeRel)) && state(linked) === "broken", `a browser/ that links out of the add-on folder: broken (${state(linked)})`);
   const arm = readGraphicsAddon(ready, { platform: "linux-arm64" });
   check(arm.state === "unsupported" && arm.dir === undefined, `another platform (linux-arm64): unsupported, nothing read (${JSON.stringify(arm)})`);
 }
@@ -536,6 +562,8 @@ async function c4() {
   const work = join(root, "c4");
   const exe = join(root, "c4-browser", "chrome-headless-shell");
   const opts = (name: string) => ({ code: "export default () => null;\n", width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(work, `${name}.mp4`), workDir: join(work, name) });
+  mkdirSync(dirname(exe), { recursive: true });
+  writeFileSync(exe, "");
   const pinned = recordingRemotion();
   const e = await thrown(() => renderGraphic(opts("pinned"), { ok: true, root: REPO, browserExecutable: exe }, pinned.stub));
   const optionsOf = (name: string) => {
@@ -554,6 +582,7 @@ async function c4() {
   const leaked = dev.calls.filter((c) => c.args.some((a) => a && typeof a === "object" && ("browserExecutable" in a || "onBrowserDownload" in a)));
   check(dev.calls.length === 3 && leaked.length === 0, `AIVE_REMOTION_ADDON without a browser: Remotion's own cache, nothing pinned (${leaked.map((c) => c.name).join(", ") || "none"})`);
   // Remotion itself, given a pinned browser that is gone: it fails, and never downloads.
+  unlinkSync(exe);
   const remotion = await loadRemotion(REPO);
   const requests: string[] = [];
   const realFetch = globalThis.fetch;
@@ -571,10 +600,53 @@ async function c4() {
   try {
     const r = await thrown(() => remotion.renderer.ensureBrowser({ browserExecutable: exe, onBrowserDownload: () => ((downloadAsked = true), refuseBrowserDownload()), logLevel: "error" }));
     check(r !== null && !downloadAsked && requests.length === 0, `Remotion's ensureBrowser with the add-on's (missing) browser: refused, no download asked or started (${r?.message.slice(0, 90)})`);
+    await c4Queue(exe, requests);
   } finally {
     globalThis.fetch = realFetch;
     [http.get, http.request, https.get, https.request] = realGet as [typeof http.get, typeof http.request, typeof https.get, typeof https.request];
   }
+}
+
+/**
+ * Remotion queues every ensureBrowser (openBrowser's own included) behind the one before, and
+ * once one fails every later call gets that failure: renderGraphic must never hand Remotion a
+ * browser that is gone. A fresh copy of the renderer (so the row above's failure is not in its
+ * queue) answers ensureBrowser, and openBrowser goes through the same queue first, as Remotion's
+ * does. `exe` is missing on entry.
+ */
+// MUTATION: drop pinnedBrowserPresent before ensureBrowser (render.ts) → the first render fails
+// with Remotion's message and the second with the same. Drop it before openBrowser → the third
+// and fourth do.
+async function c4Queue(exe: string, requests: string[]) {
+  const esm = join(REPO, "node_modules", "@remotion", "renderer", "dist", "esm", "index.mjs");
+  const fresh = (await import(`${pathToFileURL(esm).href}?c4-queue`)) as typeof import("@remotion/renderer");
+  const work = join(root, "c4-queue");
+  const opts = (name: string) => ({ code: "export default () => null;\n", width: 64, height: 64, fps: 30, durationInFrames: 1, alpha: false, outPath: join(work, `${name}.mp4`), workDir: join(work, name) });
+  let goneAfterEnsure = false;
+  const q = recordingRemotion();
+  const open = q.stub.openBrowser;
+  q.stub.ensureBrowser = (async (o: Record<string, unknown>) => {
+    const status = await fresh.ensureBrowser({ ...o, logLevel: "error" });
+    if (goneAfterEnsure) unlinkSync(exe);
+    return status;
+  }) as unknown as GraphicRemotion["ensureBrowser"];
+  q.stub.openBrowser = (async (b: "chrome", o: Record<string, unknown>) => {
+    await fresh.ensureBrowser({ browserExecutable: o.browserExecutable as string, onBrowserDownload: o.onBrowserDownload as never, logLevel: "error" });
+    return open(b, o as never);
+  }) as unknown as GraphicRemotion["openBrowser"];
+  const render = (name: string) => thrown(() => renderGraphic(opts(name), { ok: true, root: REPO, browserExecutable: exe }, q.stub));
+  const e1 = await render("gone");
+  check(e1?.message === BROWSER_MISSING, `a render whose browser is gone before ensureBrowser fails with the D5.2 message (${e1?.message.slice(0, 90)})`);
+  writeFileSync(exe, "");
+  const e2 = await render("back");
+  check(e2 === null, `the next render, the browser back, succeeds (${e2?.message.slice(0, 90) ?? "ok"})`);
+  goneAfterEnsure = true;
+  const e3 = await render("gone-before-open");
+  goneAfterEnsure = false;
+  check(e3?.message === BROWSER_MISSING, `a render whose browser goes between ensureBrowser and openBrowser fails with the D5.2 message (${e3?.message.slice(0, 90)})`);
+  writeFileSync(exe, "");
+  const e4 = await render("back-again");
+  check(e4 === null && requests.length === 0, `the next render, the browser back, succeeds; no network (${e4?.message.slice(0, 90) ?? "ok"}; ${requests.length} request(s))`);
 }
 
 // MUTATION: drop the installedAt comparison from renderGraphic (render.ts) → the two "changed" rows

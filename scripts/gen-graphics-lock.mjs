@@ -281,7 +281,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const problems = [...pin.problems];
     let current = null;
     try {
-      current = readFileSync(join(root, OUT), "utf8");
+      // A Windows checkout (core.autocrlf, the release job) has CRLF line endings.
+      current = readFileSync(join(root, OUT), "utf8").replace(/\r\n/g, "\n");
     } catch {
       /* missing: out of sync */
     }

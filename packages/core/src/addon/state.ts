@@ -91,8 +91,9 @@ const inside = (parent: string, child: string) => {
 /**
  * The browser executable addon.json names, as an absolute path inside
  * `<dir>/browser`, or null when it leaves that folder: not a string, absolute
- * (either platform's form, or a drive letter), a ".." segment, or a link
- * whose real path is outside browser/. A missing file is the caller's
+ * (either platform's form, or a drive letter), a ".." segment, a link
+ * whose real path is outside browser/, or a browser/ that is itself a link
+ * out of the add-on's folder. A missing file is the caller's
  * key-file check.
  */
 function browserPath(dir: string, rel: unknown): string | null {
@@ -109,7 +110,8 @@ function browserPath(dir: string, rel: unknown): string | null {
     return exe;
   }
   try {
-    return inside(realpathNative(browser), real) ? exe : null;
+    const realBrowser = realpathNative(browser);
+    return inside(realpathNative(dir), realBrowser) && inside(realBrowser, real) ? exe : null;
   } catch {
     return null;
   }

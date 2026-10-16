@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rm, rename, realpathNative } from "../io/gatedfs.js";
+import { existsSync, mkdir, writeFile, rm, rename, realpathNative } from "../io/gatedfs.js";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import type { bundle } from "@remotion/bundler";
@@ -199,6 +199,17 @@ export const refuseBrowserDownload = (): never => {
   throw new Error(`The graphics add-on's browser is missing. Reinstall the add-on in the ${PRODUCT_NAME} window (Help → Graphics add-on).`);
 };
 
+/**
+ * Refuses, with {@link refuseBrowserDownload}'s message, when the add-on's
+ * browser is gone. Remotion queues every ensureBrowser (openBrowser's own
+ * included) behind the one before it, and once one fails every later call
+ * gets that same failure: a missing browser handed to Remotion would turn
+ * graphics off until the core restarts, a Reinstall included.
+ */
+const pinnedBrowserPresent = (addon: ResolvedGraphicsAddon): void => {
+  if (addon.browserExecutable && !existsSync(addon.browserExecutable)) refuseBrowserDownload();
+};
+
 /** What a render whose add-on was replaced or removed meanwhile fails with. */
 export const ADDON_CHANGED = "The graphics add-on was changed while this graphic rendered. Try again.";
 
@@ -279,6 +290,7 @@ async function renderIn(opts: RenderGraphicOptions, addon: ResolvedGraphicsAddon
 
     // The add-on's browser; without one (a source checkout's AIVE_REMOTION_ADDON
     // alone) Remotion's own cache, downloaded on first use.
+    pinnedBrowserPresent(addon);
     await remotion.ensureBrowser(pinned);
 
     // Remotion's server takes exactly this port (or fails), so the /proxy guard
@@ -290,6 +302,7 @@ async function renderIn(opts: RenderGraphicOptions, addon: ResolvedGraphicsAddon
     try {
       // Our own browser, started through the network limits, for the whole render.
       installChromeGuard(remotion.RenderInternals);
+      pinnedBrowserPresent(addon);
       const browser = await remotion.openBrowser("chrome", { ...pinned, chromeMode: "headless-shell" });
       try {
         if (!isGuardedBrowser(browser)) {

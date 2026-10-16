@@ -76,10 +76,11 @@ const RENDER_MUST = ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInsta
 const RENDER_MUST_NOT = ["selectComposition", "getCompositions", "chromiumOptions"];
 /**
  * browserExecutable set in motion/render.ts: a property (not `?:`, a type),
- * a shorthand property or an assignment. Only `browserExecutable:
+ * a shorthand property, an assignment, or a quoted key (`o["browserExecutable"]
+ * = …`, `{ "browserExecutable": … }`). Only `browserExecutable:
  * addon.browserExecutable` passes.
  */
-const BROWSER_EXECUTABLE = /\bbrowserExecutable\s*:(?!\s*addon\.browserExecutable\b)|[{,]\s*browserExecutable\s*[,}]|\.browserExecutable\s*=(?!=)/g;
+const BROWSER_EXECUTABLE = /\bbrowserExecutable\s*:(?!\s*addon\.browserExecutable\b)|[{,]\s*browserExecutable\s*[,}]|\.browserExecutable\s*=(?!=)|['"`]browserExecutable['"`]\s*[\]:]/g;
 
 const bareName = (m) => m.replace(/^node:/, "");
 let ts;
@@ -287,6 +288,8 @@ function selfTest() {
       ["a literal browserExecutable", `openBrowser("chrome", { browserExecutable: "/x/chrome" });\n`],
       ["a shorthand browserExecutable", `const browserExecutable = "/x/chrome";\nopenBrowser("chrome", { browserExecutable });\n`],
       ["an assigned browserExecutable", `const o = {};\no.browserExecutable = "/x/chrome";\n`],
+      ["a bracket-assigned browserExecutable", `const o = {};\no["browserExecutable"] = "/x/chrome";\n`],
+      ["a quoted-key browserExecutable", `openBrowser("chrome", { "browserExecutable": "/x/chrome" });\n`],
     ]) {
       run(`render.ts with ${what} fails`, { "motion/render.ts": `${GOOD_RENDER}${line}` }, /motion\/render\.ts:\d+: sets browserExecutable from something other than addon\.browserExecutable/);
     }
