@@ -15,10 +15,15 @@
 //  - the headless-shell table and the tarball sizes, from
 //    scripts/graphics-lock-data.json (the lock has no sizes). A write fills a
 //    missing size from npm's local cache (the tarball by its integrity), when
-//    it is there; --check never reads the cache.
+//    it is there; --check never reads the cache. The cache holds only this
+//    machine's platform's tarballs, so another platform's total can be null;
+//    --require-sizes (the release job's tag builds) makes that a problem, so no
+//    release ships without the installer's size cap.
 //
 // Usage: node scripts/gen-graphics-lock.mjs [--root <dir>]          write the file
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --check  exit 1 when it is out of sync or the pin is wrong
+//        node scripts/gen-graphics-lock.mjs [--root <dir>] --check --require-sizes
+//                                                                   also exit 1 when a platform's tarball total is unknown
 //        node scripts/gen-graphics-lock.mjs [--root <dir>] --json   print the computed pin, write nothing
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -170,7 +175,7 @@ export function compute(root, { fillSizes = false } = {}) {
   for (const key of Object.keys(PLATFORMS)) if (!shell.platforms[key]) problems.push(`the headless-shell table has no ${key}`);
 
   const lockSha256 = createHash("sha256")
-    .update(JSON.stringify({ remotion, closure: closure.map(({ bytes, ...e }) => e), platforms: Object.fromEntries(Object.entries(platforms).map(([k, v]) => [k, v.paths])) }))
+    .update(JSON.stringify({ remotion, closure: closure.map(({ bytes, ...e }) => e), platforms: Object.fromEntries(Object.entries(platforms).map(([k, v]) => [k, v.paths])), headlessShell: shell }))
     .digest("hex");
   const usedSizes = Object.fromEntries(closure.filter((e) => e.bytes !== null).map((e) => [e.integrity, e.bytes]).sort(([a], [b]) => (a < b ? -1 : 1)));
   return { problems, remotion, lockSha256, closure, platforms, addonOnly, headlessShell: shell, data: { ...data, tarballBytes: usedSizes } };
@@ -224,7 +229,7 @@ export function render(pin) {
     "/** The Remotion version of the pin (remotionload.ts's REMOTION_VERSION). */",
     `export const ADDON_REMOTION_VERSION = ${json(pin.remotion)};`,
     "",
-    "/** The hash of this pin (the closure and the platform lists); addon.json records it. */",
+    "/** The hash of this pin (the closure, the platform lists and the headless-shell table); addon.json records it. */",
     `export const ADDON_LOCK_SHA256 = ${json(pin.lockSha256)};`,
     "",
     `/** The closure, every platform (${pin.closure.length} entries). */`,
@@ -281,6 +286,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       /* missing: out of sync */
     }
     if (current !== text) problems.push(`${OUT} is out of sync with package-lock.json; run node scripts/gen-graphics-lock.mjs`);
+    if (process.argv.includes("--require-sizes")) {
+      for (const [k, v] of Object.entries(pin.platforms)) {
+        const unsized = v.paths.filter((x) => pin.closure.find((e) => e.path === x)?.bytes === null).length;
+        if (v.bytes === null) problems.push(`${k}: the tarball total is unknown (${unsized} of ${v.count} sizes missing); the installer's size cap and progress need it`);
+      }
+    }
     for (const p of problems) console.error(p);
     if (problems.length) console.error(`[gen-graphics-lock] FAILED: ${problems.length} problem(s)`);
     else console.log(`[gen-graphics-lock] ok: ${counts}`);

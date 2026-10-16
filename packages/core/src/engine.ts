@@ -6399,10 +6399,18 @@ export class EditorEngine extends EventEmitter {
   }
 
   // ---- motion graphics (Remotion) -------------------------------------------
-  /** The graphics add-on's state for get_state and timeline_summary, read when asked (never per broadcast). */
+  /**
+   * The graphics add-on's state for get_state and timeline_summary, read when
+   * asked (never per broadcast). A malformed AIVE_REMOTION_ADDON (source
+   * checkouts only) reads as "broken" here; add_graphic gives its message.
+   */
   graphicsState(): GraphicsAddonState {
-    const r = this.graphicsAddon();
-    return r.ok ? "ready" : r.state;
+    try {
+      const r = this.graphicsAddon();
+      return r.ok ? "ready" : r.state;
+    } catch {
+      return "broken";
+    }
   }
 
   /**

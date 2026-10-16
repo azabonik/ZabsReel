@@ -40,8 +40,8 @@ export const ADDON_PLATFORMS: readonly AddonPlatform[] = ["win32-x64","darwin-x6
 /** The Remotion version of the pin (remotionload.ts's REMOTION_VERSION). */
 export const ADDON_REMOTION_VERSION = "4.0.481";
 
-/** The hash of this pin (the closure and the platform lists); addon.json records it. */
-export const ADDON_LOCK_SHA256 = "adb2ce0af3bd6c04f4c7863313a96eb93bca267636f0381411d0c9bf366a9f9e";
+/** The hash of this pin (the closure, the platform lists and the headless-shell table); addon.json records it. */
+export const ADDON_LOCK_SHA256 = "ddcc9e957b33c2eabe02dedbe53f1fa08c3d771b9424277a0f309dd28230f1c8";
 
 /** The closure, every platform (212 entries). */
 export const ADDON_CLOSURE: readonly AddonLockEntry[] = [

@@ -17,6 +17,12 @@
  *  P4. add-on-only   — an add-on path (a/node_modules/semver) with the
  *                      name@version of a production path (b/node_modules/semver)
  *                      is left out of the list.
+ *  P5. the lock hash — covers the headless-shell table: another zip sha256
+ *                      gives another ADDON_LOCK_SHA256 (installed add-ons
+ *                      become update-needed).
+ *  P6. sizes         — --check --require-sizes fails while a platform's
+ *                      tarball total is unknown, and passes once every size
+ *                      is in the data file.
  * The core:
  *  C1. states        — readGraphicsAddon on fixture folders: ready; no or
  *                      unparsable addon.json: not-installed; lock hash,
@@ -44,11 +50,16 @@
  *  C6. resolution    — AIVE_REMOTION_ADDON (and AIVE_REMOTION_BROWSER) in a
  *                      source checkout; in a packaged core folder (no src/)
  *                      the three variables are ignored, one stderr line each;
- *                      no fallback to ZabsReel's own Remotion.
+ *                      no fallback to ZabsReel's own Remotion; a malformed
+ *                      AIVE_REMOTION_ADDON leaves get_state and
+ *                      timeline_summary answering ("broken"), and add_graphic
+ *                      gives the variable's message.
  *  C7. private area  — every writer and reader of RPC_PATH_PARAMS refuses a
  *                      path under <dataDir>/addons with the D5.4 message and
  *                      creates nothing; a link from outside into it too;
- *                      remember_projects skips it.
+ *                      remember_projects skips it; a project whose asset,
+ *                      cutout colour, LUT or font path is in the add-on folder
+ *                      does not load, with the add-on folder's message.
  *
  * No network: loopback on port 5030, fixture locks, and Remotion stubbed
  * except in C4's last row (which starts no browser). FFmpeg makes C3's video.
@@ -294,6 +305,42 @@ function p4() {
   const list = j?.addonOnly ?? [];
   check(!list.includes("semver@7.8.4") && !list.includes("react@18.3.1") && list.includes("a@1.0.0") && list.includes("@remotion/renderer@4.0.481"),
     `a/node_modules/semver has b/node_modules/semver's name@version: left out, with react; a and Remotion are in (${JSON.stringify(list)})`);
+}
+
+// MUTATION: drop headlessShell from the lockSha256 input (gen-graphics-lock.mjs) → the hash does not change.
+function p5() {
+  console.log("P5. the lock hash covers the headless-shell table...");
+  const dir = fixtureRoot("p5");
+  const hash = () => (gen(dir, "--json").json as { lockSha256?: string } | undefined)?.lockSha256;
+  const before = hash();
+  const again = hash();
+  const dataFile = join(dir, "scripts", "graphics-lock-data.json");
+  const data = JSON.parse(readFileSync(dataFile, "utf8")) as { headlessShell: { platforms: Record<string, { sha256: string }> } };
+  data.headlessShell.platforms["win32-x64"].sha256 = "0".repeat(64);
+  writeFileSync(dataFile, JSON.stringify(data));
+  const after = hash();
+  check(!!before && before === again && !!after && after !== before, `another win32-x64 zip sha256 gives another lock hash (${before?.slice(0, 12)} → ${after?.slice(0, 12)})`);
+}
+
+// MUTATION: drop the --require-sizes problems (gen-graphics-lock.mjs) → the unknown-total row passes.
+function p6() {
+  console.log("P6. --require-sizes and the platform totals...");
+  const dir = fixtureRoot("p6");
+  gen(dir);
+  const plain = gen(dir, "--check");
+  const strict = gen(dir, "--check", "--require-sizes");
+  check(plain.status === 0 && strict.status === 1 && ADDON_PLATFORMS.every((p) => new RegExp(`^${p}: the tarball total is unknown \\(\\d+ of \\d+ sizes missing\\)`, "m").test(strict.out)),
+    `no sizes known: --check passes, --check --require-sizes names every platform (${strict.out.trim().split("\n")[0]})`);
+  const j = gen(dir, "--json").json as { closure: { integrity: string }[] } | undefined;
+  const dataFile = join(dir, "scripts", "graphics-lock-data.json");
+  const data = JSON.parse(readFileSync(dataFile, "utf8")) as { tarballBytes: Record<string, number> };
+  data.tarballBytes = Object.fromEntries((j?.closure ?? []).map((e) => [e.integrity, 1000]));
+  writeFileSync(dataFile, JSON.stringify(data));
+  gen(dir);
+  const sized = gen(dir, "--check", "--require-sizes");
+  const totals = (gen(dir, "--json").json as { platforms: Record<string, { bytes: number | null; count: number }> } | undefined)?.platforms;
+  check(sized.status === 0 && ADDON_PLATFORMS.every((p) => totals?.[p]?.bytes === (totals?.[p]?.count ?? -1) * 1000),
+    `every size in the data file: --require-sizes passes, each total is the sum (${sized.out.trim().split("\n").pop()})`);
 }
 
 // ---- C: the core ---------------------------------------------------------------------
@@ -582,6 +629,23 @@ async function c6() {
     const e = await thrown(() => resolveGraphicsAddon(empty, { env: { AIVE_REMOTION_ADDON: bad } }));
     check(!!e && /^AIVE_REMOTION_ADDON must be an absolute folder that holds node_modules\/@remotion\/renderer/.test(e.message), `AIVE_REMOTION_ADDON=${JSON.stringify(bad)} is refused (${e?.message.slice(0, 80)})`);
   }
+  // MUTATION: drop the catch in EditorEngine.graphicsState → get_state and timeline_summary throw.
+  // A typo in the variable takes away add_graphic only; the state tools still answer.
+  const engine = new EditorEngine(freshData());
+  process.env.AIVE_REMOTION_ADDON = "node_modules";
+  try {
+    const answers: unknown[] = [];
+    for (const m of ["get_state", "timeline_summary"]) {
+      const e = await thrown(async () => answers.push(((await dispatch(engine, m, {})) as { graphics?: unknown }).graphics));
+      if (e) answers.push(`${m} threw: ${e.message.slice(0, 60)}`);
+    }
+    check(JSON.stringify(answers) === '["broken","broken"]', `a malformed AIVE_REMOTION_ADDON: get_state and timeline_summary still answer, graphics "broken" (${JSON.stringify(answers)})`);
+    const g = await thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 }));
+    check(!!g && /^AIVE_REMOTION_ADDON must be an absolute folder that holds node_modules\/@remotion\/renderer \(it is "node_modules"\)\.$/.test(g.message) && engine.jobs.list().length === 0,
+      `…and add_graphic gives the variable's message, no job (${g?.message.slice(0, 80)})`);
+  } finally {
+    delete process.env.AIVE_REMOTION_ADDON;
+  }
   const none = resolveGraphicsAddon(empty, { env: {} });
   check(!none.ok && none.state === "not-installed", `no variable and no add-on: not-installed, never ZabsReel's own Remotion (${JSON.stringify(none)})`);
   check(loadRemotion.length === 1 && graphicRemotion.length === 1, "loadRemotion and graphicRemotion take a root, with no default");
@@ -650,6 +714,33 @@ async function c7() {
     }
   }
   check(!PLATFORM || readGraphicsAddon(dataDir).state === "ready", "the core itself still reads the add-on (gatedfs stays trust-only)");
+
+  // MUTATION: name the trust area in checkLoadedProject's message (hosttrust.ts) → these rows fail.
+  // A project file outside the data folder whose fields are in the add-on folder.
+  const inAddon = (f: string) => join(graphicsAddonDir(dataDir), f);
+  const projectWith = (name: string, asset: Record<string, unknown>, clip: Record<string, unknown> = {}) => {
+    const f = join(root, `c7-${name}.aive`);
+    writeFileSync(f, JSON.stringify({
+      assets: [{ id: "asset_a1", path: "/x/a.mp4", name: "a", duration: 1, width: 64, height: 64, fps: 30, hasVideo: true, hasAudio: false, addedAt: 0, ...asset }],
+      tracks: [{ id: "track_v", kind: "video", index: 0, clips: [{ id: "clip_c1", assetId: "asset_a1", startFrame: 0, sourceInFrame: 0, sourceOutFrame: 10, ...clip }] }],
+    }));
+    return f;
+  };
+  const fields: [string, string, string][] = [
+    ["asset path", projectWith("asset", { path: inAddon("browser/a.mp4") }), 'asset "asset_a1" path'],
+    ["cutout colour path", projectWith("cutout", { cutout: { colorPath: inAddon("c.mp4"), colorStart: 0 } }), 'asset "asset_a1" cutout colour path'],
+    ["clip LUT", projectWith("lut", {}, { effects: { lut: inAddon("x.cube") } }), 'clip "clip_c1" LUT path'],
+    ["overlay font", projectWith("font", {}, { overlays: [{ id: "text_t1", text: "t", font: inAddon("f.ttf") }] }), 'clip "clip_c1" text "text_t1" font'],
+    ["caption font", projectWith("caption", {}, { captions: { cues: [], style: { font: inAddon("f.ttf") } } }), 'clip "clip_c1" caption font'],
+  ];
+  const before = JSON.stringify(engine.getProject());
+  for (const [what, file, field] of fields) {
+    const e = await thrown(() => dispatch(engine, "load_project", { path: file }));
+    const msg = e?.message ?? "";
+    check(msg.startsWith(`${field} `) && / is in ZabsReel's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(msg)
+      && JSON.stringify(engine.getProject()) === before && engine.getCurrentPath() === undefined,
+      `a project whose ${what} is in the add-on folder does not load, with the add-on folder's message (${msg.slice(-120)})`);
+  }
 }
 
 async function main() {
@@ -658,6 +749,8 @@ async function main() {
     p2();
     p3();
     p4();
+    p5();
+    p6();
     c1();
     await c2c3();
     await c4();

@@ -26,7 +26,9 @@
 //    browserExecutable or nothing), or no longer mutes the render and refuses
 //    Remotion's /proxy (muted: true, proxyGuardWorks(, guardRemotionProxy(),
 //    or mentions selectComposition / getCompositions (they open a browser
-//    whose downloads nothing refuses) or chromiumOptions;
+//    whose downloads nothing refuses) or chromiumOptions, or sets
+//    browserExecutable from anything but the resolved add-on
+//    (addon.browserExecutable);
 //  - a packages/core/src file other than motion/remotionload.ts loads remotion
 //    or @remotion/* at run time (a value import or re-export, `import "…"`,
 //    import(…), require(…) or a createRequire call); `import type` is
@@ -72,6 +74,12 @@ const REMOTION_MODULE = /^(?:remotion|@remotion\/[^/]+)(?:\/.*)?$/;
 /** What motion/render.ts must contain (the browser through the network limits, no downloads), and must not. */
 const RENDER_MUST = ["installChromeGuard(", "isGuardedBrowser(", "puppeteerInstance", "onDownload", "onBrowserDownload", "muted: true", "proxyGuardWorks(", "guardRemotionProxy("];
 const RENDER_MUST_NOT = ["selectComposition", "getCompositions", "chromiumOptions"];
+/**
+ * browserExecutable set in motion/render.ts: a property (not `?:`, a type),
+ * a shorthand property or an assignment. Only `browserExecutable:
+ * addon.browserExecutable` passes.
+ */
+const BROWSER_EXECUTABLE = /\bbrowserExecutable\s*:(?!\s*addon\.browserExecutable\b)|[{,]\s*browserExecutable\s*[,}]|\.browserExecutable\s*=(?!=)/g;
 
 const bareName = (m) => m.replace(/^node:/, "");
 let ts;
@@ -163,6 +171,9 @@ export function scan(root) {
         problems.push(`${shown}: has no ${m}; the graphic must render in a browser started through chromeguard.ts, with every media and browser download refused, muted, and /proxy refused (proxyguard.ts)`);
       }
       for (const m of RENDER_MUST_NOT.filter((w) => text.includes(w))) problems.push(`${shown}: mentions ${m}, which bypasses the graphics browser's limits`);
+      for (const m of text.matchAll(BROWSER_EXECUTABLE)) {
+        problems.push(`${shown}:${lineOf(text, m.index)}: sets browserExecutable from something other than addon.browserExecutable; the graphics browser is the resolved add-on's`);
+      }
     }
     for (const { index, statically } of /remotion/.test(text) ? remotionLoads(text, path) : []) {
       if (rel !== "motion/remotionload.ts") {
@@ -272,6 +283,16 @@ function selfTest() {
     ]) {
       run(`render.ts with ${what} fails`, { "motion/render.ts": `${GOOD_RENDER}${line}` }, new RegExp(`motion/render\\.ts: mentions ${what}`));
     }
+    for (const [what, line] of [
+      ["a literal browserExecutable", `openBrowser("chrome", { browserExecutable: "/x/chrome" });\n`],
+      ["a shorthand browserExecutable", `const browserExecutable = "/x/chrome";\nopenBrowser("chrome", { browserExecutable });\n`],
+      ["an assigned browserExecutable", `const o = {};\no.browserExecutable = "/x/chrome";\n`],
+    ]) {
+      run(`render.ts with ${what} fails`, { "motion/render.ts": `${GOOD_RENDER}${line}` }, /motion\/render\.ts:\d+: sets browserExecutable from something other than addon\.browserExecutable/);
+    }
+    run("render.ts with the add-on's browserExecutable passes", {
+      "motion/render.ts": `${GOOD_RENDER}const pinned = { browserExecutable: addon.browserExecutable };\nfunction f(p: { browserExecutable?: string }) {}\nif (o.browserExecutable === x) f(pinned);\n`,
+    }, null);
     for (const [form, body] of [
       ["a named import", `import { renderMedia } from "@remotion/renderer";\n`],
       ["a file in it", `import { downloadAsset } from "@remotion/renderer/dist/assets/download-and-map-assets-to-file.js";\n`],
