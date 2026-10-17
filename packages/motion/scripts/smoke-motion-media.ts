@@ -485,12 +485,15 @@ async function m2(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   check(vfrCount > 70 && lib.vfr.fps !== 30, `the variable-rate video averages ${lib.vfr.fps} fps: ${vfrCount} frames from its 70 pictures`);
   await played("vfr", vfrCount, "a video whose frame rate changes");
   await jumped("vfr", vfrCount, [74, 69, 66, 61, 58, 50, 45, 37, 33, 23, 10, 5, 1], "a video whose frame rate changes");
-  // 0.5 s late (0.523 s in the file): its first picture until frame 15, 106 frames from its 90 pictures; the
-  // table's count is its 4 s of audio's.
+  // 0.5 s late (plus the audio encoder's delay): its first picture until it starts, then its 90 pictures. Its real
+  // frame count is its last picture's end at its fps (106 here); the table's count is its 4 s of audio's.
+  const packets = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", fx.late], { encoding: "utf8" });
+  const lateEnd = Math.max(...packets.stdout.trim().split("\n").map((l) => l.split(",").map(Number)).map(([pts, d]) => pts + d));
+  const lateReal = Math.round(lateEnd * lib.late.fps);
   const lateCount = Math.round(lib.late.duration * lib.late.fps);
-  check(lateCount > 106, `the video that starts 0.5 s after its file has a frame count past its last frame (${lateCount})`);
-  await played("late", 106, "a video that starts 0.5 s after its file");
-  await jumped("late", 106, [100, 40, 16, 8, 0], "a video that starts 0.5 s after its file");
+  check(lateReal > 90 && lateCount > lateReal, `the video that starts 0.5 s after its file: ${lateReal} frames from its 90 pictures, and a frame count past them (${lateCount})`);
+  await played("late", lateReal, "a video that starts 0.5 s after its file");
+  await jumped("late", lateReal, [lateReal - 6, 40, 16, 8, 0], "a video that starts 0.5 s after its file");
 }
 
 // ---- M3: a request that depends on loaded media ----------------------------------------
