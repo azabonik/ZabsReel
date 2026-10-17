@@ -24,8 +24,10 @@ import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
  */
 
 /**
- * The renderer's environment: these variables of the core's, TEMP/TMP/TMPDIR
- * in the render's folder, and GSETTINGS_BACKEND=memory (GTK's settings stay in
+ * The renderer's environment, D2's allowlist and nothing else: these
+ * variables of the core's (PATH, SystemRoot, windir, LANG, LC_ALL, HOME,
+ * USERPROFILE, DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR), TEMP/TMP/TMPDIR in
+ * the render's folder, and GSETTINGS_BACKEND=memory (GTK's settings stay in
  * memory instead of dconf's files in HOME). Never AIVE_*, ELECTRON_* or
  * NODE_OPTIONS.
  */
@@ -221,12 +223,14 @@ async function moveAll(moves: (readonly [string, string])[]): Promise<void> {
     for (const [from, to] of moves) {
       try {
         await rename(from, to);
+        done.push(to);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
         await copyFile(from, to);
+        // `to` is written now: a failing rm(from) below must still take it back out.
+        done.push(to);
         await rm(from, { force: true });
       }
-      done.push(to);
     }
   } catch (err) {
     for (const to of done) await rm(to, { force: true }).catch(() => {});

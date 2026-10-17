@@ -45,9 +45,10 @@
  *                     a renderer that cannot start (not executable): the probe
  *                     says start-failed at once, a render rejects with
  *                     graphic_renderer_unavailable and leaves nothing;
- *                     abort mid-render kills it at once; an FFmpeg failure
- *                     and a failed later move into baked/ leave baked/ as it
- *                     was; the core killed mid-render leaves no renderer
+ *                     abort mid-render kills it at once; an FFmpeg failure,
+ *                     a failed later move into baked/ and, across disks
+ *                     (injected EXDEV), a copy whose source can't be removed
+ *                     leave baked/ as it was; the core killed mid-render leaves no renderer
  *                     process within 2 s, and the next core start (the built
  *                     core) removes its motion/<id>; without --zr-scratch the
  *                     renderer exits 2 and writes nothing, with it the profile
@@ -58,13 +59,16 @@
  *                     mode (as core-launcher.cjs starts it); (c) the packed
  *                     `--dir` build (AIVE_APP, else
  *                     apps/desktop/build/dist/linux-unpacked; skipped with a
- *                     printed reason when there is none). Each prints
+ *                     printed reason when there is none), whose
+ *                     motion-renderer.cjs, guard.js and core
+ *                     dist/motion/rendermotion.js must be byte-identical to
+ *                     this tree's (a stale build fails). Each prints
  *                     {"probe":"ok"}, opens no visible window, loads none of
  *                     core-launcher, media-servers, graphics-addon, starts no
  *                     core (no server.json, no port 5030-5039, no child with
  *                     ELECTRON_RUN_AS_NODE or dist/cli.js), and its
- *                     environment is only the allowlist (no AIVE_DATA_DIR, no
- *                     ELECTRON_RUN_AS_NODE).
+ *                     environment is only D2's allowlist, written out here
+ *                     (no AIVE_DATA_DIR, no ELECTRON_RUN_AS_NODE).
  *  R7. measure      — a 1920x1080 overlay, 60 frames: milliseconds per frame;
  *                     every render here runs with no DISPLAY (Chromium's
  *                     headless platform on Linux).
@@ -79,7 +83,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -91,7 +95,6 @@ import { RENDERER_FLAG, rendererBinary, type RendererBinary } from "../../core/s
 import {
   MotionRenderError,
   probeMotionRenderer,
-  RENDERER_ENV,
   rendererArgs,
   rendererEnv,
   renderMotion,
@@ -115,11 +118,34 @@ const CORE_DIST = join(REPO, "packages", "core", "dist");
 const ELECTRON = createRequire(join(DESKTOP, "package.json"))("electron") as string;
 const NETNS = "ZR_MOTION_SMOKE_NETNS";
 const LINUX = process.platform === "linux";
-/** What the renderer's environment may hold: the allowlist, its own temp variables and GTK's in-memory settings. */
-const ALLOWED_ENV = new Set<string>([...RENDERER_ENV, "TEMP", "TMP", "TMPDIR", "GSETTINGS_BACKEND"]);
+/**
+ * What the renderer's environment may hold: D2's allowlist, written out here
+ * (not read from RENDERER_ENV, so a name added there fails the rows), with its
+ * own temp variables and GTK's in-memory settings.
+ */
+const ALLOWED_ENV = new Set<string>([
+  "PATH", "SystemRoot", "windir", "LANG", "LC_ALL", "HOME", "USERPROFILE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+  "TEMP", "TMP", "TMPDIR", "GSETTINGS_BACKEND",
+]);
 /** Variables Electron/Chromium set in their own process after start (not from the core). */
 const CHROMIUM_ENV = new Set(["CHROME_DESKTOP", "DBUS_SESSION_BUS_ADDRESS", "FC_FONTATIONS"]);
 const DESKTOP_MODULES = /[\\/](core-launcher|media-servers|graphics-addon)\.cjs$/;
+
+/** A fault to inject into the core's rename, copyFile and rm (gatedfs looks each fs/promises function up per call): the error to throw, or null. */
+let fsFault: ((name: string, args: unknown[]) => NodeJS.ErrnoException | null) | null = null;
+{
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  for (const name of ["rename", "copyFile", "rm"]) {
+    const real = fsp[name];
+    fsp[name] = async (...args: unknown[]) => {
+      const e = fsFault?.(name, args);
+      if (e) throw e;
+      return real(...args);
+    };
+  }
+  syncBuiltinESMExports();
+}
+const errno = (code: string) => Object.assign(new Error(`${code}: injected`), { code }) as NodeJS.ErrnoException;
 
 function skipped(name: string, why: string) {
   console.log(`  skip ${name}: ${why}`);
@@ -858,7 +884,8 @@ async function runRenderer(bin: Extract<RendererBinary, { ok: true }>, args: str
 // crash row's renderer outlives the killed core and fails. cli.ts without sweepMotionScratch → motion/<id>
 // survives the next core start and fails. renderMotion without the abort listener → the
 // abort row renders to the end and fails. moveAll without its rollback → the later-move
-// row finds the .mov in baked/ and fails. The renderer's stdin 'end' handler dropped → the
+// row finds the .mov in baked/ and fails. moveAll's EXDEV branch recording `to` only after
+// rm(from) → the EXDEV row finds the copied .mov in baked/. The renderer's stdin 'end' handler dropped → the
 // success row's renderer is killed after the 10 s wait instead of exiting 0 (R2). The
 // renderer without the --zr-scratch check → the no-scratch row fails; without
 // app.setPath("userData") → the profile row finds Chromium's files in HOME and fails.
@@ -889,6 +916,20 @@ async function r5(work: string) {
   await leftNothing(move, f, "move", "later move");
   rmSync(blocker, { recursive: true, force: true });
   check(readdirSync(join(f.data, "baked")).length === 0, `baked/ is empty after abort, FFmpeg failure and the failed move (${JSON.stringify(readdirSync(join(f.data, "baked")))})`);
+
+  // baked/ on another disk: rename says EXDEV, so the .mov is copied in; then removing it from motion/<id> fails. The copy goes back out.
+  const xd = fresh(work, "exdev");
+  const injected: string[] = [];
+  fsFault = (name, args) => {
+    const code = name === "rename" && String(args[1]).startsWith(join(xd.data, "baked")) ? "EXDEV" : name === "rm" && String(args[0]) === join(xd.data, "motion", "exdev", "out.mov") ? "EPERM" : null;
+    if (code) injected.push(`${name} ${code}`);
+    return code ? errno(code) : null;
+  };
+  const exdev = await render(xd, "exdev", { module: PATTERN }).finally(() => (fsFault = null));
+  check(/EPERM/.test(exdev.error?.message ?? "") && injected.includes("rename EXDEV") && injected.includes("rm EPERM"),
+    `across disks (EXDEV), a failed removal after the copy fails the render (${exdev.error?.message.slice(0, 120)}; injected ${JSON.stringify(injected)})`);
+  check(readdirSync(join(xd.data, "baked")).length === 0, `…and baked/ ends empty: the copied .mov is taken back out (${JSON.stringify(readdirSync(join(xd.data, "baked")))})`);
+  await leftNothing(exdev, xd, "exdev", "EXDEV move");
 
   // A renderer that cannot start (a file that is not executable): no "exit" ever comes, only "error".
   const x = fresh(work, "nostart");
@@ -1039,8 +1080,10 @@ async function childProbe(work: string, row: string, exe: string, motion: string
 // MUTATION: rendererbinary.ts's source-checkout branch without the apps/desktop app path
 // (args: [RENDERER_FLAG]) → Electron's default_app starts instead: rows a and b fail.
 // rendererbinary.ts deciding "packaged" from process.versions.electron → row b fails. The
-// renderer's environment built from {...process.env} → the environment rows fail. main.cjs's
-// dispatch moved below its requires → the module rows fail.
+// renderer's environment built from {...process.env} → the environment rows fail; a name
+// added to RENDERER_ENV → the same rows fail (ALLOWED_ENV is its own list). main.cjs's
+// dispatch moved below its requires → the module rows fail. A packed build older than this
+// tree, or one packed file changed → the byte-identical rows of (c) fail.
 async function r6(work: string) {
   console.log("R6. launch: the probe through the core's binary rule (source checkout, dev desktop, packed build)...");
   // (a) Source checkout, the core under plain node (this process).
@@ -1064,6 +1107,16 @@ async function r6(work: string) {
   }
   const packedCore = join(dirname(exe), "resources", "app", "node_modules", "@aive", "core");
   check(!existsSync(join(packedCore, "src")), `(c) the packed core has no src/ (${packedCore})`);
+  // A build older than this tree proves nothing about it: the renderer's files and the core's driver must be this tree's own bytes.
+  const packedMotion = join(dirname(exe), "resources", "app", "node_modules", "@aive", "motion");
+  for (const [packed, built] of [
+    [join(packedMotion, "renderer", "motion-renderer.cjs"), join(REPO, "packages", "motion", "renderer", "motion-renderer.cjs")],
+    [join(packedMotion, "renderer", "guard.js"), join(REPO, "packages", "motion", "renderer", "guard.js")],
+    [join(packedCore, "dist", "motion", "rendermotion.js"), join(CORE_DIST, "motion", "rendermotion.js")],
+  ]) {
+    const identical = existsSync(packed) && existsSync(built) && realpathSync(packed) !== realpathSync(built) && readFileSync(packed).equals(readFileSync(built));
+    check(identical, `(c) the packed ${packed.slice(dirname(exe).length + 1)} is byte-identical to this tree's ${built.slice(REPO.length + 1)} (rebuild: npm run build, then electron-builder --linux --dir)`);
+  }
   await childProbe(work, "(c) packed build", exe, join(packedCore, "dist", "motion", "rendermotion.js"), { command: realpathSync(exe), args: [RENDERER_FLAG] });
 }
 

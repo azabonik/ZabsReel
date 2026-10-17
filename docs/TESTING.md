@@ -226,12 +226,15 @@ npx tsx packages/core/scripts/smoke-addon.ts
 # tags; every network route from the page fails with nothing contacted (in a
 # private network namespace with loopback listeners on ports 5030-5033), WebRTC
 # off with and without guard.js; frame, total-time and heap limits; abort, an
-# FFmpeg failure and a failed move leave baked/ unchanged; a core killed
+# FFmpeg failure, a failed move and a cross-disk copy whose source can't be
+# removed leave baked/ unchanged; a core killed
 # mid-render leaves no renderer and the next core start removes its scratch;
 # the probe through the core's binary rule from a source checkout, the dev
 # Electron and the packed --dir build (when apps/desktop/build/dist/linux-unpacked
-# exists, else a printed skip): no window, no core, no port, only the
-# allowlisted environment. Needs the build and FFmpeg; no display (Chromium's
+# exists, else a printed skip; its renderer files and the core's rendermotion.js
+# must be byte-identical to this tree's, so rebuild it after a change): no
+# window, no core, no port, only the allowlisted environment (a list written in
+# the smoke). Needs the build and FFmpeg; no display (Chromium's
 # headless platform); muted
 npx tsx packages/motion/scripts/smoke-renderer.ts
 
