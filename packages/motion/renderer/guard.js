@@ -8,10 +8,15 @@
 //   about:blank iframe (no src, which frame-src 'none' does not stop) still
 //   has its own constructors: there only layers 1 and 2 and the CSP the frame
 //   inherits apply (slice 1 deviation; smoke-renderer.ts R3 tries them);
-// - gives Date.now, new Date(), performance.now and requestAnimationFrame's
-//   timestamp the render's virtual time (frame / fps), set by loader.js for
-//   each frame. document.timeline.currentTime and CSS animations still run on
-//   the wall clock (the runtime's concern, slice 3).
+// - gives Date.now, new Date(), performance.now, requestAnimationFrame's
+//   timestamp and document.timeline.currentTime the render's virtual time
+//   (frame / fps), set by loader.js for each frame;
+// - puts CSS animations and transitions and Web Animations on that time:
+//   loader.js calls syncAnimations() after the frame is drawn and before it is
+//   painted, which pauses every animation in document.getAnimations() and sets
+//   its currentTime as if it had played from the timeline's start (time 0) at
+//   its playback rate. So frame n shows the same thing whichever frames came
+//   before it (a transition still starts from the previous frame's style).
 (function () {
   "use strict";
   var g = window;
@@ -42,9 +47,25 @@
   g.requestAnimationFrame = function (cb) {
     return raf(function () { cb(now); });
   };
+  Object.defineProperty(document.timeline, "currentTime", { get: function () { return now; } });
+  var getAnimations = Document.prototype.getAnimations;
+  function syncAnimations() {
+    var all = getAnimations.call(document);
+    for (var i = 0; i < all.length; i++) {
+      var a = all[i];
+      a.pause();
+      // Setting the time completes the pause at once, and with it a pending playback rate
+      // (reverse(), updatePlaybackRate()), so playbackRate reads the rate it plays at.
+      a.currentTime = 0;
+      var rate = a.playbackRate;
+      // Played backwards, an animation starts from its end.
+      a.currentTime = rate < 0 && a.effect ? a.effect.getComputedTiming().endTime + now * rate : now * rate;
+    }
+  }
   Object.defineProperty(g, "__zrMotionClock", {
     value: Object.freeze({
       setFrame: function (n, fps) { now = (n * 1000) / fps; },
+      syncAnimations: syncAnimations,
     }),
   });
 })();

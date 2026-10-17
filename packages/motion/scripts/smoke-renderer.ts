@@ -12,7 +12,8 @@
  *                     require("electron") with <repo>/apps/desktop first; no
  *                     main.cjs, or no Electron at all = no-binary.
  *  R2. frames       — the page's clock (Date.now, Date(), new Date(),
- *                     performance.now, the rAF timestamp) is frame / fps;
+ *                     performance.now, the rAF timestamp,
+ *                     document.timeline.currentTime) is frame / fps;
  *                     the frames on fd 3 are exactly the page's pattern for
  *                     each frame: width*4 rows, B,G,R,A, premultiplied; the
  *                     ProRes 4444 round trip gives straight alpha (50%-alpha
@@ -90,7 +91,10 @@
  *                     (ReactDOM.createRoot, flushSync) and loader.js's require
  *                     table; the title template at 1920x1080 and 1080x1920
  *                     (frames with content that changes); frames rendered out
- *                     of order equal the same frames in order; delayRender
+ *                     of order equal the same frames in order, also for a
+ *                     CSS keyframe animation and an element.animate() one,
+ *                     whose box is where frame / fps puts it (slice 3b2:
+ *                     CSS and Web Animations on the virtual clock); delayRender
  *                     holds the capture until continueRender; props reach a
  *                     component with no React import; a failed frame fails
  *                     the render with its code (a component's own throw:
@@ -510,10 +514,10 @@ const px = (frame: Buffer, x: number, y: number, w = W) => [...frame.subarray((y
 
 // ---- R2: frames ------------------------------------------------------------------------
 
-/** Logs each frame's clock readings: Date.now, new Date(), Date() (to the second), performance.now and the rAF timestamp. */
+/** Logs each frame's clock readings: Date.now, new Date(), Date() (to the second), performance.now, the rAF timestamp and document.timeline.currentTime. */
 const CLOCK = `
 zrMotion.onFrame((n) => new Promise((resolve) => requestAnimationFrame((t) => {
-  zrMotionHost.log("CLOCK " + JSON.stringify({ n, now: Date.now(), date: new Date().getTime(), str: Date.parse(Date()), perf: performance.now(), raf: t }));
+  zrMotionHost.log("CLOCK " + JSON.stringify({ n, now: Date.now(), date: new Date().getTime(), str: Date.parse(Date()), perf: performance.now(), raf: t, timeline: document.timeline.currentTime }));
   resolve();
 })));
 `;
@@ -527,7 +531,8 @@ const EPOCH = 946684800000;
 // row fails.
 // MUTATION (clock): guard.js without `g.Date = VirtualDate` → the Date row fails. guard.js's
 // requestAnimationFrame passing the real timestamp (cb instead of cb(now)) → the
-// performance/rAF row fails.
+// performance/rAF row fails. guard.js without the document.timeline getter → the timeline
+// row fails.
 async function r2(work: string) {
   console.log("R2. frames: the page's clock, exact pattern per frame, B,G,R,A, straight alpha after ProRes, opaque standalone...");
   const k = fresh(work, "clock");
@@ -538,6 +543,8 @@ async function r2(work: string) {
     `Date.now, new Date() and Date() read frame / fps from 2000-01-01 (${clock.error?.message ?? JSON.stringify(ticks.map((c) => [c.now - EPOCH, c.date - EPOCH, c.str - EPOCH]))})`);
   check(ticks.length === 4 && ticks.every((c, n) => Math.abs(c.perf - at(n)) < 1e-6 && Math.abs(c.raf - at(n)) < 1e-6),
     `performance.now and the requestAnimationFrame timestamp are frame / fps in ms (${JSON.stringify(ticks.map((c) => [c.perf, c.raf]))})`);
+  check(ticks.length === 4 && ticks.every((c, n) => Math.abs(c.timeline - at(n)) < 1e-6),
+    `document.timeline.currentTime is frame / fps in ms (${JSON.stringify(ticks.map((c) => c.timeline))})`);
   await leftNothing(clock, k, "clock", "clock page");
 
   const f = fresh(work, "frames");
@@ -764,7 +771,7 @@ async function r3(work: string) {
         "worker.js": "postMessage('alive');",
         "shared.js": "onconnect = function (e) { e.ports[0].postMessage('alive'); };",
       };
-      if (!guard) entries["guard.js"] = "window.__zrMotionClock = { setFrame: function () {} };";
+      if (!guard) entries["guard.js"] = "window.__zrMotionClock = { setFrame: function () {}, syncAnimations: function () {} };";
       const run = await render(f, "net", { module: ATTACK, durationInFrames: 3, entries });
       const line = logs(run).find((t) => t.startsWith("RESULTS "));
       const res = (line ? JSON.parse(line.slice(8)) : {}) as Record<string, string>;
@@ -1333,6 +1340,47 @@ type Props = { colour: string };
 export default ({ colour }: Props) => <AbsoluteFill style={{ background: colour }} />;
 `;
 
+/**
+ * A 40x40 box whose `left` runs 0 → 480 px, linear, over 400 ms from the timeline's start:
+ * at 30 fps frame n puts it at 40n. CSS_TSX animates it with a CSS keyframe animation,
+ * WAAPI_TSX with element.animate() on mount (which, out of order, is the first frame drawn),
+ * and two more boxes the same way: one over 800 ms at playback rate 2, one 480 → 0 px played
+ * backwards (reverse()).
+ */
+const SLIDE_W = 480;
+const CSS_TSX = `import { AbsoluteFill } from "remotion";
+export default function Slide() {
+  return (
+    <AbsoluteFill>
+      <style>{"@keyframes zr-slide { from { left: 0px; } to { left: 480px; } }"}</style>
+      <div style={{ position: "absolute", left: 0, top: 20, width: 40, height: 40, background: "rgb(30, 200, 90)", animation: "zr-slide 400ms linear both" }} />
+    </AbsoluteFill>
+  );
+}
+`;
+const WAAPI_TSX = `import { useEffect, useRef } from "react";
+import { AbsoluteFill } from "remotion";
+export default function Slide() {
+  const box = useRef<HTMLDivElement>(null);
+  const fast = useRef<HTMLDivElement>(null);
+  const back = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const timing = { duration: 400, easing: "linear", fill: "both" } as const;
+    box.current!.animate([{ left: "0px" }, { left: "480px" }], timing);
+    fast.current!.animate([{ left: "0px" }, { left: "480px" }], { ...timing, duration: 800 }).playbackRate = 2;
+    back.current!.animate([{ left: "480px" }, { left: "0px" }], timing).reverse();
+  }, []);
+  const at = (top: number) => ({ position: "absolute", left: 0, top, width: 40, height: 40, background: "rgb(30, 200, 90)" }) as const;
+  return (
+    <AbsoluteFill>
+      <div ref={box} style={at(20)} />
+      <div ref={fast} style={at(80)} />
+      <div ref={back} style={at(140)} />
+    </AbsoluteFill>
+  );
+}
+`;
+
 const THROWS_AT_2 = `import { AbsoluteFill, useCurrentFrame } from "remotion";
 export default () => {
   if (useCurrentFrame() === 2) throw new Error("boom at two");
@@ -1346,7 +1394,14 @@ export default () => {
 // non-blank checks fail; host.js rendering frame 0 for every n → the "content changes"
 // rows fail; host.js with a shorter composition → the title "renders" rows fail. loader.js
 // drawing each frame at the previous frame's time → the out-of-order row fails; renderMotion
-// ignoring `frames` → the same row fails. loader.js not waiting for the frame's promise →
+// ignoring `frames` → the same row fails. loader.js without its syncAnimations() call (CSS
+// and Web Animations on the wall clock) → the CSS and element.animate() out-of-order and
+// position rows fail; the call moved before the draw (animations the frame creates are
+// missed) or syncAnimations() without pause() → the same rows fail. syncAnimations() setting
+// currentTime = now (no playback rate) → the rate-2 and backwards rows fail; without its
+// backwards branch → the backwards row fails; without the `currentTime = 0` that completes
+// the pause (reverse()'s pending rate unread) → the backwards and element.animate()
+// out-of-order rows fail. loader.js not waiting for the frame's promise →
 // the delayRender row fails. loader.js reporting frameReady when the frame rejects (slice
 // 1's behaviour) → the error rows and the "frames before the failed one" row fail;
 // motion-renderer.cjs sending the page's failure as a plain "error" line → the error rows
@@ -1364,7 +1419,7 @@ export default () => {
 // dropping the props → the same row fails. The encode written straight into baked/ → the
 // "nothing in baked/" rows fail.
 async function r9(work: string) {
-  console.log("R9. graphics through the runtime: React's globals, the require table, the title template, seeking, delayRender, errors, refusals before launch...");
+  console.log("R9. graphics through the runtime: React's globals, the require table, the title template, seeking, CSS and Web Animations, delayRender, errors, refusals before launch...");
   {
     const f = fresh(work, "table");
     const run = await render(f, "table", { module: TABLE_PAGE, durationInFrames: 1 });
@@ -1405,6 +1460,38 @@ async function r9(work: string) {
     check(!inOrder.error && !shuffled.error && inOrder.frames.length === 12 && shuffled.frames.length === 12 && off.length === 0 && !inOrder.frames[0].equals(inOrder.frames[11]),
       `frames rendered out of order (${order.join(",")}) are byte-identical to the same frames in order (${inOrder.error?.message ?? shuffled.error?.message ?? `frames off: ${JSON.stringify(off)}`})`);
     await leftNothing(shuffled, f, "seek-out", "out-of-order render");
+  }
+
+  // CSS and Web Animations follow the virtual clock: the same bytes in any order, the box at frame / fps.
+  const slides: [string, string, [string, number][]][] = [
+    ["a CSS keyframe animation", CSS_TSX, [["", 40]]],
+    ["element.animate()", WAAPI_TSX, [["", 40], [" at playback rate 2", 100], [" played backwards", 160]]],
+  ];
+  for (const [what, source, rows] of slides) {
+    const id = source === CSS_TSX ? "css" : "waapi";
+    const f = fresh(work, id);
+    const base = { graphic: { source }, width: SLIDE_W, height: 200, durationInFrames: 12, previewPath: undefined };
+    const inOrder = await render(f, `${id}-in`, base);
+    const order = [7, 2, 11, 0, 5, 9, 1, 10, 3, 8, 6, 4];
+    const shuffled = await render(f, `${id}-out`, { ...base, frames: order });
+    const byFrame = new Map(order.map((n, i) => [n, shuffled.frames[i]]));
+    const off = inOrder.frames.map((b, n) => (byFrame.get(n)?.equals(b) ? -1 : n)).filter((n) => n >= 0);
+    check(!inOrder.error && !shuffled.error && inOrder.frames.length === 12 && shuffled.frames.length === 12 && off.length === 0,
+      `${what}: frames rendered out of order are byte-identical to the same frames in order (${inOrder.error?.message ?? shuffled.error?.message ?? `frames off: ${JSON.stringify(off)}`})`);
+    // Frame n: the box covers x = 40n..40n+39 on its row, and 4 px to either side is empty.
+    const box = [90, 200, 30, 255];
+    for (const [how, y] of rows) {
+      const wrong = inOrder.frames.map((b, n) => {
+        const inside = same(px(b, 40 * n + 20, y, SLIDE_W), box);
+        const before = n === 0 || px(b, 40 * n - 4, y, SLIDE_W)[3] === 0;
+        const after = px(b, 40 * n + 44, y, SLIDE_W)[3] === 0;
+        return inside && before && after ? -1 : n;
+      }).filter((n) => n >= 0);
+      const edge = (b: Buffer) => { for (let x = 0; x < SLIDE_W; x++) if (px(b, x, y, SLIDE_W)[3] > 0) return x; return -1; };
+      check(inOrder.frames.length === 12 && wrong.length === 0,
+        `${what}${how}: at frame n the box's left edge is at 40n px, frame / fps into the animation (frames off: ${JSON.stringify(wrong)}; left edges ${JSON.stringify(inOrder.frames.map(edge))})`);
+    }
+    await leftNothing(shuffled, f, `${id}-out`, `${what} out of order`);
   }
 
   // delayRender: the frame is captured only after continueRender.

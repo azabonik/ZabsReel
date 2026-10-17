@@ -3,7 +3,8 @@
 // Frames: the page registers one function with zrMotion.onFrame(fn) (host.js
 // does it for a graphic; a hand-written test page does it itself). For frame
 // n the renderer main calls __zrMotionRender(n, fps), which sets the virtual
-// clock, runs fn(n), waits for two animation frames so the result is painted,
+// clock, runs fn(n), puts every CSS and Web Animation at that time (guard.js's
+// syncAnimations), waits for two animation frames so the result is painted,
 // and reports frameReady(n, cues) through the preload, with the audio cues of
 // the FrameResult fn returned (none when it returned nothing). The main
 // captures the frame only after that report. When fn throws or rejects, the
@@ -81,6 +82,7 @@
         .then(function () { return draw ? draw(n) : undefined; })
         .then(function (result) {
           if (result && Array.isArray(result.cues)) cues = result.cues;
+          clock.syncAnimations();
           return painted();
         })
         .then(
