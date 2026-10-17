@@ -223,8 +223,8 @@ export function buildPin(pkgs: FixturePkg[], zips: Partial<Record<AddonPlatform,
 
 // ---- the fixture registry -------------------------------------------------------------
 
-/** How a path answers: 500, close the socket mid-body, changed bytes, an endless body, hold the answer, or wait. */
-export type Answer = "500" | "close" | "wrong" | "big" | "hold" | { delay: number };
+/** How a path answers: 500, close the socket mid-body, changed bytes, an endless body, hold the answer, or wait (then `status` with no body, when given). */
+export type Answer = "500" | "close" | "wrong" | "big" | "hold" | { delay: number; status?: number };
 
 export interface FixtureRegistry {
   /** http://127.0.0.1:<port>: the value of AIVE_ADDON_REGISTRY. */
@@ -276,7 +276,10 @@ export function fixtureRegistry(port: number): FixtureRegistry {
         }
         const body = a === "wrong" ? Buffer.from(blob.map((b, i) => (i === blob.length >> 1 ? b ^ 1 : b))) : blob;
         const send = () => res.writeHead(200, { "content-length": body.length }).end(body);
-        if (typeof a === "object") setTimeout(send, a.delay);
+        if (typeof a === "object") {
+          const status = a.status;
+          setTimeout(status ? () => res.writeHead(status).end() : send, a.delay);
+        }
         else send();
       });
       server.on("connection", (s) => {

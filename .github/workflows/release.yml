@@ -99,6 +99,13 @@ jobs:
       - name: Smoke — network paths end to end (core process, traced; step 7 second share spelling on \\localhost)
         run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
 
+      # The add-on installer on fixtures from a loopback registry (no network):
+      # its renames, name rules and recovery on a Windows disk, before anything
+      # is packaged. Needs FFmpeg (installed above). The rows Windows can't run
+      # print "skip (win32)" (docs/TESTING.md).
+      - name: Smoke — graphics add-on installer (fixtures, loopback)
+        run: npx tsx packages/core/scripts/smoke-addon.ts
+
       # The graphics add-on as a Windows user gets it (ADDON-PLAN R2), on every
       # run, tag pushes and workflow_dispatch dry runs alike: the real
       # installer downloads the pinned packages from registry.npmjs.org and the

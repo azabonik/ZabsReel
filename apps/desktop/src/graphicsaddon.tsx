@@ -7,7 +7,8 @@
 // the add-on, the core broadcasts the add-on's state and the banner below
 // offers this dialog. The same dialog serves the desktop window and the web
 // shell. Escape, the scrim, the X and Close call onClose; an install goes on
-// in the host, and the dialog shows it again when it is opened.
+// in the host, and the dialog shows it again when it is opened, and how it
+// ended once it has.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { PRODUCT_NAME } from "@aive/core/brand";
@@ -80,6 +81,16 @@ function day(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
+/**
+ * The id of the last host job (status.last) whose end this page has shown. It
+ * outlives the dialog, so a job that ended while the dialog was closed is shown
+ * once when it opens again, and not on every later open.
+ */
+const shownJob: { id: number | null } = { id: null };
+
+const INSTALL_FAILED = "The graphics add-on couldn't be installed.";
+const REMOVE_FAILED = "The graphics add-on couldn't be removed.";
+
 export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi; connected: boolean; onClose: () => void }) {
   const [status, setStatus] = useState<GraphicsAddonStatus | null>(null);
   const [terms, setTerms] = useState<GraphicsAddonTerms | null>(null);
@@ -90,13 +101,37 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const rendering = useGraphicRendering(api, connected);
   const available = platform.graphicsAddon.available();
+  /** This dialog's own job is ending: its result is shown already, so status.last is only marked shown. */
+  const own = useRef(false);
+  /** False once the dialog is closed: a job it started that ends later is left for the next dialog to show. */
+  const mounted = useRef(true);
+  /** The error shown is a failed status request, which the next one that succeeds clears. */
+  const pollFailed = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const [s, t] = await Promise.all([platform.graphicsAddon.status(), platform.graphicsAddon.terms()]);
       setStatus(s);
       setTerms(t);
+      if (pollFailed.current) {
+        pollFailed.current = false;
+        setError(null);
+      }
+      const last = s.last;
+      if (last && last.id !== shownJob.id && mounted.current) {
+        shownJob.id = last.id;
+        // How a job ended that this dialog didn't see end (it was closed, or the page reloaded, meanwhile).
+        if (!own.current && !s.job) {
+          setDone(last.ok ? (last.kind === "install" ? "Graphics are ready." : "The graphics add-on was removed.") : null);
+          setError(last.ok ? null : last.error ?? (last.kind === "install" ? INSTALL_FAILED : REMOVE_FAILED));
+        }
+      }
     } catch (e) {
+      pollFailed.current = true;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -125,35 +160,41 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
   const install = async () => {
     if (!terms) return;
     setError(null);
+    pollFailed.current = false;
     setDone(null);
     setRunning("install");
     setProgress(null);
     try {
       const r = await platform.graphicsAddon.install(terms.sha256, setProgress);
       if (r.ok) setDone("Graphics are ready.");
-      else setError(r.error ?? "The graphics add-on couldn't be installed.");
+      else setError(r.error ?? INSTALL_FAILED);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(null);
       setProgress(null);
+      own.current = true;
       await refresh();
+      own.current = false;
     }
   };
 
   const remove = async () => {
     setError(null);
+    pollFailed.current = false;
     setDone(null);
     setRunning("remove");
     try {
       const r = await platform.graphicsAddon.remove();
       if (r.ok) setDone("The graphics add-on was removed.");
-      else setError(r.error ?? "The graphics add-on couldn't be removed.");
+      else setError(r.error ?? REMOVE_FAILED);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(null);
+      own.current = true;
       await refresh();
+      own.current = false;
     }
   };
 

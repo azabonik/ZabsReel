@@ -21,6 +21,9 @@ declare module "playwright-core" {
     url(): string;
     status(): number;
   }
+  export interface Route {
+    fulfill(response: { status?: number; contentType?: string; body?: string }): Promise<void>;
+  }
   export interface Box {
     x: number;
     y: number;
@@ -70,6 +73,7 @@ declare module "playwright-core" {
     locator(selector: string, options?: { hasText?: string | RegExp; has?: Locator }): Locator;
     getByRole(role: string, options?: RoleOptions): Locator;
     reload(): Promise<unknown>;
+    route(url: string, handler: (route: Route) => unknown, options?: { times?: number }): Promise<void>;
     mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void>; down(): Promise<void>; up(): Promise<void> };
     keyboard: { press(key: string): Promise<void>; down(key: string): Promise<void>; up(key: string): Promise<void> };
     isClosed(): boolean;

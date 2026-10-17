@@ -670,15 +670,17 @@ async function graphicsAddon(o: {
   const post = (path: string, body: unknown, headers: Record<string, string>) =>
     request(port, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
-  // MUTATION: serve /api/graphics-addon/* before the shell-key check in server.cjs → the 401 rows fail.
+  // MUTATION: serve /api/graphics-addon/* before the shell-key check in server.cjs → the 401 rows fail. Serve only
+  // POST /api/graphics-addon/cancel before it → they fail too.
   for (const [what, headers] of [["without the shell key", {}], ["with only the core token", { "x-aive-token": token }]] as const) {
     const st = await request(port, "/api/graphics-addon/status", { headers });
     const tm = await request(port, "/api/graphics-addon/terms", { headers });
     const ins = await post("/api/graphics-addon/install", { acceptedLicenseSha256: terms.sha256 }, headers);
     const rem = await post("/api/graphics-addon/remove", {}, headers);
+    const can = await post("/api/graphics-addon/cancel", {}, headers);
     await sleep(500);
-    check(`GET status and terms, POST install and remove ${what} → 401; nothing installed or fetched`,
-      [st, tm, ins, rem].every((r) => r.status === 401) && registry.hits.size === 0 && !existsSync(join(dataDir, "addons")), [st, tm, ins, rem].map((r) => r.status).join());
+    check(`GET status and terms, POST install, remove and cancel ${what} → 401; nothing installed or fetched`,
+      [st, tm, ins, rem, can].every((r) => r.status === 401) && registry.hits.size === 0 && !existsSync(join(dataDir, "addons")), [st, tm, ins, rem, can].map((r) => r.status).join());
   }
   const st = await request(port, "/api/graphics-addon/status", { headers: shellAuth });
   check("GET status with the shell key → not installed", st.status === 200 && json(st).state === "not-installed" && json(st).version === "4.0.481", st.body.slice(0, 200));
@@ -735,6 +737,17 @@ async function graphicsAddon(o: {
     check("another window's install lock: its message, and no install button",
       (await text()).includes("Another ZabsReel window is installing the graphics add-on (desktop). Wait for it to finish.") && (await button("Accept and install").count()) === 0,
       (await text()).replace(/\s+/g, " ").slice(0, 160));
+    // A status request that fails once while the dialog follows the lock: its error shows, and the next request
+    // that succeeds clears it. The page logs that 503 (a response and a console line); those are expected here.
+    // MUTATION: never clear the failed poll's error in refresh() (graphicsaddon.tsx) → this row fails.
+    const errorsBefore = errors.length;
+    await page.route("**/api/graphics-addon/status", (r) => r.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ ok: false, error: "zr-fixture: the status request failed" }) }), { times: 1 });
+    const alert = dlg.locator(".storage-error");
+    const pollError = await waitFor("poll error", async () => (await alert.innerText().catch(() => "")).includes("zr-fixture: the status request failed"), 5000);
+    const pollCleared = pollError && (await waitFor("poll error cleared", async () => (await alert.count()) === 0 && (await text()).includes("Another ZabsReel window is installing"), 5000));
+    const logged = errors.splice(errorsBefore);
+    check("a status request that fails once while the dialog follows the lock: its error, then cleared by the next one",
+      pollError && pollCleared && logged.every((e) => /503/.test(e)), `${pollError} ${pollCleared} ${JSON.stringify(logged)}`);
     rmSync(lock);
     check("…until the lock clears", await waitFor("lock cleared", async () => (await button("Accept and install").count()) === 1, 10000));
 
@@ -749,6 +762,31 @@ async function graphicsAddon(o: {
       await waitFor("cancelled", async () => (await text()).includes("The graphics add-on install was cancelled. Nothing was installed."), 10000) && state() === "not-installed"
       && JSON.stringify(readdirSync(join(dataDir, "addons"))) === "[]", (await text()).replace(/\s+/g, " ").slice(0, 200));
     registry.answers.clear();
+
+    // The dialog closed while an install runs that then fails (the zip answers 500): opened again, it shows the
+    // D3.8 message once, and not on the next open.
+    // MUTATION: drop the status.last branch from refresh() (graphicsaddon.tsx) → the reopened row fails. Show
+    // status.last on every open (drop the shownJob comparison) → the next-open row fails.
+    const failed = `${new URL(registry.url).host} answered 500 for the Chrome headless shell. Try again later.`;
+    registry.answers.set(zipPath, { delay: 3000, status: 500 });
+    await button("Accept and install").click();
+    const started = await waitFor("progress", async () => (await dlg.locator(".ga-progress").count()) === 1, 10000);
+    await closeDialog();
+    const ended = await waitFor("install ended", async () => {
+      const s = json(await request(port, "/api/graphics-addon/status", { headers: shellAuth }));
+      return s.job === null && s.last?.ok === false;
+    }, 20000);
+    registry.answers.clear();
+    await openDialog();
+    const reopened = (await text()).replace(/\s+/g, " ");
+    check("an install that fails while the dialog is closed: opened again, the dialog shows the D3.8 message",
+      started && ended && reopened.includes(failed) && (await dlg.getByRole("alert").innerText().catch(() => "")) === failed && (await button("Accept and install").count()) === 1 && state() === "not-installed",
+      reopened.slice(0, 200));
+    await closeDialog();
+    await openDialog();
+    const again = (await text()).replace(/\s+/g, " ");
+    check("…once: the next open doesn't show it again", !again.includes(failed) && (await button("Accept and install").count()) === 1, again.slice(0, 200));
+
     registry.hits.clear();
     await button("Accept and install").click();
     check("Accept and install → \"Graphics are ready.\" and ready", await waitFor("ready", async () => (await text()).includes("Graphics are ready."), 20000) && state() === "ready", state());

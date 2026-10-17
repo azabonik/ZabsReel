@@ -110,10 +110,12 @@
  *  I8. activation    — a first rename busy past the retry window keeps the old
  *                      copy; a failed second rename puts it back; win32 retries,
  *                      elsewhere not; recovery restores one ready .old-*, never
- *                      two, never a .removed-*.
+ *                      two, never a .removed-*; its rename back is retried on
+ *                      win32, and a .old-* still busy stays for the next start.
  *  I9. versions, Remove — 4.0.480 goes after activation and with Remove; a
  *                      busy Remove changes nothing; Remove of nothing creates
- *                      nothing.
+ *                      nothing; a busy 4.0.480 fails neither the install nor
+ *                      Remove and goes the next time.
  *  I10. the guard    — a renderer whose text the load-time rewrite doesn't know
  *                      is never activated.
  *  I11. messages     — 500, a closed socket, a timeout, nothing listening,
@@ -142,7 +144,9 @@
  *                      smoke-addon-real.ts --live on every run (no `if:`, no
  *                      workflow input), before electron-builder, and
  *                      docs/RELEASING.md says no v* tag before a dry run
- *                      passed it.
+ *                      passed it; the job runs this smoke too, after FFmpeg
+ *                      and before electron-builder, and docs/TESTING.md says
+ *                      which rows skip there.
  *  Z1. the zip reader — stored, deflate and empty entries, Unix execute bits;
  *                      zip64 (end record, locator, extra field), encryption,
  *                      another method, symlink, FIFO, "..", absolute, drive,
@@ -152,6 +156,13 @@
  * "nothing listens"), fixture locks, and Remotion stubbed except in C4's last
  * rows (which start no browser). FFmpeg makes C3's video.
  * Run: npx tsx packages/core/scripts/smoke-addon.ts
+ *
+ * release.yml's Windows job runs it too. There the parts that need what
+ * Windows doesn't give skip, each with a "skip (win32)" line: execute bits on
+ * disk (I1, I4, Z1; Windows keeps none, tree.ts execBit), symlinks (C1's two
+ * link rows, C7's linked path; creating one needs a privilege), and I12's
+ * linux-x64 writes of names NTFS refuses or folds. Committed text files are
+ * read with CRLF as LF there (core.autocrlf).
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -195,6 +206,14 @@ const thrown = async (fn: () => unknown): Promise<Error | null> => {
 };
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+/** Windows (release.yml's job): the rows that need execute bits, symlinks or names NTFS refuses skip there. */
+const WIN32 = process.platform === "win32";
+const skipOnWin32 = (what: string) => console.log(`  skip (win32): ${what}`);
+/** A committed text file: a Windows checkout's CRLF (core.autocrlf) is read as LF there. */
+const committed = (file: string) => {
+  const text = readFileSync(file, "utf8");
+  return WIN32 ? text.replace(/\r\n/g, "\n") : text;
+};
 const GEN = join(REPO, "scripts", "gen-graphics-lock.mjs");
 const PORT = 5030;
 const root = mkdtempSync(join(tmpdir(), "aive-addon-"));
@@ -628,6 +647,10 @@ function c1() {
     ["an absolute path", outside, false],
     ["a link out of browser/", "linked/chrome", true],
   ] as const) {
+    if (link && WIN32) {
+      skipOnWin32(`a browserExecutable that leaves browser/ (${what}): creating a symlink needs a privilege`);
+      continue;
+    }
     const d = freshData();
     const a = installFixture(d, { browserExecutable: exe });
     if (link) {
@@ -637,15 +660,18 @@ function c1() {
     check(state(d) === "broken", `a browserExecutable that leaves browser/ (${what}): broken (${state(d)})`);
   }
   // browser/ itself a link to a folder outside the add-on, the executable inside that folder.
-  const linked = freshData();
-  const la = installFixture(linked);
-  const outsideBrowser = join(root, "outside-browser");
-  const exeRel = HEADLESS_SHELL.platforms[PLATFORM].executable;
-  mkdirSync(dirname(join(outsideBrowser, exeRel)), { recursive: true });
-  writeFileSync(join(outsideBrowser, exeRel), "");
-  rmSync(join(la, "browser"), { recursive: true, force: true });
-  symlinkSync(outsideBrowser, join(la, "browser"), "dir");
-  check(existsSync(join(la, "browser", exeRel)) && state(linked) === "broken", `a browser/ that links out of the add-on folder: broken (${state(linked)})`);
+  if (WIN32) skipOnWin32("a browser/ that links out of the add-on folder: creating a symlink needs a privilege");
+  else {
+    const linked = freshData();
+    const la = installFixture(linked);
+    const outsideBrowser = join(root, "outside-browser");
+    const exeRel = HEADLESS_SHELL.platforms[PLATFORM].executable;
+    mkdirSync(dirname(join(outsideBrowser, exeRel)), { recursive: true });
+    writeFileSync(join(outsideBrowser, exeRel), "");
+    rmSync(join(la, "browser"), { recursive: true, force: true });
+    symlinkSync(outsideBrowser, join(la, "browser"), "dir");
+    check(existsSync(join(la, "browser", exeRel)) && state(linked) === "broken", `a browser/ that links out of the add-on folder: broken (${state(linked)})`);
+  }
   const arm = readGraphicsAddon(ready, { platform: "linux-arm64" });
   check(arm.state === "unsupported" && arm.dir === undefined, `another platform (linux-arm64): unsupported, nothing read (${JSON.stringify(arm)})`);
 }
@@ -976,8 +1002,9 @@ async function c7() {
     return out;
   };
   const link = join(root, "addons-link");
-  symlinkSync(join(dataDir, "addons"), link, "dir");
-  const paths = [join(graphicsAddonDir(dataDir), "x.aive"), join(dataDir, "addons", "x.aive"), join(dataDir, "addons"), join(link, "remotion", "x.aive")];
+  if (WIN32) skipOnWin32("each path through a link into the add-on folder: creating a symlink needs a privilege");
+  else symlinkSync(join(dataDir, "addons"), link, "dir");
+  const paths = [join(graphicsAddonDir(dataDir), "x.aive"), join(dataDir, "addons", "x.aive"), join(dataDir, "addons"), ...(WIN32 ? [] : [join(link, "remotion", "x.aive")])];
   for (const [m, ps] of Object.entries(RPC_PATH_PARAMS)) {
     for (const p of ps) {
       const key = p.replace("[]", "");
@@ -1138,11 +1165,16 @@ async function i1() {
   check(JSON.stringify(hitPaths()) === JSON.stringify(want) && other.length === 3 && other.every((p) => !hits.has(p)),
     `the registry got exactly this platform's ${list.count} tarballs and its zip; the other platforms' compositors never (${other.map((p) => p.split("/").pop()).join(", ")})`);
   const exe = (p: string) => (lstatSync(join(dir, p)).mode & 0o111) !== 0;
-  check(readFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "utf8") === "x\n" && readFileSync(join(dir, "node_modules/a/node_modules/b/b.js"), "utf8") === "b\n"
-    && exe(`node_modules/${ADDON_PLATFORM_LISTS[PLATFORM!].compositor}`) && !exe("node_modules/a/index.js") && exe(`browser/${CFT_EXE(PLATFORM!)}`) && !exe(`browser/chrome-headless-shell-${PLATFORM}/resources.pak`)
-    && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/locales/en-US.pak`), "utf8") === "x".repeat(5000) && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/resources.pak`), "utf8") === "stored bytes",
-    "files, nested packages and the zip's stored and deflated entries hold their bytes; execute bits as the archives give them");
-  check(exe("node_modules/@remotion/bundler/bin/cli.js"), "a file the package's `bin` names is executable (npm's bin-links does this without a script)");
+  const bytes = readFileSync(join(dir, "node_modules/a/lib/deep/x.js"), "utf8") === "x\n" && readFileSync(join(dir, "node_modules/a/node_modules/b/b.js"), "utf8") === "b\n"
+    && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/locales/en-US.pak`), "utf8") === "x".repeat(5000) && readFileSync(join(dir, `browser/chrome-headless-shell-${PLATFORM}/resources.pak`), "utf8") === "stored bytes";
+  if (WIN32) {
+    check(bytes, "files, nested packages and the zip's stored and deflated entries hold their bytes");
+    skipOnWin32("execute bits as the archives give them, and a `bin` target made executable: Windows keeps none");
+  } else {
+    check(bytes && exe(`node_modules/${ADDON_PLATFORM_LISTS[PLATFORM!].compositor}`) && !exe("node_modules/a/index.js") && exe(`browser/${CFT_EXE(PLATFORM!)}`) && !exe(`browser/chrome-headless-shell-${PLATFORM}/resources.pak`),
+      "files, nested packages and the zip's stored and deflated entries hold their bytes; execute bits as the archives give them");
+    check(exe("node_modules/@remotion/bundler/bin/cli.js"), "a file the package's `bin` names is executable (npm's bin-links does this without a script)");
+  }
   check(!(RAN in globalThis) && !existsSync(POSTINSTALL), "no add-on code ran in the installer's process, and no install script ran");
   const outside = fsCalls.filter((c) => c.split(" ").slice(1).some((p) => !p.startsWith(join(dataDir, "addons"))));
   check(outside.length === 0 && JSON.stringify(readdirSync(dataDir)) === JSON.stringify(["addons"]) && clean(dataDir),
@@ -1162,7 +1194,8 @@ async function i2() {
   check(err?.reason === "license" && err.message === "Accept Remotion's license in the graphics add-on dialog first. Nothing was installed." && hits.size === 0 && !existsSync(join(dataDir, "addons")),
     `another licence hash: refused before anything is fetched or created (${err?.message})`);
   const t = graphicsAddonTerms(PLATFORM!);
-  const file = readFileSync(join(REPO, "packages", "core", "licenses", "remotion-4.0.481-LICENSE.md"));
+  const licenseFile = join(REPO, "packages", "core", "licenses", "remotion-4.0.481-LICENSE.md");
+  const file = WIN32 ? Buffer.from(committed(licenseFile)) : readFileSync(licenseFile);
   check(sha256hex(file) === "bd65083b940f61904f6ef298aade918a7cad72a3e35bc406e36fab365844b673" && t.license === file.toString("utf8") && t.sha256 === sha256hex(t.notice + t.license)
     && /Remotion is free for individuals, non-profit organizations and companies of up to three people\. Larger companies need their own Remotion license\./.test(t.notice)
     && /is not covered by ZabsReel's GPL license/.test(t.notice) && new RegExp(`downloads about ${Math.round(ADDON_PLATFORM_LISTS[PLATFORM!].bytes! / 1e6)} MB of packages from registry\\.npmjs\\.org and the Chrome headless shell \\(about ${Math.round(HEADLESS_SHELL.platforms[PLATFORM!].size / 1e6)} MB\\) from Google`).test(t.notice),
@@ -1231,8 +1264,9 @@ async function i4() {
     { name: "top-level-file", data: "skipped as npm does" },
   ]), ok, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" });
   check(JSON.stringify(files.map((f) => f.path).sort()) === JSON.stringify(["index.js", `${"n".repeat(120)}.txt`, "pax/long-name.txt"].sort()) && readFileSync(join(ok, "pax", "long-name.txt"), "utf8") === "pax"
-    && (lstatSync(join(ok, "index.js")).mode & 0o111) !== 0 && files.find((f) => f.path === "index.js")!.sha256 === sha256hex("1"),
+    && (WIN32 || (lstatSync(join(ok, "index.js")).mode & 0o111) !== 0) && files.find((f) => f.path === "index.js")!.sha256 === sha256hex("1"),
     `a pax path and a GNU long name are read, package/ is stripped, an entry outside it skipped (${files.map((f) => f.path.slice(0, 20)).join(", ")})`);
+  if (WIN32) skipOnWin32("a 0755 tar entry is executable on disk: Windows keeps no execute bits");
   // The same refusal through a full install: the pinned bytes are the bad tarball itself.
   const dataDir = freshData();
   const pkgs = basePkgs(POSTINSTALL);
@@ -1400,7 +1434,9 @@ async function i7() {
 
 // MUTATION: rename .old-* back only on success (drop the rollback in activate) → the second-rename row finds no
 // live copy. Retry on every platform's EBUSY without the window (no `until`) → the first-rename row hangs (timeout).
-// Restore a ready .removed-* in recover() → the .removed row is restored.
+// Restore a ready .removed-* in recover() → the .removed row is restored. Delete the .old-* recover() could not
+// put back (drop `n !== kept`) → the busy-recovery row finds it gone. Put it back with a plain rename (no
+// renameRetry) → the retried-recovery row is not ready.
 async function i8() {
   console.log("I8. activation and recovery...");
   const f = buildPin(basePkgs(POSTINSTALL));
@@ -1451,6 +1487,35 @@ async function i8() {
     renameSync(live(d), join(d, "addons", ".old-a1"));
     check((await T.recover(d, { pin: f.pin })) && readGraphicsAddon(d, { pin: f.pin }).state === "ready" && treeHash(live(d)) === hash && clean(d), "live missing, one ready .old-*: recoverGraphicsAddon puts it back");
   }
+  // The rename back busy past the retry window (win32: antivirus, the indexer): that .old-* is the only working
+  // copy, so it stays for the next start; the other leftovers go.
+  {
+    const { d, hash } = await installed();
+    const old = join(d, "addons", ".old-a1");
+    renameSync(live(d), old);
+    mkdirSync(join(d, "addons", ".old-b2"));
+    mkdirSync(join(d, "addons", ".staging-s1"));
+    fault = (name, p) => (name === "rename" && p === old ? errno("EBUSY") : null);
+    const t0 = Date.now();
+    const first = await T.recover(d, { pin: f.pin, ...win });
+    fault = null;
+    check(first && Date.now() - t0 >= 300 && readGraphicsAddon(d, { pin: f.pin }).state === "not-installed" && existsSync(old) && treeHash(old) === hash
+      && JSON.stringify(addonsListing(d)) === JSON.stringify([".old-a1", "remotion"]),
+      `live missing, the one ready .old-* busy past the retry window (EBUSY): it stays whole, not installed; the other .old-* and the staging go (${JSON.stringify(addonsListing(d))})`);
+    const again = await T.recover(d, { pin: f.pin });
+    check(again && readGraphicsAddon(d, { pin: f.pin }).state === "ready" && treeHash(live(d)) === hash && clean(d), "…and the next recovery, the folder free, puts it back: ready");
+  }
+  {
+    const { d, hash } = await installed();
+    const old = join(d, "addons", ".old-a1");
+    renameSync(live(d), old);
+    let busy = 2;
+    fault = (name, p) => (name === "rename" && p === old && busy-- > 0 ? errno("EPERM") : null);
+    const ok = await T.recover(d, { pin: f.pin, windowsRenames: true });
+    fault = null;
+    check(ok && busy < 0 && readGraphicsAddon(d, { pin: f.pin }).state === "ready" && treeHash(live(d)) === hash && clean(d),
+      "on win32 recovery retries the rename back (EPERM twice, then free): the .old-* is live again");
+  }
   {
     const { d } = await installed();
     cpSync(live(d), join(d, "addons", ".old-a1"), { recursive: true });
@@ -1467,7 +1532,8 @@ async function i8() {
 }
 
 // MUTATION: skip dropOtherVersions after activation → the 4.0.480 row keeps it. Remove only the live
-// folder → Remove's 4.0.480 row keeps it.
+// folder → Remove's 4.0.480 row keeps it. Rethrow in dropOtherVersions' catch (no `continue`) → the busy
+// 4.0.480 rows fail the install and Remove.
 async function i9() {
   console.log("I9. other versions, and Remove...");
   const f = buildPin(basePkgs(POSTINSTALL));
@@ -1492,6 +1558,29 @@ async function i9() {
   const err = await thrown(() => T.remove(busy, "web", { windowsRenames: true, renameWindowMs: 200 }));
   fault = null;
   check(err instanceof GraphicsAddonInstallError && err.reason === "in-use" && manifestOf(busy).installedAt === at && clean(busy), `Remove whose rename stays busy: "${err?.message}"; nothing changed`);
+  // Another version's folder held past the retry window (win32: a render, antivirus) is left for later: the
+  // install that just activated is still ready, Remove still removes this version, and a later run deletes it.
+  const held = freshData();
+  const v480 = join(held, "addons", "remotion", "4.0.480");
+  const win = { windowsRenames: true, renameWindowMs: 200 };
+  const hold = (name: string, p: string) => (name === "rename" && p === v480 ? errno("EBUSY") : null);
+  plantOld(held);
+  fault = hold;
+  const kept = await fixtureInstall(held, f, win);
+  fault = null;
+  check(kept.got?.state === "ready" && existsSync(join(v480, "addon.json")) && clean(held),
+    `a 4.0.480 folder busy past the retry window after activation: the install is ready, 4.0.480 stays for later (${kept.err?.message ?? kept.got?.state})`);
+  const later = await fixtureInstall(held, f);
+  check(later.got?.state === "ready" && JSON.stringify(readdirSync(join(held, "addons", "remotion"))) === JSON.stringify([ADDON_REMOTION_VERSION]) && clean(held),
+    `…and the next install, the folder free, deletes it (${JSON.stringify(readdirSync(join(held, "addons", "remotion")))})`);
+  plantOld(held);
+  fault = hold;
+  const heldRemove = await thrown(() => T.remove(held, "web", win));
+  fault = null;
+  check(heldRemove === null && !existsSync(graphicsAddonDir(held)) && existsSync(join(v480, "addon.json")) && clean(held),
+    `Remove with 4.0.480 busy: no error, this version removed, 4.0.480 left for later (${heldRemove?.message ?? JSON.stringify(readdirSync(join(held, "addons", "remotion")))})`);
+  await T.remove(held, "web", {});
+  check(readdirSync(join(held, "addons", "remotion")).length === 0 && clean(held), "…and the next Remove, the folder free, deletes it");
   const none = freshData();
   await T.remove(none, "web", {});
   check(!existsSync(join(none, "addons")), "Remove with nothing installed creates nothing");
@@ -1588,17 +1677,18 @@ async function i11() {
 async function i12() {
   console.log("I12. names Windows and macOS can't hold...");
   const tarWith = (name: string) => makeTar([{ name: `package/${name}`, data: "x" }]);
+  if (WIN32) skipOnWin32("each name below written for linux-x64: NTFS refuses or folds these names");
   const winNames = ["CON", "aux.js", "Com1.txt", "lpt9", "nul.tar.gz", "dot.", "space ", "lt<.js", 'q".js', "pipe|.js", "ask?.js", "star*.js", "ctl\u0001.js", "dir./x.js"];
   for (const n of winNames) {
     const e = await thrown(() => extractTarball(tarWith(n), join(root, "i12", `w-${createHash("md5").update(n).digest("hex")}`), { platform: "win32-x64", names: new NameSet("win32-x64"), prefix: "node_modules/x" }));
-    const l = await thrown(() => extractTarball(tarWith(n), join(root, "i12", `l-${createHash("md5").update(n).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
+    const l = WIN32 ? null : await thrown(() => extractTarball(tarWith(n), join(root, "i12", `l-${createHash("md5").update(n).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
     check(e instanceof ArchiveRefusal && /device name|ends in a dot or a space|a character Windows refuses/.test(e.message) && l === null, `${JSON.stringify(n)}: refused for win32-x64 (${e?.message.slice(0, 80)}), written for linux-x64`);
   }
   const pairs: [string, string, AddonPlatform][] = [["README.md", "readme.md", "win32-x64"], ["Lib/a.js", "lib/b.js", "win32-x64"], ["caf\u00e9.txt", "cafe\u0301.txt", "darwin-x64"], ["A.js", "a.js", "darwin-arm64"]];
   for (const [x, y, p] of pairs) {
     const tar = makeTar([{ name: `package/${x}`, data: "1" }, { name: `package/${y}`, data: "2" }]);
     const e = await thrown(() => extractTarball(tar, join(root, "i12", `c-${p}-${createHash("md5").update(x + y).digest("hex")}`), { platform: p, names: new NameSet(p), prefix: "node_modules/x" }));
-    const l = await thrown(() => extractTarball(tar, join(root, "i12", `cl-${createHash("md5").update(x + y).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
+    const l = WIN32 ? null : await thrown(() => extractTarball(tar, join(root, "i12", `cl-${createHash("md5").update(x + y).digest("hex")}`), { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "node_modules/x" }));
     check(e instanceof ArchiveRefusal && /which are the same name on/.test(e.message) && l === null, `${JSON.stringify(x)} and ${JSON.stringify(y)}: refused for ${p} (${e?.message.slice(0, 90)}), both written for linux-x64`);
   }
   const zip = makeZip([{ name: "x/CON.txt", data: "x" }]);
@@ -1717,7 +1807,7 @@ function i14() {
 
 function d1() {
   console.log("D1. the add-on's docs and release step...");
-  const testing = readFileSync(join(REPO, "docs", "TESTING.md"), "utf8");
+  const testing = committed(join(REPO, "docs", "TESTING.md"));
   const vars = testing.slice(testing.indexOf("### The graphics add-on in a source checkout"), testing.indexOf("### The desktop app in Electron"));
   // MUTATION: drop the AIVE_ADDON_TEST_PIN row from docs/TESTING.md → this row fails. Drop the addonInstallerForTests sentence → it fails.
   check(["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY", "AIVE_ADDON_TEST_PIN"].every((v) => vars.includes(`| \`${v}=`))
@@ -1733,7 +1823,18 @@ function d1() {
   check(!!live && !/\n\s+(if|continue-on-error):/.test(live) && !/workflow_dispatch:\s*\n\s+inputs:/.test(release)
     && at(/smoke-addon-real\.ts --live/) < at(/npm run dist --workspace zabsreel-desktop/) && at(/smoke-addon-real\.ts --live/) > at(/npm run build\b/),
     "release.yml's Windows job runs smoke-addon-real.ts --live on every run (no if:, no continue-on-error, no workflow input), after the build and before electron-builder");
-  const releasing = readFileSync(join(REPO, "docs", "RELEASING.md"), "utf8");
+  // This smoke itself on every Windows run too, after FFmpeg is installed (C3) and before electron-builder.
+  // MUTATION: give the smoke-addon.ts step `if: startsWith(github.ref, 'refs/tags/')` → this row fails.
+  const ownStep = /^\s+run: npx tsx packages\/core\/scripts\/smoke-addon\.ts\s*$/m;
+  const own = steps.find((x) => ownStep.test(x));
+  check(!!own && !/\n\s+(if|continue-on-error):/.test(own) && at(ownStep) > at(/choco install ffmpeg/) && at(ownStep) < at(/npm run dist --workspace zabsreel-desktop/),
+    "release.yml's Windows job runs this smoke (smoke-addon.ts) on every run (no if:, no continue-on-error), after FFmpeg is installed and before electron-builder");
+  // MUTATION: drop the Windows sentence above the smoke-addon.ts command in docs/TESTING.md → this row fails.
+  const block = testing.slice(testing.indexOf("# The graphics add-on (no network"), testing.indexOf("npx tsx packages/core/scripts/smoke-addon.ts"));
+  check(/# release\.yml's Windows job runs it too, before packaging\. There the parts\n# that need what Windows doesn't give print "skip \(win32\)": execute bits on/.test(block)
+    && ["(I1, I4, Z1)", "(C1's two link rows, C7's linked path)", "I12's linux-x64 writes"].every((x) => block.replace(/\n# /g, " ").includes(x)),
+    "docs/TESTING.md says release.yml's Windows job runs this smoke, and which rows skip there");
+  const releasing = committed(join(REPO, "docs", "RELEASING.md"));
   check(releasing.includes("**No `v*` tag until a `workflow_dispatch` dry run of the Windows job has\npassed**, this step included") && releasing.includes("installs the add-on by hand"),
     "docs/RELEASING.md: no v* tag until a dry run of the Windows job passed the live step; the by-hand fallback");
 }
@@ -1755,9 +1856,14 @@ async function z1() {
   const dest = join(root, "z1-ok");
   const files = await extractZip(ok, dest, { platform: "linux-x64", names: new NameSet("linux-x64"), prefix: "browser" });
   const mode = (p: string) => lstatSync(join(dest, p)).mode & 0o777;
+  // Windows keeps no execute bits: the reader records none there (tree.ts execBit).
+  const execs = WIN32 ? files.every((x) => !x.exec)
+    : (mode("d/deflated.bin") & 0o111) !== 0 && (mode("d/stored.txt") & 0o111) === 0 && (mode("dos.txt") & 0o111) === 0 && files.length === 4 && files.find((x) => x.path === "d/deflated.bin")!.exec;
   check(readFileSync(join(dest, "d/stored.txt"), "utf8") === "stored" && readFileSync(join(dest, "d/deflated.bin"), "utf8") === "y".repeat(100_000) && readFileSync(join(dest, "d/empty.txt"), "utf8") === ""
-    && (mode("d/deflated.bin") & 0o111) !== 0 && (mode("d/stored.txt") & 0o111) === 0 && (mode("dos.txt") & 0o111) === 0 && files.length === 4 && files.find((x) => x.path === "d/deflated.bin")!.exec,
-    `stored, deflated and empty entries hold their bytes; a Unix 0755 entry is executable, a 0644 or DOS one not (${files.map((x) => x.path).join(", ")})`);
+    && files.length === 4 && execs,
+    WIN32 ? `stored, deflated and empty entries hold their bytes; no entry is recorded executable (${files.map((x) => x.path).join(", ")})`
+      : `stored, deflated and empty entries hold their bytes; a Unix 0755 entry is executable, a 0644 or DOS one not (${files.map((x) => x.path).join(", ")})`);
+  if (WIN32) skipOnWin32("a Unix 0755 zip entry is executable on disk: Windows keeps no execute bits");
   const cases: [string, Buffer, RegExp][] = [
     ["a zip64 end record (count 0xffff)", (() => { const z = makeZip([{ name: "a.txt", data: "a" }]); z.writeUInt16LE(0xffff, z.length - 12); z.writeUInt16LE(0xffff, z.length - 14); return z; })(), /a zip64 archive/],
     ["a zip64 locator", makeZip([{ name: "a.txt", data: "a" }], { zip64: true }), /a zip64 archive/],
@@ -1822,7 +1928,8 @@ async function main() {
     d1();
     await z1();
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    // Windows may hold a file a moment after its last handle closed (antivirus): retry.
+    rmSync(root, { recursive: true, force: true, maxRetries: WIN32 ? 5 : 0 });
   }
   console.log(failures === 0 ? "\nALL ADD-ON CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

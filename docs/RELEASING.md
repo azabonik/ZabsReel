@@ -79,16 +79,20 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
 4. The network-path gate on Windows (below): `smoke-unc.ts`,
    `smoke-unc-e2e.ts` and `check-io-imports.mjs`. A failure stops the job
    before anything is packaged.
-5. The live add-on check: `npx tsx packages/core/scripts/smoke-addon-real.ts --live`
+5. The add-on installer on fixtures, `npx tsx packages/core/scripts/smoke-addon.ts`
+   (a loopback registry, no network): the installer's renames, name rules and
+   recovery on a Windows disk. The rows Windows can't run print
+   `skip (win32)` (docs/TESTING.md).
+6. The live add-on check: `npx tsx packages/core/scripts/smoke-addon-real.ts --live`
    installs the graphics add-on from `registry.npmjs.org` and Google and renders
    one graphic with it (below).
-6. `npm run dist -- --publish never` — electron-builder packs the app, runs the
+7. `npm run dist -- --publish never` — electron-builder packs the app, runs the
    packaging gate on it (the `afterPack` hook, below), and produces:
    - `ZabsReel-<ver>.exe` — the installer
    - `ZabsReel-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
-7. Attaches **all** of those to a **published** GitHub Release.
+8. Attaches **all** of those to a **published** GitHub Release.
 
 > All three of `.exe`, `.exe.blockmap`, and `latest.yml` must be on the Release,
 > or auto-update breaks. The workflow globs them explicitly.

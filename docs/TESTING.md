@@ -211,7 +211,11 @@ ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts
 # AIVE_REMOTION_ADDON only in a source checkout, agent tools kept out of
 # <dataDir>/addons; the installer the UI hosts run: hashes before extraction,
 # the tar and zip readers, the install lock, cancel, activation and recovery,
-# reuse on update. Also the add-on's docs and release.yml's live step (D rows)
+# reuse on update. Also the add-on's docs and release.yml's live step (D rows).
+# release.yml's Windows job runs it too, before packaging. There the parts
+# that need what Windows doesn't give print "skip (win32)": execute bits on
+# disk (I1, I4, Z1), symlinks (C1's two link rows, C7's linked path) and
+# I12's linux-x64 writes of names NTFS refuses or folds
 npx tsx packages/core/scripts/smoke-addon.ts
 
 # The pin is in sync with package-lock.json, every platform's download size is

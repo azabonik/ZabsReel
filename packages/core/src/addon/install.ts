@@ -235,10 +235,12 @@ const inUse = (err: unknown) => (RETRIED.has(code(err) ?? "") ? fail("in-use", I
 
 /**
  * D3.1 step 3: with the live folder missing and exactly one ready `.old-*`
- * (power lost between the activation renames), put it back; then delete
- * every `.staging-*`, `.old-*` and `.removed-*`.
+ * (power lost between the activation renames), put it back, retried on win32
+ * as activation's renames are; then delete every `.staging-*`, `.old-*` and
+ * `.removed-*`. A `.old-*` that still can't be put back is the only working
+ * copy: it stays for the next start to try again.
  */
-async function recover(addons: string, platform: AddonPlatform | null, pin: AddonPin): Promise<void> {
+async function recover(addons: string, platform: AddonPlatform | null, pin: AddonPin, s: AddonSeams): Promise<void> {
   let names: string[];
   try {
     names = await readdir(addons);
@@ -246,14 +248,19 @@ async function recover(addons: string, platform: AddonPlatform | null, pin: Addo
     return;
   }
   const live = join(addons, "remotion", VERSION);
+  let kept: string | null = null;
   if (platform && !(await exists(live))) {
     const ready = names.filter((n) => n.startsWith(".old-") && addonStateAt(join(addons, n), platform, pin).state === "ready");
     if (ready.length === 1) {
       await mkdir(dirname(live), { recursive: true });
-      await rename(join(addons, ready[0]), live).catch(() => {});
+      try {
+        await renameRetry(join(addons, ready[0]), live, s);
+      } catch {
+        kept = ready[0];
+      }
     }
   }
-  for (const n of names) if (/^\.(?:staging|old|removed)-/.test(n)) await rm(join(addons, n), { recursive: true, force: true }).catch(() => {});
+  for (const n of names) if (n !== kept && /^\.(?:staging|old|removed)-/.test(n)) await rm(join(addons, n), { recursive: true, force: true }).catch(() => {});
 }
 
 /** D3.1 step 9 (and Remove): every `remotion/<v>` but this build's is renamed to `.removed-*` and deleted; a failure leaves it for later. */
@@ -616,7 +623,7 @@ async function install(dataDir: string, opts: InstallOptions, s: AddonSeams): Pr
   let staging: string | null = null;
   try {
     opts.signal?.throwIfAborted();
-    await recover(addons, platform, pin);
+    await recover(addons, platform, pin, s);
     staging = join(addons, `.staging-${random()}`);
     await mkdir(staging);
     let done = 0;
@@ -674,7 +681,7 @@ async function recoverAddon(dataDir: string, s: AddonSeams): Promise<boolean> {
     throw err;
   }
   try {
-    await recover(addons, addonPlatform(s.platform), s.pin ?? ADDON_PIN);
+    await recover(addons, addonPlatform(s.platform), s.pin ?? ADDON_PIN, s);
   } finally {
     await releaseLock(lock);
   }
