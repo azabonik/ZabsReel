@@ -3,14 +3,16 @@
 // Frames: the page registers one function with zrMotion.onFrame(fn) (host.js
 // does it for a graphic; a hand-written test page does it itself). For frame
 // n the renderer main calls __zrMotionRender(n, fps), which sets the virtual
-// clock, runs fn(n), puts every CSS and Web Animation on the document
-// timeline at that time (guard.js's syncAnimations), waits for two animation
-// frames so the result is painted, and reports frameReady(n, cues) through
-// the preload, with the audio cues of the FrameResult fn returned (none when
-// it returned nothing). The main captures the frame only after that report.
-// When fn throws or rejects, the frame is not reported ready:
-// frameFailed(n, code, message) carries the error's code ("" when it has
-// none) and message, and the render fails.
+// clock, runs fn(n), puts every CSS and Web Animation on a DocumentTimeline
+// at that time (guard.js's syncAnimations), waits for two animation frames so
+// the result is painted, syncing again in the second one's callbacks for
+// animations the graphic started in its own rAF callbacks, and reports
+// frameReady(n, cues) through the preload, with the audio cues of the
+// FrameResult fn returned (none when it returned nothing). The main
+// captures the frame only after that report. When fn throws or rejects, or
+// syncAnimations throws (an endless animation played backwards), the
+// frame is not reported ready: frameFailed(n, code, message) carries the
+// error's code ("" when it has none) and message, and the render fails.
 //
 // Modules: zrMotion.require(moduleObject) gives the graphic its require. It
 // knows react (window.React), react-dom (window.ReactDOM), react/jsx-runtime
@@ -65,9 +67,19 @@
     }),
   });
 
+  // Two animation frames, then the animations started since the first sync go to the frame's time too.
   function painted() {
-    return new Promise(function (resolve) {
-      requestAnimationFrame(function () { requestAnimationFrame(function () { resolve(); }); });
+    return new Promise(function (resolve, reject) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          try {
+            clock.syncAnimations();
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        });
+      });
     });
   }
 
@@ -83,6 +95,7 @@
         .then(function () { return draw ? draw(n) : undefined; })
         .then(function (result) {
           if (result && Array.isArray(result.cues)) cues = result.cues;
+          // At once, while every animation the draw started is still current.
           clock.syncAnimations();
           return painted();
         })

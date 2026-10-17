@@ -10,16 +10,19 @@
 //   inherits apply (slice 1 deviation; smoke-renderer.ts R3 tries them);
 // - gives Date.now, new Date(), performance.now, requestAnimationFrame's
 //   timestamp and document.timeline.currentTime the render's virtual time
-//   (frame / fps), set by loader.js for each frame;
+//   (frame / fps), set by loader.js for each frame; a DocumentTimeline the
+//   graphic makes reads that time less its originTime;
 // - puts CSS animations and transitions and Web Animations on that time:
-//   loader.js calls syncAnimations() after the frame is drawn and before it is
-//   painted, which pauses every animation on the document timeline and sets
-//   its currentTime as if it had played from the timeline's start (time 0) at
-//   its playback rate. So frame n shows the same thing whichever frames came
-//   before it (a transition still starts from the previous frame's style).
-//   Animations on another timeline (a scroll() or view() one) are left alone:
-//   their progress does not depend on time, and their currentTime cannot be
-//   set in milliseconds.
+//   loader.js calls syncAnimations() once the frame is drawn and again in the
+//   second animation frame's callbacks (for animations the graphic starts in
+//   its own rAF callbacks), before capture. It pauses every animation on a
+//   DocumentTimeline (document.timeline or one the graphic made) and sets its
+//   currentTime as if it had played from time 0 at its playback rate. So
+//   frame n shows the same thing whichever frames came before it (a
+//   transition still starts from the previous frame's style). Animations with
+//   no timeline or on a progress-based one (scroll() or view()) are left
+//   alone: their progress does not depend on time, and their currentTime
+//   cannot be set in milliseconds.
 (function () {
   "use strict";
   var g = window;
@@ -50,14 +53,23 @@
   g.requestAnimationFrame = function (cb) {
     return raf(function () { cb(now); });
   };
-  Object.defineProperty(document.timeline, "currentTime", { get: function () { return now; } });
+  // Any DocumentTimeline: its real time less document.timeline's real time is
+  // minus its originTime (0 for document.timeline).
+  var DocTimeline = g.DocumentTimeline;
+  var realTime = Object.getOwnPropertyDescriptor(AnimationTimeline.prototype, "currentTime").get;
+  var docTimeline = document.timeline;
+  Object.defineProperty(DocTimeline.prototype, "currentTime", {
+    get: function () {
+      var t = realTime.call(this);
+      return t === null ? null : now + (t - realTime.call(docTimeline));
+    },
+  });
   var getAnimations = Document.prototype.getAnimations;
-  var timeline = document.timeline;
   function syncAnimations() {
     var all = getAnimations.call(document);
     for (var i = 0; i < all.length; i++) {
       var a = all[i];
-      if (a.timeline !== timeline) continue;
+      if (!(a.timeline instanceof DocTimeline)) continue;
       a.pause();
       // Setting the time completes the pause at once, and with it a pending playback rate
       // (reverse(), updatePlaybackRate()), so playbackRate reads the rate it plays at.
