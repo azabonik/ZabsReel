@@ -793,7 +793,9 @@ async function graphicsAddon(o: {
     check("…fetching exactly the platform's tarballs and its browser zip", JSON.stringify(registry.hitPaths()) === JSON.stringify(wanted), JSON.stringify(registry.hitPaths()));
     const manifest = JSON.parse(readFileSync(join(graphicsAddonDir(dataDir), "addon.json"), "utf8"));
     check("addon.json: via web, the accepted terms' hash", manifest.via === "web" && manifest.licenseSha256 === terms.sha256, `${manifest.via}`);
-    check("ready: the version, Remove and Reinstall", (await button("Remove").count()) === 1 && (await button("Reinstall").count()) === 1 && (await text()).includes(`Remotion ${manifest.remotion} is installed`));
+    // The ready view comes from the status refresh after "Graphics are ready.", a moment later.
+    const readyView = async () => (await button("Remove").count()) === 1 && (await button("Reinstall").count()) === 1 && (await text()).includes(`Remotion ${manifest.remotion} is installed`);
+    check("ready: the version, Remove and Reinstall", await waitFor("the ready view", readyView, 10000));
 
     // A graphic renders (a fixture job of type "graphic" on the page's own socket).
     // MUTATION: drop `blocked` from the Reinstall button in graphicsaddon.tsx → the disabled row fails.

@@ -1196,8 +1196,9 @@ async function graphicsAddon(pw: PW, work: string) {
     check(JSON.stringify(registry.hitPaths()) === JSON.stringify(wanted) && urls.length === wanted.length && urls.every((u) => u.startsWith(`${registry.url}/`)),
       `exactly the platform's ${wanted.length - 1} tarballs and its browser zip, all through main's add-on session from the loopback registry (${urls.length} requests)`);
     check(!(await app.evaluate(() => "__zrAddonRan" in globalThis)) && !existsSync(join(work, "addon-postinstall-ran")), "no add-on code or install script ran in main");
-    check((await button("Remove").count()) === 1 && (await button("Reinstall").count()) === 1 && (await dlg.innerText()).includes(`Remotion ${manifest.remotion} is installed`),
-      "ready: the version, Remove and Reinstall");
+    // The ready view comes from the status refresh after "Graphics are ready.", a moment later.
+    const readyView = async () => (await button("Remove").count()) === 1 && (await button("Reinstall").count()) === 1 && (await dlg.innerText()).includes(`Remotion ${manifest.remotion} is installed`);
+    check(await waitFor("the ready view", readyView, 10000), "ready: the version, Remove and Reinstall");
     await closeDialog();
 
     // A graphic renders (a fixture job of type "graphic" on the app's own socket).
