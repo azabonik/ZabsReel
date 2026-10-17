@@ -169,7 +169,7 @@ The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper
 Motion graphics render with [Remotion](https://www.remotion.dev) 4.0.481 and a Chrome headless shell. ZabsReel does not include either: you install them as the **graphics add-on**, from inside ZabsReel.
 
 1. Open **Help → Graphics add-on…** (in the desktop app, or in the browser with `npm run web`).
-2. Read the notice and Remotion's license, then click **Accept and install**. ZabsReel downloads the Remotion packages from `registry.npmjs.org` (about 55 MB on Windows, 83 MB on Linux) and the Chrome for Testing headless shell from Google (`storage.googleapis.com`, about 120 MB). The dialog shows the sizes for your computer. Each file must match the hash this version of ZabsReel pins, or nothing is installed.
+2. Read the notice and Remotion's license, then click **Accept and install**. ZabsReel downloads the Remotion packages from `registry.npmjs.org` (about 55 MB on Windows, 83 MB on Linux) and the Chrome for Testing headless shell from Google (`storage.googleapis.com`, about 100 to 120 MB). The dialog shows the sizes for your computer. Each file must match the hash this version of ZabsReel pins, or nothing is installed.
 3. When the dialog says "Graphics are ready.", graphics work. The add-on is in ZabsReel's data folder (`addons/remotion/4.0.481`).
 
 Only you can install the add-on: the AI can't, and no tool can. When the AI asks for a graphic and the add-on is missing, the window shows a banner with **Set up…**, which opens the same dialog. The dialog also has **Remove** and **Reinstall**, and **Update** after a ZabsReel update that moves the pin (an update downloads only the packages that changed). These wait while a graphic renders.

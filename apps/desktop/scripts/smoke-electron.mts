@@ -199,8 +199,18 @@ async function launch(pw: PW, cwd: string, dataDir: string, extraEnv: Record<str
     executablePath: packaged || electronBinary(),
     // SwiftShader gives the renderer WebGL2 without a GPU, as on a plain VM.
     // A profile under the test folder: the user's own (~/.config/ZabsReel…,
-    // with its recent projects) is neither read nor changed.
-    args: [...(packaged ? [] : [APP_DIR]), `--user-data-dir=${join(cwd, "..", "profile")}`, "--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    // with its recent projects) is neither read nor changed. Muted: Playwright
+    // mutes only headless Chromium, never Electron, and the audio rows read the
+    // WebAudio graph, not the speakers. AIVE_SMOKE_AUDIO=1 to hear it.
+    args: [
+      ...(packaged ? [] : [APP_DIR]),
+      `--user-data-dir=${join(cwd, "..", "profile")}`,
+      "--no-sandbox",
+      "--use-gl=angle",
+      "--use-angle=swiftshader",
+      "--enable-unsafe-swiftshader",
+      ...(process.env.AIVE_SMOKE_AUDIO === "1" ? [] : ["--mute-audio"]),
+    ],
     cwd,
     env,
     timeout: 60000,

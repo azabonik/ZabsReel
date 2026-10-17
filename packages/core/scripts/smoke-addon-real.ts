@@ -58,7 +58,7 @@ import { createReadStream, existsSync, mkdtempSync, readdirSync, readFileSync, r
 import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { addonInstallerForTests, installGraphicsAddon, type InstallProgress } from "../src/addon/install.js";
@@ -90,9 +90,15 @@ function ffmpeg81(): string | null {
 }
 const REGISTRY_PORT = 5032;
 const CORE_PORT = 5033;
-/** The scratch folder's parent: never inside the checkout (another drive on Windows gives an absolute relative path). */
+/**
+ * The scratch folder's parent: never inside the checkout. Another drive on
+ * Windows gives an absolute relative path; a child folder named "..x" is
+ * still inside.
+ */
 const TEMP = (LIVE && process.env.RUNNER_TEMP) || tmpdir();
-if (!relative(REPO, TEMP).startsWith("..") && !isAbsolute(relative(REPO, TEMP))) throw new Error(`${TEMP} is inside the checkout: set RUNNER_TEMP (or TMPDIR) to a folder outside it`);
+const fromRepo = relative(REPO, TEMP);
+const outsideRepo = isAbsolute(fromRepo) || fromRepo === ".." || fromRepo.startsWith(`..${sep}`);
+if (!outsideRepo) throw new Error(`${TEMP} is inside the checkout: set RUNNER_TEMP (or TMPDIR) to a folder outside it`);
 const root = mkdtempSync(join(TEMP, "aive-addon-real-"));
 for (const v of ["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY"]) delete process.env[v];
 

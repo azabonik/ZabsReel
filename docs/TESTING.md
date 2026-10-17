@@ -598,6 +598,10 @@ AIVE_APP=$PWD/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -
 - Needs `npm run build`, FFmpeg on PATH, a display (`xvfb-run` gives one
   without opening a window) and playwright-core (found like `parity-gl.mts`
   does; `PLAYWRIGHT_CORE=<dir>` overrides).
+- The app runs muted (`--mute-audio`), so the preview makes no sound on the
+  speakers: Playwright mutes only headless Chromium, never Electron.
+  `AIVE_SMOKE_AUDIO=1` turns the sound on. The audio rows read the WebAudio
+  graph, so they pass either way.
 - The core gets a free port unless `AIVE_PORT` is set. Chromium, and so
   Electron and every Chromium-based browser, refuses some ports
   (`ERR_UNSAFE_PORT`: 5060, 5061, 6000, 6665–6669, 10080 and others): the app
