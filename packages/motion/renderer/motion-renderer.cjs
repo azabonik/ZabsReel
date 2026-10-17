@@ -15,6 +15,10 @@
 //   {"type":"frame","n"} per frame. EOF ends the process.
 // - stdout, control out, JSON lines: {"type":"ready"} once the page has
 //   loaded, {"type":"frame","n","cues"} after frame n's bytes are on fd 3,
+//   {"type":"media","id","route":"media","handle","t","w","h","frame"} or
+//   {"type":"media","id","route":"font","handle","frame"} for a request of
+//   the page's media routes (below; `frame` is the composition frame being
+//   drawn, or the last one, -1 before the first),
 //   {"type":"frame-error","n","code","message"} when the page reports that
 //   frame n failed (its code as the page gave it; the core decides what it
 //   accepts) before it exits, {"type":"log","text"}, {"type":"blocked","url"}
@@ -23,8 +27,17 @@
 // - fd 3, frames out: each frame exactly width*height*4 bytes, rows of
 //   width*4 bytes with no padding, bytes B, G, R, A, premultiplied alpha as
 //   Chromium paints them (the core's overlay encode unpremultiplies).
-// - fd 4, media bytes in (the media routes of D4; nothing uses it yet): records
-//   of [request id, u32 big-endian][length, u32 big-endian][bytes].
+// - fd 4, media replies in: records of [request id][status][length] (u32,
+//   big-endian) and `length` bytes: status 200 with a PNG (media) or a font
+//   file's bytes, anything else a 404 for the page. The core answers every
+//   request on fd 4, or ends the render.
+//
+// The page's media routes (MOTION-PLAN D4): zrmotion://media/<handle>?t=&w=&h=
+// (a video's source frame t, or an image without t, in a box of w x h) and
+// zrmotion://app/font/<handle> (same origin as the page: a font load is a
+// CORS request, which a cross-origin zrmotion: URL fails). The handle is the
+// core's opaque per-render name; this process checks only its form and the
+// query's numbers, and never learns a path.
 //
 // The page runs sandboxed with no Node, in an in-memory session where every
 // request that is not zrmotion: is cancelled, every host name fails to
@@ -47,6 +60,12 @@ const CSP = [
 /** Nothing listens there: a request that got past the session's filter has no route out (loopback included). */
 const DEAD_PROXY = { proxyRules: "socks5://127.0.0.1:9", proxyBypassRules: "<-loopback>" };
 const MAX_HEAP_MB = 2048;
+/** The core's media handles (motionmedia.ts: 16 random bytes in hex). */
+const HANDLE = /^[0-9a-f]{32}$/;
+/** A query number as the core reads it (it refuses a source time that is not a whole number, 0 or more). */
+const QUERY_NUMBER = /^-?\d{1,15}(\.\d{1,15})?$/;
+/** The largest font reply: the core's 32 MB cap, and some room. */
+const MAX_FONT_REPLY = 33 * 1024 * 1024;
 /** A 1x1 opaque red PNG: its bitmap tells this platform's byte order. */
 const RED_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
@@ -134,18 +153,85 @@ async function renderSession(table) {
   return ses;
 }
 
-/** A zrmotion: response: a table entry by its path on host "app", else 404. */
+/**
+ * A zrmotion: response: a media route answered by the core, a table entry by
+ * its path on host "app", else 404. The media routes come first, so no table
+ * entry can stand in for one.
+ */
 function serve(table, request) {
   const headers = { "content-security-policy": CSP, "x-content-type-options": "nosniff", "cache-control": "no-store" };
   let entry;
   try {
     const u = new URL(request.url);
+    if (request.method === "GET" && (u.host === "media" || (u.host === "app" && u.pathname.startsWith("/font/")))) return serveMedia(mediaRoute(u), headers);
     if (request.method === "GET" && u.host === "app" && !u.search) entry = table.get(u.pathname.slice(1));
   } catch {
     /* not a URL we serve */
   }
   if (!entry) return new Response("", { status: 404, headers });
   return new Response(entry.body, { status: 200, headers: { ...headers, "content-type": entry.type } });
+}
+
+/** The request a media route's URL makes of the core, or null (404): a handle of the core's form, only t, w and h, each once and a number. */
+function mediaRoute(u) {
+  if (u.host === "app") {
+    const m = /^\/font\/([^/]+)$/.exec(u.pathname);
+    return m && HANDLE.test(m[1]) && !u.search ? { route: "font", handle: m[1] } : null;
+  }
+  const handle = u.pathname.slice(1);
+  if (!HANDLE.test(handle)) return null;
+  const q = {};
+  for (const [k, v] of u.searchParams) {
+    if ((k !== "t" && k !== "w" && k !== "h") || k in q || !QUERY_NUMBER.test(v)) return null;
+    q[k] = Number(v);
+  }
+  return q.w === undefined || q.h === undefined ? null : { route: "media", handle, ...q };
+}
+
+/** Media and font requests waiting for their reply on fd 4: request id -> resolve. */
+const mediaWaiting = new Map();
+let mediaSeq = 0;
+
+/** Asks the core for `req` and answers the page with its reply. */
+async function serveMedia(req, headers) {
+  if (!req || !render) return new Response("", { status: 404, headers });
+  const id = ++mediaSeq;
+  const reply = new Promise((resolve) => mediaWaiting.set(id, resolve));
+  send({ type: "media", id, ...req, frame: render.frame });
+  const { status, body } = await reply;
+  if (status !== 200) return new Response("", { status: 404, headers });
+  return new Response(body, { status: 200, headers: { ...headers, "content-type": req.route === "font" ? "application/octet-stream" : "image/png" } });
+}
+
+/** fd 4's records, each handed to its waiting request; a record longer than `max` bytes ends the render. */
+function readReplies(socket, max) {
+  let parts = [];
+  let length = 0;
+  let head = null;
+  const take = (n) => {
+    const all = parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
+    parts = all.length > n ? [all.subarray(n)] : [];
+    length -= n;
+    return all.subarray(0, n);
+  };
+  socket.on("data", (chunk) => {
+    parts.push(chunk);
+    length += chunk.length;
+    for (;;) {
+      if (!head) {
+        if (length < 12) return;
+        const h = take(12);
+        head = { id: h.readUInt32BE(0), status: h.readUInt32BE(4), size: h.readUInt32BE(8) };
+        if (head.size > max) return fail("graphic_render_crashed", `a media reply of ${head.size} bytes`);
+      }
+      if (length < head.size) return;
+      const body = Buffer.from(take(head.size));
+      const resolve = mediaWaiting.get(head.id);
+      mediaWaiting.delete(head.id);
+      resolve?.({ status: head.status, body });
+      head = null;
+    }
+  });
 }
 
 /** No window.open, navigation, redirect, webview or WebRTC UDP for any page of this process. */
@@ -252,13 +338,17 @@ async function start(msg) {
   const o = startOptions(msg);
   const frames = new net.Socket({ fd: 3, readable: false, writable: true });
   frames.on("error", (err) => fail("graphic_render_crashed", `frame pipe: ${err.message}`));
+  const replies = new net.Socket({ fd: 4, readable: true, writable: false });
+  replies.on("error", (err) => fail("graphic_render_crashed", `media pipe: ${err.message}`));
+  // A PNG of the whole canvas at worst (the core fits every box to it), or a font.
+  readReplies(replies, Math.max(MAX_FONT_REPLY, o.width * o.height * 4 + o.height + 1024 * 1024));
   const ses = await renderSession(o.table);
   const win = renderWindow(ses, o.width, o.height, o.opaque);
   const wc = win.webContents;
   wc.on("render-process-gone", (_e, d) => fail("graphic_render_crashed", `the page stopped (${d.reason}, exit code ${d.exitCode})`));
   wc.on("preload-error", (_e, _p, err) => fail("graphic_render_crashed", `preload: ${err.message}`));
   wc.on("console-message", (e, _level, message) => send({ type: "log", text: String(message ?? e.message).slice(0, 2000) }));
-  render = { o, win, frames, pending: null };
+  render = { o, win, frames, pending: null, frame: -1 };
   await win.loadURL(PAGE_URL);
   send({ type: "ready" });
 }
@@ -285,6 +375,7 @@ async function renderFrame(n) {
   if (!Number.isInteger(n) || n < 0 || n >= render.o.frames) throw new Error(`bad frame ${n}`);
   const cues = await new Promise((resolve) => {
     render.pending = { n, resolve };
+    render.frame = n;
     render.win.webContents.executeJavaScript(`typeof __zrMotionRender === "function" && __zrMotionRender(${n}, ${render.o.fps})`).catch(() => {});
   });
   const bytes = frameBytes(await render.win.webContents.capturePage(), render.o.width, render.o.height);

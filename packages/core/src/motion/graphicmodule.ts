@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { Script } from "node:vm";
 import { transform } from "sucrase";
 import { PRODUCT_NAME } from "../brand.js";
+import type { PageAsset } from "./motionmedia.js";
 
 /**
  * The graphic as ZabsReel's own renderer runs it (MOTION-PLAN D5): the agent's
@@ -32,8 +33,8 @@ const RUNTIME_SPECIFIERS: ReadonlySet<string> = new Set(["remotion", "@aive/moti
 /** The start data host.js builds the runtime's MotionHost from. */
 export interface GraphicStart {
   composition: { id: "Graphic"; width: number; height: number; fps: number; durationInFrames: number; props: Record<string, unknown> };
-  /** asset id -> { handle, kind, sizes }; no path (slice 4 fills it). */
-  assets: Record<string, unknown>;
+  /** asset id -> { handle, kind, sizes }; no path, name or folder (motionmedia.ts). */
+  assets: Record<string, PageAsset>;
   /** The runtime's own per-frame deadline. */
   frameTimeoutMs: number;
 }

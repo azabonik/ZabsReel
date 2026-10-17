@@ -5,6 +5,8 @@ import { PRODUCT_NAME } from "../brand.js";
 import { adaptFfmpegArgs, FfmpegError, ffmpegStderrDetail, runTool, spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "../io/gatedfs.js";
 import { graphicModule, type GraphicStart } from "./graphicmodule.js";
+import { GRAPHIC_CODES, MotionRenderError, type GraphicCode } from "./motionerror.js";
+import { MEDIA_CAPS, MotionMedia, parseMediaRequest, requireOnline, type MediaCaps, type MediaReply, type MediaStats, type MotionAsset } from "./motionmedia.js";
 import { graphicPreviewProxy, tagGraphicColor } from "./render.js";
 import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
 
@@ -16,7 +18,9 @@ import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
  * FFmpeg (executor.ts). The pipes and their formats are described at the top
  * of motion-renderer.cjs. The graphic's TSX is compiled here, and its imports
  * checked, before the renderer starts (graphicmodule.ts); the page runs it on
- * the clean-room runtime (MOTION-PLAN D5).
+ * the clean-room runtime (MOTION-PLAN D5). The graphic's library media and
+ * fonts reach the page only as the core's answers to its requests, on fd 4
+ * (motionmedia.ts; MOTION-PLAN D4).
  *
  * Everything a render writes stays in its motion/<id> folder (workDir) until
  * the whole render has succeeded; only then are the files moved into baked/,
@@ -29,10 +33,11 @@ import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
 /**
  * The renderer's environment, D2's allowlist and nothing else: these
  * variables of the core's (PATH, SystemRoot, windir, LANG, LC_ALL, HOME,
- * USERPROFILE, DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR), TEMP/TMP/TMPDIR in
- * the render's folder, and GSETTINGS_BACKEND=memory (GTK's settings stay in
- * memory instead of dconf's files in HOME). Never AIVE_*, ELECTRON_* or
- * NODE_OPTIONS.
+ * USERPROFILE, DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR), TEMP/TMP/TMPDIR and
+ * XDG_CACHE_HOME in the render's folder (Chromium's fontconfig writes its
+ * font cache there, not in HOME), and GSETTINGS_BACKEND=memory (GTK's
+ * settings stay in memory instead of dconf's files in HOME). Never AIVE_*,
+ * ELECTRON_* or NODE_OPTIONS.
  */
 export const RENDERER_ENV = ["PATH", "SystemRoot", "windir", "LANG", "LC_ALL", "HOME", "USERPROFILE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"] as const;
 /** The longest graphic: 600 s at 60 fps. */
@@ -41,49 +46,7 @@ const OWNER = "owner.json";
 /** Longest control line the renderer may send. */
 const MAX_LINE = 1024 * 1024;
 
-/**
- * The codes a graphic's failed frame carries from the page: the runtime's
- * (cleanroom/runtime/src/errors.ts; graphic_render_cancelled is the graphic's
- * own cancelRender(), not the job's abort, graphic_render_canceled), and
- * graphic_component_error for an error that has none (the component's own
- * throw). Any other code the page reports becomes graphic_component_error.
- */
-export const GRAPHIC_CODES = [
-  "graphic_api_unsupported",
-  "graphic_api_misuse",
-  "graphic_asset_unknown",
-  "graphic_asset_kind",
-  "graphic_media_ref",
-  "graphic_media_failed",
-  "graphic_media_time",
-  "graphic_media_per_frame",
-  "graphic_audio_cues_cap",
-  "graphic_font_cap",
-  "graphic_frame_timeout",
-  "graphic_render_cancelled",
-  "graphic_component_error",
-] as const;
-export type GraphicCode = (typeof GRAPHIC_CODES)[number];
-
-export type MotionErrorCode =
-  | "graphic_renderer_unavailable"
-  | "graphic_frame_timeout"
-  | "graphic_render_timeout"
-  | "graphic_render_crashed"
-  | "graphic_render_canceled"
-  | "graphic_compile_error"
-  | GraphicCode;
-
-/** A render that ended without a result; `code` is what add_graphic reports. */
-export class MotionRenderError extends Error {
-  constructor(
-    readonly code: MotionErrorCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = "MotionRenderError";
-  }
-}
+export { GRAPHIC_CODES, MotionRenderError, type GraphicCode, type MotionErrorCode } from "./motionerror.js";
 
 /** Why the renderer can't run (D7); "start-failed" is any other failed start. */
 export type RendererUnavailableReason = "no-binary" | "no-display" | "sandbox-unavailable" | "start-failed";
@@ -106,8 +69,12 @@ export interface RenderMotionOptions {
    * into the page's module.js. Exactly one of `graphic` and `module`.
    */
   graphic?: { source: string; props?: Record<string, unknown> };
-  /** Tests: a hand-written page script as module.js instead of a graphic (it calls zrMotion.onFrame(fn) itself). */
-  module?: string;
+  /**
+   * Tests: a hand-written page script as module.js instead of a graphic (it
+   * calls zrMotion.onFrame(fn) itself), or a function that writes it from
+   * the render's start data (its asset handles).
+   */
+  module?: string | ((start: GraphicStart) => string);
   width: number;
   height: number;
   fps: number;
@@ -120,6 +87,19 @@ export interface RenderMotionOptions {
   outPath: string;
   /** Overlay only: the .webm preview proxy in baked/ (best-effort, as today). */
   previewPath?: string;
+  /**
+   * The graphic's assets: asset id -> the core's own record (a library
+   * MediaAsset, or a font file). The page learns each one's kind and sizes
+   * under a random per-render handle, never its path or name, and the core
+   * answers the page's requests for it (motionmedia.ts).
+   */
+  assets?: Readonly<Record<string, MotionAsset>>;
+  /**
+   * G4 for an asset the page asks for: throws MediaOfflineError (media_offline)
+   * when its file may not or can't be opened. Default: motionmedia.ts
+   * requireOnline; the engine passes its own check.
+   */
+  requireMedia?: (asset: MotionAsset) => void;
   signal?: AbortSignal;
   onProgress?: (fraction: number) => void;
   /**
@@ -131,6 +111,9 @@ export interface RenderMotionOptions {
    */
   binary?: RendererBinary;
   limits?: Partial<MotionLimits>;
+  /** Tests: D4's media caps (motionmedia.ts MEDIA_CAPS), and the media counters when the render ends, failed or not. */
+  caps?: Partial<MediaCaps>;
+  onMedia?: (stats: MediaStats) => void;
   heapMb?: number;
   entries?: Record<string, string>;
   frames?: number[];
@@ -152,6 +135,8 @@ export interface RenderMotionResult {
   previewPath?: string;
   /** Milliseconds from the renderer's start to the last frame. */
   framesMs: number;
+  /** What its media requests did. */
+  media: MediaStats;
 }
 
 /** The renderer's environment for a render in `scratch` (see {@link RENDERER_ENV}). */
@@ -162,7 +147,7 @@ export function rendererEnv(scratch: string, env: NodeJS.ProcessEnv = process.en
     if (value !== undefined) out[name] = value;
   }
   const tmp = join(scratch, "tmp");
-  out.TEMP = out.TMP = out.TMPDIR = tmp;
+  out.TEMP = out.TMP = out.TMPDIR = out.XDG_CACHE_HOME = tmp;
   out.GSETTINGS_BACKEND = "memory";
   return out;
 }
@@ -263,18 +248,19 @@ function limitsOf(o: RenderMotionOptions): MotionLimits {
 
 /**
  * module.js for `o`: the hand-written module of a test, or the graphic
- * compiled, its imports checked (graphicmodule.ts). A refused graphic throws
- * here, before anything is started or written.
+ * compiled, its imports checked (graphicmodule.ts), with the page's asset
+ * table. A refused graphic throws here, before anything is started or
+ * written.
  */
-async function pageModule(o: RenderMotionOptions, limits: MotionLimits): Promise<string> {
-  if (!o.graphic) return o.module as string;
-  const props = JSON.parse(JSON.stringify(o.graphic.props ?? {})) as Record<string, unknown>;
+async function pageModule(o: RenderMotionOptions, limits: MotionLimits, assets: GraphicStart["assets"]): Promise<string> {
+  const props = JSON.parse(JSON.stringify(o.graphic?.props ?? {})) as Record<string, unknown>;
   const start: GraphicStart = {
     composition: { id: "Graphic", width: o.width, height: o.height, fps: o.fps, durationInFrames: o.durationInFrames, props },
-    assets: {},
+    assets,
     // Below the core's own frame limit, so the runtime's message (it names the open delayRender labels) comes first.
     frameTimeoutMs: Math.max(Math.round(limits.frameMs / 2), limits.frameMs - 2000),
   };
+  if (!o.graphic) return typeof o.module === "function" ? o.module(start) : (o.module as string);
   const built = graphicModule(o.graphic.source, start, await runtimeExports());
   if (!built.ok) throw new MotionRenderError(built.code, built.message);
   return built.module;
@@ -289,13 +275,14 @@ async function pageModule(o: RenderMotionOptions, limits: MotionLimits): Promise
 export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotionResult> {
   checkOptions(o);
   const limits = limitsOf(o);
-  const module = await pageModule(o, limits);
+  const media = new MotionMedia(o.assets ?? {}, { width: o.width, height: o.height, caps: { ...MEDIA_CAPS, ...o.caps }, requireMedia: o.requireMedia ?? requireOnline });
+  const module = await pageModule(o, limits, media.page);
   const encoded = join(o.workDir, o.alpha ? "out.mov" : "out.mp4");
   const preview = join(o.workDir, "graphic.webm");
   try {
     await mkdir(join(o.workDir, "tmp"), { recursive: true });
     await writeFile(join(o.workDir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
-    const framesMs = await renderFrames(o, encoded, module, limits);
+    const framesMs = await renderFrames(o, encoded, module, limits, media);
     if (!o.alpha) await tagGraphicColor(encoded, o.signal);
     let previewMade = false;
     if (o.alpha && o.previewPath) {
@@ -308,8 +295,10 @@ export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotion
     }
     if (o.signal?.aborted) throw canceled();
     await moveAll([[encoded, o.outPath], ...(previewMade && o.previewPath ? [[preview, o.previewPath] as const] : [])]);
-    return { outPath: o.outPath, previewPath: previewMade ? o.previewPath : undefined, framesMs };
+    return { outPath: o.outPath, previewPath: previewMade ? o.previewPath : undefined, framesMs, media: { ...media.stats } };
   } finally {
+    await media.close();
+    o.onMedia?.({ ...media.stats });
     await rm(o.workDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   }
 }
@@ -411,8 +400,21 @@ function pageFailure(msg: RendererMessage): MotionRenderError {
   return new MotionRenderError(code, `The graphic failed at frame ${String(msg.n)}: ${String(msg.message)}`);
 }
 
+/**
+ * Writes `reply` to the renderer's fd 4 as one record: request id, status and
+ * length (u32, big-endian), then the bytes (motion-renderer.cjs reads it).
+ */
+function writeReply(out: Writable, id: number, reply: MediaReply): void {
+  const head = Buffer.alloc(12);
+  head.writeUInt32BE(id, 0);
+  head.writeUInt32BE(reply.status, 4);
+  head.writeUInt32BE(reply.body.length, 8);
+  out.write(head);
+  if (reply.body.length > 0) out.write(reply.body);
+}
+
 /** The renderer and FFmpeg for one render: frames 0..N-1 (or `o.frames`) into `encoded`. Returns the milliseconds the frames took. */
-async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits): Promise<number> {
+async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits, media: MotionMedia): Promise<number> {
   const bin = o.binary ?? rendererBinary();
   if (!bin.ok) throw new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (${bin.reason}: ${bin.detail}).`);
   const order = o.frames ?? Array.from({ length: o.durationInFrames }, (_, n) => n);
@@ -458,6 +460,20 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
   const stderr = tail(child.stderr);
   child.once("error", (err: Error) => failWith(startFailed(err)));
 
+  // Media requests: answered on fd 4, or the named error ends the render.
+  const replies = child.stdio[4] as Writable;
+  replies.on("error", () => {}); // its exit reports it
+  const answer = (msg: RendererMessage) => {
+    const req = parseMediaRequest(msg);
+    if (!req) return failWith(new MotionRenderError("graphic_render_crashed", "The graphics renderer sent an unreadable media request."));
+    media.answer(req).then(
+      (reply) => {
+        if (!failure) writeReply(replies, req.id, reply);
+      },
+      (err: Error) => failWith(err),
+    );
+  };
+
   // Control out.
   let ready = false;
   /** How many frames of `order` the renderer has finished, in order. */
@@ -476,6 +492,7 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
       if (msg.type === "ready") ready = true;
       else if (msg.type === "frame" && msg.n === order[done]) done++;
       else if (msg.type === "frame-error") failWith(pageFailure(msg));
+      else if (msg.type === "media") answer(msg);
       else if (msg.type === "error") reported = msg;
       notify();
     },
@@ -582,7 +599,7 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
   } finally {
     clearTimeout(totalTimer);
     o.signal?.removeEventListener("abort", onAbort);
-    await Promise.all([exited(child), ffDone.catch(() => {})]);
+    await Promise.all([exited(child), ffDone.catch(() => {}), media.close()]);
   }
 }
 

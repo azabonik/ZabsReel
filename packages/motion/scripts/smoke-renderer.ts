@@ -118,7 +118,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createSocket } from "node:dgram";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -139,31 +139,38 @@ import {
   type RendererMessage,
   type RenderMotionOptions,
 } from "../../core/src/motion/rendermotion.js";
+import {
+  check,
+  descendants,
+  environNames,
+  failureCount,
+  filesUnder,
+  fresh,
+  gone,
+  LINUX,
+  NETNS,
+  reexecInNetns,
+  sleep,
+  watchTree,
+  type Fresh,
+} from "./smoke-lib.js";
 
-let failures = 0;
 /** Set once the run's summary is printed (or the R5 child's render is done). */
 let summarized = false;
-const check = (ok: boolean, msg: string) => {
-  if (!ok) failures++;
-  console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
-};
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
 const DESKTOP = join(REPO, "apps", "desktop");
 const CORE_DIST = join(REPO, "packages", "core", "dist");
 const ELECTRON = createRequire(join(DESKTOP, "package.json"))("electron") as string;
-const NETNS = "ZR_MOTION_SMOKE_NETNS";
-const LINUX = process.platform === "linux";
 /**
  * What the renderer's environment may hold: D2's allowlist, written out here
  * (not read from RENDERER_ENV, so a name added there fails the rows), with its
- * own temp variables and GTK's in-memory settings.
+ * own temp and cache variables (in its folder) and GTK's in-memory settings.
  */
 const ALLOWED_ENV = new Set<string>([
   "PATH", "SystemRoot", "windir", "LANG", "LC_ALL", "HOME", "USERPROFILE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
-  "TEMP", "TMP", "TMPDIR", "GSETTINGS_BACKEND",
+  "TEMP", "TMP", "TMPDIR", "XDG_CACHE_HOME", "GSETTINGS_BACKEND",
 ]);
 /** Variables Electron/Chromium set in their own process after start (not from the core). */
 const CHROMIUM_ENV = new Set(["CHROME_DESKTOP", "DBUS_SESSION_BUS_ADDRESS", "FC_FONTATIONS"]);
@@ -189,139 +196,6 @@ function skipped(name: string, why: string) {
   console.log(`  skip ${name}: ${why}`);
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) appendFileSync(summary, `- smoke-renderer: ${name} skipped (${why})\n`);
-}
-
-// ---- fresh folders and processes -------------------------------------------------
-
-interface Fresh {
-  dir: string;
-  home: string;
-  data: string;
-  /** For a renderer or a core: fresh HOME/USERPROFILE/XDG_CONFIG_HOME and AIVE_DATA_DIR, no display, plus what a core inherits. */
-  env: NodeJS.ProcessEnv;
-}
-
-let counter = 0;
-function fresh(work: string, name: string): Fresh {
-  const dir = join(work, `${name}-${++counter}`);
-  const home = join(dir, "home");
-  const data = join(dir, "data");
-  mkdirSync(join(home, ".config"), { recursive: true });
-  mkdirSync(join(data, "baked"), { recursive: true });
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    LANG: process.env.LANG ?? "C.UTF-8",
-    HOME: home,
-    USERPROFILE: home,
-    XDG_CONFIG_HOME: join(home, ".config"),
-    AIVE_DATA_DIR: data,
-    // A core runs with these; the renderer must get none of them.
-    ELECTRON_RUN_AS_NODE: "1",
-    NODE_OPTIONS: "--max-old-space-size=4096",
-    AIVE_SMOKE_SECRET: "core-only",
-  };
-  return { dir, home, data, env };
-}
-
-/** Every file under `dir`, relative, "/"-separated. */
-function filesUnder(dir: string, base = dir): string[] {
-  if (!existsSync(dir)) return [];
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...filesUnder(p, base));
-    else out.push(p.slice(base.length + 1).split("\\").join("/"));
-  }
-  return out;
-}
-
-/** Linux: pid -> parent pid, for live processes (zombies left out). */
-function processTable(): Map<number, number> {
-  const out = new Map<number, number>();
-  for (const name of readdirSync("/proc")) {
-    if (!/^\d+$/.test(name)) continue;
-    try {
-      const stat = readFileSync(`/proc/${name}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (fields[0] !== "Z") out.set(Number(name), Number(fields[1]));
-    } catch {
-      /* gone meanwhile */
-    }
-  }
-  return out;
-}
-
-function descendants(root: number, table = processTable()): number[] {
-  const out: number[] = [];
-  const walk = (pid: number) => {
-    for (const [child, parent] of table) {
-      if (parent === pid) {
-        out.push(child);
-        walk(child);
-      }
-    }
-  };
-  walk(root);
-  return out;
-}
-
-async function gone(pids: number[], ms: number): Promise<number[]> {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const table = processTable();
-    const left = pids.filter((p) => table.has(p));
-    if (left.length === 0 || Date.now() > deadline) return left;
-    await sleep(50);
-  }
-}
-
-function environNames(pid: number): string[] | null {
-  try {
-    return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").filter(Boolean).map((e) => e.slice(0, e.indexOf("=")));
-  } catch {
-    return null;
-  }
-}
-
-/** Local TCP ports in LISTEN state (this network namespace). */
-function listeningPorts(): number[] {
-  const out: number[] = [];
-  for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-    if (!existsSync(f)) continue;
-    for (const line of readFileSync(f, "utf8").split("\n").slice(1)) {
-      const cols = line.trim().split(/\s+/);
-      if (cols[3] === "0A") out.push(parseInt(cols[1].split(":")[1], 16));
-    }
-  }
-  return out;
-}
-
-/** Samples, every 20 ms, the processes below `root`: their command lines, their environment's names, and listening ports 5030-5039. */
-function watchTree(root: number) {
-  const seen = new Map<number, { cmd: string; env: string[] }>();
-  const ports = new Set<number>();
-  const sample = () => {
-    for (const pid of descendants(root)) {
-      if (seen.has(pid)) continue;
-      let cmd = "";
-      try {
-        cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
-      } catch {
-        continue;
-      }
-      seen.set(pid, { cmd, env: environNames(pid) ?? [] });
-    }
-    for (const p of listeningPorts()) if (p >= 5030 && p <= 5039) ports.add(p);
-  };
-  sample();
-  const timer = setInterval(sample, 20);
-  return {
-    stop() {
-      clearInterval(timer);
-      sample();
-      return { seen, ports };
-    },
-  };
 }
 
 // ---- R1: the binary rule over fixture layouts ------------------------------------
@@ -1053,20 +927,21 @@ async function r5(work: string) {
     check(false, `the binary rule finds this checkout's Electron (${bin.detail})`);
     return;
   }
-  // Fontconfig's cache (HOME/.cache/fontconfig) is the one file Chromium writes outside, before any JS runs.
-  const outside = (home: string) => filesUnder(home).filter((x) => !x.startsWith(".cache/fontconfig/"));
+  // Fontconfig's cache is the one thing Chromium writes before any JS runs: in XDG_CACHE_HOME,
+  // which the core points at the render's tmp folder (never HOME).
   const n = fresh(work, "noscratch");
   const r = await runRenderer(bin, [`--zr-parent-pid=${process.pid}`, "--mute-audio", ...(LINUX ? ["--ozone-platform=headless"] : []), "--probe"], rendererEnv(n.dir, n.env));
-  check(r.code === 2 && outside(n.home).length === 0 && filesUnder(n.data).length === 0 && !existsSync(join(n.dir, "tmp")),
-    `no --zr-scratch: exit 2, nothing written (exit ${r.code}; ${JSON.stringify([...outside(n.home), ...filesUnder(n.data)].slice(0, 5))})`);
+  const tmpFiles = filesUnder(join(n.dir, "tmp")).filter((x) => !x.startsWith("fontconfig/"));
+  check(r.code === 2 && filesUnder(n.home).length === 0 && filesUnder(n.data).length === 0 && tmpFiles.length === 0,
+    `no --zr-scratch: exit 2, nothing written but fontconfig's cache in the render's tmp (exit ${r.code}; ${JSON.stringify([...filesUnder(n.home), ...filesUnder(n.data), ...tmpFiles].slice(0, 5))})`);
   const p = fresh(work, "scratch");
   const scratch = join(p.data, "motion", "probe-test");
   mkdirSync(join(scratch, "tmp"), { recursive: true });
   const r2 = await runRenderer(bin, rendererArgs(scratch, 16, 16, ["--probe"]), rendererEnv(scratch, p.env));
-  const inHome = outside(p.home);
+  const inHome = filesUnder(p.home);
   const inScratch = filesUnder(scratch);
   check(r2.code === 0 && /"probe":"ok"/.test(r2.stdout), `with --zr-scratch the probe runs (exit ${r2.code})`);
-  check(inScratch.some((x) => x.startsWith("profile/")) && inHome.length === 0, `Chromium's profile lands under motion/<id>/profile, nothing in HOME but fontconfig's cache (${inScratch.length} files there; HOME: ${JSON.stringify(inHome.slice(0, 5))})`);
+  check(inScratch.some((x) => x.startsWith("profile/")) && inHome.length === 0, `Chromium's profile lands under motion/<id>/profile, nothing in HOME (${inScratch.length} files there; HOME: ${JSON.stringify(inHome.slice(0, 5))})`);
   check(filesUnder(p.data).every((x) => x.startsWith("motion/probe-test/")), `nothing else in the data folder (${JSON.stringify(filesUnder(p.data).filter((x) => !x.startsWith("motion/probe-test/")).slice(0, 5))})`);
 }
 
@@ -1654,17 +1529,7 @@ async function main() {
   }
   // The whole run in a private network namespace (loopback and a dummy interface, nothing
   // routed out), so even a broken guard reaches no real host.
-  if (LINUX && !process.env[NETNS]) {
-    const setup = `ip link set lo up && ip link add zr0 type dummy && ip addr add ${LAN}/24 dev zr0 && ip link set zr0 up`;
-    const ns = ["--user", "--map-current-user", "--net", "--keep-caps", "sh", "-c"];
-    if (spawnSync("unshare", [...ns, setup], { stdio: "ignore" }).status === 0) {
-      const r = spawnSync("unshare", [...ns, `${setup} && exec setpriv --inh-caps=-all --ambient-caps=-all "$0" "$@"`, process.execPath, ...process.execArgv, fileURLToPath(import.meta.url), ...args], {
-        stdio: "inherit",
-        env: { ...process.env, [NETNS]: "1" },
-      });
-      process.exit(r.status ?? 1);
-    }
-  }
+  reexecInNetns(fileURLToPath(import.meta.url), args, LAN);
   // --only=R2,R5 runs those parts alone.
   const only = args.find((a) => a.startsWith("--only="))?.slice(7).split(",");
   const part = (name: string) => !only || only.includes(name);
@@ -1687,6 +1552,7 @@ async function main() {
     rmSync(work, { recursive: true, force: true, maxRetries: 5 });
   }
   summarized = true;
+  const failures = failureCount();
   console.log(failures === 0 ? "\nALL MOTION RENDERER CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

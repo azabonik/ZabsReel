@@ -29,9 +29,14 @@
   }
   g.zrMotion.onFrame(notRun);
 
-  /** zrmotion://<route>/<handle>, with its query; the routes are the core's (slice 4). */
-  function route(kind, handle, query) {
-    return "zrmotion://" + kind + "/" + encodeURIComponent(handle) + (query ? "?" + query : "");
+  /**
+   * The media routes the renderer main forwards to the core (motion-renderer.cjs):
+   * zrmotion://media/<handle>?query, and fonts at zrmotion://app/font/<handle>,
+   * the page's own origin (a font load is a CORS request, which fails for
+   * another zrmotion: host).
+   */
+  function mediaRoute(handle, query) {
+    return "zrmotion://media/" + encodeURIComponent(handle) + "?" + query;
   }
 
   function hostFor(start) {
@@ -41,9 +46,9 @@
       frameTimeoutMs: start.frameTimeoutMs,
       mediaUrl: function (handle, box, sourceFrame) {
         var q = (sourceFrame === undefined ? "" : "t=" + sourceFrame + "&") + "w=" + box.w + "&h=" + box.h;
-        return route("media", handle, q);
+        return mediaRoute(handle, q);
       },
-      fontUrl: function (handle) { return route("font", handle, ""); },
+      fontUrl: function (handle) { return "zrmotion://app/font/" + encodeURIComponent(handle); },
       log: function (text) { g.zrMotionHost.log(String(text)); },
     };
   }
