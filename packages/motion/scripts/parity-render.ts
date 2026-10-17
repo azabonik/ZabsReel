@@ -37,9 +37,12 @@
  * --self-test (to --out): compare() on known buffers; control.tsx rendered
  * twice through ZabsReel passes against itself with max_diff 0; the same
  * frames with +40 on every colour channel give a mismatch row per frame in
- * render-mismatches.jsonl; a composition that throws is tagged "reference
- * refused (drift candidate)" by the real reference pipeline, and the run
- * names it.
+ * render-mismatches.jsonl; control.tsx with its green circle 40 brighter on
+ * the second side only (its own render, its own file) fails every frame, and
+ * each side's image shows its own circle; a composition that throws is tagged
+ * "reference refused (drift candidate)" by the real reference pipeline, and
+ * the run names it; one only the reference side refuses (its source made to
+ * throw) is exactly "reference refused (drift candidate)".
  *
  * Linux only (the pinned shell's linux64 folder and the private network
  * namespace). The whole run re-executes itself in a private network namespace
@@ -47,7 +50,7 @@
  * real host. Needs `npm run build` (dist/zr-runtime.js) and FFmpeg.
  * Run: npx tsx packages/motion/scripts/parity-render.ts --out=<folder>
  *        [--cases=<folder of .tsx>] [--only=control.tsx,spring-motion.tsx]
- *        [--scratch=<folder>] [--self-test]
+ *        [--scratch=<folder>] [--require-netns] [--self-test]
  */
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -324,6 +327,9 @@ interface Run {
   sides: { reference: Pipeline; zabsreel: Pipeline };
   /** Self-test: change the second side's decoded frames before comparing. */
   alter?: (frame: Buffer) => Buffer;
+  /** Self-test: change one side's composition before it renders (the header is read from the original). */
+  sourceA?: (tsx: string) => string;
+  sourceB?: (tsx: string) => string;
 }
 
 const fmt = (m: Metrics) => `${m.pct_within_4}/${m.max_diff}`;
@@ -344,8 +350,8 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
     const job = { source, width: w, height: h, fps: header.fps, durationInFrames: header.durationInFrames };
     const tag = `${name.replace(/\.tsx$/, "")}-${size}`;
     const [reference, zabsreel] = await Promise.all([
-      runPipeline(run.scratch, `${tag}-a`, { ...job, pipeline: run.sides.reference }),
-      runPipeline(run.scratch, `${tag}-b`, { ...job, pipeline: run.sides.zabsreel }),
+      runPipeline(run.scratch, `${tag}-a`, { ...job, source: run.sourceA?.(source) ?? source, pipeline: run.sides.reference }),
+      runPipeline(run.scratch, `${tag}-b`, { ...job, source: run.sourceB?.(source) ?? source, pipeline: run.sides.zabsreel }),
     ]);
     const sized: SizeResult = { size, reference, zabsreel, frames: [] };
     result.sizes.push(sized);
@@ -474,7 +480,7 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     cases: results,
   };
   writeFileSync(join(run.out, "render-summary.json"), JSON.stringify(summary, null, 2) + "\n");
-  console.log(`\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s`);
+  console.log(`\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`);
   if (leftovers.length) console.log(`killed ${leftovers.reduce((t, l) => t + l.pids.length, 0)} leftover process(es): ${JSON.stringify(leftovers)}`);
   const unrendered = results.filter((r) => r.status === DRIFT || r.status === "zabsreel failed" || r.status === "harness error");
   if (unrendered.length) {
@@ -532,6 +538,39 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   const img = join(altOut, "images", "control", `${listed.sizes[0].w}x${listed.sizes[0].h}`, `frame-${listed.frames[0]}-diff.png`);
   check(existsSync(img), `a heatmap and both frames are written for a failing frame (${img.slice(out.length + 1)})`);
 
+  console.log("S3b. control.tsx with its green circle 40 brighter on the second side only fails every frame, each image its own side...");
+  const brightOut = join(out, "brighter");
+  const brighter: Run = {
+    ...self,
+    out: brightOut,
+    sourceB: (tsx) => {
+      if (!tsx.includes('"#3cb44b"')) throw new Error("control.tsx no longer has the green circle #3cb44b");
+      return tsx.replace('"#3cb44b"', '"#64dc73"');
+    },
+  };
+  freshOut(brightOut);
+  const r3b = await runCase(brighter, control);
+  const frames3b = r3b.sizes.flatMap((s) => s.frames);
+  const mis3b = readRows(join(brightOut, "render-mismatches.jsonl"));
+  check(
+    r3b.status === "mismatch" && frames3b.length === frames2.length && frames3b.every((f) => !f.pass && f.pct_within_4 < RULE.pct && f.max_diff >= 36 && f.max_diff <= 44),
+    `every frame fails, max_diff about 40 (${frames3b.map(fmt).join(", ")})`,
+  );
+  check(mis3b.length === frames2.length && mis3b.every((r) => r.case === "control.tsx" && Object.keys(r).join() === KEYS), `render-mismatches.jsonl holds ${mis3b.length} rows of ${frames2.length}`);
+  // compare() is symmetric: only the two images show which side's file was decoded as which.
+  const { w: w0, h: h0 } = listed.sizes[0];
+  const centre = (side: Pipeline) => {
+    const png = join(brightOut, "images", "control", `${w0}x${h0}`, `frame-${listed.frames[0]}-${side}.png`);
+    if (!existsSync(png)) return null;
+    const px = decodeFrames(png, w0, h0, [0]).get(0)!;
+    const i = (Math.round(h0 * 0.25) * w0 + Math.round(w0 * 0.55)) * 4;
+    return [px[i], px[i + 1], px[i + 2]];
+  };
+  const near = (px: number[], want: number[]) => px.every((v, c) => Math.abs(v - want[c]) <= 4);
+  const ref3b = centre("reference");
+  const zr3b = centre("zabsreel");
+  check(!!ref3b && !!zr3b && near(ref3b, [0x3c, 0xb4, 0x4b]) && near(zr3b, [0x64, 0xdc, 0x73]), `the circle is #3cb44b in the first side's image and #64dc73 in the second's (${ref3b} and ${zr3b})`);
+
   console.log("S4. a composition that throws, through the real reference pipeline, is a drift candidate and is named...");
   const throws = join(scratch, "throws.tsx");
   writeFileSync(throws, ["// size: 64x48", "// fps: 30", "// durationInFrames: 2", "// frames: 0, 1", "// spec: self-test", "// why: a composition both pipelines refuse", "export default function Throws(): never {", '  throw new Error("parity self-test");', "}", ""].join("\n"));
@@ -544,6 +583,21 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   check(mis4.length === 2 && mis4.every((r) => r.actual.startsWith(DRIFT) && r.input.startsWith("frame ")), `both rows say "${DRIFT}" (${JSON.stringify(mis4.map((r) => r.actual))})`);
   check(summary4.referenceRefused.join() === "throws.tsx" && !summary4.cases[0].sizes[0].reference.ok, "the summary lists it, with the reference's own error kept there");
   check(!mis4.some((r) => r.actual.includes("parity self-test")), "no row carries the error text");
+
+  console.log("S4b. a composition only the reference side refuses (its source made to throw) is exactly a drift candidate...");
+  const driftDir = join(scratch, "drift");
+  mkdirSync(driftDir, { recursive: true });
+  writeFileSync(join(driftDir, "drift.tsx"), ["// size: 64x48", "// fps: 30", "// durationInFrames: 2", "// frames: 0, 1", "// spec: self-test", "// why: a composition only the reference side refuses", 'import React from "react";', "export default function Drift() {", '  return <div style={{ position: "absolute", inset: 0, backgroundColor: "#204060" }} />;', "}", ""].join("\n"));
+  const driftOut = join(out, "drift");
+  const driftRun: Run = { ...refRun, out: driftOut, sourceA: (tsx) => tsx.replace("  return <div", '  throw new Error("parity self-test drift");\n  return <div') };
+  const code4b = await parity(driftRun, driftDir, undefined, process.env[NETNS] === "1");
+  const mis4b = readRows(join(driftOut, "render-mismatches.jsonl"));
+  const summary4b = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zabsreelFailed: string[]; cases: CaseResult[] };
+  check(code4b === 2, `the run exits 2 (it exited ${code4b})`);
+  check(mis4b.length === 2 && mis4b.every((r) => r.actual === DRIFT), `both rows say exactly "${DRIFT}" (${JSON.stringify(mis4b.map((r) => r.actual))})`);
+  const sized4b = summary4b.cases[0].sizes[0];
+  check(summary4b.referenceRefused.join() === "drift.tsx" && !summary4b.zabsreelFailed.length && !sized4b.reference.ok && sized4b.zabsreel.ok, "the summary lists it as refused by the reference only, ZabsReel rendered it");
+  check(!mis4b.some((r) => r.actual.includes("parity self-test")), "no row carries the error text");
 
   console.log(failures === 0 ? "\nPARITY HARNESS SELF-TEST PASSED" : `\n${failures} CHECK(S) FAILED`);
   return failures === 0 ? 0 : 1;
@@ -570,6 +624,7 @@ async function main(): Promise<number> {
       });
       return r.status ?? 1;
     }
+    if (args.includes("--require-netns")) throw new Error("--require-netns: no private network namespace (unshare failed)");
     console.log("note: no private network namespace (unshare failed); running in the current one");
   }
   const out = arg("out");

@@ -57,7 +57,9 @@
       "dist/renderer/**/*",
       "package.json",
       "!**/node_modules/@aive/core/src{,/**}",
-      "!**/packages/core/src{,/**}"
+      "!**/packages/core/src{,/**}",
+      "!**/node_modules/@aive/motion/{parity,scripts,cleanroom/test}{,/**}",
+      "!**/packages/motion/{parity,scripts,cleanroom/test}{,/**}"
     ],
     "extraResources": [
       {
