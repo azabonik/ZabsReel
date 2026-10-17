@@ -43,10 +43,11 @@
  *                      system FFmpeg and with the FFmpeg matrix kit's 8.1
  *                      (~/.cache/<kit>/ffmpeg-builds/8.1/bin, or ZR_FFMPEG_81).
  *
- * --live (CI only: the Windows release job, slice 4): the real installer with
- * Node's fetch against registry.npmjs.org and storage.googleapis.com into a
- * scratch data folder, then R7 once with AIVE_REMOTION_ADDON unset. Never run
- * it where the network is off limits.
+ * --live (CI only: release.yml's Windows job, every run): the real installer
+ * with Node's fetch against registry.npmjs.org and storage.googleapis.com into
+ * a scratch data folder under RUNNER_TEMP (the system temp folder when it is
+ * unset; never inside the checkout), then R7 once with AIVE_REMOTION_ADDON
+ * unset. Never run it where the network is off limits.
  *
  * Needs the build (npm run build) for R7. Run:
  *   npx tsx packages/core/scripts/smoke-addon-real.ts [--live]
@@ -57,7 +58,7 @@ import { createReadStream, existsSync, mkdtempSync, readdirSync, readFileSync, r
 import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { addonInstallerForTests, installGraphicsAddon, type InstallProgress } from "../src/addon/install.js";
@@ -89,7 +90,10 @@ function ffmpeg81(): string | null {
 }
 const REGISTRY_PORT = 5032;
 const CORE_PORT = 5033;
-const root = mkdtempSync(join(tmpdir(), "aive-addon-real-"));
+/** The scratch folder's parent: never inside the checkout (another drive on Windows gives an absolute relative path). */
+const TEMP = (LIVE && process.env.RUNNER_TEMP) || tmpdir();
+if (!relative(REPO, TEMP).startsWith("..") && !isAbsolute(relative(REPO, TEMP))) throw new Error(`${TEMP} is inside the checkout: set RUNNER_TEMP (or TMPDIR) to a folder outside it`);
+const root = mkdtempSync(join(TEMP, "aive-addon-real-"));
 for (const v of ["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY"]) delete process.env[v];
 
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");

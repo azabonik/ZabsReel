@@ -8,12 +8,12 @@
 // offers this dialog. The same dialog serves the desktop window and the web
 // shell. Escape, the scrim, the X and Close call onClose; an install goes on
 // in the host, and the dialog shows it again when it is opened.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { PRODUCT_NAME } from "@aive/core/brand";
 import type { CoreApi, GraphicsAddonRefusal } from "./api";
 import type { GraphicsAddonStatus, GraphicsAddonTerms, JobInfo } from "./types";
-import { applyJobEvent } from "./jobstate";
+import { applyJobEvent, listedJobs } from "./jobstate";
 import { platform } from "./platform";
 import { fmtBytes } from "./storagedialog";
 import { Alert, Sparkles, X } from "./icons";
@@ -45,17 +45,28 @@ export function GraphicsAddonBanner(props: { state: GraphicsAddonRefusal | null;
   );
 }
 
-/** Whether a graphic is rendering (a running core job of type "graphic"): Remove, Reinstall and Update wait for it. */
+/**
+ * Whether a graphic is rendering (a running core job of type "graphic"): Remove, Reinstall and Update wait for it.
+ * The running jobs are asked for again on every (re)connect, and that answer replaces what was known (listedJobs).
+ */
 function useGraphicRendering(api: CoreApi, connected: boolean): boolean {
   const [jobs, setJobs] = useState<Record<string, JobInfo>>({});
-  useEffect(() => api.subscribeJobs((j) => setJobs((prev) => applyJobEvent(prev, j))), [api]);
+  /** The job events since the pending list_jobs request was sent. */
+  const since = useRef<JobInfo[] | null>(null);
+  useEffect(() => api.subscribeJobs((j) => {
+    since.current?.push(j);
+    setJobs((prev) => applyJobEvent(prev, j));
+  }), [api]);
   useEffect(() => {
     if (!connected) return;
     let live = true;
+    const events: JobInfo[] = [];
+    since.current = events;
     api
       .rpc<{ jobs: JobInfo[] }>("list_jobs", { activeOnly: true })
-      .then((r) => { if (live) setJobs((prev) => ({ ...Object.fromEntries(r.jobs.map((j) => [j.id, j])), ...prev })); })
-      .catch(() => {});
+      .then((r) => { if (live) setJobs(listedJobs(r.jobs, events)); })
+      .catch(() => {})
+      .finally(() => { if (since.current === events) since.current = null; });
     return () => { live = false; };
   }, [api, connected]);
   return Object.values(jobs).some((j) => j.type === "graphic");
@@ -210,7 +221,7 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
             {idle && state === "update-needed" && terms && (
               <button className="btn btn-sm btn-primary" onClick={install} disabled={blocked}>{accept ? "Accept and update" : "Update"}</button>
             )}
-            {idle && state === "ready" && (
+            {idle && replaces && (
               <button className="btn btn-sm btn-danger" onClick={remove} disabled={blocked}>Remove</button>
             )}
             {idle && (state === "ready" || state === "broken") && terms && (

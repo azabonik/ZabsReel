@@ -7,10 +7,11 @@
  * Bundling strategy = HYBRID (see docs/PROJECT_STATUS.md §5 / the Phase-5 plan):
  *   bundled here  → FFmpeg + ffprobe, whisper-cli (+ DLLs) + base.en model,
  *                   YuNet + RVM ONNX, an OSS font (Noto Sans, OFL-1.1).
- *   NOT bundled   → Remotion's Chrome Headless Shell (downloaded on first
- *                   motion-graphics use; it is large and Remotion manages its
- *                   own robust cache). Larger whisper models also download on
- *                   demand.
+ *   NOT bundled   → Larger whisper models (they download on demand). Motion
+ *                   graphics need the graphics add-on (Remotion and its
+ *                   headless shell), which the user installs from Help →
+ *                   Graphics add-on; no installer holds it (the afterPack
+ *                   gate, scripts/check-no-remotion.mjs).
  *
  * The packaged app points the engine's env overrides (AIVE_FFMPEG / AIVE_FFPROBE
  * / AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL / AIVE_YUNET_MODEL / AIVE_RVM_MODEL / AIVE_FONT) at
@@ -180,7 +181,6 @@ async function main(): Promise<void> {
         stagedAt: new Date().toISOString(),
         bundled: ["ffmpeg", "ffprobe", "whisper-cli", DEFAULT_MODEL, "yunet", "rvm", "noto-sans"],
         ffmpeg: build,
-        firstRunDownload: ["remotion-chrome-headless-shell"],
       },
       null,
       2,

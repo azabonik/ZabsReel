@@ -59,7 +59,10 @@ Per-feature smokes live in `packages/core/scripts/` — e.g. `smoke-effects.ts`,
 (Whisper), `smoke-reframe.ts` (YuNet), `smoke-jlcut.ts`, `smoke-motion.ts`
 (Remotion), and `smoke-bundled.ts` (the packaged/offline bundle, see below).
 Models/binaries download on first use and cache under `~/.aive` (override with
-`AIVE_WHISPER_DIR` / `AIVE_MODELS_DIR`, etc.).
+`AIVE_WHISPER_DIR` / `AIVE_MODELS_DIR`, etc.). Graphics load Remotion only from
+the graphics add-on: in a source checkout, set `AIVE_REMOTION_ADDON=$PWD` to use
+the Remotion in `node_modules` (the graphics smokes do this for you; see
+`docs/TESTING.md`).
 
 ## Network paths and the trust folder
 
@@ -93,8 +96,10 @@ an administrator, in the release workflow) and is skipped elsewhere.
 
 Distribution is **offline-first**: the installer bundles FFmpeg, whisper.cpp
 (+ `base.en`), the YuNet model, and an OSS font so the app works with no
-downloads on first run. Remotion's headless Chrome is the one exception — it
-downloads on first motion-graphics use.
+downloads on first run. Motion graphics are the one exception: they need the
+graphics add-on (Remotion and its headless shell), which the user installs from
+**Help → Graphics add-on** and which no installer may contain (see "Remotion is
+a devDependency only" below).
 
 ```bash
 node apps/desktop/scripts/prepare-bundle.ts     # stage bundled binaries → apps/desktop/build/resources/aive
@@ -112,8 +117,17 @@ A few non-obvious things if you touch the packaging:
   electron-builder runs a production `npm install` that, in this hoisted npm
   workspace, **prunes devDependencies from the shared root `node_modules`** — it
   will delete electron-builder itself mid-build. Leave it off.
-- `asar: false` is intentional: the core runs as a spawned Node subprocess and
-  Remotion's bundler needs real filesystem access to `node_modules`.
+- `asar: false` is intentional: the core runs as a spawned Node subprocess from
+  real files.
+- `build.files` leaves out the core's `src/` (`!**/packages/core/src{,/**}`;
+  electron-builder copies the workspace's `packages/core` whole and ignores its
+  `files` field). A core with `src/` takes itself for a source checkout and
+  honours the developer variables in `docs/TESTING.md`.
+- The `afterPack` hook (`apps/desktop/build/afterpack.cjs`) runs
+  `node scripts/check-no-remotion.mjs <appOutDir>` on every build, `--dir`
+  included, and fails it on any Remotion package, add-on-only package, headless
+  shell or core `src/`, or a missing or changed copy of Remotion's licence.
+  `node scripts/check-no-remotion.mjs --self-test` checks its rules.
 - On Windows, electron-builder's `winCodeSign` archive contains macOS symlinks
   that can't be created without Developer Mode/admin. If extraction fails,
   pre-extract it once into
@@ -141,6 +155,34 @@ component must be listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)
 The paragraph above comes from the original project and is kept as written.
 For the ZabsReel changes, [`NOTICE`](NOTICE) adds an explicit GNU GPL section 7
 permission to link with Remotion.
+
+### Remotion is a devDependency only
+
+No installer ZabsReel conveys may contain Remotion. Users install it
+themselves as the graphics add-on, under Remotion's own license, and the core
+loads it only from there (or, in a source checkout, from `AIVE_REMOTION_ADDON`).
+So:
+
+- `remotion`, `@remotion/*`, `react` and `react-dom` are `devDependencies` of
+  `packages/core`. Never move them back to `dependencies`, and never add a
+  package to `apps/desktop`'s `dependencies` that only the add-on uses (esbuild,
+  webpack, `@rspack/*`, ...).
+- `node scripts/check-no-remotion.mjs <appOutDir>` (run by the `afterPack` hook)
+  fails a build that holds such a package. It allows the packages the shipped
+  code shares with the add-on (react, ws, cross-spawn, ...): it compares
+  `name@version` with the add-on-only list in
+  `packages/core/src/motion/addonlock.ts`.
+- **The add-on drift guard.** `addonlock.ts` pins every package the add-on
+  installs, generated from the root `package-lock.json` by
+  `node scripts/gen-graphics-lock.mjs`. A dependency update that changes the
+  add-on's package set (even a shared package that moves Remotion's copy to
+  another folder) changes the add-on's fingerprint, and
+  `node scripts/gen-graphics-lock.mjs --check` (CI and the release job) then
+  fails and lists what changed. `--accept-addon-change` accepts the new
+  fingerprint, and that makes **every user update the add-on** after the next
+  release (an update downloads only the changed packages). So prefer to leave
+  the add-on's packages unchanged between deliberate Remotion upgrades: undo
+  the lock change, or update only packages outside the add-on.
 
 ## Style
 

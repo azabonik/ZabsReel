@@ -70,11 +70,26 @@
 //      the install shows its progress and ends "ready", fetching exactly the
 //      platform's list through main's add-on session and nowhere else; while a
 //      job of type "graphic" runs, Remove and Reinstall are disabled ("Wait
-//      for the graphic to finish."); Remove; a copy whose browser is gone
-//      shows "damaged" and Reinstall, which repairs it; with no add-on, an
+//      for the graphic to finish."), and enabled when it ends, also when it
+//      ended while the socket was away (a reconnect) or after the dialog's
+//      list_jobs was sent but before its answer came; Remove; Cancel during
+//      the download (graphics-addon:cancel, main's session fetch aborted)
+//      leaves no add-on and no staging; a copy whose browser is gone shows
+//      "damaged" with Reinstall and Remove, and Reinstall repairs it; an
+//      add-on another ZabsReel version installed shows Update and Remove
+//      (both wait for a graphic), and Remove deletes it; with no add-on, an
 //      add_graphic sent over the core's HTTP RPC (as the MCP server sends it)
 //      is refused (409 graphics_addon_missing) and the window shows the
-//      banner, whose Set up… opens the dialog.
+//      banner, whose Set up… opens the dialog. Needs a source checkout: it is
+//      skipped with AIVE_APP.
+//  11. The packed app (a 6th run; ADDON-PLAN D8.5): the `--dir` build
+//      (AIVE_APP, else apps/desktop/build/dist/linux-unpacked when it exists)
+//      with AIVE_REMOTION_ADDON, AIVE_ADDON_REGISTRY and AIVE_ADDON_TEST_PIN
+//      set: a packaged core is no source checkout, so graphics stay
+//      "not-installed"; Accept and install asks main's add-on session (a stub
+//      that records each URL and fails it, so nothing leaves the machine) for
+//      the real pin's registry.npmjs.org tarballs, never the override or the
+//      test pin's hosts, and nothing is installed.
 //   No renderer console errors or page errors in any run.
 //   The app runs with its own profile (--user-data-dir) in the test folder, so
 //   the user's ZabsReel profile and its recent projects are left alone.
@@ -175,11 +190,11 @@ interface Run {
   mainLog: () => string;
 }
 
-async function launch(pw: PW, cwd: string, dataDir: string, extraEnv: Record<string, string> = {}): Promise<Run> {
+/** `packaged`: a packed app's executable (default AIVE_APP), else the source tree. */
+async function launch(pw: PW, cwd: string, dataDir: string, extraEnv: Record<string, string> = {}, packaged = process.env.AIVE_APP): Promise<Run> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("ELECTRON_")) env[k] = v;
   Object.assign(env, { AIVE_DATA_DIR: dataDir, AIVE_PORT: process.env.AIVE_PORT ?? "0" }, extraEnv);
-  const packaged = process.env.AIVE_APP;
   const app = await pw._electron.launch({
     executablePath: packaged || electronBinary(),
     // SwiftShader gives the renderer WebGL2 without a GPU, as on a plain VM.
@@ -756,7 +771,11 @@ async function main() {
   await networkComputers(pw, work, cwd2, clip);
 
   // ---------------------------------------------------------------- run 5
-  await graphicsAddon(pw, work);
+  if (process.env.AIVE_APP) console.log("10. skipped: the fixture add-on needs a source checkout (AIVE_ADDON_TEST_PIN); run 11 covers the packed app");
+  else await graphicsAddon(pw, work);
+
+  // ---------------------------------------------------------------- run 6
+  await packedAddon(pw, work);
 
   await noLeftoverCores();
   rmSync(work, { recursive: true, force: true });
@@ -1189,9 +1208,54 @@ async function graphicsAddon(pw: PW, work: string) {
     await job("done");
     check(await waitFor("enabled", async () => (await button("Remove").isEnabled()) && (await button("Reinstall").isEnabled()), 5000), "…and enabled once it is done");
 
+    // A graphic that ends while the socket is away: on the reconnect, list_jobs's answer (no job) replaces what was known.
+    // MUTATION: merge the list_jobs answer under the jobs already known (graphicsaddon.tsx, slice 3) → the row stays disabled.
+    await job("running");
+    const before = await waitFor("disabled again", async () => button("Remove").isDisabled(), 5000);
+    await win.evaluate(() => (window as unknown as { __ws: WebSocket }).__ws.close());
+    check(before && await waitFor("enabled after the reconnect", async () => (await win.locator(".statuspill.ok").count()) > 0 && (await button("Remove").isEnabled()) && (await button("Reinstall").isEnabled()), 15000),
+      "a graphic that ended while the socket was away: after the reconnect, Remove and Reinstall are enabled");
+    // A graphic that ends after the dialog's list_jobs is sent and before its answer arrives: the page answers that one
+    // request itself, the job's "done" event first, then an answer that still lists it as running.
+    // MUTATION: listedJobs ignores the events since the request (jobstate.ts) → the row stays disabled.
+    await closeDialog();
+    await win.evaluate(`(() => {
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (d) {
+        const m = JSON.parse(d);
+        if (m.method !== "list_jobs") return send.call(this, d);
+        WebSocket.prototype.send = send;
+        const job = { id: "zr-late-graphic", type: "graphic", label: "Render motion graphic", status: "running", fraction: 0.5, startedAt: Date.now() };
+        const msg = (data) => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
+        setTimeout(() => {
+          msg({ type: "job", job: { ...job, status: "done", fraction: 1 } });
+          msg({ type: "rpc_result", id: m.id, ok: true, result: { jobs: [job] } });
+          window.__lateAnswered = true;
+        }, 50);
+      };
+    })()`);
+    await openDialog();
+    await waitFor("late answer", () => win.evaluate(() => !!(window as unknown as { __lateAnswered?: boolean }).__lateAnswered), 5000);
+    await sleep(300);
+    check((await button("Remove").isEnabled()) && (await button("Reinstall").isEnabled()) && !(await dlg.innerText()).includes("Wait for the graphic to finish."),
+      "a graphic that ended after list_jobs was sent, before its answer came: Remove and Reinstall stay enabled");
+
     await button("Remove").click();
     check(await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)),
       `Remove → not installed, its folder gone (${state()})`);
+
+    // Cancel during the download: the Cancel button calls graphics-addon:cancel, which aborts main's session fetch.
+    // MUTATION: make graphics-addon:cancel return false without aborting (main.cjs) → the install never ends "cancelled".
+    registry.answers.set(zipPath, "hold");
+    await button("Accept and install").click();
+    await waitFor("progress before Cancel", async () => (await button("Cancel").count()) === 1 && /Installing… \d+ MB/.test(await dlg.locator(".ga-progress").innerText().catch(() => "")), 10000);
+    await button("Cancel").click();
+    // addons/remotion (empty) stays from the install Remove took away; the staging folder and the lock must go.
+    const addons = () => (existsSync(join(dataDir, "addons")) ? readdirSync(join(dataDir, "addons")) : []);
+    check(await waitFor("cancelled", async () => (await dlg.innerText()).includes("The graphics add-on install was cancelled. Nothing was installed."), 10000)
+      && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)) && JSON.stringify(addons()) === '["remotion"]',
+      `Cancel → "cancelled", no add-on and no staging (addons/: ${JSON.stringify(addons())})`);
+    registry.answers.clear();
 
     // A copy whose browser went missing: "damaged", and Reinstall repairs it.
     await button("Accept and install").click();
@@ -1199,14 +1263,34 @@ async function graphicsAddon(pw: PW, work: string) {
     await closeDialog();
     rmSync(join(graphicsAddonDir(dataDir), "browser", fixture.pin.shell[platform].executable));
     await openDialog();
-    check((await dlg.innerText()).includes("The graphics add-on is damaged (missing files).") && (await button("Reinstall").count()) === 1 && (await button("Remove").count()) === 0,
-      `broken (${state()}): "damaged" and Reinstall`);
+    // MUTATION: offer Remove only when ready (graphicsaddon.tsx, slice 3) → this row and the update-needed one fail.
+    check((await dlg.innerText()).includes("The graphics add-on is damaged (missing files).") && (await button("Reinstall").count()) === 1 && (await button("Remove").count()) === 1,
+      `broken (${state()}): "damaged", Reinstall and Remove`);
+    await job("running");
+    check(await waitFor("broken: disabled", async () => (await button("Remove").isDisabled()) && (await button("Reinstall").isDisabled()), 5000),
+      "broken: while a graphic renders, Remove and Reinstall are disabled");
+    await job("done");
+    await waitFor("broken: enabled", async () => button("Reinstall").isEnabled(), 5000);
     registry.hits.clear();
     await button("Reinstall").click();
     check(await waitFor("repaired", async () => (await dlg.innerText()).includes("Graphics are ready."), 20000) && state() === "ready" && JSON.stringify(registry.hitPaths()) === JSON.stringify([zipPath]),
       `Reinstall → ready, downloading only the browser (${JSON.stringify(registry.hitPaths())})`);
+    await closeDialog();
+
+    // An add-on another ZabsReel version installed (another lock hash): Update and Remove, both waiting for a graphic.
+    const manifestFile = join(graphicsAddonDir(dataDir), "addon.json");
+    writeFileSync(manifestFile, JSON.stringify({ ...JSON.parse(readFileSync(manifestFile, "utf8")), lockSha256: "0".repeat(64) }));
+    await openDialog();
+    check(state() === "update-needed" && (await dlg.innerText()).includes("Update the graphics add-on.") && (await button("Update").count()) === 1 && (await button("Remove").count()) === 1,
+      `update-needed (${state()}): Update and Remove`);
+    await job("running");
+    check(await waitFor("update-needed: disabled", async () => (await button("Remove").isDisabled()) && (await button("Update").isDisabled()), 5000),
+      "update-needed: while a graphic renders, Update and Remove are disabled");
+    await job("done");
+    await waitFor("update-needed: enabled", async () => button("Remove").isEnabled(), 5000);
     await button("Remove").click();
-    await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000);
+    check(await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)),
+      `update-needed: Remove → not installed, its folder gone (${state()})`);
     await closeDialog();
 
     // The agent's add_graphic with no add-on: refused, and the banner offers the dialog.
@@ -1230,6 +1314,87 @@ async function graphicsAddon(pw: PW, work: string) {
     check(await Promise.race([closed.then(() => true), sleep(30000).then(() => false)]), "closed");
     check(await waitFor("core exit", () => !pidAlive(info.pid), 10000), "its core exited");
     check(!/A JavaScript error occurred|ReferenceError|TypeError/.test(r.mainLog()), "no main-process errors");
+    check(r.errors.length === 0, `no renderer console errors${r.errors.length ? `:\n    ${r.errors.join("\n    ")}` : ""}`);
+    await app.close().catch(() => {});
+  } finally {
+    await registry.stop();
+  }
+}
+
+/**
+ * Run 6 (step 11 above): the packed `--dir` build with the source-checkout variables set. A packaged core
+ * ignores them, so graphics stay "not-installed", and an install goes to the real pin's hosts: main's add-on
+ * session is a stub that records each URL and fails it, so nothing leaves the machine.
+ */
+async function packedAddon(pw: PW, work: string) {
+  const exe = process.env.AIVE_APP || (process.platform === "linux" ? join(APP_DIR, "build", "dist", "linux-unpacked", "zabsreel-desktop") : "");
+  if (!exe || !existsSync(exe)) {
+    console.log(`11. skipped: no packed build (${exe || "set AIVE_APP"}; npx electron-builder --linux --dir in apps/desktop makes one)`);
+    return;
+  }
+  console.log(`11. the packed app ignores the add-on's source-checkout variables (${exe})...`);
+  const { addonPlatform, graphicsAddonTerms, readGraphicsAddon } = await import("@aive/core/addon");
+  const platform = addonPlatform();
+  if (!platform) {
+    console.log(`  skip: ${process.platform}-${process.arch} has no add-on`);
+    return;
+  }
+  const registry = fixtureRegistry(5032);
+  const fixture = buildPin(basePkgs(join(work, "packed-postinstall-ran")), {}, "packed", { registry: "https://zr-addon-registry.invalid", storage: "https://zr-addon-storage.invalid" });
+  registry.publish(fixture);
+  await registry.start();
+  const pinFile = join(work, "packed-pin.json");
+  writeFileSync(pinFile, JSON.stringify(fixture.pin));
+  const cwd = join(work, "cwd6");
+  mkdirSync(cwd);
+  const dataDir = join(work, "data-packed");
+  const repo = resolve(APP_DIR, "..", "..");
+  try {
+    const r = await launch(pw, cwd, dataDir, { AIVE_REMOTION_ADDON: repo, AIVE_ADDON_REGISTRY: registry.url, AIVE_ADDON_TEST_PIN: pinFile }, exe);
+    const { app, win } = r;
+    check(await waitFor("Core pill", async () => (await win.locator(".statuspill.ok").count()) > 0), "window connected");
+    check(await app.evaluate(({ app }) => app.isPackaged), "the app is packaged");
+    // The add-on session's fetch: each URL recorded, then refused like a machine with no network.
+    await app.evaluate(({ session }) => {
+      const s = session.fromPartition("zabsreel-graphics-addon") as unknown as { fetch: (u: unknown) => Promise<unknown> };
+      const g = globalThis as unknown as { __addonUrls: string[] };
+      g.__addonUrls = [];
+      s.fetch = (u) => {
+        g.__addonUrls.push(String(u));
+        return Promise.reject(new TypeError("fetch failed"));
+      };
+    });
+    const info = JSON.parse(readFileSync(join(dataDir, "server.json"), "utf8"));
+    const res = await fetch(`http://127.0.0.1:${info.port}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aive-token": info.token },
+      body: JSON.stringify({ method: "get_state", params: {} }),
+    });
+    const graphics = ((await res.json()) as { result?: { graphics?: string } }).result?.graphics;
+    // MUTATION: leave the core's src/ in the packed tree (build.files) and skip the afterPack gate → graphics are "ready".
+    check(graphics === "not-installed", `get_state: graphics "${graphics}" with AIVE_REMOTION_ADDON set to the checkout (a packaged core is no source checkout)`);
+
+    const dlg = win.getByRole("dialog", { name: /Graphics add-on/ });
+    await win.getByRole("button", { name: "Help", exact: true }).click();
+    await win.getByRole("menuitem", { name: "Graphics add-on…" }).click();
+    await waitFor("add-on dialog", async () => (await dlg.count()) > 0 && !(await dlg.innerText()).includes("Loading…"), 10000);
+    const terms = graphicsAddonTerms(platform);
+    check((await dlg.locator(".ga-license").textContent()) === terms.license && (await dlg.getByRole("button", { name: "Accept and install", exact: true }).count()) === 1,
+      "the dialog shows Remotion's licence (the packed core's copy) and Accept and install");
+    await dlg.getByRole("button", { name: "Accept and install", exact: true }).click();
+    check(await waitFor("install failed", async () => (await dlg.locator(".storage-error").count()) > 0, 20000), `the install ends with an error (${await dlg.locator(".storage-error").innerText().catch(() => "")})`);
+    const urls = await app.evaluate(() => (globalThis as unknown as { __addonUrls: string[] }).__addonUrls);
+    check(urls.length > 0 && urls.every((u) => u.startsWith("https://registry.npmjs.org/") || u.startsWith("https://storage.googleapis.com/")) && registry.hits.size === 0,
+      `Install asked only for the real pin's URLs (${urls.length}: ${urls.slice(0, 2).join(", ")}…), never the override or the test pin's .invalid hosts (${registry.hits.size} hits)`);
+    check(readGraphicsAddon(dataDir).state === "not-installed" && !existsSync(join(work, "packed-postinstall-ran")), `nothing installed (${readGraphicsAddon(dataDir).state})`);
+    check(/AIVE_ADDON_TEST_PIN is ignored/.test(r.mainLog()) && /AIVE_ADDON_REGISTRY is ignored/.test(r.mainLog()), "main says AIVE_ADDON_TEST_PIN and AIVE_ADDON_REGISTRY are ignored");
+    await dlg.getByRole("button", { name: "Close", exact: true }).last().click();
+
+    const closed = new Promise<void>((res) => app.once("close", () => res()));
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
+    check(await Promise.race([closed.then(() => true), sleep(30000).then(() => false)]), "closed");
+    check(await waitFor("core exit", () => !pidAlive(info.pid), 10000), "its core exited");
+    check(!/A JavaScript error occurred|ReferenceError|TypeError: (?!fetch failed)/.test(r.mainLog()), "no main-process errors");
     check(r.errors.length === 0, `no renderer console errors${r.errors.length ? `:\n    ${r.errors.join("\n    ")}` : ""}`);
     await app.close().catch(() => {});
   } finally {

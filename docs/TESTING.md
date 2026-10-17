@@ -24,10 +24,11 @@ Plus how to test the **packaged installer** offline.
 | FFmpeg + ffprobe on PATH (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | (AI testing) Claude Desktop | — | https://claude.ai/download |
 
-Everything else (whisper.cpp + model, YuNet model, Remotion's headless Chrome)
-**auto-downloads on first use** and caches under `~/.aive`. The first run of
-captions / auto-reframe / motion graphics will pause to download — that's normal
-and happens only once.
+Everything else (whisper.cpp + model, YuNet model) **auto-downloads on first
+use** and caches under `~/.aive`. The first run of captions / auto-reframe will
+pause to download — that's normal and happens only once. Motion graphics need
+the graphics add-on (Remotion and its headless shell): see
+[The graphics add-on in a source checkout](#the-graphics-add-on-in-a-source-checkout).
 
 ---
 
@@ -202,6 +203,22 @@ npx tsx packages/core/scripts/smoke-graphicimports.ts
 # Starts no server or browser
 node packages/core/scripts/check-remotion-guard.mjs
 ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts/check-remotion-guard.mjs
+
+# The graphics add-on (no network: fixture tarballs and zips from a loopback
+# registry on ports 5030-5031). The pin's walk on fixture locks and its drift
+# guard; the core's side: the add-on states, add_graphic's 409 refusals and the
+# UI signal, the pinned browser everywhere Remotion could start one,
+# AIVE_REMOTION_ADDON only in a source checkout, agent tools kept out of
+# <dataDir>/addons; the installer the UI hosts run: hashes before extraction,
+# the tar and zip readers, the install lock, cancel, activation and recovery,
+# reuse on update. Also the add-on's docs and release.yml's live step (D rows)
+npx tsx packages/core/scripts/smoke-addon.ts
+
+# The pin is in sync with package-lock.json, every platform's download size is
+# known, and the add-on's fingerprint is the accepted one (CONTRIBUTING.md, "The
+# add-on drift guard"); then the packaging gate's own rules on fixture trees
+node scripts/gen-graphics-lock.mjs --check --require-sizes
+node scripts/check-no-remotion.mjs --self-test
 
 # The desktop window's request guard and CSP (electron/net-guard.cjs, plain logic)
 npx tsx apps/desktop/scripts/smoke-netguard.ts
@@ -483,6 +500,52 @@ npx tsx packages/core/scripts/smoke-proxy.ts                           # self-sy
 npx tsx packages/core/scripts/smoke-motion.ts
 ```
 
+### The graphics add-on for real (run by hand)
+
+`smoke-addon-real.ts` (not in CI) installs the real add-on offline, from a
+loopback registry that serves npm's local cache (`~/.npm/_cacache`, every
+linux-x64 tarball) and the pinned headless-shell zips
+(`~/.cache/zabsreel-addon/cft-149.0.7790.0`, downloaded there once;
+`node scripts/gen-graphics-lock.mjs --check --browser` checks them against the
+pin). It compares the installed tree with `node_modules` file by file, extracts all four zips, installs the win32
+and darwin lists (forced platform) and audits their names for Windows and
+macOS, checks an update that reuses every unchanged package, and renders real
+graphics through the add-on's own browser (system FFmpeg and the matrix kit's
+8.1). With `--live` it installs from the real `registry.npmjs.org` and Google
+instead and renders one graphic: only release.yml's Windows job runs that
+(docs/RELEASING.md).
+
+```bash
+npx tsx packages/core/scripts/smoke-addon-real.ts          # offline; needs npm run build
+```
+
+### The graphics add-on in a source checkout
+
+Graphics load Remotion only from the graphics add-on. A user installs it in the
+app (**Help → Graphics add-on…**, README "Motion graphics: the graphics
+add-on") into `<data folder>/addons/remotion/4.0.481`. A source checkout can
+use the Remotion in its own `node_modules` instead (a devDependency of
+`packages/core`), and the tests use loopback fixtures. These variables do that:
+
+| Variable | What it does |
+|---|---|
+| `AIVE_REMOTION_ADDON=<folder>` | Graphics load Remotion from `<folder>` (absolute; it must hold `node_modules/@remotion/renderer`), e.g. `AIVE_REMOTION_ADDON=$PWD`. The graphics smokes and `check-remotion-guard.mjs` set it to the repo root when it is unset. |
+| `AIVE_REMOTION_BROWSER=<executable>` | With `AIVE_REMOTION_ADDON`: the headless shell to render with. Without it, Remotion uses its own browser cache, found from the working folder (`node_modules/.remotion`). |
+| `AIVE_ADDON_REGISTRY=http://127.0.0.1:<port>` | The installer takes every tarball and zip from this loopback server (`127.0.0.1` or `localhost` only; anything else is refused), keeping each URL's path. |
+| `AIVE_ADDON_TEST_PIN=<file>` | The UI hosts (Electron main, the web shell) install the fixture closure in this JSON pin file instead of the real pin: the UI smokes' fixture add-on. |
+
+All four are honoured **only in a source checkout**: the core's own package
+folder holds `src/`. A packaged ZabsReel has no `src/` there (the `afterPack`
+gate checks that), so it ignores them and prints one stderr line saying so.
+Run 11 of `smoke-electron.mts` checks that on a packed build.
+`addonInstallerForTests`, the installer's test seam that `@aive/core/addon`
+exports for these smokes (a pin, a platform, injected file-system errors), is
+refused outside a source checkout too.
+
+Without `AIVE_REMOTION_ADDON` and without an installed add-on, `add_graphic`
+is refused with `graphics_addon_missing`, as for a user, and the window shows
+a banner with **Set up…**.
+
 ### The desktop app in Electron (run by hand)
 
 `smoke-electron.mts` launches the real Electron app (`apps/desktop`) with
@@ -508,14 +571,26 @@ nothing is saved before Allow), the "You opened" and "The AI
 assistant asked" wording, and **Project → Network computers…**; and the
 window's network limits (the sign-in switch, the request guard cancelling a
 request to another computer or a `file://` URL with a host, a navigation away
-from the app cancelled, the CSP refusing media from another origin). It fails
-on renderer console errors. The app runs with its own profile (`--user-data-dir` in the
+from the app cancelled, the CSP refusing media from another origin); and the
+graphics add-on with a fixture closure from a loopback registry
+(`AIVE_ADDON_REGISTRY`, `AIVE_ADDON_TEST_PIN`): **Help → Graphics add-on…**,
+Accept and install through main's own session, Cancel during the download,
+Remove, Reinstall and Update disabled while a graphic job runs (also after a
+reconnect, and when a job ends before the dialog's job list arrives), a damaged
+copy and one from another ZabsReel version (Remove offered in both), and the
+banner after an agent's refused `add_graphic`. Run 11 starts the packed `--dir`
+build (`AIVE_APP`, else `apps/desktop/build/dist/linux-unpacked` when it
+exists, else it is skipped) with those variables and `AIVE_REMOTION_ADDON`
+set: graphics stay "not-installed", and Install asks only for the real pin's
+URLs (a stub in main fails each one, so nothing leaves the machine), never the
+override. It fails on renderer console errors. The app runs with its own profile (`--user-data-dir` in the
 test folder), so your ZabsReel profile and its recent projects are left alone.
 
 ```bash
 node node_modules/electron/install.js        # once, if node_modules/electron/dist is missing
 xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
-# a packed build instead of the source tree:
+# a packed build instead of the source tree (run 10 needs a source checkout and
+# is skipped then; a plain run already uses linux-unpacked for run 11 when it exists):
 (cd apps/desktop && npx electron-builder --dir --linux)
 AIVE_APP=$PWD/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 ```
@@ -716,9 +791,10 @@ guards the fix. CI's ffcompat step prints `ffmpeg -version | head -1` first.
 What to expect:
 - The **first** captions run downloads whisper.cpp + the `base.en` model (~150 MB);
   the first reframe run downloads the YuNet model; the first `smoke-media` run
-  downloads the CLIP semantic-search model (~small, into `~/.aive/clip`); the
-  first motion run downloads Remotion's headless Chrome (~150 MB). Subsequent runs
-  are fast. (Set `AIVE_CLIP_DISABLE=1` to skip CLIP and use the model-free
+  downloads the CLIP semantic-search model (~small, into `~/.aive/clip`). The
+  graphics smokes use the Remotion in `node_modules` (`AIVE_REMOTION_ADDON`);
+  their real renders need its headless shell already in Remotion's cache
+  (`node_modules/.remotion`) and skip without it. Subsequent runs are fast. (Set `AIVE_CLIP_DISABLE=1` to skip CLIP and use the model-free
   perceptual index instead.)
 - Every script exits non-zero on failure, so you can also run them in a loop and
   check exit codes.
@@ -872,6 +948,12 @@ npm run dist --workspace zabsreel-desktop          # -> apps/desktop/build/dist/
 no system font, bundled whisper + model + YuNet) and renders captions — proving
 first-run works with no network.
 
+`npm run dist` runs the packaging gate (`node scripts/check-no-remotion.mjs`,
+electron-builder's `afterPack` hook) on the packed app before it makes the
+installer: no Remotion package, add-on-only package, headless shell or core
+`src/`, and the core's copy of Remotion's licence unchanged. A refusal fails
+the build.
+
 ### 7.2 Install and run
 
 1. Run `apps/desktop/build/dist/ZabsReel-<version>.exe`.
@@ -879,7 +961,8 @@ first-run works with no network.
 3. Launch the installed app. Import a clip, add it, **Export** — it should render
    using the bundled FFmpeg with **no internet connection** (try it with Wi-Fi
    off). Captions and auto-reframe also work offline. Only **motion graphics**
-   needs one online run (to download Remotion's Chrome).
+   need a download: the graphics add-on (**Help → Graphics add-on…**, Accept
+   and install), once.
 
 ---
 
@@ -889,8 +972,12 @@ first-run works with no network.
   `ffmpeg -version` works.
 - **Claude doesn't see the tools** — fully restart Claude Desktop; check the
   config path points to an existing `packages/mcp/dist/index.js`.
-- **First captions/reframe/motion call hangs for a minute** — it's the one-time
-  model/Chrome download. Watch the core's stderr for `[whisper] downloading …`.
+- **First captions/reframe call hangs for a minute** — it's the one-time
+  model download. Watch the core's stderr for `[whisper] downloading …`.
+- **`add_graphic` fails with `graphics_addon_missing`** — the graphics add-on
+  is not installed: install it from **Help → Graphics add-on…**, or, in a source
+  checkout, start with `AIVE_REMOTION_ADDON=$PWD` (§3, "The graphics add-on in
+  a source checkout").
 - **Motion graphics fails on a machine running a dev server** — Remotion's render
   server uses an ephemeral port to avoid colliding with port 3000; if you see
   "not a valid Remotion project", make sure you're on the current build.
@@ -914,4 +1001,5 @@ first-run works with no network.
 - [ ] Desktop app: import → edit → preview → export by hand
 - [ ] Claude Desktop connected; the §5.2 prompt script completes
 - [ ] Motion-graphics error loop: broken code → error → Claude self-corrects
-- [ ] Installer builds; installed app exports with Wi-Fi off
+- [ ] Installer builds (the `afterPack` gate passes); installed app exports with Wi-Fi off
+- [ ] Graphics add-on: **Help → Graphics add-on…** installs it, and a graphic renders

@@ -67,19 +67,28 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
 
 1. Checks out **the exact commit the tag points to**, then runs the release
    guard (below).
-2. `npm ci` → `npm run build` (core + mcp + renderer), then the graphics
-   guards on Windows paths: `check-remotion-guard.mjs` under Node and under
-   Electron's Node, `smoke-chromeguard.ts` (its strace, network-namespace and
-   real-render parts skip there) and `smoke-graphicimports.ts`.
-3. The network-path gate on Windows (below): `smoke-unc.ts`,
+2. `npm ci`, then the graphics add-on's lock check,
+   `node scripts/gen-graphics-lock.mjs --check --require-sizes`, and the
+   packaging gate's self-test, `node scripts/check-no-remotion.mjs --self-test`
+   (see "The graphics add-on" below).
+3. `npm run build` (core + mcp + renderer), then the graphics guards on
+   Windows paths, with `AIVE_REMOTION_ADDON` set to the checkout:
+   `check-remotion-guard.mjs` under Node and under Electron's Node,
+   `smoke-chromeguard.ts` (its strace, network-namespace and real-render parts
+   skip there) and `smoke-graphicimports.ts`.
+4. The network-path gate on Windows (below): `smoke-unc.ts`,
    `smoke-unc-e2e.ts` and `check-io-imports.mjs`. A failure stops the job
    before anything is packaged.
-4. `npm run dist -- --publish never` — electron-builder produces:
+5. The live add-on check: `npx tsx packages/core/scripts/smoke-addon-real.ts --live`
+   installs the graphics add-on from `registry.npmjs.org` and Google and renders
+   one graphic with it (below).
+6. `npm run dist -- --publish never` — electron-builder packs the app, runs the
+   packaging gate on it (the `afterPack` hook, below), and produces:
    - `ZabsReel-<ver>.exe` — the installer
    - `ZabsReel-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
-5. Attaches **all** of those to a **published** GitHub Release.
+7. Attaches **all** of those to a **published** GitHub Release.
 
 > All three of `.exe`, `.exe.blockmap`, and `latest.yml` must be on the Release,
 > or auto-update breaks. The workflow globs them explicitly.
@@ -138,6 +147,45 @@ run it once without a tag:
 3. Every gate step must be green. If one fails (for example `net share`, the
    Server service, or the `.cmd` FFmpeg stub that the e2e runs through
    `cmd.exe`), fix it before you push the tag.
+
+### The graphics add-on
+
+Remotion is not in the installer: users install it from **Help → Graphics
+add-on** (README, "Motion graphics: the graphics add-on"). Three steps of the
+release job keep it that way and check that it still works:
+
+- **The lock check.** `node scripts/gen-graphics-lock.mjs --check --require-sizes`
+  fails when `packages/core/src/motion/addonlock.ts` (the exact packages and
+  headless-shell zips the add-on installs) is out of sync with
+  `package-lock.json`, when a platform's download size is unknown, or when the
+  add-on's fingerprint is not the accepted one. A changed fingerprint makes
+  every user update the add-on after this release: accept it with
+  `--accept-addon-change` only for a deliberate Remotion upgrade
+  (CONTRIBUTING.md, "The add-on drift guard").
+- **The packaging gate.** electron-builder's `afterPack` hook
+  (`apps/desktop/build/afterpack.cjs`) runs `node scripts/check-no-remotion.mjs`
+  on the packed app before the installer and zip are made. It fails the build
+  when the app holds a Remotion package, a package only the add-on uses (by
+  `name@version`, from `addonlock.ts`), a headless shell or the core's `src/`,
+  or when the core's copy of Remotion's licence (the add-on dialog's text) is
+  missing or changed. It runs on every build, `--dir` builds included; don't
+  skip it.
+- **The live add-on check (required).** `smoke-addon-real.ts --live` runs on
+  every run of the Windows job, a tag push or a `workflow_dispatch` dry run,
+  with no input to skip it. It installs the add-on from the real
+  `registry.npmjs.org` and `storage.googleapis.com` into a data folder under
+  `RUNNER_TEMP` (never in the checkout), then a core renders one graphic with
+  it, with `AIVE_REMOTION_ADDON` unset. If either fails, the job fails before
+  anything is packaged. It is the only test of a real add-on install on
+  Windows.
+
+**No `v*` tag until a `workflow_dispatch` dry run of the Windows job has
+passed**, this step included (start **Release** from the Actions tab on the
+branch, as for the network-path gate above; the run publishes nothing). When
+CI is not available, the maintainer (Anthony) installs the add-on by hand from
+a dry-run build on Windows instead: install that build, open **Help → Graphics
+add-on…**, **Accept and install**, then have the AI add one graphic and check
+that it renders.
 
 ### Release text
 

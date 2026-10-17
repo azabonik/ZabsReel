@@ -11,9 +11,10 @@
 // In DEV (not packaged) this is a no-op: we keep relying on a PATH ffmpeg and the
 // engine's own ~/.aive download-on-first-use path.
 //
-// Hybrid bundling: Remotion's Chrome Headless Shell is intentionally NOT bundled
-// (it is large and Remotion manages its own cache); it downloads on first
-// motion-graphics use. Everything else is local from the first run.
+// Hybrid bundling: everything here is local from the first run. Motion graphics
+// are the exception: they need the graphics add-on (Remotion and its headless
+// shell), which no installer holds; the user installs it from Help → Graphics
+// add-on (graphics-addon.cjs) into the data folder.
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");

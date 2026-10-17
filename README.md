@@ -86,7 +86,7 @@ A single persistent **core** owns all editing state. The AI mutates a non-destru
 
 - **FFmpeg** — all video processing, fully local. Invoked as an external process (not linked). It ships as a GPL build, which is compatible with this project's GPL-3.0 license.
 - **Whisper (whisper.cpp)** — local speech-to-text for captions.
-- **Remotion** — AI-authored React components for motion graphics.
+- **Remotion** — AI-authored React components for motion graphics, through the graphics add-on you install from inside ZabsReel (not bundled).
 - **MCP server** — clean tool definitions any MCP client can call.
 - **Electron + React** — desktop UI: timeline, clip library, preview.
 
@@ -158,11 +158,27 @@ From a checkout of this repo (without npm):
 
 ## Install (packaged app)
 
-The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, and auto-reframe all work on first launch with **no downloads**. Motion graphics (Remotion) downloads its headless Chrome the first time you use it.
+The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, and auto-reframe all work on first launch with **no downloads**. Motion graphics need the graphics add-on, which you install from inside ZabsReel (see [Motion graphics: the graphics add-on](#motion-graphics-the-graphics-add-on)).
 
 1. Run **`ZabsReel-<version>.exe`** and follow the installer.
 2. Because the build is **unsigned**, Windows SmartScreen may warn ("Windows protected your PC"). Click **More info → Run anyway**. (We can drop in an Authenticode certificate later — the config has a hook for it.)
 3. To drive it with AI, connect an MCP client — see **Connect your AI client** below.
+
+## Motion graphics: the graphics add-on
+
+Motion graphics render with [Remotion](https://www.remotion.dev) 4.0.481 and a Chrome headless shell. ZabsReel does not include either: you install them as the **graphics add-on**, from inside ZabsReel.
+
+1. Open **Help → Graphics add-on…** (in the desktop app, or in the browser with `npm run web`).
+2. Read the notice and Remotion's license, then click **Accept and install**. ZabsReel downloads the Remotion packages from `registry.npmjs.org` (about 55 MB on Windows, 83 MB on Linux) and the Chrome for Testing headless shell from Google (`storage.googleapis.com`, about 120 MB). The dialog shows the sizes for your computer. Each file must match the hash this version of ZabsReel pins, or nothing is installed.
+3. When the dialog says "Graphics are ready.", graphics work. The add-on is in ZabsReel's data folder (`addons/remotion/4.0.481`).
+
+Only you can install the add-on: the AI can't, and no tool can. When the AI asks for a graphic and the add-on is missing, the window shows a banner with **Set up…**, which opens the same dialog. The dialog also has **Remove** and **Reinstall**, and **Update** after a ZabsReel update that moves the pin (an update downloads only the packages that changed). These wait while a graphic renders.
+
+**License.** Remotion is separate software under its own license (the Remotion License), not part of ZabsReel and not covered by ZabsReel's GPL. It is free for individuals, non-profit organizations and companies of up to three people; larger companies need their own Remotion license. The headless shell comes from Google under Google's terms. See [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+
+**Proxies.** The desktop app downloads the add-on through Chromium's network stack, so it uses the system proxy settings. The web shell (`npm run web`) uses Node's `fetch`, which uses `HTTPS_PROXY` only when `NODE_USE_ENV_PROXY=1` is also set.
+
+**From source**, graphics need the add-on too. A source checkout already has Remotion in `node_modules` (a devDependency), so you can point ZabsReel at it instead: start with `AIVE_REMOTION_ADDON=$PWD` (see [`docs/TESTING.md`](docs/TESTING.md)). A packaged ZabsReel ignores that variable.
 
 ## Connect your AI client
 
@@ -287,7 +303,7 @@ The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run 
 
 ## Requirements
 
-- **Packaged app:** none — everything needed is bundled (first run is offline).
+- **Packaged app:** none — everything needed is bundled (first run is offline). Motion graphics need the graphics add-on, a download (see above).
 - **From source:** Node.js ≥ 22.12, plus FFmpeg + ffprobe on `PATH`. Motion graphics need Node.js 22.15 or later: ZabsReel gives Remotion its safety check as Remotion loads (`module.registerHooks`), and turns graphics off on an older Node. The packaged app's Electron runs Node 24.
 
 ### Supported FFmpeg versions
@@ -386,4 +402,4 @@ This program is a modified version of SynthCut, Copyright © 2026 Relo (https://
 Bundled and downloaded third-party components, and their license obligations, are documented in **[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)**. Two points worth calling out:
 
 - **FFmpeg** ships as a GPL build and is invoked as a separate process. Its GPL terms are compatible with this project's GPL-3.0 license; redistributing the installer still carries the usual GPL "offer the source" obligation for that binary.
-- **Remotion** (motion graphics only) is **source-available, not OSI open-source** — companies of 4+ people need a paid license, and its field-of-use terms are **not** GPL-compatible. It is isolated to one optional module (`packages/core/src/motion/render.ts`) and can be swapped for a Puppeteer/Playwright renderer for a fully GPL-clean build. See `THIRD_PARTY_LICENSES.md`.
+- **Remotion** (motion graphics only) is **source-available, not OSI open-source** — companies of 4+ people need a paid license, and its field-of-use terms are **not** GPL-compatible. ZabsReel does not ship it: graphics load a copy that the user installs as the graphics add-on (Help → Graphics add-on), under Remotion's own license. The code that loads it is isolated to one optional module (`packages/core/src/motion/render.ts`) and can be swapped for a Puppeteer/Playwright renderer for a fully GPL-clean build. See `THIRD_PARTY_LICENSES.md`.

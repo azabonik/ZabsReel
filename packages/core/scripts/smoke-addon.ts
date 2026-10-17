@@ -18,7 +18,10 @@
  *                      passes; a changed one in CRLF still fails.
  *  P4. add-on-only   — an add-on path (a/node_modules/semver) with the
  *                      name@version of a production path (b/node_modules/semver)
- *                      is left out of the list.
+ *                      is left out of the list; with that pin, the packaging
+ *                      gate (scripts/check-no-remotion.mjs) passes a shipped
+ *                      tree holding the production copy, and refuses one
+ *                      holding the add-on's own package a@1.0.0.
  *  P5. the lock hash — covers the headless-shell table: another zip sha256
  *                      gives another ADDON_LOCK_SHA256 (installed add-ons
  *                      become update-needed).
@@ -132,6 +135,14 @@
  *                      method (so no MCP tool) installs, removes or recovers;
  *                      the MCP instructions, SKILL.md and add_graphic's
  *                      description tell the agent to ask the user instead.
+ *  D1. docs, release — docs/TESTING.md lists the four source-checkout
+ *                      variables (AIVE_ADDON_TEST_PIN too) and says the
+ *                      installer's test seam refuses outside a source
+ *                      checkout; release.yml's Windows job runs
+ *                      smoke-addon-real.ts --live on every run (no `if:`, no
+ *                      workflow input), before electron-builder, and
+ *                      docs/RELEASING.md says no v* tag before a dry run
+ *                      passed it.
  *  Z1. the zip reader — stored, deflate and empty entries, Unix execute bits;
  *                      zip64 (end record, locator, extra field), encryption,
  *                      another method, symlink, FIFO, "..", absolute, drive,
@@ -409,6 +420,31 @@ function p4() {
   const list = j?.addonOnly ?? [];
   check(!list.includes("semver@7.8.4") && !list.includes("react@18.3.1") && list.includes("a@1.0.0") && list.includes("@remotion/renderer@4.0.481"),
     `a/node_modules/semver has b/node_modules/semver's name@version: left out, with react; a and Remotion are in (${JSON.stringify(list)})`);
+  // The packaging gate with this pin: a shipped tree holding production's semver (and an a of another version) passes;
+  // the add-on's own a@1.0.0 does not.
+  // MUTATION: compare names only in check-no-remotion.mjs → the clean tree is refused (a@2.0.0). Let the production walk
+  // ship nothing (gen-graphics-lock.mjs) → it is refused (semver@7.8.4).
+  const fixture = fixtureRoot("p4-gate");
+  const wrote = gen(fixture);
+  mkdirSync(join(fixture, "packages", "core", "licenses"), { recursive: true });
+  writeFileSync(join(fixture, "packages", "core", "licenses", "remotion-4.0.481-LICENSE.md"), "fixture licence\n");
+  const shipped = (extra: Record<string, string>) => {
+    const out = mkdtempSync(join(root, "p4-shipped-"));
+    const pkgs: Record<string, string> = { "b/node_modules/semver": "7.8.4", react: "18.3.1", "c/node_modules/a": "2.0.0", ...extra };
+    for (const [path, version] of Object.entries(pkgs)) {
+      const dir = join(out, "resources", "app", "node_modules", ...path.split("/"));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: path.split("/node_modules/").pop(), version }));
+    }
+    mkdirSync(join(out, "resources", "app", "node_modules", "@aive", "core", "licenses"), { recursive: true });
+    writeFileSync(join(out, "resources", "app", "node_modules", "@aive", "core", "licenses", "remotion-4.0.481-LICENSE.md"), "fixture licence\n");
+    const r = spawnSync(process.execPath, [join(REPO, "scripts", "check-no-remotion.mjs"), out, "--root", fixture], { encoding: "utf8" });
+    return { status: r.status, out: `${r.stdout}${r.stderr}`.trim() };
+  };
+  const clean = shipped({});
+  check(wrote.status === 0 && clean.status === 0, `check-no-remotion passes a shipped tree with production's semver@7.8.4, react and an a@2.0.0 (${clean.out.split("\n").pop()})`);
+  const addon = shipped({ a: "1.0.0" });
+  check(addon.status === 1 && /node_modules\/a\/package\.json: a@1\.0\.0 is a graphics add-on package/.test(addon.out), `…and refuses one with the add-on's a@1.0.0 (${addon.out.split("\n")[0]})`);
 }
 
 // MUTATION: drop headlessShell from the lockSha256 input (gen-graphics-lock.mjs) → the hash does not change.
@@ -1677,6 +1713,31 @@ function i14() {
     "add_graphic's description says the user installs the add-on and no tool can");
 }
 
+// ---- D: the add-on's docs and release step ---------------------------------------------
+
+function d1() {
+  console.log("D1. the add-on's docs and release step...");
+  const testing = readFileSync(join(REPO, "docs", "TESTING.md"), "utf8");
+  const vars = testing.slice(testing.indexOf("### The graphics add-on in a source checkout"), testing.indexOf("### The desktop app in Electron"));
+  // MUTATION: drop the AIVE_ADDON_TEST_PIN row from docs/TESTING.md → this row fails. Drop the addonInstallerForTests sentence → it fails.
+  check(["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY", "AIVE_ADDON_TEST_PIN"].every((v) => vars.includes(`| \`${v}=`))
+    && vars.includes("All four are honoured **only in a source checkout**")
+    && /`addonInstallerForTests`, the installer's test seam[^.]*, is\s+refused outside a source checkout/.test(vars),
+    "docs/TESTING.md lists the four source-checkout variables (AIVE_ADDON_TEST_PIN too), honoured only in a source checkout, and says addonInstallerForTests refuses outside one");
+  // R2: the live install and render on every Windows release run, before electron-builder.
+  // MUTATION: give the step `if: startsWith(github.ref, 'refs/tags/')` in release.yml → this row fails.
+  const release = readFileSync(join(REPO, ".github", "workflows", "release.yml"), "utf8").replace(/\r\n/g, "\n");
+  const steps = release.split(/\n(?=      - )/);
+  const live = steps.find((x) => /\n\s+run: npx tsx packages\/core\/scripts\/smoke-addon-real\.ts --live\s*$/.test(x));
+  const at = (re: RegExp) => steps.findIndex((x) => re.test(x));
+  check(!!live && !/\n\s+(if|continue-on-error):/.test(live) && !/workflow_dispatch:\s*\n\s+inputs:/.test(release)
+    && at(/smoke-addon-real\.ts --live/) < at(/npm run dist --workspace zabsreel-desktop/) && at(/smoke-addon-real\.ts --live/) > at(/npm run build\b/),
+    "release.yml's Windows job runs smoke-addon-real.ts --live on every run (no if:, no continue-on-error, no workflow input), after the build and before electron-builder");
+  const releasing = readFileSync(join(REPO, "docs", "RELEASING.md"), "utf8");
+  check(releasing.includes("**No `v*` tag until a `workflow_dispatch` dry run of the Windows job has\npassed**, this step included") && releasing.includes("installs the add-on by hand"),
+    "docs/RELEASING.md: no v* tag until a dry run of the Windows job passed the live step; the by-hand fallback");
+}
+
 // ---- Z: the zip reader -----------------------------------------------------------------
 
 // MUTATION: drop the zip64 checks (zip.ts) → the zip64 rows extract. Drop the encryption check → its row
@@ -1758,6 +1819,7 @@ async function main() {
         await stopRegistry();
       }
     } else console.log(`I. skip: ${process.platform}-${process.arch} has no add-on`);
+    d1();
     await z1();
   } finally {
     rmSync(root, { recursive: true, force: true });

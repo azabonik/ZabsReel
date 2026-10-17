@@ -38,6 +38,11 @@ jobs:
       - name: Graphics add-on pin (gen-graphics-lock --check --require-sizes)
         run: node scripts/gen-graphics-lock.mjs --check --require-sizes
 
+      # The rules of the packaging gate that electron-builder's afterPack hook
+      # runs on the packed app below (scripts/check-no-remotion.mjs).
+      - name: Packaging gate self-test (check-no-remotion)
+        run: node scripts/check-no-remotion.mjs --self-test
+
       - name: Build core + mcp + renderer
         run: npm run build
 
@@ -46,21 +51,30 @@ jobs:
       # path of the loaded module (fileURLToPath of its URL), so a drive-letter,
       # junction or real-path difference here turns graphics off, and a rewrite
       # that misses leaves them open. One command per step (pwsh, see below).
+      # Remotion is a devDependency (npm ci installs it), and this checkout is a
+      # source checkout, so AIVE_REMOTION_ADDON points these steps at it.
       - name: Remotion guard in the built core (Node)
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: node packages/core/scripts/check-remotion-guard.mjs
 
       - name: Remotion guard in the built core (Electron's Node)
         env:
           ELECTRON_RUN_AS_NODE: "1"
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: '& (node -p "require(''electron'')") packages/core/scripts/check-remotion-guard.mjs'
 
       # strace and the network namespace are Linux-only and skip here; no
       # headless shell is cached, so the real renders (M5, M6b) skip and are
       # listed in the step summary. Nothing is downloaded.
       - name: Smoke — graphics browser network limits (no Chrome download)
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: npx tsx packages/core/scripts/smoke-chromeguard.ts
 
       - name: Smoke — graphic imports and bundle reads
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
       - name: Install FFmpeg (staging source; not shipped from here — prepare-bundle copies it in)
@@ -85,6 +99,17 @@ jobs:
       - name: Smoke — network paths end to end (core process, traced; step 7 second share spelling on \\localhost)
         run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
 
+      # The graphics add-on as a Windows user gets it (ADDON-PLAN R2), on every
+      # run, tag pushes and workflow_dispatch dry runs alike: the real
+      # installer downloads the pinned packages from registry.npmjs.org and the
+      # pinned headless shell from Google into a data folder under RUNNER_TEMP
+      # (outside the checkout and the packaging inputs), then a core renders one
+      # graphic through it with AIVE_REMOTION_ADDON unset. Either failing fails
+      # the job before anything is packaged. Never add a skip for it: no v* tag
+      # until a dry run has passed it (docs/RELEASING.md).
+      - name: Graphics add-on, live install and one render (registry.npmjs.org, Google)
+        run: npx tsx packages/core/scripts/smoke-addon-real.ts --live
+
       - name: Stage bundled FFmpeg/whisper/YuNet/font resources
         run: npm run prepare:bundle --workspace zabsreel-desktop
 
@@ -92,6 +117,10 @@ jobs:
         # `--publish never` = build the installer AND emit the update feed
         # (latest.yml + .blockmap) into build/dist, but let the release step below
         # do the actual upload. Avoids electron-builder needing its own token here.
+        # The afterPack hook (apps/desktop/build/afterpack.cjs) runs the
+        # packaging gate on the packed app before the installer is made: no
+        # Remotion package, add-on-only package, headless shell or core src/,
+        # and the core's Remotion licence intact. A refusal fails this step.
         run: npm run dist --workspace zabsreel-desktop -- --publish never
 
       # --- Free code signing for open source (optional) -----------------------

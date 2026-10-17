@@ -8,10 +8,11 @@ This file lists them, their licenses, and any obligations they place on
 redistribution. Packaged installers include a copy of this file, `LICENSE` and `NOTICE`.
 
 > **TL;DR for redistributors**
-> - Everything bundled is freely redistributable **except** you should read the
->   **Remotion License** section — Remotion is *source-available, not OSI
->   open-source*, and **companies with 4 or more people need a paid license** to
->   use it. It powers the motion-graphics feature only.
+> - Everything bundled is freely redistributable. **Remotion is not bundled:**
+>   motion graphics use a copy that the user installs as an optional add-on,
+>   under Remotion's own license (see the **Remotion** section). Remotion is
+>   *source-available, not OSI open-source*, and **companies with 4 or more
+>   people need their own Remotion license** to use it.
 > - **FFmpeg** is bundled as a GPL build and invoked as a separate process. If you
 >   redistribute the installer you must make the **corresponding FFmpeg source**
 >   available (it is unmodified upstream FFmpeg — see the FFmpeg section).
@@ -100,34 +101,48 @@ All MIT-licensed:
 
 ---
 
-## ⚠️ Remotion — source-available, NOT open-source
+## ⚠️ Remotion — an optional add-on the user installs (NOT in the installer)
 
-- **Packages:** `remotion`, `@remotion/bundler`, `@remotion/renderer` (and their
-  `@remotion/*` peers).
+- **Packages:** `remotion`, `@remotion/bundler`, `@remotion/renderer` 4.0.481,
+  with their dependencies (the `@remotion/*` compositors among them, which
+  include an FFmpeg build that is not redistributable).
 - **Role:** renders AI-authored React/Remotion components into motion graphics.
-  Used **only** by the motion-graphics feature and isolated to
-  `packages/core/src/motion/render.ts`.
+  Used **only** by the motion-graphics feature; ZabsReel loads it only in
+  `packages/core/src/motion/remotionload.ts`, for `motion/render.ts`.
+- **Not conveyed:** no ZabsReel installer contains Remotion. The user installs it
+  from inside ZabsReel (**Help → Graphics add-on**): the dialog shows ZabsReel's
+  notice and Remotion's `LICENSE.md` as of the v4.0.481 tag, and only **Accept
+  and install** downloads the packages, from `registry.npmjs.org`, each checked
+  against the sha512 this ZabsReel version pins. The release build checks that
+  the packed app holds no Remotion package (`scripts/check-no-remotion.mjs`).
+  In the source repository Remotion is a development dependency only.
 - **License:** the **Remotion License** — *source-available, not OSI
-  open-source.* Individuals and companies of up to 3 people may use it for free;
-  **companies of 4+ people require a paid Remotion Company License.** Review the
-  current terms before commercial use or redistribution:
-  https://github.com/remotion-dev/remotion/blob/main/LICENSE.md
-- **Note:** unlike FFmpeg, Remotion is a *linked dependency*, so its terms flow to
-  anyone who redistributes a build that includes it. It is deliberately confined
-  to one module and can be swapped for a Puppeteer/Playwright-based renderer if a
-  fully-OSI motion-graphics path is required.
+  open-source.* Individuals, non-profit organizations and companies of up to 3
+  people may use it for free; **larger companies need their own Remotion
+  license.** The add-on dialog shows these terms before anything is
+  downloaded: https://github.com/remotion-dev/remotion/blob/main/LICENSE.md
+- **Note:** Remotion's terms, not ZabsReel's GPL, govern the add-on. The code
+  that loads it is confined to one module and can be swapped for a
+  Puppeteer/Playwright-based renderer if a fully-OSI motion-graphics path is
+  required. `NOTICE` carries the GPL section 7 permission for linking with it.
 
 ---
 
 ## Downloaded on first use (NOT in the installer)
 
 These are fetched and cached on the user's machine the first time the relevant
-feature runs; they are not shipped in the installer.
+feature runs, or when the user installs them; they are not shipped in the
+installer.
 
-### Chrome Headless Shell (via Remotion)
+### Chrome Headless Shell (Chrome for Testing, with the graphics add-on)
 - **Role:** the headless browser Remotion drives to render motion graphics.
-- **License:** BSD-style (Chromium) — © The Chromium Authors. Downloaded and
-  cached by Remotion's `ensureBrowser()`.
+- **License:** BSD-style (Chromium) — © The Chromium Authors, distributed by
+  Google as Chrome for Testing under Google's terms.
+- **Download:** the graphics add-on install downloads the Chrome for Testing
+  headless shell 149.0.7790.0 for the user's platform from Google
+  (`storage.googleapis.com`), checked against the sha256 this ZabsReel version
+  pins, into the add-on's folder. Remotion itself never downloads a browser in
+  ZabsReel.
 
 ### Additional whisper models
 Larger Whisper models (small/medium/large) download on demand from Hugging Face

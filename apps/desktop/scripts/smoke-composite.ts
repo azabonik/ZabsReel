@@ -71,7 +71,7 @@ import { PlaybackGovernor } from "../src/gl/governor";
 import { balanceParams, curveTable, curvesTables, eqTables, hueParams, parseCube, parseCurvePoints, safeCurve } from "../src/gl/color";
 import { buildRenderCommand, EXPORT_PROFILE } from "../../../packages/core/src/ffmpeg/graph";
 import { CoreApi } from "../src/api";
-import { applyJobEvent, BusyAction, cancelJob, newestFirst, statusView } from "../src/jobstate";
+import { applyJobEvent, BusyAction, cancelJob, listedJobs, newestFirst, statusView } from "../src/jobstate";
 import type { JobInfo } from "../src/types";
 
 let failures = 0;
@@ -1588,6 +1588,16 @@ async function jobStatusChecks(): Promise<void> {
     emit(job("unknown", { status: "done" }));
     check("an end event for a job never shown changes nothing", jobs === before);
     check("not connected: the line says so", statusView([], null, false).kind === "ready" && /Waiting/.test((statusView([], null, false) as { text: string }).text));
+
+    // The add-on dialog's running jobs (graphicsaddon.tsx): a list_jobs answer, then the events since its request.
+    // MUTATION: listedJobs ignores `since` → the late-answer row keeps g1 running.
+    const g1 = job("g1", { type: "graphic" });
+    const late = listedJobs([g1], [job("g1", { type: "graphic", status: "done" })]);
+    check("add-on dialog: a graphic that ended after list_jobs was sent, before its answer came, is not running", Object.keys(late).length === 0, JSON.stringify(late));
+    const started = listedJobs([], [job("g2", { type: "graphic" })]);
+    check("add-on dialog: a graphic that started after list_jobs was sent is running", Object.keys(started).join() === "g2", JSON.stringify(started));
+    const ended = listedJobs([job("g3", { type: "graphic" }), job("x", { status: "done" })], []);
+    check("add-on dialog: the answer's jobs that are not running are left out", Object.keys(ended).join() === "g3", JSON.stringify(ended));
   } finally {
     g.WebSocket = realWs;
   }

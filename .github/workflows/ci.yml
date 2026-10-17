@@ -43,8 +43,12 @@ jobs:
 
       # The built core's Remotion guard under Node and under Electron's Node
       # (the app's core child): Remotion loads with the same-as refusal, and the
-      # /proxy guard works.
+      # /proxy guard works. Remotion is a devDependency (npm ci installs it), and
+      # a CI checkout is a source checkout, so AIVE_REMOTION_ADDON points the
+      # graphics guard steps at it.
       - name: Remotion guard (built core, Node and Electron's Node)
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: |
           node packages/core/scripts/check-remotion-guard.mjs
           ELECTRON_RUN_AS_NODE=1 "$(node -p "require('electron')")" packages/core/scripts/check-remotion-guard.mjs
@@ -123,12 +127,16 @@ jobs:
       # run only where the headless shell is cached; here they skip, and each
       # skip is written to this job's step summary.
       - name: Smoke — graphics browser network limits (no Chrome download)
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: npx tsx packages/core/scripts/smoke-chromeguard.ts
 
       # Graphic code may import only react and remotion, and webpack's file
       # system reads no file outside the scaffold and node_modules (real
       # bundles, no browser).
       - name: Smoke — graphic imports and bundle reads
+        env:
+          AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
       # The graphics add-on's pin is in sync with the root lock (media-free):
@@ -136,6 +144,12 @@ jobs:
       # list, the headless-shell table against Remotion's TESTED_VERSION.
       - name: Graphics add-on pin (gen-graphics-lock --check --require-sizes)
         run: node scripts/gen-graphics-lock.mjs --check --require-sizes
+
+      # The packaging gate electron-builder's afterPack hook runs on every
+      # packed app (scripts/check-no-remotion.mjs): its rules on fixture trees,
+      # and this pin's shared packages (react, ws, semver@7.8.4, ...) allowed.
+      - name: Packaging gate self-test (check-no-remotion)
+        run: node scripts/check-no-remotion.mjs --self-test
 
       # The pin's walk on fixture locks and its drift guard, and the core's side
       # of the add-on: its states, add_graphic's 409 refusals and the UI signal,

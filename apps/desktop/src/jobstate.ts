@@ -13,6 +13,19 @@ export function applyJobEvent(prev: Record<string, JobInfo>, j: JobInfo): Record
   return next;
 }
 
+/**
+ * The running jobs once a list_jobs ({ activeOnly: true }) answer arrives: the
+ * answer is authoritative for the jobs it lists, and the job events received
+ * since the request was sent are applied on top, in order. So a job that ended
+ * after the request went out but before its answer came is not added back as
+ * running, and one that ended while the socket was away is dropped.
+ */
+export function listedJobs(listed: JobInfo[], since: JobInfo[]): Record<string, JobInfo> {
+  let jobs: Record<string, JobInfo> = Object.fromEntries(listed.filter((j) => j.status === "running").map((j) => [j.id, j]));
+  for (const j of since) jobs = applyJobEvent(jobs, j);
+  return jobs;
+}
+
 /** The running jobs, newest first. */
 export function newestFirst(jobs: Record<string, JobInfo>): JobInfo[] {
   return Object.values(jobs).sort((a, b) => b.startedAt - a.startedAt);

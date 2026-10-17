@@ -42,7 +42,8 @@
 // message and no install button; Accept and install shows progress and
 // Cancel, and Cancel leaves nothing; the next install ends "ready" with only
 // the platform's list fetched; a fixture job of type "graphic" disables Remove
-// and Reinstall; Remove; a copy whose browser is gone shows Reinstall; with no
+// and Reinstall; Remove; a copy whose browser is gone shows Reinstall, which
+// repairs it, and Remove, which deletes it; with no
 // add-on, an add_graphic over the core's HTTP RPC brings the banner, whose
 // Set up… opens the dialog. The shell fetches nothing but loopback (traced).
 //
@@ -771,18 +772,24 @@ async function graphicsAddon(o: {
     await button("Remove").click();
     check("Remove → not installed, its folder gone", await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)));
 
-    // A copy whose browser went missing: "damaged", with Reinstall.
+    // A copy whose browser went missing: "damaged", with Reinstall and Remove.
+    // MUTATION: offer Remove only when ready (graphicsaddon.tsx, slice 3) → the damaged rows fail.
     await button("Accept and install").click();
     await waitFor("ready again", async () => (await text()).includes("Graphics are ready."), 20000);
-    await closeDialog();
-    rmSync(join(graphicsAddonDir(dataDir), "browser", fixture.pin.shell[platform].executable));
-    await openDialog();
-    check("a copy whose browser is gone: \"damaged\" and Reinstall",
-      state() === "broken" && (await text()).includes("The graphics add-on is damaged (missing files).") && (await button("Reinstall").count()) === 1 && (await button("Remove").count()) === 0);
+    const breakIt = async () => {
+      await closeDialog();
+      rmSync(join(graphicsAddonDir(dataDir), "browser", fixture.pin.shell[platform].executable));
+      await openDialog();
+    };
+    await breakIt();
+    check("a copy whose browser is gone: \"damaged\", Reinstall and Remove",
+      state() === "broken" && (await text()).includes("The graphics add-on is damaged (missing files).") && (await button("Reinstall").count()) === 1 && (await button("Remove").count()) === 1);
     await button("Reinstall").click();
     check("Reinstall repairs it", await waitFor("repaired", async () => (await text()).includes("Graphics are ready."), 20000) && state() === "ready");
+    await breakIt();
     await button("Remove").click();
-    await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000);
+    check("Remove of a damaged copy → not installed, its folder gone",
+      await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)));
     await closeDialog();
 
     // The agent's add_graphic with no add-on: refused, and the banner offers the dialog.

@@ -38,5 +38,7 @@ statement, which accepts Remotion as a linked dependency (the "One accepted
 exception" paragraph of CONTRIBUTING.md, which this repository keeps
 unchanged).
 
-Remotion itself is licensed under its own terms, not under the GPL. See
-THIRD_PARTY_LICENSES.md.
+Remotion itself is licensed under its own terms, not under the GPL. ZabsReel
+does not include Remotion: its motion graphics load a copy of Remotion that the
+user installs as the graphics add-on (Help → Graphics add-on), under Remotion's
+own terms. See THIRD_PARTY_LICENSES.md.
