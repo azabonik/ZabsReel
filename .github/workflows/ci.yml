@@ -163,5 +163,17 @@ jobs:
       - name: Smoke — graphics add-on (pin, core and installer)
         run: npx tsx packages/core/scripts/smoke-addon.ts
 
+      # ZabsReel's own motion renderer, the host (packages/motion): the binary
+      # rule on fixture trees, frames from hand-written pages through the
+      # offscreen Electron renderer into FFmpeg, every network route refused
+      # (a private network namespace, loopback listeners only), the limits and
+      # lifecycle, and the probe launch rows (the packed-build row skips here).
+      # Chromium's sandbox and the namespace need unprivileged user namespaces,
+      # which Ubuntu 24.04's AppArmor restricts by default.
+      - name: Smoke — motion renderer host (Electron offscreen, no network)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          npx tsx packages/motion/scripts/smoke-renderer.ts
+
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts

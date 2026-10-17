@@ -5,6 +5,7 @@ import { EditorServer } from "./server.js";
 import { checkBinaries, ffmpegVersion } from "./ffmpeg/executor.js";
 import { untestedFfmpegWarning } from "./ffmpeg/version.js";
 import { pruneDataDir } from "./gc.js";
+import { sweepMotionScratch } from "./motion/rendermotion.js";
 
 /**
  * Entry point for the persistent editor backend. Started by the Electron app
@@ -41,6 +42,8 @@ async function main(): Promise<void> {
         console.error(`[aive-core] gc: removed ${r.deletedFiles} cached files (${(r.freedBytes / 1e6).toFixed(1)} MB)`);
     })
     .catch(() => {});
+  // The motion/<id> folders of renders whose core is gone (rendermotion.ts). Never blocks startup.
+  void sweepMotionScratch(dataDir).catch(() => {});
   // Move unused baked/proxy files to their area's .trash/ and delete trash older
   // than AIVE_BAKED_TRASH_DAYS (storage.ts). No project is open yet, so this
   // relies on <dataDir>/projects.json and the autosaves. Never blocks startup.

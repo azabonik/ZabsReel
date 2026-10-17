@@ -15,7 +15,7 @@
   "scripts": {
     "build": "npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace zabsreel-desktop",
     "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace zabsreel-desktop && npm run typecheck:scripts",
-    "typecheck:scripts": "tsc -p packages/core/scripts && tsc -p packages/mcp/scripts && tsc -p apps/desktop/scripts",
+    "typecheck:scripts": "tsc -p packages/core/scripts && tsc -p packages/mcp/scripts && tsc -p packages/motion/scripts && tsc -p apps/desktop/scripts",
     "start": "npm run start --workspace zabsreel-desktop",
     "web": "npm run build && npm run web --workspace zabsreel-desktop --",
     "core": "npm run start --workspace @aive/core",

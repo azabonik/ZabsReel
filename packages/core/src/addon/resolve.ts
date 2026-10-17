@@ -35,7 +35,14 @@ const checkouts = new Map<string, boolean>();
 export function isSourceCheckout(from = HERE): boolean {
   const known = checkouts.get(from);
   if (known !== undefined) return known;
-  let answer = false;
+  const dir = corePackageDir(from);
+  const answer = dir !== undefined && existsSync(join(dir, "src"));
+  checkouts.set(from, answer);
+  return answer;
+}
+
+/** The core's own package folder: the nearest folder above `from` whose package.json is named @aive/core. */
+export function corePackageDir(from = HERE): string | undefined {
   for (let dir = dirname(from); ; dir = dirname(dir)) {
     let name: unknown;
     try {
@@ -43,14 +50,9 @@ export function isSourceCheckout(from = HERE): boolean {
     } catch {
       /* no package.json here */
     }
-    if (name === "@aive/core") {
-      answer = existsSync(join(dir, "src"));
-      break;
-    }
-    if (dirname(dir) === dir) break;
+    if (name === "@aive/core") return dir;
+    if (dirname(dir) === dir) return undefined;
   }
-  checkouts.set(from, answer);
-  return answer;
 }
 
 const ignored = new Set<string>();

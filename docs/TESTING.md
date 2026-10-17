@@ -218,6 +218,23 @@ ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts
 # I12's linux-x64 writes of names NTFS refuses or folds
 npx tsx packages/core/scripts/smoke-addon.ts
 
+# ZabsReel's own motion renderer, the host (packages/motion; MOTION-PLAN slice 1;
+# add_graphic still renders with the add-on). The binary rule on fixture trees
+# for win32, darwin and linux (packaged and source checkout); hand-written pages:
+# frames on the pipe exact per frame (B,G,R,A, premultiplied), straight alpha
+# after the ProRes 4444 round trip, an opaque standalone card with today's BT.601
+# tags; every network route from the page fails with nothing contacted (in a
+# private network namespace with loopback listeners on ports 5030-5033), WebRTC
+# off with and without guard.js; frame, total-time and heap limits; abort, an
+# FFmpeg failure and a failed move leave baked/ unchanged; a core killed
+# mid-render leaves no renderer and the next core start removes its scratch;
+# the probe through the core's binary rule from a source checkout, the dev
+# Electron and the packed --dir build (when apps/desktop/build/dist/linux-unpacked
+# exists, else a printed skip): no window, no core, no port, only the
+# allowlisted environment. Needs the build and FFmpeg; no display (Chromium's
+# headless platform); muted
+npx tsx packages/motion/scripts/smoke-renderer.ts
+
 # The pin is in sync with package-lock.json, every platform's download size is
 # known, and the add-on's fingerprint is the accepted one (CONTRIBUTING.md, "The
 # add-on drift guard"); then the packaging gate's own rules on fixture trees

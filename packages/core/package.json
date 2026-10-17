@@ -65,6 +65,7 @@
     "start": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@aive/motion": "*",
     "execa": "^9.5.2",
     "nanoid": "^5.0.9",
     "onnxruntime-node": "^1.26.0",

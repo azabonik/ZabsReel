@@ -12,6 +12,15 @@
 //   4. Tear down the core on quit ONLY if we were the ones who started it.
 //
 // Written in CommonJS so it runs directly under Electron with no build step.
+//
+// The core starts this same executable with --zr-motion-renderer for each
+// motion-graphics render (MOTION-PLAN D2): that process runs the renderer's
+// own main and nothing below (no core, window, IPC handler or single-instance
+// lock). The flag takes no value; the entry is fixed here.
+if (process.argv.includes("--zr-motion-renderer")) {
+  require("@aive/motion/renderer/motion-renderer.cjs");
+  return;
+}
 const { app, BrowserWindow, Menu, ipcMain, dialog, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
