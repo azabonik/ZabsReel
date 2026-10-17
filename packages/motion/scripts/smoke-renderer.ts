@@ -1215,19 +1215,21 @@ const IMPORT_CASES: [string, string, RegExp | null][] = [
   ["a re-export of a missing name", `export { spring, getInputProps } from "remotion"; export default () => null;`, NAME_MSG("getInputProps")],
 ];
 
-// MUTATION: check-cleanroom-lock.mjs's sha256 comparison inverted (=== for !==) → the gate
-// row fails (and the self-test). The gate without its "not in the lock" check → the
-// self-test's added-file case fails. One byte of the vendored react-dom changed → its sha256
-// row fails. build-runtime.mjs with a time stamp in its header → the two-builds row fails;
-// dist/zr-runtime.js edited after the build → the "dist is this tree's build" row fails.
-// graphicmodule.ts: GRAPHIC_SPECIFIERS with "lodash" added → the lodash row fails; the
-// names check dropped (check() returns null for remotion) → the five missing-name rows
-// fail; `import type` not skipped → the type-only row fails; the require() check dropped →
-// the require and import-x-=-require rows fail; the export…from branch dropped → the two
-// re-export rows and export * fail; the import() and import.meta checks dropped → those rows
-// fail; imports found with a regular expression over the text instead of sucrase's tokens →
-// the strings/comments/JSX-text row fails; the default import not counted → the default
-// row fails.
+// MUTATION: check-cleanroom-lock.mjs's sha256 comparison inverted (=== for !==) → the gate row
+// fails (and the self-test). The gate without its "not in the lock" check → the self-test's
+// added-file case fails. One byte of the vendored react or react-dom, or of the licence,
+// changed → its sha256 row fails. build-runtime.mjs with a time stamp in its header → the
+// two-builds row fails; dist/zr-runtime.js edited after the build → the "dist is this tree's
+// build" row fails. graphicmodule.ts: GRAPHIC_SPECIFIERS with "lodash" added → the lodash row
+// fails; the specifier check dropped → every "not <specifier>" row fails; react's names
+// checked against the runtime's list → the accepted react rows fail; `* as N` not skipped →
+// the namespace row fails; the names check dropped (check() returns null for remotion) → the
+// five missing-name rows fail; `import type` not skipped → the type-only row fails; the
+// require() check dropped → the require and import-x-=-require rows fail; the export…from
+// branch dropped → the two re-export rows and export * fail; the import() and import.meta
+// checks dropped → those rows fail; imports found with a regular expression over the text
+// instead of sucrase's tokens → the strings/comments/JSX-text row fails; the default import
+// not counted → the default row fails.
 async function r8(work: string) {
   console.log("R8. the runtime's pieces: the clean-room lock, React's UMD builds, the runtime build, the graphic's imports...");
   // The clean-room lock gate: the real tree, then its own mutations on copies (--self-test).
