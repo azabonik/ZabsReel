@@ -265,11 +265,20 @@ function tail(stream: Readable | null | undefined, max = 8192): () => string {
 
 type Spawned = ReturnType<typeof runTool>;
 
-/** Resolves when `child` has exited (at once if it already has). */
+/**
+ * Resolves when `child` has exited (at once if it already has), or never
+ * started: a failed start (EACCES, ENOENT) emits "error" and no "exit", and
+ * leaves no PID.
+ */
 function exited(child: Spawned): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => child.once("exit", () => resolve()));
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", () => resolve());
+  });
 }
+
+const startFailed = (err: Error) => new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (start-failed: ${err.message}).`);
 
 /** Start the renderer for the binary rule's command, with only the allowlisted environment and five pipes. */
 function spawnRenderer(bin: Extract<RendererBinary, { ok: true }>, args: string[], scratch: string, env?: NodeJS.ProcessEnv): Spawned {
@@ -293,10 +302,20 @@ async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<nu
   const table = await pageTable(o);
   const heap = o.heapMb === undefined ? [] : [`--zr-heap-mb=${o.heapMb}`];
 
+  // FFmpeg's arguments before the renderer starts, and a failed FFmpeg start kills it: no renderer outlives a throw here.
+  const ffArgs = await adaptFfmpegArgs(encodeArgs(o, encoded));
   const started = Date.now();
   const child = spawnRenderer(bin, rendererArgs(o.workDir, o.width, o.height, heap), o.workDir, o.env);
   if (child.pid !== undefined) o.onSpawn?.(child.pid);
-  const ff = spawnFfmpegStream(await adaptFfmpegArgs(encodeArgs(o, encoded)), { stdin: "pipe", stdout: "ignore", stderr: "pipe", buffer: { stderr: true }, reject: false });
+  const encoder = () => spawnFfmpegStream(ffArgs, { stdin: "pipe", stdout: "ignore", stderr: "pipe", buffer: { stderr: true }, reject: false });
+  let ff: ReturnType<typeof encoder>;
+  try {
+    ff = encoder();
+  } catch (err) {
+    child.kill("SIGKILL");
+    await exited(child);
+    throw err;
+  }
 
   let failure: Error | null = null;
   let finished = false;
@@ -318,6 +337,7 @@ async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<nu
   };
   let reported: RendererMessage | null = null;
   const stderr = tail(child.stderr);
+  child.once("error", (err: Error) => failWith(startFailed(err)));
 
   // Control out.
   let ready = false;
@@ -492,6 +512,7 @@ export async function probeMotionRenderer(
     clearTimeout(timer);
     (child.stdin as Writable).destroy();
     if (report) return { ok: true, report };
+    if (child.pid === undefined) return { ok: false, reason: "start-failed", detail: (await child).message ?? "the renderer did not start" };
     const text = stderr();
     return { ok: false, reason: unavailableReason(text), detail: `exit ${child.exitCode ?? child.signalCode}; ${text.trim().split("\n").slice(-3).join(" | ")}` };
   } finally {

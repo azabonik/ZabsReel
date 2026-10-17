@@ -169,7 +169,8 @@ jobs:
       # (a private network namespace, loopback listeners only), the limits and
       # lifecycle, and the probe launch rows (the packed-build row skips here).
       # Chromium's sandbox and the namespace need unprivileged user namespaces,
-      # which Ubuntu 24.04's AppArmor restricts by default.
+      # which Ubuntu 24.04's AppArmor restricts by default. With CI=true a
+      # missing namespace fails the network part (R3) instead of skipping it.
       - name: Smoke — motion renderer host (Electron offscreen, no network)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true

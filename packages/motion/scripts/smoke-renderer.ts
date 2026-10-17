@@ -10,7 +10,9 @@
  *                     no Electron version = no-binary; source = execPath or
  *                     require("electron") with <repo>/apps/desktop first; no
  *                     main.cjs, or no Electron at all = no-binary.
- *  R2. frames       — the frames on fd 3 are exactly the page's pattern for
+ *  R2. frames       — the page's clock (Date.now, Date(), new Date(),
+ *                     performance.now, the rAF timestamp) is frame / fps;
+ *                     the frames on fd 3 are exactly the page's pattern for
  *                     each frame: width*4 rows, B,G,R,A, premultiplied; the
  *                     ProRes 4444 round trip gives straight alpha (50%-alpha
  *                     red, blue and green within 2 levels) and BT.601 colour,
@@ -18,17 +20,21 @@
  *                     pipe) and its H.264 has today's BT.601 tags; the
  *                     overlay's .webm preview lands in baked/ with it.
  *  R3. network      — (in a private network namespace: loopback plus one
- *                     dummy interface, so even a broken build reaches no real
- *                     network) fetch, XHR, WebSocket, EventSource, img, font,
- *                     CSS @import and url(), SVG image, preconnect/prefetch and
- *                     sendBeacon to 127.0.0.1 listeners, a LAN-looking address
- *                     and a .invalid host all fail and no listener sees a
+ *                     dummy interface 10.99.0.1, so even a broken build
+ *                     reaches no real network) fetch, XHR, WebSocket,
+ *                     EventSource, img, font, CSS @import and url(), SVG
+ *                     image, preconnect/prefetch and sendBeacon to listeners
+ *                     on 127.0.0.1 and on the private address 10.99.0.1, and
+ *                     to a .invalid host, all fail and no listener sees a
  *                     connection; ICE/STUN to a loopback UDP listener sends
  *                     nothing with guard.js (constructor gone), without it
  *                     (layers 1 and 2 alone), and from an about:blank
  *                     iframe's fresh constructor; WebTransport sends nothing;
  *                     Worker/SharedWorker/serviceWorker on a table entry and
- *                     an iframe fail (names gone with guard.js, CSP without);
+ *                     an iframe fail (names gone with guard.js, CSP without),
+ *                     and so do Worker, SharedWorker and WebTransport from an
+ *                     about:blank iframe (its own constructors: the inherited
+ *                     CSP stops them); on CI a missing namespace is a FAIL;
  *                     file:// and zrmotion URLs not in the table fail, a
  *                     relative URL loads a table entry; window.open,
  *                     navigation and permissions are refused.
@@ -36,6 +42,9 @@
  *                     time and a page past its heap each end with their named
  *                     error, no renderer process and nothing in baked/.
  *  R5. lifecycle    — success: the renderer exits on its own at stdin EOF;
+ *                     a renderer that cannot start (not executable): the probe
+ *                     says start-failed at once, a render rejects with
+ *                     graphic_renderer_unavailable and leaves nothing;
  *                     abort mid-render kills it at once; an FFmpeg failure
  *                     and a failed later move into baked/ leave baked/ as it
  *                     was; the core killed mid-render leaves no renderer
@@ -62,6 +71,7 @@
  *
  * Every renderer runs with fresh HOME/USERPROFILE/XDG_CONFIG_HOME and data
  * folders, muted. Ports: 5030-5033 (listeners) and 5036 (the core in R5).
+ * On CI (CI=true) R3 fails instead of skipping when there is no namespace.
  * Needs `npm run build` (R5's core start, R6b) and FFmpeg. Linux only beyond
  * R1. On GitHub Actions a skipped part is also written to the step summary.
  * Run: npx tsx packages/motion/scripts/smoke-renderer.ts [--only=R1,R3]
@@ -90,6 +100,8 @@ import {
 } from "../../core/src/motion/rendermotion.js";
 
 let failures = 0;
+/** Set once the run's summary is printed (or the R5 child's render is done). */
+let summarized = false;
 const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;
   console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
@@ -444,14 +456,36 @@ const px = (frame: Buffer, x: number, y: number, w = W) => [...frame.subarray((y
 
 // ---- R2: frames ------------------------------------------------------------------------
 
+/** Logs each frame's clock readings: Date.now, new Date(), Date() (to the second), performance.now and the rAF timestamp. */
+const CLOCK = `
+zrMotion.onFrame((n) => new Promise((resolve) => requestAnimationFrame((t) => {
+  zrMotionHost.log("CLOCK " + JSON.stringify({ n, now: Date.now(), date: new Date().getTime(), str: Date.parse(Date()), perf: performance.now(), raf: t }));
+  resolve();
+})));
+`;
+const EPOCH = 946684800000;
+
 // MUTATION: motion-renderer.cjs swaps R and B on this platform (swapRB = !swapRB) → the
 // byte-exact frame rows fail. loader.js reports frameReady before drawing → frames come out
 // one behind and the per-frame rows fail. Drop `unpremultiply=inplace=1` from encodeArgs →
 // the straight-alpha rows fail. The standalone window transparent (opaque=false) → the
 // standalone pipe rows fail (alpha 0). encodeArgs with `-colorspace bt709` → the untagged
 // row fails.
+// MUTATION (clock): guard.js without `g.Date = VirtualDate` → the Date row fails. guard.js's
+// requestAnimationFrame passing the real timestamp (cb instead of cb(now)) → the
+// performance/rAF row fails.
 async function r2(work: string) {
-  console.log("R2. frames: exact pattern per frame, B,G,R,A, straight alpha after ProRes, opaque standalone...");
+  console.log("R2. frames: the page's clock, exact pattern per frame, B,G,R,A, straight alpha after ProRes, opaque standalone...");
+  const k = fresh(work, "clock");
+  const clock = await render(k, "clock", { module: CLOCK, durationInFrames: 4 });
+  const ticks = logs(clock).filter((t) => t.startsWith("CLOCK ")).map((t) => JSON.parse(t.slice(6)) as Record<string, number>);
+  const at = (n: number) => (n * 1000) / 30;
+  check(!clock.error && ticks.length === 4 && ticks.every((c, n) => c.n === n && c.now === EPOCH + Math.floor(at(n)) && c.date === c.now && c.str === EPOCH),
+    `Date.now, new Date() and Date() read frame / fps from 2000-01-01 (${clock.error?.message ?? JSON.stringify(ticks.map((c) => [c.now - EPOCH, c.date - EPOCH, c.str - EPOCH]))})`);
+  check(ticks.length === 4 && ticks.every((c, n) => Math.abs(c.perf - at(n)) < 1e-6 && Math.abs(c.raf - at(n)) < 1e-6),
+    `performance.now and the requestAnimationFrame timestamp are frame / fps in ms (${JSON.stringify(ticks.map((c) => [c.perf, c.raf]))})`);
+  await leftNothing(clock, k, "clock", "clock page");
+
   const f = fresh(work, "frames");
   const run = await render(f, "frames", { module: PATTERN });
   check(!run.error, `the overlay renders (${run.error?.message ?? `${run.ms} ms`})`);
@@ -499,9 +533,11 @@ async function r2(work: string) {
 
 // ---- R3: network ---------------------------------------------------------------------
 
+/** The private address main() gives the namespace's dummy interface: local there, so a request that got through would connect. */
+const LAN = "10.99.0.1";
 const HOSTS: [string, string][] = [
   ["loop", "127.0.0.1"],
-  ["lan", "192.168.77.7"],
+  ["lan", LAN],
   ["invalid", "zr-evil-1.invalid"],
 ];
 
@@ -552,6 +588,10 @@ const ATTACK = `
     var P = f.contentWindow && f.contentWindow.RTCPeerConnection;
     return P ? ice(P).then(function (c) { return "constructor;" + c; }) : "no-constructor";
   }, 6000);
+  function blankFrame() { var f = document.createElement("iframe"); document.body.appendChild(f); return f.contentWindow; }
+  job("iframe-worker", function () { var C = blankFrame().Worker; if (!C) return "gone"; return new Promise(function (res, rej) { var w = new C("zrmotion://app/worker.js"); w.onmessage = function (e) { res("message " + e.data); }; w.onerror = function () { rej(new Error("worker")); }; }); });
+  job("iframe-sharedworker", function () { var C = blankFrame().SharedWorker; if (!C) return "gone"; return new Promise(function (res, rej) { var w = new C("zrmotion://app/shared.js"); w.port.onmessage = function (e) { res("message " + e.data); }; w.onerror = function () { rej(new Error("sharedworker")); }; w.port.start(); }); });
+  job("iframe-webtransport", function () { var T = blankFrame().WebTransport; if (!T) return "gone"; return new T("https://127.0.0.1:5033/").ready.then(function () { return "ready"; }); }, 4000);
   job("webtransport", function () { var T = window.WebTransport; if (!T) return "gone"; return new T("https://127.0.0.1:5033/").ready.then(function () { return "ready"; }); }, 4000);
   job("worker", function () { var C = window.Worker; if (!C) return "gone"; return new Promise(function (res, rej) { var w = new C("zrmotion://app/worker.js"); w.onmessage = function (e) { res("message " + e.data); }; w.onerror = function () { rej(new Error("worker")); }; }); });
   job("sharedworker", function () { var C = window.SharedWorker; if (!C) return "gone"; return new Promise(function (res, rej) { var w = new C("zrmotion://app/shared.js"); w.port.onmessage = function (e) { res("message " + e.data); }; w.onerror = function () { rej(new Error("sharedworker")); }; w.port.start(); }); });
@@ -592,13 +632,14 @@ const ATTACK = `
 const RED_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "base64");
 
 /**
- * Loopback listeners that count every connection and datagram and answer
- * like real servers, so a request that got through would succeed: TCP 5030
- * (HTTP, CORS open: text, images, an event stream) and 5031 (WebSocket
- * handshake), UDP 5032 (STUN) and 5033 (WebTransport).
+ * Listeners that count every connection and datagram and answer like real
+ * servers, so a request that got through would succeed: TCP 5030 (HTTP, CORS
+ * open: text, images, an event stream) and 5031 (WebSocket handshake) on
+ * 127.0.0.1 and on {@link LAN}, UDP 5032 (STUN) and 5033 (WebTransport) on
+ * 127.0.0.1.
  */
 async function listeners() {
-  const counts: Record<string, number> = { "tcp 5030": 0, "tcp 5031": 0, "udp 5032": 0, "udp 5033": 0 };
+  const counts: Record<string, number> = { "udp 5032": 0, "udp 5033": 0 };
   const paths: string[] = [];
   const answer = (req: IncomingMessage, res: ServerResponse) => {
     paths.push(req.url ?? "");
@@ -607,30 +648,44 @@ async function listeners() {
     else if (req.url === "/es") res.writeHead(200, { ...cors, "content-type": "text/event-stream" }).write("data: hi\n\n");
     else res.writeHead(200, { ...cors, "content-type": "text/plain" }).end("reached");
   };
-  const http = [5030, 5031].map((port) => createHttpServer(answer).on("connection", () => counts[`tcp ${port}`]++));
-  http[1].on("upgrade", (req: IncomingMessage, sock: Socket) => {
-    const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
-    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  // Every socket, upgraded WebSockets included (closeAllConnections no longer sees those), so close() can end them.
+  const sockets = new Set<Socket>();
+  const tcp = ["127.0.0.1", LAN].flatMap((host) => [5030, 5031].map((port) => ({ host, port, key: `tcp ${host}:${port}` })));
+  const http = tcp.map(({ port, key }) => {
+    counts[key] = 0;
+    const server = createHttpServer(answer).on("connection", (sock: Socket) => {
+      counts[key]++;
+      sockets.add(sock);
+    });
+    if (port === 5031) {
+      server.on("upgrade", (req: IncomingMessage, sock: Socket) => {
+        const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+        sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      });
+    }
+    return server;
   });
   const udp = [5032, 5033].map((port) => createSocket("udp4").on("message", () => counts[`udp ${port}`]++));
   await Promise.all([
-    ...http.map((s, i) => new Promise<void>((r) => s.listen(5030 + i, "127.0.0.1", () => r()))),
+    ...http.map((s, i) => new Promise<void>((r) => s.listen(tcp[i].port, tcp[i].host, () => r()))),
     ...udp.map((s, i) => new Promise<void>((r) => s.bind(5032 + i, "127.0.0.1", () => r()))),
   ]);
   return {
     counts,
     paths,
     async close() {
-      for (const s of http) s.closeAllConnections();
+      for (const s of sockets) s.destroy();
       await Promise.all([...http.map((s) => new Promise<void>((r) => s.close(() => r()))), ...udp.map((s) => new Promise<void>((r) => s.close(() => r())))]);
     },
   };
 }
 
 // MUTATION: drop every network layer at once (the CSP header and page.html's meta CSP, the
-// session's onBeforeRequest cancel, the dead proxy, the resolver rule) → the loopback
-// listeners count connections and the network rows fail. Drop guard.js's deletions → the
-// "names gone" rows fail. Drop both WebRTC layers 1 and 2 (setWebRTCIPHandlingPolicy and the
+// session's onBeforeRequest cancel, the dead proxy, the resolver rule) → the listeners on
+// 127.0.0.1 and 10.99.0.1 count connections and the loop and lan rows fail. Drop worker-src
+// and child-src from both CSPs → the about:blank iframe's Worker and SharedWorker rows fail.
+// r3 without its CI check → a CI run with no namespace skips R3 instead of failing. Drop
+// guard.js's deletions → the "names gone" rows fail. Drop both WebRTC layers 1 and 2 (setWebRTCIPHandlingPolicy and the
 // switch) → the ICE rows without guard.js and from the iframe fail. Drop the permission
 // handlers → the notification row fails. Drop setWindowOpenHandler's deny → the
 // window.open row fails. Serve zrmotion URLs with a query (drop `!u.search`) → the
@@ -638,7 +693,9 @@ async function listeners() {
 async function r3(work: string) {
   console.log("R3. every network route from the page fails, with nothing contacted...");
   if (!process.env[NETNS]) {
-    skipped("R3", "no private network namespace here (unshare --user --net), and these rows reach for a LAN-looking address");
+    const why = "no private network namespace here (unshare --user --net), and these rows reach for a private address";
+    if (process.env.CI === "true") check(false, `R3 runs on CI: ${why}`);
+    else skipped("R3", why);
     return;
   }
   const net = await listeners();
@@ -659,7 +716,7 @@ async function r3(work: string) {
       const res = (line ? JSON.parse(line.slice(8)) : {}) as Record<string, string>;
       check(!run.error && !!line, `${what}: the page ran every attempt and rendered all 3 frames (${run.error?.message ?? "ok"})`);
       const contacted = Object.entries(net.counts).filter(([k, v]) => v !== before[k]);
-      check(contacted.length === 0, `${what}: no loopback listener saw a connection or datagram (${JSON.stringify(net.counts)}; requests ${JSON.stringify(net.paths)})`);
+      check(contacted.length === 0, `${what}: no listener (127.0.0.1, ${LAN}) saw a connection or datagram (${JSON.stringify(net.counts)}; requests ${JSON.stringify(net.paths)})`);
       for (const [name] of HOSTS) {
         for (const kind of ["fetch", "xhr", "ws", "eventsource", "img", "font"]) {
           check((res[`${kind}-${name}`] ?? "").startsWith("err:"), `${what}: ${kind} to the ${name} host fails (${res[`${kind}-${name}`]})`);
@@ -673,6 +730,10 @@ async function r3(work: string) {
       check(res["ice-iframe"] === "ok:constructor;no-candidates" && stun === 0, `${what}: an about:blank iframe's fresh RTCPeerConnection gathers and sends nothing either (${res["ice-iframe"]}; ${stun} datagrams)`);
       const quic = net.counts["udp 5033"] - before["udp 5033"];
       check((gone ? res.webtransport === "ok:gone" : (res.webtransport ?? "").startsWith("err:")) && quic === 0, `${what}: WebTransport fails and sends nothing (${res.webtransport}; ${quic} datagrams)`);
+      // An about:blank iframe has its own constructors (guard.js runs in the page only; slice 1 deviation): the CSP it inherits stops them.
+      for (const k of ["iframe-worker", "iframe-sharedworker", "iframe-webtransport"]) {
+        check((res[k] ?? "").startsWith("err:") && quic === 0, `${what}: ${k.slice(7)} from an about:blank iframe fails and sends nothing (${res[k]}; ${quic} datagrams)`);
+      }
       for (const k of ["worker", "sharedworker", "serviceworker"]) {
         check(gone ? res[k] === "ok:gone" : (res[k] ?? "").startsWith("err:"), `${what}: ${k} on a table entry fails (${res[k]})`);
       }
@@ -792,8 +853,9 @@ async function runRenderer(bin: Extract<RendererBinary, { ok: true }>, args: str
   return { code, stdout };
 }
 
-// MUTATION: motion-renderer.cjs without its parent-PID check → the crash row's renderer
-// outlives the killed core and fails. cli.ts without sweepMotionScratch → motion/<id>
+// MUTATION: exited() and renderFrames without their "error" listeners (exit only) → the
+// cannot-start rows hang and fail. motion-renderer.cjs without its parent-PID check → the
+// crash row's renderer outlives the killed core and fails. cli.ts without sweepMotionScratch → motion/<id>
 // survives the next core start and fails. renderMotion without the abort listener → the
 // abort row renders to the end and fails. moveAll without its rollback → the later-move
 // row finds the .mov in baked/ and fails. The renderer's stdin 'end' handler dropped → the
@@ -827,6 +889,29 @@ async function r5(work: string) {
   await leftNothing(move, f, "move", "later move");
   rmSync(blocker, { recursive: true, force: true });
   check(readdirSync(join(f.data, "baked")).length === 0, `baked/ is empty after abort, FFmpeg failure and the failed move (${JSON.stringify(readdirSync(join(f.data, "baked")))})`);
+
+  // A renderer that cannot start (a file that is not executable): no "exit" ever comes, only "error".
+  const x = fresh(work, "nostart");
+  const bad: RendererBinary = { ok: true, command: touch(join(x.dir, "not-executable"), "#!/bin/sh\nexit 0\n"), args: [] };
+  const hung = (ms: number) => sleep(ms).then(() => "hung" as const);
+  let t0 = Date.now();
+  const probe = await Promise.race([probeMotionRenderer(x.data, { binary: bad, env: x.env }), hung(10_000)]);
+  check(probe !== "hung" && !probe.ok && probe.reason === "start-failed" && Date.now() - t0 < 5000,
+    `a renderer that cannot start: the probe says start-failed at once (${JSON.stringify(probe)}; ${Date.now() - t0} ms)`);
+  t0 = Date.now();
+  const nostart = await Promise.race([render(x, "nostart", { module: PATTERN, binary: bad }), hung(15_000)]);
+  const e0 = nostart === "hung" ? undefined : (nostart.error as MotionRenderError | undefined);
+  check(e0?.code === "graphic_renderer_unavailable" && Date.now() - t0 < 5000, `…and a render rejects with graphic_renderer_unavailable at once (${e0?.code}: ${e0?.message}; ${Date.now() - t0} ms)`);
+  const cmdline = (pid: number) => {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const encoders = await gone(descendants(process.pid).filter((p) => /ffmpeg/.test(cmdline(p))), 2000);
+  check(!existsSync(join(x.data, "motion", "nostart")) && readdirSync(join(x.data, "baked")).length === 0 && encoders.length === 0,
+    `…leaving no motion/nostart, nothing in baked/ and no FFmpeg (${JSON.stringify(filesUnder(x.data))}; FFmpeg left ${JSON.stringify(encoders)})`);
 
   // The core killed mid-render.
   const c = fresh(work, "crash");
@@ -1005,12 +1090,13 @@ async function main() {
   const args = process.argv.slice(2);
   if (args[0] === "--child-render") {
     await childRender(args[1], args[2]);
+    summarized = true;
     return;
   }
   // The whole run in a private network namespace (loopback and a dummy interface, nothing
   // routed out), so even a broken guard reaches no real host.
   if (LINUX && !process.env[NETNS]) {
-    const setup = "ip link set lo up && ip link add zr0 type dummy && ip addr add 10.99.0.1/24 dev zr0 && ip link set zr0 up";
+    const setup = `ip link set lo up && ip link add zr0 type dummy && ip addr add ${LAN}/24 dev zr0 && ip link set zr0 up`;
     const ns = ["--user", "--map-current-user", "--net", "--keep-caps", "sh", "-c"];
     if (spawnSync("unshare", [...ns, setup], { stdio: "ignore" }).status === 0) {
       const r = spawnSync("unshare", [...ns, `${setup} && exec setpriv --inh-caps=-all --ambient-caps=-all "$0" "$@"`, process.execPath, ...process.execArgv, fileURLToPath(import.meta.url), ...args], {
@@ -1039,9 +1125,17 @@ async function main() {
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5 });
   }
+  summarized = true;
   console.log(failures === 0 ? "\nALL MOTION RENDERER CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
+
+// The event loop drained before the summary (a promise that never settles): a failure, never exit 0.
+process.on("beforeExit", () => {
+  if (summarized) return;
+  console.log("\nthe smoke ended before its summary");
+  process.exit(1);
+});
 
 main().catch((err) => {
   console.error(err);

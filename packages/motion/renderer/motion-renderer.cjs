@@ -68,6 +68,8 @@ app.setPath("userData", profile);
 app.setPath("sessionData", profile);
 app.setPath("crashDumps", path.join(profile, "crashes"));
 app.setPath("temp", path.join(scratch, "tmp"));
+// macOS: no Dock icon for a process that never shows a window.
+if (process.platform === "darwin") app.dock?.hide();
 // Software compositing: capturePage then returns the frame just drawn (slice 1 measured the GPU path returning stale frames).
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("mute-audio");
