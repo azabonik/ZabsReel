@@ -23,6 +23,15 @@ jobs:
           node scripts/check-brand.mjs --self-test
           node scripts/check-brand.mjs
 
+      # The clean-room runtime (packages/motion/cleanroom: runtime/, test/,
+      # NOTES.md) is changed only by a clean-room session: its files must match
+      # CLEANROOM.lock (the self-test proves a changed, added or deleted file
+      # fails, on copies). Reads only, so it runs before the install too.
+      - name: Clean-room lock gate
+        run: |
+          node scripts/check-cleanroom-lock.mjs --self-test
+          node scripts/check-cleanroom-lock.mjs
+
       # The release.yml tag guard otherwise runs only on a real tag push.
       - name: Release guard self-test
         run: node scripts/release-guard.mjs --self-test
@@ -40,6 +49,12 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The clean-room runtime's own unit tests (node --test through
+      # sucrase/register, jsdom, React's development and production builds)
+      # and its typecheck (its own tsconfig).
+      - name: Clean-room runtime tests and typecheck
+        run: npm run test:cleanroom
 
       # The built core's Remotion guard under Node and under Electron's Node
       # (the app's core child): Remotion loads with the same-as refusal, and the
@@ -163,15 +178,18 @@ jobs:
       - name: Smoke — graphics add-on (pin, core and installer)
         run: npx tsx packages/core/scripts/smoke-addon.ts
 
-      # ZabsReel's own motion renderer, the host (packages/motion): the binary
-      # rule on fixture trees, frames from hand-written pages through the
-      # offscreen Electron renderer into FFmpeg, every network route refused
-      # (a private network namespace, loopback listeners only), the limits and
-      # lifecycle, and the probe launch rows (the packed-build row skips here).
+      # ZabsReel's own motion renderer (packages/motion): the binary rule on
+      # fixture trees, frames from hand-written pages through the offscreen
+      # Electron renderer into FFmpeg, every network route refused (a private
+      # network namespace, loopback listeners only), the limits and lifecycle,
+      # the probe launch rows (the packed-build row skips here); then the
+      # runtime wired in: the clean-room lock, the vendored React's sha256, a
+      # reproducible runtime build, the graphic's import check, and graphics
+      # (the title template, seeking, delayRender, errors) through the renderer.
       # Chromium's sandbox and the namespace need unprivileged user namespaces,
       # which Ubuntu 24.04's AppArmor restricts by default. With CI=true a
       # missing namespace fails the network part (R3) instead of skipping it.
-      - name: Smoke — motion renderer host (Electron offscreen, no network)
+      - name: Smoke — motion renderer host and runtime (Electron offscreen, no network)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-renderer.ts

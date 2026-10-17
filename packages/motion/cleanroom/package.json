@@ -1,0 +1,6 @@
+{
+  "name": "zr-motion-cleanroom",
+  "private": true,
+  "description": "Module scope of the clean-room runtime and its tests: CommonJS, as in the clean room (npm run test:cleanroom loads them through sucrase/register). Not a package; not covered by CLEANROOM.lock.",
+  "type": "commonjs"
+}

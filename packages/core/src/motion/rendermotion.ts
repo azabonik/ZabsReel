@@ -4,6 +4,7 @@ import type { Readable, Writable } from "node:stream";
 import { PRODUCT_NAME } from "../brand.js";
 import { adaptFfmpegArgs, FfmpegError, ffmpegStderrDetail, runTool, spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "../io/gatedfs.js";
+import { graphicModule, type GraphicStart } from "./graphicmodule.js";
 import { graphicPreviewProxy, tagGraphicColor } from "./render.js";
 import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
 
@@ -13,7 +14,9 @@ import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
  * executable; main.cjs dispatches to @aive/motion's motion-renderer.cjs),
  * sends it the page's table, asks for each frame, and pipes the frames into
  * FFmpeg (executor.ts). The pipes and their formats are described at the top
- * of motion-renderer.cjs.
+ * of motion-renderer.cjs. The graphic's TSX is compiled here, and its imports
+ * checked, before the renderer starts (graphicmodule.ts); the page runs it on
+ * the clean-room runtime (MOTION-PLAN D5).
  *
  * Everything a render writes stays in its motion/<id> folder (workDir) until
  * the whole render has succeeded; only then are the files moved into baked/,
@@ -38,12 +41,38 @@ const OWNER = "owner.json";
 /** Longest control line the renderer may send. */
 const MAX_LINE = 1024 * 1024;
 
+/**
+ * The codes a graphic's failed frame carries from the page: the runtime's
+ * (cleanroom/runtime/src/errors.ts; graphic_render_cancelled is the graphic's
+ * own cancelRender(), not the job's abort, graphic_render_canceled), and
+ * graphic_component_error for an error that has none (the component's own
+ * throw). Any other code the page reports becomes graphic_component_error.
+ */
+export const GRAPHIC_CODES = [
+  "graphic_api_unsupported",
+  "graphic_api_misuse",
+  "graphic_asset_unknown",
+  "graphic_asset_kind",
+  "graphic_media_ref",
+  "graphic_media_failed",
+  "graphic_media_time",
+  "graphic_media_per_frame",
+  "graphic_audio_cues_cap",
+  "graphic_font_cap",
+  "graphic_frame_timeout",
+  "graphic_render_cancelled",
+  "graphic_component_error",
+] as const;
+export type GraphicCode = (typeof GRAPHIC_CODES)[number];
+
 export type MotionErrorCode =
   | "graphic_renderer_unavailable"
   | "graphic_frame_timeout"
   | "graphic_render_timeout"
   | "graphic_render_crashed"
-  | "graphic_render_canceled";
+  | "graphic_render_canceled"
+  | "graphic_compile_error"
+  | GraphicCode;
 
 /** A render that ended without a result; `code` is what add_graphic reports. */
 export class MotionRenderError extends Error {
@@ -67,9 +96,18 @@ export interface MotionLimits {
   totalMs: number;
 }
 
+/** The largest props a graphic takes: their JSON text in UTF-8 (D5). */
+export const MAX_GRAPHIC_PROPS_BYTES = 256 * 1024;
+
 export interface RenderMotionOptions {
-  /** The page's module (module.js in the table). Until the runtime lands it is plain JS that calls zrMotion.onFrame(fn). */
-  module: string;
+  /**
+   * The graphic: TSX that default-exports a React component, and its props
+   * (JSON only, at most {@link MAX_GRAPHIC_PROPS_BYTES}). The core compiles it
+   * into the page's module.js. Exactly one of `graphic` and `module`.
+   */
+  graphic?: { source: string; props?: Record<string, unknown> };
+  /** Tests: a hand-written page script as module.js instead of a graphic (it calls zrMotion.onFrame(fn) itself). */
+  module?: string;
   width: number;
   height: number;
   fps: number;
@@ -86,13 +124,16 @@ export interface RenderMotionOptions {
   onProgress?: (fraction: number) => void;
   /**
    * Tests: the binary rule's answer, the limits, the page's heap (MB), table
-   * entries replaced or added, the environment, and the renderer's messages,
-   * frame bytes (as they arrive on fd 3), PID and exit.
+   * entries replaced or added, the frames to render in this order (default
+   * 0..durationInFrames-1; the encode gets them in that order), the
+   * environment, and the renderer's messages, frame bytes (as they arrive on
+   * fd 3), PID and exit.
    */
   binary?: RendererBinary;
   limits?: Partial<MotionLimits>;
   heapMb?: number;
   entries?: Record<string, string>;
+  frames?: number[];
   env?: NodeJS.ProcessEnv;
   onMessage?: (msg: RendererMessage) => void;
   onFrameData?: (chunk: Buffer) => void;
@@ -137,21 +178,39 @@ export function rendererArgs(scratch: string, width: number, height: number, ext
   return [`--zr-parent-pid=${process.pid}`, `--zr-scratch=${scratch}`, "--mute-audio", ...linux, ...extra];
 }
 
-/** The renderer folder of @aive/motion (page.html, guard.js, loader.js). */
-function rendererDir(): string {
-  return join(dirname(createRequire(import.meta.url).resolve("@aive/motion/package.json")), "renderer");
+/** The folder of @aive/motion: renderer/ (the page and its scripts), vendor/ (React), dist/ (the runtime), cleanroom/runtime/exports.json. */
+function motionDir(): string {
+  return dirname(createRequire(import.meta.url).resolve("@aive/motion/package.json"));
+}
+
+/** The runtime's export list (the names a graphic may take from remotion or @aive/motion). */
+async function runtimeExports(): Promise<ReadonlySet<string>> {
+  const json = JSON.parse(await readFile(join(motionDir(), "cleanroom", "runtime", "exports.json"), "utf8")) as { exports: string[] };
+  return new Set(json.exports);
 }
 
 const TEXT = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8" };
 
-/** The zrmotion table: path -> { type, body (base64) }. */
-async function pageTable(o: RenderMotionOptions): Promise<{ path: string; type: string; body: string }[]> {
-  const dir = rendererDir();
+/** The zrmotion table: path -> { type, body (base64) }; page.html loads the scripts in this order. */
+async function pageTable(o: RenderMotionOptions, module: string): Promise<{ path: string; type: string; body: string }[]> {
+  const dir = motionDir();
+  const read = async (...p: string[]) => {
+    try {
+      return await readFile(join(dir, ...p), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT" && p[0] === "dist") throw new Error(`${p.join("/")} of @aive/motion is missing: run npm run build`);
+      throw err;
+    }
+  };
   const files: Record<string, string> = {
-    "page.html": await readFile(join(dir, "page.html"), "utf8"),
-    "guard.js": await readFile(join(dir, "guard.js"), "utf8"),
-    "loader.js": await readFile(join(dir, "loader.js"), "utf8"),
-    "module.js": o.module,
+    "page.html": await read("renderer", "page.html"),
+    "guard.js": await read("renderer", "guard.js"),
+    "react.production.min.js": await read("vendor", "react-18.3.1", "react.production.min.js"),
+    "react-dom.production.min.js": await read("vendor", "react-18.3.1", "react-dom.production.min.js"),
+    "loader.js": await read("renderer", "loader.js"),
+    "zr-runtime.js": await read("dist", "zr-runtime.js"),
+    "host.js": await read("renderer", "host.js"),
+    "module.js": module,
     ...o.entries,
   };
   return Object.entries(files).map(([path, text]) => ({
@@ -180,6 +239,45 @@ function checkOptions(o: RenderMotionOptions): void {
   if (!int(o.width, 8192) || !int(o.height, 8192)) throw new RangeError(`A graphic is 1 to 8192 pixels on each side (${o.width}x${o.height}).`);
   if (!int(o.durationInFrames, MAX_MOTION_FRAMES)) throw new RangeError(`A graphic is 1 to ${MAX_MOTION_FRAMES} frames long (${o.durationInFrames}).`);
   if (!(o.fps > 0 && o.fps <= 240)) throw new RangeError(`A graphic's frame rate is above 0 and at most 240 (${o.fps}).`);
+  if ((o.graphic === undefined) === (o.module === undefined)) throw new TypeError("renderMotion needs a graphic or (tests) a module, and not both.");
+  if (o.frames && !(o.frames.length > 0 && o.frames.every((n) => Number.isInteger(n) && n >= 0 && n < o.durationInFrames))) throw new RangeError(`Frames to render are whole numbers from 0 to ${o.durationInFrames - 1}.`);
+  if (o.graphic) {
+    if (typeof o.graphic.source !== "string") throw new TypeError("A graphic's code is TSX text.");
+    const props = o.graphic.props ?? {};
+    let json: string | undefined;
+    try {
+      json = typeof props === "object" && props !== null && !Array.isArray(props) ? JSON.stringify(props) : undefined;
+    } catch {
+      json = undefined;
+    }
+    if (json === undefined) throw new TypeError("A graphic's props are one JSON object.");
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes > MAX_GRAPHIC_PROPS_BYTES) throw new RangeError(`A graphic's props are at most ${MAX_GRAPHIC_PROPS_BYTES / 1024} KB of JSON (${Math.ceil(bytes / 1024)} KB). Pass less data, or move large data out of the props.`);
+  }
+}
+
+/** The renderer's limits for `o` (D2): 30 s per frame, 120 s + 1 s per frame in all. */
+function limitsOf(o: RenderMotionOptions): MotionLimits {
+  return { frameMs: 30_000, totalMs: 120_000 + 1000 * o.durationInFrames, ...o.limits };
+}
+
+/**
+ * module.js for `o`: the hand-written module of a test, or the graphic
+ * compiled, its imports checked (graphicmodule.ts). A refused graphic throws
+ * here, before anything is started or written.
+ */
+async function pageModule(o: RenderMotionOptions, limits: MotionLimits): Promise<string> {
+  if (!o.graphic) return o.module as string;
+  const props = JSON.parse(JSON.stringify(o.graphic.props ?? {})) as Record<string, unknown>;
+  const start: GraphicStart = {
+    composition: { id: "Graphic", width: o.width, height: o.height, fps: o.fps, durationInFrames: o.durationInFrames, props },
+    assets: {},
+    // Below the core's own frame limit, so the runtime's message (it names the open delayRender labels) comes first.
+    frameTimeoutMs: Math.max(Math.round(limits.frameMs / 2), limits.frameMs - 2000),
+  };
+  const built = graphicModule(o.graphic.source, start, await runtimeExports());
+  if (!built.ok) throw new MotionRenderError(built.code, built.message);
+  return built.module;
 }
 
 /**
@@ -190,12 +288,14 @@ function checkOptions(o: RenderMotionOptions): void {
  */
 export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotionResult> {
   checkOptions(o);
+  const limits = limitsOf(o);
+  const module = await pageModule(o, limits);
   const encoded = join(o.workDir, o.alpha ? "out.mov" : "out.mp4");
   const preview = join(o.workDir, "graphic.webm");
   try {
     await mkdir(join(o.workDir, "tmp"), { recursive: true });
     await writeFile(join(o.workDir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
-    const framesMs = await renderFrames(o, encoded);
+    const framesMs = await renderFrames(o, encoded, module, limits);
     if (!o.alpha) await tagGraphicColor(encoded, o.signal);
     let previewMade = false;
     if (o.alpha && o.previewPath) {
@@ -305,14 +405,20 @@ function spawnRenderer(bin: Extract<RendererBinary, { ok: true }>, args: string[
   });
 }
 
-/** The renderer and FFmpeg for one render: frames 0..N-1 into `encoded`. Returns the milliseconds the frames took. */
-async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<number> {
+/** A failed frame the page reported: its code if the page may report it (else graphic_component_error), and its message. */
+function pageFailure(msg: RendererMessage): MotionRenderError {
+  const code = (GRAPHIC_CODES as readonly unknown[]).includes(msg.code) ? (msg.code as GraphicCode) : "graphic_component_error";
+  return new MotionRenderError(code, `The graphic failed at frame ${String(msg.n)}: ${String(msg.message)}`);
+}
+
+/** The renderer and FFmpeg for one render: frames 0..N-1 (or `o.frames`) into `encoded`. Returns the milliseconds the frames took. */
+async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits): Promise<number> {
   const bin = o.binary ?? rendererBinary();
   if (!bin.ok) throw new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (${bin.reason}: ${bin.detail}).`);
-  const limits: MotionLimits = { frameMs: 30_000, totalMs: 120_000 + 1000 * o.durationInFrames, ...o.limits };
+  const order = o.frames ?? Array.from({ length: o.durationInFrames }, (_, n) => n);
   const frameSize = o.width * o.height * 4;
-  const total = frameSize * o.durationInFrames;
-  const table = await pageTable(o);
+  const total = frameSize * order.length;
+  const table = await pageTable(o, module);
   const heap = o.heapMb === undefined ? [] : [`--zr-heap-mb=${o.heapMb}`];
 
   // FFmpeg's arguments before the renderer starts, and a failed FFmpeg start kills it: no renderer outlives a throw here.
@@ -354,7 +460,8 @@ async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<nu
 
   // Control out.
   let ready = false;
-  let lastFrame = -1;
+  /** How many frames of `order` the renderer has finished, in order. */
+  let done = 0;
   readLines(
     child.stdout as Readable,
     (line) => {
@@ -367,7 +474,8 @@ async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<nu
       }
       o.onMessage?.(msg);
       if (msg.type === "ready") ready = true;
-      else if (msg.type === "frame" && msg.n === lastFrame + 1) lastFrame = msg.n;
+      else if (msg.type === "frame" && msg.n === order[done]) done++;
+      else if (msg.type === "frame-error") failWith(pageFailure(msg));
       else if (msg.type === "error") reported = msg;
       notify();
     },
@@ -446,14 +554,14 @@ async function renderFrames(o: RenderMotionOptions, encoded: string): Promise<nu
   try {
     send({ type: "start", width: o.width, height: o.height, fps: o.fps, durationInFrames: o.durationInFrames, alpha: o.alpha, table });
     await until(() => ready, limits.frameMs, () => new MotionRenderError("graphic_frame_timeout", `The graphic's page did not load within ${Math.round(limits.frameMs / 1000)} s.`));
-    for (let n = 0; n < o.durationInFrames; n++) {
+    for (const [i, n] of order.entries()) {
       send({ type: "frame", n });
       await until(
-        () => lastFrame >= n && received >= (n + 1) * frameSize,
+        () => done > i && received >= (i + 1) * frameSize,
         limits.frameMs,
         () => new MotionRenderError("graphic_frame_timeout", `Frame ${n} of the graphic took longer than ${Math.round(limits.frameMs / 1000)} s to draw. Make the graphic simpler and try again.`),
       );
-      o.onProgress?.((n + 1) / o.durationInFrames);
+      o.onProgress?.((i + 1) / order.length);
     }
     const framesMs = Date.now() - started;
     finished = true;

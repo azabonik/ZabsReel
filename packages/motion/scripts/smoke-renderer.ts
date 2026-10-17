@@ -1,7 +1,8 @@
 /**
- * ZabsReel's own motion renderer, slice 1: the renderer host (MOTION-PLAN D2,
- * D8 "Launch", "Binary rule", "Renderer" and "Lifecycle"). The pages here are
- * hand-written (no runtime yet).
+ * ZabsReel's own motion renderer: the renderer host (slice 1; MOTION-PLAN D2,
+ * D8 "Launch", "Binary rule", "Renderer" and "Lifecycle"), with hand-written
+ * pages in R2-R7, and the clean-room runtime wired into the page (slice 3b1;
+ * D5, D8 "Code delivery") in R8-R9.
  *
  *  R1. binary rule  — rendererbinary.ts over fixture layouts for win32, darwin
  *                     and linux, packaged and source checkout (no macOS or
@@ -74,12 +75,35 @@
  *  R7. measure      — a 1920x1080 overlay, 60 frames: milliseconds per frame;
  *                     every render here runs with no DISPLAY (Chromium's
  *                     headless platform on Linux).
+ *  R8. runtime parts — (no renderer) the clean-room files match
+ *                     CLEANROOM.lock, and the gate fails on a changed byte, an
+ *                     added file and a deleted file (its --self-test, on
+ *                     copies); the vendored React 18.3.1 UMD builds and licence
+ *                     have their pinned sha256; two runtime builds are
+ *                     byte-identical and dist/ holds this tree's; the
+ *                     graphic's imports: react, its JSX runtimes, remotion and
+ *                     @aive/motion pass (type-only imports, and import words
+ *                     in strings, comments, JSX text and regular expressions,
+ *                     are not imports), anything else, import(), import.meta
+ *                     and a name the runtime does not export are refused.
+ *  R9. graphics     — through the real renderer: the page's React globals
+ *                     (ReactDOM.createRoot, flushSync) and loader.js's require
+ *                     table; the title template at 1920x1080 and 1080x1920
+ *                     (frames with content that changes); frames rendered out
+ *                     of order equal the same frames in order; delayRender
+ *                     holds the capture until continueRender; props reach a
+ *                     component with no React import; a failed frame fails
+ *                     the render with its code (a component's own throw:
+ *                     graphic_component_error) and leaves nothing; an unknown
+ *                     import, a syntax error and props over 256 KB are refused
+ *                     before any renderer starts.
  *
  * Every renderer runs with fresh HOME/USERPROFILE/XDG_CONFIG_HOME and data
  * folders, muted. Ports: 5030-5033 (listeners) and 5036 (the core in R5).
  * On CI (CI=true) R3 fails instead of skipping when there is no namespace.
- * Needs `npm run build` (R5's core start, R6b) and FFmpeg. Linux only beyond
- * R1. On GitHub Actions a skipped part is also written to the step summary.
+ * Needs `npm run build` (R5's core start, R6b, R8's dist/zr-runtime.js) and
+ * FFmpeg. Linux only beyond R1 and R8. On GitHub Actions a skipped part is
+ * also written to the step summary.
  * Run: npx tsx packages/motion/scripts/smoke-renderer.ts [--only=R1,R3]
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -94,6 +118,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isSourceCheckout } from "../../core/src/addon/resolve.js";
 import { RENDERER_FLAG, rendererBinary, type RendererBinary } from "../../core/src/motion/rendererbinary.js";
+import { graphicImportRefusal, unsupportedNameMessage } from "../../core/src/motion/graphicmodule.js";
+import { TITLE_CARD_TSX } from "../../core/src/motion/templates.js";
 import {
   MotionRenderError,
   probeMotionRenderer,
@@ -416,8 +442,8 @@ interface Run {
   ms: number;
 }
 
-/** renderMotion with the run's frames, messages, renderer PID (and its children while it ran) and exit recorded. */
-async function render(f: Fresh, id: string, o: Partial<RenderMotionOptions> & { module: string }): Promise<Run> {
+/** renderMotion with the run's frames, messages, renderer PID (and its children while it ran) and exit recorded; `o` has a module (a hand-written page) or a graphic. */
+async function render(f: Fresh, id: string, o: Partial<RenderMotionOptions> & ({ module: string } | { graphic: NonNullable<RenderMotionOptions["graphic"]> })): Promise<Run> {
   const chunks: Buffer[] = [];
   const run: Run = { frames: [], messages: [], pids: [], exit: null, ms: 0 };
   let tree: ReturnType<typeof watchTree> | null = null;
@@ -1152,6 +1178,297 @@ async function r7(work: string) {
   await leftNothing(run, f, "big", "1920x1080");
 }
 
+// ---- R8: the runtime's pieces (no renderer) ------------------------------------------
+
+const MOTION = join(REPO, "packages", "motion");
+const VENDOR = join(MOTION, "vendor", "react-18.3.1");
+/** The vendored React 18.3.1 UMD production builds and React's MIT licence, as published (npm react@18.3.1 / react-dom@18.3.1, umd/). */
+const REACT_SHA256: Record<string, string> = {
+  "react.production.min.js": "d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd",
+  "react-dom.production.min.js": "35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d",
+  LICENSE: "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+};
+const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+
+/** [what, graphic source, the refusal it must get (a RegExp), or null when it must pass]. */
+const NAME_MSG = (name: string) => new RegExp(`^${name} is not available in ZabsReel's built-in graphics renderer`);
+const IMPORT_CASES: [string, string, RegExp | null][] = [
+  ["the title template", TITLE_CARD_TSX, null],
+  ["react, its JSX runtimes, remotion and @aive/motion", `import React, { useState } from "react"; import { jsx } from "react/jsx-runtime"; import { jsxDEV } from "react/jsx-dev-runtime"; import { spring } from "remotion"; import { asset, loadFont } from "@aive/motion"; export default () => null;`, null],
+  ["a namespace import of remotion", `import * as R from "remotion"; export default () => R.AbsoluteFill;`, null],
+  ["type-only imports (erased by the compile)", `import type { CSSProperties } from "./types"; import type Q from "lodash"; import { type CalculateMetadataFunction, spring } from "remotion"; export default () => null;`, null],
+  ["import words inside strings, comments, JSX text and a regular expression", `// import x from "fs"\nconst a = "import y from 'fs'"; const r = /import z from 'fs'/; export default () => <div title={a + r}>Don't import "fs" here</div>;`, null],
+  ["another package", `import _ from "lodash"; export default () => null;`, /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "lodash"/],
+  ["react-dom", `import { createPortal } from "react-dom"; export default () => null;`, /not "react-dom"/],
+  ["a relative file", `import x from "./data.json"; export default () => null;`, /not "\.\/data\.json"/],
+  ["a side-effect import", `import "fs"; export default () => null;`, /not "fs"/],
+  ["a require() call", `const fs = require("fs"); export default () => null;`, /not "fs"/],
+  ["import x = require()", `import fs = require("node:fs"); export default () => null;`, /not "node:fs"/],
+  ["a re-export from another package", `export { readFile } from "fs"; export default () => null;`, /not "fs"/],
+  ["export * from another package", `export * from "fs"; export default () => null;`, /not "fs"/],
+  ["dynamic import()", `export default () => { void import("fs"); return null; };`, /^A graphic can't load code with import\(\)/],
+  ["import.meta", `export default () => <div>{String(import.meta)}</div>;`, /^A graphic can't use import\.meta/],
+  ["a name the runtime does not export", `import { AbsoluteFill, Composition } from "remotion";\nexport default () => null;`, NAME_MSG("Composition")],
+  ["a renamed import of a missing name", `import { Still as S } from "@aive/motion"; export default () => null;`, NAME_MSG("Still")],
+  ["a string import name", `import { "Thumbnail" as T } from "remotion"; export default () => null;`, NAME_MSG("Thumbnail")],
+  ["a default import of remotion", `import Remotion from "remotion"; export default () => null;`, NAME_MSG("default")],
+  ["a re-export of a missing name", `export { spring, getInputProps } from "remotion"; export default () => null;`, NAME_MSG("getInputProps")],
+];
+
+// MUTATION: check-cleanroom-lock.mjs's sha256 comparison inverted (=== for !==) → the gate
+// row fails (and the self-test). The gate without its "not in the lock" check → the
+// self-test's added-file case fails. One byte of the vendored react-dom changed → its sha256
+// row fails. build-runtime.mjs with a time stamp in its header → the two-builds row fails;
+// dist/zr-runtime.js edited after the build → the "dist is this tree's build" row fails.
+// graphicmodule.ts: GRAPHIC_SPECIFIERS with "lodash" added → the lodash row fails; the
+// names check dropped (check() returns null for remotion) → the five missing-name rows
+// fail; `import type` not skipped → the type-only row fails; the require() check dropped →
+// the require and import-x-=-require rows fail; the export…from branch dropped → the two
+// re-export rows and export * fail; the import() and import.meta checks dropped → those rows
+// fail; imports found with a regular expression over the text instead of sucrase's tokens →
+// the strings/comments/JSX-text row fails; the default import not counted → the default
+// row fails.
+async function r8(work: string) {
+  console.log("R8. the runtime's pieces: the clean-room lock, React's UMD builds, the runtime build, the graphic's imports...");
+  // The clean-room lock gate: the real tree, then its own mutations on copies (--self-test).
+  const gate = spawnSync(process.execPath, [join(REPO, "scripts", "check-cleanroom-lock.mjs")], { encoding: "utf8" });
+  check(gate.status === 0, `the clean-room files match CLEANROOM.lock (${(gate.stdout + gate.stderr).trim().split("\n").pop()})`);
+  const self = spawnSync(process.execPath, [join(REPO, "scripts", "check-cleanroom-lock.mjs"), "--self-test"], { encoding: "utf8" });
+  check(self.status === 0 && /changed in a runtime file fails/.test(self.stdout) && /added under runtime\/src fails/.test(self.stdout) && /deleted fails/.test(self.stdout),
+    `the lock gate fails on a changed byte, an added file and a deleted file (copies of the tree) (${self.stdout.trim().split("\n").filter((l) => !l.startsWith("ok")).join(" | ")})`);
+
+  // React 18.3.1's UMD builds, vendored with their licence.
+  for (const [name, want] of Object.entries(REACT_SHA256)) {
+    const file = join(VENDOR, name);
+    const got = existsSync(file) ? sha256(file) : "missing";
+    check(got === want, `vendor/react-18.3.1/${name} has its pinned sha256 (${got.slice(0, 16)}…)`);
+  }
+  check(existsSync(join(VENDOR, "LICENSE")) && /^MIT License/.test(readFileSync(join(VENDOR, "LICENSE"), "utf8")), "React's MIT licence is beside its builds");
+
+  // The runtime's page script: two builds are byte-identical, and dist/ holds this tree's.
+  const outs = [join(work, "runtime-a.js"), join(work, "runtime-b.js")];
+  for (const out of outs) spawnSync(process.execPath, [join(MOTION, "scripts", "build-runtime.mjs"), "--out", out], { encoding: "utf8" });
+  const [a, b] = outs.map((p) => (existsSync(p) ? readFileSync(p) : Buffer.alloc(0)));
+  check(a.length > 0 && a.equals(b), `two builds of the runtime are byte-identical (${a.length} and ${b.length} bytes)`);
+  const dist = join(MOTION, "dist", "zr-runtime.js");
+  check(existsSync(dist) && readFileSync(dist).equals(a), `dist/zr-runtime.js is this tree's build (npm run build) (${existsSync(dist) ? "differs" : "missing"})`);
+
+  // The graphic's imports, checked before anything starts.
+  const exportsList = new Set((JSON.parse(readFileSync(join(MOTION, "cleanroom", "runtime", "exports.json"), "utf8")) as { exports: string[] }).exports);
+  for (const [what, source, want] of IMPORT_CASES) {
+    let got: string | null;
+    try {
+      got = graphicImportRefusal(source, exportsList);
+    } catch (err) {
+      got = `threw: ${(err as Error).message}`;
+    }
+    check(want === null ? got === null : got !== null && want.test(got), `imports, ${what}: ${want === null ? "accepted" : "refused"} (${got ?? "accepted"})`);
+  }
+}
+
+// ---- R9: graphics through the runtime --------------------------------------------------
+
+/** Pixels with alpha above 0. */
+function inked(frame: Buffer): number {
+  let n = 0;
+  for (let i = 3; i < frame.length; i += 4) if (frame[i] > 0) n++;
+  return n;
+}
+
+/** Logs what the page's globals and loader.js's require table give (a hand-written module). */
+const TABLE_PAGE = `
+(function () {
+  var mod = { marker: 1 };
+  var req = zrMotion.require(mod);
+  function attempt(name) { try { var v = req(name); return v === mod ? "module object" : v === React ? "React" : v === ReactDOM ? "ReactDOM" : typeof v; } catch (e) { return "throws " + e.code; } }
+  var jsxr = req("react/jsx-runtime");
+  var el = jsxr.jsx("div", { id: "a", children: "x" }, "k");
+  zrMotionHost.log("UMD " + JSON.stringify({
+    react: React.version, reactDom: ReactDOM.version, createRoot: typeof ReactDOM.createRoot, flushSync: typeof ReactDOM.flushSync,
+    runtime: Object.keys(window.__zrMotionRuntime || {}).sort(),
+  }));
+  zrMotionHost.log("TABLE " + JSON.stringify({
+    react: attempt("react"), reactDom: attempt("react-dom"), remotion: attempt("remotion"), motion: attempt("@aive/motion"),
+    jsx: [typeof jsxr.jsx, typeof jsxr.jsxs, jsxr.Fragment === React.Fragment, el.type, el.key, el.props.id, el.props.children].join(","),
+    jsxDev: req("react/jsx-dev-runtime") === jsxr,
+    fs: attempt("fs"), relative: attempt("./x"), client: attempt("react-dom/client"), remotionSub: attempt("remotion/no-react"),
+  }));
+  zrMotion.onFrame(function () {});
+})();
+`;
+
+/** Frames from a clock-driven graphic: what each shows depends only on its frame (the virtual clock, useCurrentFrame), never on what was drawn before. */
+const SEEK_TSX = `import { AbsoluteFill, useCurrentFrame, interpolate } from "remotion";
+export default function Seek() {
+  const frame = useCurrentFrame();
+  const x = interpolate(frame, [0, 11], [0, 400]);
+  return (
+    <AbsoluteFill style={{ background: "transparent" }}>
+      <div style={{ position: "absolute", left: x, top: 20, width: 40, height: 40, background: "rgb(200, 30, 90)" }} />
+      <div style={{ position: "absolute", left: 10, top: 100, width: (Date.now() % 1000) / 4 + 1, height: 20, background: "white" }} />
+    </AbsoluteFill>
+  );
+}
+`;
+
+/** Red until a delayRender it opened on mount is released 400 ms later, green after. */
+const DELAY_TSX = `import { useEffect, useState } from "react";
+import { AbsoluteFill, delayRender, continueRender } from "remotion";
+export default function Waits() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const handle = delayRender("loading the data");
+    const t = setTimeout(() => { setReady(true); continueRender(handle); }, 400);
+    return () => clearTimeout(t);
+  }, []);
+  return <AbsoluteFill style={{ background: ready ? "rgb(0, 255, 0)" : "rgb(255, 0, 0)" }} />;
+}
+`;
+
+/** A component with no React import (automatic JSX) whose colour comes from its props. */
+const PROPS_TSX = `import { AbsoluteFill } from "remotion";
+type Props = { colour: string };
+export default ({ colour }: Props) => <AbsoluteFill style={{ background: colour }} />;
+`;
+
+const THROWS_AT_2 = `import { AbsoluteFill, useCurrentFrame } from "remotion";
+export default () => {
+  if (useCurrentFrame() === 2) throw new Error("boom at two");
+  return <AbsoluteFill style={{ background: "blue" }} />;
+};
+`;
+
+// MUTATION: page.html without react-dom's script → the UMD row fails (ReactDOM is gone).
+// loader.js's require answering unknown names (no throw) → the table row fails; remotion
+// mapped to window.React → the table row fails. host.js not sizing #root → the title rows'
+// non-blank checks fail; host.js rendering frame 0 for every n → the "content changes"
+// rows fail; host.js with a shorter composition → the title "renders" rows fail. loader.js
+// drawing each frame at the previous frame's time → the out-of-order row fails; renderMotion
+// ignoring `frames` → the same row fails. loader.js not waiting for the frame's promise →
+// the delayRender row fails. loader.js reporting frameReady when the frame rejects (slice
+// 1's behaviour) → the error rows and the "frames before the failed one" row fail;
+// motion-renderer.cjs sending the page's failure as a plain "error" line → the error rows
+// fail (graphic_render_crashed). rendermotion.ts ignoring the page's code (always
+// graphic_component_error) → the coded rows fail; accepting any code → the foreign-code row
+// fails. The core's missing-name message changed (graphicmodule.ts) → the coded runtime
+// error row fails (it must be the runtime's text). host.js without its "did not run"
+// default → the empty-module row fails; without its default-export check → the "no
+// default export" row fails. graphicmodule.ts without the import check → the unknown-import
+// and other-package "before launch" rows fail (a renderer starts); without the vm parse →
+// the top-level await row fails; a sucrase error thrown as is → the syntax-error row fails;
+// renderMotion making the work folder before the compile → the "nothing written" part of
+// the refusal rows fails; without the props cap, or taking an array as props → those rows
+// fail. loader.js's JSX shim returning null → the no-React-import row fails; host.js
+// dropping the props → the same row fails. The encode written straight into baked/ → the
+// "nothing in baked/" rows fail.
+async function r9(work: string) {
+  console.log("R9. graphics through the runtime: React's globals, the require table, the title template, seeking, delayRender, errors, refusals before launch...");
+  {
+    const f = fresh(work, "table");
+    const run = await render(f, "table", { module: TABLE_PAGE, durationInFrames: 1 });
+    const umd = logs(run).find((t) => t.startsWith("UMD "));
+    const u = umd ? (JSON.parse(umd.slice(4)) as Record<string, unknown>) : {};
+    check(!run.error && u.react === "18.3.1" && /^18\.3\.1(-|$)/.test(String(u.reactDom)) && u.createRoot === "function" && u.flushSync === "function" && same(u.runtime, ["createModuleObject", "createMotionApp"]),
+      `the page has React 18.3.1's globals with ReactDOM.createRoot and flushSync, and the runtime's two entry points (${run.error?.message ?? umd})`);
+    const table = logs(run).find((t) => t.startsWith("TABLE "));
+    check(same(table ? JSON.parse(table.slice(6)) : null, {
+      react: "React", reactDom: "ReactDOM", remotion: "module object", motion: "module object",
+      jsx: "function,function,true,div,k,a,x", jsxDev: true,
+      fs: "throws graphic_api_unsupported", relative: "throws graphic_api_unsupported", client: "throws graphic_api_unsupported", remotionSub: "throws graphic_api_unsupported",
+    }), `loader.js's require: react, react-dom, the JSX shim, remotion and @aive/motion (the module object); anything else throws graphic_api_unsupported (${table})`);
+    await leftNothing(run, f, "table", "require table page");
+  }
+
+  // The title template at both orientations: frames with content, changing over time.
+  for (const [w, h] of [[1920, 1080], [1080, 1920]]) {
+    const id = `title-${w}x${h}`;
+    const f = fresh(work, id);
+    const run = await render(f, id, { graphic: { source: TITLE_CARD_TSX, props: { title: "ZabsReel", subtitle: "motion runtime" } }, width: w, height: h, durationInFrames: 36, previewPath: undefined });
+    check(!run.error && run.frames.length === 36, `the title template renders at ${w}x${h} (${run.error?.message ?? `${run.frames.length} frames, ${run.ms} ms`})`);
+    const ink = run.frames.map(inked);
+    check(ink.length === 36 && ink[0] === 0 && [8, 16, 24].every((n) => ink[n] > 2000), `${w}x${h}: frame 0 is faded out, frames 8, 16 and 24 hold the title (${[0, 8, 16, 24].map((n) => ink[n]).join(", ")} inked pixels)`);
+    check(run.frames.length === 36 && !run.frames[4].equals(run.frames[8]) && !run.frames[8].equals(run.frames[16]) && ink[34] < ink[24], `${w}x${h}: the content changes over time (enters, settles, fades out: ${[4, 8, 16, 24, 34].map((n) => ink[n]).join(", ")})`);
+    await leftNothing(run, f, id, `title ${w}x${h}`);
+  }
+
+  // Seeking: frames rendered out of order are the same bytes as in order.
+  {
+    const f = fresh(work, "seek");
+    const base = { graphic: { source: SEEK_TSX }, width: 480, height: 160, durationInFrames: 12, previewPath: undefined };
+    const inOrder = await render(f, "seek-in", base);
+    const order = [7, 2, 11, 0, 5, 9, 1, 10, 3, 8, 6, 4];
+    const shuffled = await render(f, "seek-out", { ...base, frames: order });
+    const byFrame = new Map(order.map((n, i) => [n, shuffled.frames[i]]));
+    const off = inOrder.frames.map((b, n) => (byFrame.get(n)?.equals(b) ? -1 : n)).filter((n) => n >= 0);
+    check(!inOrder.error && !shuffled.error && inOrder.frames.length === 12 && shuffled.frames.length === 12 && off.length === 0 && !inOrder.frames[0].equals(inOrder.frames[11]),
+      `frames rendered out of order (${order.join(",")}) are byte-identical to the same frames in order (${inOrder.error?.message ?? shuffled.error?.message ?? `frames off: ${JSON.stringify(off)}`})`);
+    await leftNothing(shuffled, f, "seek-out", "out-of-order render");
+  }
+
+  // delayRender: the frame is captured only after continueRender.
+  {
+    const f = fresh(work, "delay");
+    const run = await render(f, "delay", { graphic: { source: DELAY_TSX }, durationInFrames: 2 });
+    check(!run.error && run.frames.length === 2 && run.frames.every((b) => same(px(b, 10, 10), [0, 255, 0, 255])),
+      `a frame waits for delayRender: captured after continueRender, green, not red (${run.error?.message ?? JSON.stringify(run.frames.map((b) => px(b, 10, 10)))})`);
+    await leftNothing(run, f, "delay", "delayRender");
+  }
+
+  // Props reach the component, which needs no React import (automatic JSX).
+  {
+    const f = fresh(work, "props");
+    const run = await render(f, "props", { graphic: { source: PROPS_TSX, props: { colour: "rgb(10, 20, 250)" } }, durationInFrames: 1 });
+    check(!run.error && run.frames.length === 1 && same(px(run.frames[0], 5, 5), [250, 20, 10, 255]), `a graphic without a React import renders, with its props (${run.error?.message ?? JSON.stringify(run.frames[0] && px(run.frames[0], 5, 5))})`);
+    await leftNothing(run, f, "props", "props");
+  }
+
+  // A failed frame fails the render with its code; frames before it were drawn.
+  const failing: [string, string, string, RegExp][] = [
+    ["a component that throws", THROWS_AT_2, "graphic_component_error", /^The graphic failed at frame 2: boom at two$/],
+    // The runtime's own message, word for word the core's (unsupportedNameMessage), so the agent reads one text whichever side refuses.
+    ["a coded runtime error (a name the runtime lacks, read at render time)", `import * as R from "remotion";\nexport default () => { const C = (R as any).Composition; return null; };`, "graphic_api_unsupported", new RegExp(`^The graphic failed at frame 0: ${unsupportedNameMessage("Composition").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`)],
+    ["staticFile()", `import { Img, staticFile } from "remotion";\nexport default () => <Img src={staticFile("logo.png")} />;`, "graphic_media_ref", /frame 0/],
+    ["a code the page may not report", `export default () => { throw Object.assign(new Error("pretend"), { code: "graphic_renderer_unavailable" }); };`, "graphic_component_error", /pretend/],
+    ["a module that throws while it loads", `throw new Error("top level");\nexport default () => null;`, "graphic_component_error", /top level/],
+    ["no default export", `export const Graphic = () => null;`, "graphic_api_misuse", /default-export a React component/],
+  ];
+  for (const [i, [what, source, code, message]] of failing.entries()) {
+    const f = fresh(work, `fail-${i}`);
+    const run = await render(f, `fail-${i}`, { graphic: { source }, durationInFrames: 4 });
+    const err = run.error as MotionRenderError | undefined;
+    check(err instanceof MotionRenderError && err.code === code && message.test(err.message), `${what}: the render fails with ${code} (${err ? `${(err as MotionRenderError).code}: ${err.message}` : "it succeeded"})`);
+    check(readdirSync(join(f.data, "baked")).length === 0, `${what}: nothing in baked/`);
+    await leftNothing(run, f, `fail-${i}`, what);
+  }
+  {
+    const f = fresh(work, "fail-early");
+    const run = await render(f, "early", { graphic: { source: THROWS_AT_2 }, durationInFrames: 4 });
+    check(run.frames.length === 2, `the frames before the failed one were drawn, none after (${run.frames.length})`);
+    const empty = await render(f, "empty", { module: "// a page whose graphic never registers", durationInFrames: 2 });
+    const err = empty.error as MotionRenderError | undefined;
+    check(err?.code === "graphic_component_error" && /did not run/.test(err.message) && empty.frames.length === 0, `a module.js that never hands host.js a graphic fails, not an empty graphic (${err ? `${err.code}: ${err.message}` : "it succeeded"})`);
+    await leftNothing(empty, f, "empty", "empty module");
+  }
+
+  // Refused before launch: nothing starts, nothing is written.
+  const big = { blob: "x".repeat(256 * 1024) };
+  const refused: [string, Partial<RenderMotionOptions> & { graphic: NonNullable<RenderMotionOptions["graphic"]> }, (e: Error | undefined) => boolean][] = [
+    ["an unknown named import", { graphic: { source: `import { Composition } from "remotion";\nexport default () => null;` } },
+      (e) => e instanceof MotionRenderError && e.code === "graphic_api_unsupported" && e.message === unsupportedNameMessage("Composition")],
+    ["another package", { graphic: { source: `import _ from "lodash";\nexport default () => null;` } }, (e) => e instanceof MotionRenderError && e.code === "graphic_api_unsupported" && /"lodash"/.test(e.message)],
+    ["a syntax error", { graphic: { source: `export default () => <div>;` } }, (e) => e instanceof MotionRenderError && e.code === "graphic_compile_error"],
+    ["top-level await (a page script has none)", { graphic: { source: `const x = await Promise.resolve(1);\nexport default () => null;` } }, (e) => e instanceof MotionRenderError && e.code === "graphic_compile_error"],
+    ["props over 256 KB", { graphic: { source: PROPS_TSX, props: big } }, (e) => e instanceof RangeError && /256 KB/.test(e.message)],
+    ["props that are not a JSON object", { graphic: { source: PROPS_TSX, props: [1, 2] as unknown as Record<string, unknown> } }, (e) => e instanceof TypeError],
+  ];
+  for (const [i, [what, o, ok]] of refused.entries()) {
+    const f = fresh(work, `refused-${i}`);
+    const run = await render(f, `refused-${i}`, { ...o, durationInFrames: 2 });
+    check(ok(run.error) && run.pids.length === 0 && !existsSync(join(f.data, "motion")) && readdirSync(join(f.data, "baked")).length === 0,
+      `${what} is refused before the renderer starts, with nothing written (${run.error ? `${(run.error as MotionRenderError).code ?? run.error.name}: ${run.error.message.slice(0, 160)}` : "it rendered"}; ${run.pids.length} process(es))`);
+  }
+}
+
 // ---- main -------------------------------------------------------------------------
 
 async function main() {
@@ -1180,8 +1497,9 @@ async function main() {
   const work = mkdtempSync(join(tmpdir(), "zr-motion-smoke-"));
   try {
     if (part("R1")) r1(work);
+    if (part("R8")) await r8(work);
     if (!LINUX) {
-      skipped("R2-R7", "they read /proc and run Linux's Electron");
+      skipped("R2-R7, R9", "they read /proc and run Linux's Electron");
     } else {
       if (part("R2")) await r2(work);
       if (part("R3")) await r3(work);
@@ -1189,6 +1507,7 @@ async function main() {
       if (part("R5")) await r5(work);
       if (part("R6")) await r6(work);
       if (part("R7")) await r7(work);
+      if (part("R9")) await r9(work);
     }
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5 });

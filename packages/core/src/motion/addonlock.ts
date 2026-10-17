@@ -956,7 +956,7 @@ export const ADDON_PLATFORM_LISTS: Readonly<Record<AddonPlatform, AddonPlatformL
   },
 };
 
-/** name@version of every closure package that no shipped package has (193): the packaging gate refuses each one. */
+/** name@version of every closure package that no shipped package has (189): the packaging gate refuses each one. */
 export const ADDON_ONLY: readonly string[] = [
   "@emnapi/core@1.11.1",
   "@emnapi/runtime@1.11.1",
@@ -987,11 +987,7 @@ export const ADDON_ONLY: readonly string[] = [
   "@esbuild/win32-arm64@0.28.1",
   "@esbuild/win32-ia32@0.28.1",
   "@esbuild/win32-x64@0.28.1",
-  "@jridgewell/gen-mapping@0.3.13",
-  "@jridgewell/resolve-uri@3.1.2",
   "@jridgewell/source-map@0.3.11",
-  "@jridgewell/sourcemap-codec@1.5.5",
-  "@jridgewell/trace-mapping@0.3.31",
   "@mediabunny/aac-encoder@1.47.0",
   "@mediabunny/flac-encoder@1.47.0",
   "@mediabunny/mp3-encoder@1.47.0",

@@ -5,6 +5,22 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "files": [
-    "renderer"
-  ]
+    "renderer",
+    "dist",
+    "vendor",
+    "cleanroom/runtime/exports.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build-runtime.mjs",
+    "test:cleanroom": "node --test --require sucrase/register \"cleanroom/test/**/*.test.ts\" \"cleanroom/test/**/*.test.tsx\"",
+    "typecheck:cleanroom": "tsc -p cleanroom/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/jsdom": "21.1.7",
+    "jsdom": "26.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-test-renderer": "18.3.1",
+    "sucrase": "3.35.0"
+  }
 }

@@ -1,8 +1,11 @@
 <!doctype html>
 <!--
-  The render page (MOTION-PLAN D2). The core serves it, and every script it
-  loads, from the render's zrmotion table; the renderer main adds the same
-  Content-Security-Policy as a response header. guard.js is the first script.
+  The render page (MOTION-PLAN D2, D5). The core serves it, and every script
+  it loads, from the render's zrmotion table; the renderer main adds the same
+  Content-Security-Policy as a response header. The scripts, in order:
+  guard.js (first, before anything else runs), React 18.3.1's UMD builds,
+  loader.js (frames and the require table), zr-runtime.js (the clean-room
+  runtime), host.js (the host adapter) and module.js (the graphic).
 -->
 <html>
   <head>
@@ -18,7 +21,11 @@
   <body>
     <div id="root"></div>
     <script src="guard.js"></script>
+    <script src="react.production.min.js"></script>
+    <script src="react-dom.production.min.js"></script>
     <script src="loader.js"></script>
+    <script src="zr-runtime.js"></script>
+    <script src="host.js"></script>
     <script src="module.js"></script>
   </body>
 </html>

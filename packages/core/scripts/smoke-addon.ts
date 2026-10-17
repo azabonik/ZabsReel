@@ -344,6 +344,7 @@ function fixtureRoot(name: string, lock = fixtureLock(), opts: { remotion?: stri
 
 // MUTATION: drop the peerDependencies edges from walk() (gen-graphics-lock.mjs) → the closure is 211 and P1 fails.
 // Write the pin without the win32 and darwin tarball sizes (slice 1's data file) → the --require-sizes and totals rows fail.
+// addonlock.ts from before sucrase (ADDON_ONLY with the four @jridgewell packages, 193) → the add-on-only row fails.
 function p1() {
   console.log("P1. the real lock...");
   const r = spawnSync(process.execPath, [GEN, "--check", "--require-sizes"], { encoding: "utf8", cwd: REPO });
@@ -354,8 +355,12 @@ function p1() {
   const linux = ADDON_PLATFORM_LISTS["linux-x64"].paths;
   check(linux.includes("node_modules/@remotion/compositor-linux-x64-gnu") && linux.includes("node_modules/@remotion/compositor-linux-x64-musl") && !linux.some((p) => /wasm32|@emnapi|@tybys/.test(p)),
     "linux-x64 has both compositors and none of the wasm32 subtree");
-  const shared = ["react@18.3.1", "react-dom@18.3.1", "scheduler@0.23.2", "loose-envify@1.4.0", "js-tokens@4.0.0", "semver@7.8.4"];
-  check(ADDON_ONLY.length === 193 && !shared.some((s) => ADDON_ONLY.includes(s)) && ADDON_ONLY.includes("webpack@" + ADDON_CLOSURE.find((e) => e.path === "node_modules/webpack")?.version) && ADDON_ONLY.some((s) => s.startsWith("esbuild@")),
+  // The @jridgewell packages ship with sucrase (the core's graphic compiler) since slice 3b1 of the motion renderer.
+  const shared = [
+    "react@18.3.1", "react-dom@18.3.1", "scheduler@0.23.2", "loose-envify@1.4.0", "js-tokens@4.0.0", "semver@7.8.4",
+    "@jridgewell/gen-mapping@0.3.13", "@jridgewell/resolve-uri@3.1.2", "@jridgewell/sourcemap-codec@1.5.5", "@jridgewell/trace-mapping@0.3.31",
+  ];
+  check(ADDON_ONLY.length === 189 && !shared.some((s) => ADDON_ONLY.includes(s)) && ADDON_ONLY.includes("webpack@" + ADDON_CLOSURE.find((e) => e.path === "node_modules/webpack")?.version) && ADDON_ONLY.some((s) => s.startsWith("esbuild@")),
     `add-on-only: ${ADDON_ONLY.length} name@version pairs, without the shared packages and semver@7.8.4, with webpack and esbuild`);
   check(ADDON_PLATFORMS.every((p) => /^https:\/\/storage\.googleapis\.com\/chrome-for-testing-public\/149\.0\.7790\.0\//.test(HEADLESS_SHELL.platforms[p].url) && /^[0-9a-f]{64}$/.test(HEADLESS_SHELL.platforms[p].sha256))
     && /^[0-9a-f]{64}$/.test(ADDON_LOCK_SHA256) && ADDON_PLATFORMS.every((p) => ADDON_PLATFORM_LISTS[p].bytes !== null),

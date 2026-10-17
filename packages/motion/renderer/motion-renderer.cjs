@@ -15,8 +15,11 @@
 //   {"type":"frame","n"} per frame. EOF ends the process.
 // - stdout, control out, JSON lines: {"type":"ready"} once the page has
 //   loaded, {"type":"frame","n","cues"} after frame n's bytes are on fd 3,
-//   {"type":"log","text"}, {"type":"blocked","url"} (a request the session
-//   cancelled), {"type":"error","code","message"} before a failure exit.
+//   {"type":"frame-error","n","code","message"} when the page reports that
+//   frame n failed (its code as the page gave it; the core decides what it
+//   accepts) before it exits, {"type":"log","text"}, {"type":"blocked","url"}
+//   (a request the session cancelled), {"type":"error","code","message"}
+//   before a failure exit.
 // - fd 3, frames out: each frame exactly width*height*4 bytes, rows of
 //   width*4 bytes with no padding, bytes B, G, R, A, premultiplied alpha as
 //   Chromium paints them (the core's overlay encode unpremultiplies).
@@ -265,6 +268,13 @@ ipcMain.on("zr-motion:frame-ready", (e, n, cues) => {
   if (!p || e.sender !== render.win.webContents || n !== p.n) return;
   render.pending = null;
   p.resolve(Array.isArray(cues) ? cues.slice(0, 8) : []);
+});
+ipcMain.on("zr-motion:frame-failed", (e, n, code, message) => {
+  const p = render?.pending;
+  if (!p || e.sender !== render.win.webContents || n !== p.n) return;
+  render.pending = null;
+  send({ type: "frame-error", n, code: String(code).slice(0, 64), message: String(message).slice(0, 2000) });
+  exit(1);
 });
 ipcMain.on("zr-motion:log", (e, text) => {
   if (render && e.sender === render.win.webContents) send({ type: "log", text: String(text).slice(0, 2000) });
