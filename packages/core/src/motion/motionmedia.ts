@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { Readable } from "node:stream";
 import { PRODUCT_NAME } from "../brand.js";
 import { inputColorOpts, inputScaleFlags, resolveSourceColor } from "../ffmpeg/colorspace.js";
-import { ffmpegMajorVersion, ffmpegStderrDetail, NOT_MEDIA_TEXT, notMediaFrom, spawnFfmpegStream } from "../ffmpeg/executor.js";
+import { ffmpegStderrDetail, ffmpegVersion, NOT_MEDIA_TEXT, notMediaFrom, spawnFfmpegStream } from "../ffmpeg/executor.js";
+import { passthroughFlag } from "../ffmpeg/version.js";
 import { MediaOfflineError } from "../hosttrust.js";
 import { readFile, stat } from "../io/gatedfs.js";
 import { isOffline, type MediaAsset } from "../types.js";
@@ -469,7 +470,7 @@ export class MotionMedia {
     }
     this.stats.decodes++;
     // A constant frame rate output would repeat the first frame after a seek when the file's audio starts sooner (one picture per source frame).
-    if (!this.passthrough.length) this.passthrough = (await ffmpegMajorVersion()) >= 6 ? ["-fps_mode", "passthrough"] : ["-vsync", "passthrough"];
+    if (!this.passthrough.length) this.passthrough = passthroughFlag(await ffmpegVersion().catch(() => null));
     await this.slot();
     let png: Buffer;
     try {
@@ -590,7 +591,8 @@ export class MotionMedia {
    * until one reaches the end. Null when none gives a picture.
    */
   private async realFrames(e: Entry, t: number, reach: number): Promise<number | null> {
-    for (let back = reach; ; back *= 4) {
+    // At least one frame back: a video under 0.25 fps reaches 0 frames in 2 s.
+    for (let back = Math.max(1, reach); ; back *= 4) {
       const from = Math.max(0, t - back);
       const s = this.stream(e, from, { w: 1, h: 1 }, reach);
       await this.read(e, s, t);

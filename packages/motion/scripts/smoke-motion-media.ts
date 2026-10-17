@@ -24,8 +24,8 @@
  *                  the frame count answers the last frame. A video whose
  *                  audio outlasts it (the table's frame count passes its last
  *                  frame): frames played across its end, and a first request
- *                  past it (1 s and 10 s after the end), answer the real last
- *                  frame.
+ *                  past it (1 s and 10 s after the end, and in a 0.1 fps
+ *                  video), answer the real last frame.
  *  M3. dependent — an image larger than the canvas comes back fitted to it,
  *                  and that natural size places the next image the component
  *                  loads: both show where the size says.
@@ -139,9 +139,10 @@ interface Fixtures {
   hd: string;
   /** 160x90, 30 fps, 4 s testsrc2, H.264. */
   small: string;
-  /** The same 4 s of video with 5 s of AAC audio, and 2 s of video with 12 s of audio: the container outlasts the video stream. */
+  /** The same 4 s of video with 5 s of AAC audio, 2 s of video with 12 s of audio, and 40 s at 0.1 fps with 60 s: the container outlasts the video stream. */
   tail: string;
   gap: string;
+  slow: string;
   /** 400x200 PNG; 16x16 red PNG. */
   big: string;
   red: string;
@@ -164,10 +165,11 @@ function fixtures(work: string): Fixtures {
   const src = (size: string, d = 4) => ["-f", "lavfi", "-i", `testsrc2=size=${size}:rate=30:duration=${d}`];
   ffmpeg([...src("1280x720"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-preset", "veryfast", at("hd.mp4")]);
   ffmpeg([...src("160x90"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", at("small.mp4")]);
-  const longAudio = (v: number, a: number, out: string) =>
-    ffmpeg([...src("160x90", v), "-f", "lavfi", "-i", `sine=duration=${a}`, "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", at(out)]);
+  const longAudio = (v: number, a: number, out: string, rate = 30) =>
+    ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=160x90:rate=${rate}:duration=${v}`, "-f", "lavfi", "-i", `sine=duration=${a}`, "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", at(out)]);
   longAudio(4, 5, "tail.mp4");
   longAudio(2, 12, "gap.mp4");
+  longAudio(40, 60, "slow.mp4", 0.1);
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=400x200", "-frames:v", "1", at("big.png")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=16x16", "-frames:v", "1", at("red.png")]);
   ffmpeg(["-f", "lavfi", "-i", "nullsrc=s=1920x1080,format=gbrp,geq=r='random(1)*255':g='random(2)*255':b='random(3)*255'", "-frames:v", "1", at("noise.png")]);
@@ -182,7 +184,7 @@ function fixtures(work: string): Fixtures {
   const hugeFont = at("huge.ttf");
   writeFileSync(hugeFont, "");
   truncateSync(hugeFont, MEDIA_CAPS.fontBytes + 1);
-  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), tail: at("tail.mp4"), gap: at("gap.mp4"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
+  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), tail: at("tail.mp4"), gap: at("gap.mp4"), slow: at("slow.mp4"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
 }
 
 const font = (path: string): MotionAsset => ({ kind: "font", path, name: basename(path) });
@@ -420,11 +422,18 @@ async function m2(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   check(!noLru.error && equal(noLru, want) && noLru.media?.spawns === 1 && noLru.media.decodes === 8,
     `with no LRU, the ended decode answers frames 121-123 itself (${noLru.error?.message ?? JSON.stringify(noLru.media)})`);
   // A first request past the real end (a fresh seek finds no picture) answers the real last frame.
-  for (const [asset, t, lastFrame] of [["tail", count - 1, 119], ["tail", 400, 119], ["gap", Math.round(lib.gap.duration * lib.gap.fps) - 1, 59]] as const) {
+  const past = [
+    ["tail", count - 1, 119, "4 s video with 5 s"],
+    ["tail", 400, 119, "4 s video with 5 s"],
+    ["gap", Math.round(lib.gap.duration * lib.gap.fps) - 1, 59, "2 s video with 12 s"],
+    // 0.1 fps: 2 s is no whole frame, so the search starts 1 frame back.
+    ["slow", Math.round(lib.slow.duration * lib.slow.fps) - 1, 3, "40 s, 0.1 fps video with 60 s"],
+  ] as const;
+  for (const [asset, t, lastFrame, what] of past) {
     const run = await render(f, `past-${asset}-${t}`, { page: handPage(`log("SIZE", await load(media(A.v, "t=${t}&w=160&h=90"), true));`), width: 160, height: 90, assets: { v: lib[asset] } });
     const ref = reference(fx[asset], [lastFrame], 160, 90, SD_READ).get(lastFrame) as Buffer;
     check(!run.error && equal(run, [ref]) && same(logged(run, "SIZE")[0], { w: 160, h: 90 }),
-      `a first request for source frame ${t} of the ${asset === "tail" ? "4 s video with 5 s" : "2 s video with 12 s"} of audio answers its last frame, ${lastFrame} (${run.error?.message ?? JSON.stringify(run.media)})`);
+      `a first request for source frame ${t} of the ${what} of audio answers its last frame, ${lastFrame} (${run.error?.message ?? JSON.stringify(run.media)})`);
     await leftNothing(run, f, `past-${asset}-${t}`, "past the real end");
   }
 }
@@ -692,7 +701,7 @@ async function main() {
     try {
       const fx = fixtures(work);
       const lib: Record<string, MediaAsset> = {};
-      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, tail: fx.tail, gap: fx.gap, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
+      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, tail: fx.tail, gap: fx.gap, slow: fx.slow, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
       if (part("M1")) await m1(work, fx, lib);
       if (part("M2")) await m2(work, fx, lib);
       if (part("M3")) await m3(work, fx, lib);

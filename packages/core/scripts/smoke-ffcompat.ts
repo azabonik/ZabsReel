@@ -8,7 +8,8 @@
  *
  * Checks, each against the RUNNING binary unless marked pure:
  *   - version parsing of real banners (pure) with the gates that follow from it
- *     (afftfilt, the xfade EOF pad before 7.0, mixed audio joins on 6.1 – 7.x),
+ *     (afftfilt, the xfade EOF pad before 7.0, mixed audio joins on 6.1 – 7.x,
+ *     the frame passthrough option),
  *     and this FFmpeg's version; the
  *     version/ffprobe banners are probed once (the authenticated /health reads them);
  *   - `ffmpeg -filters` parsing: 3 flag columns up to 7.x, 2 from 8.0 (which
@@ -48,7 +49,7 @@ import {
   filterScriptFlagInUse, hasAlphaModes, runFfmpeg, runFfmpegStdoutBuffer, setFilterScriptFlag,
 } from "../src/ffmpeg/executor.js";
 import {
-  TESTED_FFMPEG_MAJORS, acrossfadeUnreliable, adaptFilterGraph, hasAfftdnV2, hasAfftfiltV2, parseFfmpegVersion, preferredFilterScriptFlag,
+  TESTED_FFMPEG_MAJORS, acrossfadeUnreliable, adaptFilterGraph, hasAfftdnV2, hasAfftfiltV2, parseFfmpegVersion, passthroughFlag, preferredFilterScriptFlag,
   untestedFfmpegWarning, xfadeNeedsEofPad,
 } from "../src/ffmpeg/version.js";
 import { audioFilterCaps, detectFilters, measureNoiseFloor, parseFilterList } from "../src/audio/fx.js";
@@ -288,6 +289,8 @@ async function main(): Promise<void> {
   check(preferredFilterScriptFlag({ generation: 4 }) === "-filter_complex_script" && preferredFilterScriptFlag({ generation: 6 }) === "-filter_complex_script" &&
     preferredFilterScriptFlag({ generation: 7 }) === "-/filter_complex" && preferredFilterScriptFlag({ generation: 9 }) === "-/filter_complex" &&
     preferredFilterScriptFlag(null) === "-filter_complex_script", "filtergraph-file option: -filter_complex_script before 7.0, -/filter_complex from 7.0");
+  check(passthroughFlag({ generation: 4 })[0] === "-vsync" && passthroughFlag({ generation: 6 })[0] === "-fps_mode" && passthroughFlag({ generation: 9 })[0] === "-fps_mode" &&
+    passthroughFlag(null)[0] === "-fps_mode" && passthroughFlag({ generation: null })[0] === "-fps_mode", "frame passthrough: -vsync on 4.4, -fps_mode from 6 (and for an unknown build)");
   check(!hasAfftdnV2({ generation: 4 }) && hasAfftdnV2({ generation: 5 }) && hasAfftdnV2({ generation: 9 }) && hasAfftdnV2(null), "afftdn v2 from FFmpeg 5 (and for an unknown build)");
   check(xfadeNeedsEofPad({ generation: 4 }) && xfadeNeedsEofPad({ generation: 6 }) && !xfadeNeedsEofPad({ generation: 7 }) && !xfadeNeedsEofPad({ generation: 9 }) &&
     !xfadeNeedsEofPad(null) && !xfadeNeedsEofPad({ generation: null }), "xfade EOF pad before FFmpeg 7 only (off for an unknown build)");

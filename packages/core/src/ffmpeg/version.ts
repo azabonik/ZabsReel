@@ -91,6 +91,15 @@ export function preferredFilterScriptFlag(v: Pick<FfmpegVersion, "generation"> |
 }
 
 /**
+ * The output option that passes decoded frames through as they are, none
+ * repeated or dropped (motion/motionmedia.ts): -fps_mode from 5.1, its older
+ * spelling -vsync before. An unknown build counts as current.
+ */
+export function passthroughFlag(v: Pick<FfmpegVersion, "generation"> | null): ["-fps_mode" | "-vsync", "passthrough"] {
+  return v?.generation != null && v.generation < 6 ? ["-vsync", "passthrough"] : ["-fps_mode", "passthrough"];
+}
+
+/**
  * True for the rewritten afftdn (FFmpeg ≥ 5, libavfilter ≥ 8): 25 ms output
  * delay at 48 kHz and a different noise-floor scale. An unknown build counts
  * as current.
