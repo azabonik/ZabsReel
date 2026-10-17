@@ -21,7 +21,11 @@
  *                  video: the next frames and a jump of at most 2 s forward
  *                  read a running decode, a jump past 2 s or backwards starts
  *                  another (3 FFmpeg processes); a source frame at or past
- *                  the frame count answers the last frame.
+ *                  the frame count answers the last frame. A video whose
+ *                  audio outlasts it (the table's frame count passes its last
+ *                  frame): frames played across its end, and a first request
+ *                  past it (1 s and 10 s after the end), answer the real last
+ *                  frame.
  *  M3. dependent — an image larger than the canvas comes back fitted to it,
  *                  and that natural size places the next image the component
  *                  loads: both show where the size says.
@@ -34,7 +38,8 @@
  *                  drops its oldest answers and the render succeeds; at most
  *                  8 decodes run at once (the next waits) and at most 8
  *                  FFmpeg processes live; 16 fonts load and a 17th, or a font
- *                  file over 32 MB (never read), is graphic_font_cap; a
+ *                  file over 32 MB (never read), is graphic_font_cap, while a
+ *                  handle that is no font takes no font slot; a
  *                  request past its time is graphic_decode_timeout; the
  *                  default caps are D4's numbers. Every breach leaves no
  *                  renderer, no motion/<id> and nothing in baked/.
@@ -134,6 +139,9 @@ interface Fixtures {
   hd: string;
   /** 160x90, 30 fps, 4 s testsrc2, H.264. */
   small: string;
+  /** The same 4 s of video with 5 s of AAC audio, and 2 s of video with 12 s of audio: the container outlasts the video stream. */
+  tail: string;
+  gap: string;
   /** 400x200 PNG; 16x16 red PNG. */
   big: string;
   red: string;
@@ -156,6 +164,10 @@ function fixtures(work: string): Fixtures {
   const src = (size: string, d = 4) => ["-f", "lavfi", "-i", `testsrc2=size=${size}:rate=30:duration=${d}`];
   ffmpeg([...src("1280x720"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-preset", "veryfast", at("hd.mp4")]);
   ffmpeg([...src("160x90"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", at("small.mp4")]);
+  const longAudio = (v: number, a: number, out: string) =>
+    ffmpeg([...src("160x90", v), "-f", "lavfi", "-i", `sine=duration=${a}`, "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", at(out)]);
+  longAudio(4, 5, "tail.mp4");
+  longAudio(2, 12, "gap.mp4");
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=400x200", "-frames:v", "1", at("big.png")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=16x16", "-frames:v", "1", at("red.png")]);
   ffmpeg(["-f", "lavfi", "-i", "nullsrc=s=1920x1080,format=gbrp,geq=r='random(1)*255':g='random(2)*255':b='random(3)*255'", "-frames:v", "1", at("noise.png")]);
@@ -170,7 +182,7 @@ function fixtures(work: string): Fixtures {
   const hugeFont = at("huge.ttf");
   writeFileSync(hugeFont, "");
   truncateSync(hugeFont, MEDIA_CAPS.fontBytes + 1);
-  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
+  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), tail: at("tail.mp4"), gap: at("gap.mp4"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
 }
 
 const font = (path: string): MotionAsset => ({ kind: "font", path, name: basename(path) });
@@ -255,7 +267,7 @@ function failedWith(run: Run, code: string, what: string, msg?: RegExp) {
 function reference(file: string, which: number[], w: number, h: number, vf: string): Map<number, Buffer> {
   const sorted = [...new Set(which)].sort((a, b) => a - b);
   const select = `select=${sorted.map((n) => `eq(n\\,${n})`).join("+")}`;
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-vf", `${select},${vf},format=rgba`, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", `${select},${vf},format=rgba`, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
   const out = new Map<number, Buffer>();
   sorted.forEach((n, i) => out.set(n, r.stdout.subarray(i * w * h * 4, (i + 1) * w * h * 4)));
   return out;
@@ -389,6 +401,32 @@ async function m2(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   const d = last.frames[0] ? maxDiff(last.frames[0], lastRef, 160, 90) : 255;
   check(!last.error && d <= 1 && same(logged(last, "SIZE")[0], { w: 160, h: 90 }), `source frame 170 of a 120-frame video answers frame 119 (${last.error?.message ?? `max ${d}`})`);
   await leftNothing(last, f, "last", "past the frame count");
+
+  // A video whose audio outlasts it: the table's frame count (the container's) passes the real last frame, 119.
+  const SD_READ = HD_READ.replace("bt709", "bt601");
+  const count = Math.round(lib.tail.duration * lib.tail.fps);
+  const tailRef = reference(fx.tail, [116, 117, 118, 119], 160, 90, SD_READ);
+  const seq = [116, 117, 118, 119, 120, 121, 122, 123];
+  const want = seq.map((n) => tailRef.get(Math.min(n, 119)) as Buffer);
+  const equal = (run: Run, refs: Buffer[]) => run.frames.length === refs.length && refs.every((r, i) => maxDiff(run.frames[i], r, 160, 90) <= 1);
+  check(count > 120, `the 4 s video with 5 s of audio has a frame count past its last frame (${count})`);
+  // The decode that reaches the end gives the real count: 121..123 are the LRU's frame 119, one FFmpeg process in all.
+  const across = await render(f, "across", { graphic: { source: VIDEO_TSX("tail") }, width: 160, height: 90, durationInFrames: count, frames: seq, assets: { tail: lib.tail } });
+  check(!across.error && equal(across, want) && across.media?.spawns === 1 && across.media.decodes === 5 && across.media.lruHits === 3,
+    `frames ${seq.join(",")} of it play across its end: 120-123 show frame 119, from one decode (${across.error?.message ?? JSON.stringify(across.media)})`);
+  await leftNothing(across, f, "across", "across the end");
+  // With no LRU, the decode that ended answers its last frame again: still one FFmpeg process.
+  const noLru = await render(f, "across-nolru", { graphic: { source: VIDEO_TSX("tail") }, width: 160, height: 90, durationInFrames: count, frames: seq, caps: { lruBytes: 1 }, assets: { tail: lib.tail } });
+  check(!noLru.error && equal(noLru, want) && noLru.media?.spawns === 1 && noLru.media.decodes === 8,
+    `with no LRU, the ended decode answers frames 121-123 itself (${noLru.error?.message ?? JSON.stringify(noLru.media)})`);
+  // A first request past the real end (a fresh seek finds no picture) answers the real last frame.
+  for (const [asset, t, lastFrame] of [["tail", count - 1, 119], ["tail", 400, 119], ["gap", Math.round(lib.gap.duration * lib.gap.fps) - 1, 59]] as const) {
+    const run = await render(f, `past-${asset}-${t}`, { page: handPage(`log("SIZE", await load(media(A.v, "t=${t}&w=160&h=90"), true));`), width: 160, height: 90, assets: { v: lib[asset] } });
+    const ref = reference(fx[asset], [lastFrame], 160, 90, SD_READ).get(lastFrame) as Buffer;
+    check(!run.error && equal(run, [ref]) && same(logged(run, "SIZE")[0], { w: 160, h: 90 }),
+      `a first request for source frame ${t} of the ${asset === "tail" ? "4 s video with 5 s" : "2 s video with 12 s"} of audio answers its last frame, ${lastFrame} (${run.error?.message ?? JSON.stringify(run.media)})`);
+    await leftNothing(run, f, `past-${asset}-${t}`, "past the real end");
+  }
 }
 
 // ---- M3: a request that depends on loaded media ----------------------------------------
@@ -488,6 +526,11 @@ async function m4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
     const seventeen = await render(f, "fonts17", { page: handPage(faces(17)), width: 64, height: 32, assets: many });
     failedWith(seventeen, "graphic_font_cap", "a 17th font", /more than 16 fonts/);
     await leftNothing(seventeen, f, "fonts17", "font count cap");
+    // A handle that is no font of the table (unknown, or an image's) is a 404 and takes no font slot.
+    const strays = `if (n === 0) { log("STRAY", await Promise.all(["${"0".repeat(32)}", A.img.handle].map((h) => new FontFace("s", "url(zrmotion://app/font/" + h + ")").load().then(() => 1, () => 0)))); }`;
+    const stray = await render(f, "fonts-stray", { page: handPage(`${strays} ${faces(16)}`), width: 64, height: 32, assets: { ...many, img: lib.big } });
+    check(!stray.error && same(logged(stray, "STRAY")[0], [0, 0]) && logged(stray, "FONTS")[0] === 16 && stray.media?.fonts === 16,
+      `an unknown handle and an image's handle on the font route fail and take no font slot: 16 fonts still load (${stray.error?.message ?? JSON.stringify([logged(stray, "STRAY"), logged(stray, "FONTS")])})`);
   } else {
     check(false, "a monospace font for the font rows (DejaVuSansMono or LiberationMono) is installed");
   }
@@ -649,7 +692,7 @@ async function main() {
     try {
       const fx = fixtures(work);
       const lib: Record<string, MediaAsset> = {};
-      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
+      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, tail: fx.tail, gap: fx.gap, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
       if (part("M1")) await m1(work, fx, lib);
       if (part("M2")) await m2(work, fx, lib);
       if (part("M3")) await m3(work, fx, lib);

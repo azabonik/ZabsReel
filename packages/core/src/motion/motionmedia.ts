@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Readable } from "node:stream";
 import { PRODUCT_NAME } from "../brand.js";
 import { inputColorOpts, inputScaleFlags, resolveSourceColor } from "../ffmpeg/colorspace.js";
-import { ffmpegStderrDetail, NOT_MEDIA_TEXT, notMediaFrom, spawnFfmpegStream } from "../ffmpeg/executor.js";
+import { ffmpegMajorVersion, ffmpegStderrDetail, NOT_MEDIA_TEXT, notMediaFrom, spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { MediaOfflineError } from "../hosttrust.js";
 import { readFile, stat } from "../io/gatedfs.js";
 import { isOffline, type MediaAsset } from "../types.js";
@@ -145,7 +145,8 @@ function pageAsset(a: MotionAsset, handle: string): PageAsset | null {
   if (a.hasVideo && a.isImage) return sized ? { handle, kind: "image", width: a.width, height: a.height } : null;
   if (a.hasVideo) {
     if (!sized || !pos(a.fps) || !pos(a.duration)) return null;
-    // A MediaAsset has no frame count: its duration at its frame rate (a source frame past the real last one answers the last).
+    // A MediaAsset has no frame count: its duration at its frame rate. The video stream can end sooner (its audio
+    // runs longer); a decode that reaches its end tells the real count (Entry.frames), and later frames answer the last.
     const frameCount = Math.max(1, Math.round(a.duration * a.fps));
     return { handle, kind: "video", width: a.width, height: a.height, durationSeconds: a.duration, fps: a.fps, frameCount, hasAudio: a.hasAudio };
   }
@@ -277,6 +278,9 @@ class FrameStream {
   last: Buffer | null = null;
   busy = false;
   done = false;
+  /** The decode ended by itself, with no error, after at least one picture: `last` is the video's last frame, next - 1. */
+  ended = false;
+  private killed = false;
   used = 0;
   private reader: PngReader;
 
@@ -290,10 +294,11 @@ class FrameStream {
 
   /** Frame t (next - 1 <= t): read up to it; a stream that ends first answers its last picture (the source's last frame). */
   async frameAt(t: number): Promise<Buffer | null> {
-    while (this.next <= t) {
+    while (this.next <= t && !this.done) {
       const png = await this.reader.read();
       if (!png) {
         this.done = true;
+        this.ended = this.last !== null && (await this.clean());
         break;
       }
       this.last = png;
@@ -310,8 +315,16 @@ class FrameStream {
     return this.reader.error?.message ?? (ffmpegStderrDetail(stderr) || `FFmpeg exited with ${r.exitCode ?? r.signal}`);
   }
 
+  /** FFmpeg ended by itself with no error: a decode that gave no picture was seeked past the video's end. */
+  async clean(): Promise<boolean> {
+    const r = await this.child;
+    const stderr = String(r.stderr ?? "");
+    return !this.killed && !this.reader.error && r.exitCode === 0 && !notMediaFrom(stderr) && !ffmpegStderrDetail(stderr);
+  }
+
   kill(): void {
     this.done = true;
+    this.killed = true;
     this.child.kill("SIGKILL");
     // A paused stdout never ends, and the child's promise waits for it.
     this.child.stdout?.destroy();
@@ -322,6 +335,8 @@ interface Entry {
   id: string;
   asset: MotionAsset;
   info: PageAsset;
+  /** A video's real frame count, once a decode reached its end. */
+  frames?: number;
 }
 
 /** One render's media: the page's asset table and the answers to its requests. */
@@ -343,6 +358,8 @@ export class MotionMedia {
   private waiting: (() => void)[] = [];
   private clock = 0;
   private abort = new AbortController();
+  /** FFmpeg's flag that passes the decoded frames through as they are, set by the first decode. */
+  private passthrough: string[] = [];
 
   constructor(
     assets: Readonly<Record<string, MotionAsset>>,
@@ -431,7 +448,7 @@ export class MotionMedia {
           `The graphic asked for source frame ${req.t ?? "(none)"} of the video "${e.id}": a source frame is a whole number, 0 or more. Use a trimBefore of 0 or more.`,
         );
       }
-      t = Math.min(req.t, (e.info.frameCount as number) - 1);
+      t = Math.min(req.t, (e.frames ?? (e.info.frameCount as number)) - 1);
     } else if (req.t !== undefined) {
       return NOT_FOUND;
     }
@@ -451,6 +468,8 @@ export class MotionMedia {
       );
     }
     this.stats.decodes++;
+    // A constant frame rate output would repeat the first frame after a seek when the file's audio starts sooner (one picture per source frame).
+    if (!this.passthrough.length) this.passthrough = (await ffmpegMajorVersion()) >= 6 ? ["-fps_mode", "passthrough"] : ["-vsync", "passthrough"];
     await this.slot();
     let png: Buffer;
     try {
@@ -500,7 +519,7 @@ export class MotionMedia {
     const one = e.info.kind === "image" ? ["-frames:v", "1"] : [];
     const args = [
       "-hide_banner", "-nostdin", "-loglevel", "error", ...seek, "-i", a.path,
-      "-map", "0:v:0", "-an", "-sn", "-dn", ...one, "-vf", vf, "-f", "image2pipe", "-c:v", "png", "pipe:1",
+      "-map", "0:v:0", "-an", "-sn", "-dn", ...one, "-vf", vf, ...this.passthrough, "-f", "image2pipe", "-c:v", "png", "pipe:1",
     ];
     const child = spawnFfmpegStream(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe", buffer: { stdout: false, stderr: true }, reject: false });
     this.stats.spawns++;
@@ -509,35 +528,74 @@ export class MotionMedia {
   }
 
   /** Frame t of a video (from a running decode when it is at most 2 s ahead of it), or the image, at `box`. */
-  private async decode(e: Entry, t: number, box: { w: number; h: number }): Promise<Buffer> {
+  private async decode(e: Entry, t: number, box: { w: number; h: number }, past = true): Promise<Buffer> {
+    const image = e.info.kind === "image";
+    const reach = Math.round(2 * (e.info.fps as number));
     let s: FrameStream;
-    if (e.info.kind === "image") {
+    if (image) {
       const child = this.spawn(e, 0, box);
       this.oneShots.add(child);
       s = new FrameStream("", 0, child);
     } else {
-      const key = `${e.info.handle}:${box.w}x${box.h}`;
-      const reach = Math.round(2 * (e.info.fps as number));
-      const found = this.streams.find((x) => !x.busy && !x.done && x.key === key && t >= x.next - 1 && t <= x.next + reach && (t >= x.next || x.last));
-      s = found ?? new FrameStream(key, t, this.spawn(e, t, box));
-      if (!found) this.streams.push(s);
+      s = this.stream(e, t, box, reach);
     }
-    s.busy = true;
     try {
-      const png = await s.frameAt(e.info.kind === "image" ? 0 : t);
+      const png = await this.read(e, s, image ? 0 : t);
       if (png) return png;
+      // Seeked past the video's end (its container runs longer, for example its audio): answer its real last frame.
+      if (!image && past && t > 0 && (await s.clean())) {
+        const frames = await this.realFrames(e, t, reach);
+        if (frames) return await this.decode(e, frames - 1, box, false);
+      }
       const why = await s.failure();
       throw new MotionRenderError(
         "graphic_media_failed",
-        `${e.info.kind === "image" ? `The image "${e.id}"` : `Frame ${t} of the video "${e.id}"`} could not be read (${why}). Check the asset in the project library, or use another one.`,
+        `${image ? `The image "${e.id}"` : `Frame ${t} of the video "${e.id}"`} could not be read (${why}). Check the asset in the project library, or use another one.`,
       );
     } finally {
-      s.busy = false;
-      s.used = ++this.clock;
-      if (e.info.kind === "image") {
+      if (image) {
         s.kill();
         this.oneShots.delete(s.child);
       }
+    }
+  }
+
+  /** The running decode of e at `box` that reaches frame t, or a new one from t. A decode that ended answers only its last frame (and later ones). */
+  private stream(e: Entry, t: number, box: { w: number; h: number }, reach: number): FrameStream {
+    const key = `${e.info.handle}:${box.w}x${box.h}`;
+    const found = this.streams.find(
+      (x) => !x.busy && x.key === key && t >= x.next - 1 && (x.ended || (!x.done && t <= x.next + reach && (t >= x.next || x.last))),
+    );
+    if (found) return found;
+    const s = new FrameStream(key, t, this.spawn(e, t, box));
+    this.streams.push(s);
+    return s;
+  }
+
+  /** Frame t of `s`; a video's decode that reaches the video's end records its real frame count. */
+  private async read(e: Entry, s: FrameStream, t: number): Promise<Buffer | null> {
+    s.busy = true;
+    try {
+      return await s.frameAt(t);
+    } finally {
+      s.busy = false;
+      s.used = ++this.clock;
+      if (s.ended) e.frames = Math.min(e.frames ?? s.next, s.next);
+    }
+  }
+
+  /**
+   * The real frame count of a video with no frame t: decodes at 1x1 (cheap)
+   * from further back each time (2 s, 8 s, 32 s ... before t, then from 0)
+   * until one reaches the end. Null when none gives a picture.
+   */
+  private async realFrames(e: Entry, t: number, reach: number): Promise<number | null> {
+    for (let back = reach; ; back *= 4) {
+      const from = Math.max(0, t - back);
+      const s = this.stream(e, from, { w: 1, h: 1 }, reach);
+      await this.read(e, s, t);
+      if (s.ended) return s.next;
+      if (s.last || from === 0 || !(await s.clean())) return null;
     }
   }
 
@@ -562,6 +620,9 @@ export class MotionMedia {
 
   private async font(req: MediaRequest): Promise<MediaReply> {
     const { caps } = this.o;
+    const e = this.byHandle.get(req.handle);
+    if (!e || e.info.kind !== "font" || req.t !== undefined || req.w !== undefined || req.h !== undefined) return NOT_FOUND;
+    // Only a font of the table takes one of the render's font slots.
     if (!this.fonts.has(req.handle)) {
       if (this.fonts.size >= caps.fonts) {
         throw new MotionRenderError("graphic_font_cap", `The graphic loads more than ${caps.fonts} fonts. Use at most ${caps.fonts} different fonts in one graphic.`);
@@ -569,8 +630,6 @@ export class MotionMedia {
       this.fonts.add(req.handle);
       this.stats.fonts = this.fonts.size;
     }
-    const e = this.byHandle.get(req.handle);
-    if (!e || e.info.kind !== "font" || req.t !== undefined || req.w !== undefined || req.h !== undefined) return NOT_FOUND;
     this.o.requireMedia(e.asset);
     const tooBig = (bytes: number) =>
       new MotionRenderError(
