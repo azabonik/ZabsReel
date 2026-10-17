@@ -257,6 +257,15 @@ function readLines(stream: Readable, onLine: (line: string) => void, onOverflow:
   });
 }
 
+/** Resolves when `stream` has ended (at once if it has, or there is none). */
+function ended(stream: Readable | null | undefined): Promise<void> {
+  if (!stream || stream.readableEnded || stream.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.once("end", () => resolve());
+    stream.once("close", () => resolve());
+  });
+}
+
 /** The last `max` characters of what `stream` wrote. */
 function tail(stream: Readable | null | undefined, max = 8192): () => string {
   let text = "";
@@ -499,12 +508,14 @@ export async function probeMotionRenderer(
     if (child.pid !== undefined) opts.onSpawn?.(child.pid);
     const stderr = tail(child.stderr);
     let report: RendererMessage | null = null;
+    let reported: RendererMessage | null = null;
     readLines(
       child.stdout as Readable,
       (line) => {
         try {
           const msg = JSON.parse(line) as RendererMessage;
           if (msg.probe === "ok") report = msg;
+          else if (msg.type === "error") reported = msg;
         } catch {
           /* not a control line */
         }
@@ -514,11 +525,16 @@ export async function probeMotionRenderer(
     const timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs ?? 30_000);
     await exited(child);
     clearTimeout(timer);
+    // Its last lines can come after the exit: wait for stdout and stderr to end, for at most 300 ms.
+    await Promise.race([Promise.all([child.stdout, child.stderr].map(ended)), new Promise((resolve) => setTimeout(resolve, 300))]);
     (child.stdin as Writable).destroy();
     if (report) return { ok: true, report };
     if (child.pid === undefined) return { ok: false, reason: "start-failed", detail: (await child).message ?? "the renderer did not start" };
     const text = stderr();
-    return { ok: false, reason: unavailableReason(text), detail: `exit ${child.exitCode ?? child.signalCode}; ${text.trim().split("\n").slice(-3).join(" | ")}` };
+    // The renderer's own error line (fail() in motion-renderer.cjs) first: the stderr tail is often only Chromium's noise.
+    const r = reported as RendererMessage | null;
+    const why = r ? `${String(r.code)}: ${String(r.message)}; ` : "";
+    return { ok: false, reason: unavailableReason(text), detail: `${why}exit ${child.exitCode ?? child.signalCode}; ${text.trim().split("\n").slice(-3).join(" | ")}` };
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   }

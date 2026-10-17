@@ -228,8 +228,8 @@ npx tsx packages/core/scripts/smoke-addon.ts
 # off with and without guard.js; frame, total-time and heap limits; abort, an
 # FFmpeg failure, a failed move and a cross-disk copy whose source can't be
 # removed leave baked/ unchanged; a core killed
-# mid-render leaves no renderer and the next core start removes its scratch;
-# the probe through the core's binary rule from a source checkout, the dev
+# mid-render leaves no renderer and the next core start removes its scratch; a
+# failing renderer's probe detail leads with its own error line; the probe through the core's binary rule from a source checkout, the dev
 # Electron and the packed --dir build (when apps/desktop/build/dist/linux-unpacked
 # exists, else a printed skip; its renderer files and the core's rendermotion.js
 # must be byte-identical to this tree's, so rebuild it after a change): no

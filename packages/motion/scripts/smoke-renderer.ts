@@ -44,7 +44,9 @@
  *  R5. lifecycle    — success: the renderer exits on its own at stdin EOF;
  *                     a renderer that cannot start (not executable): the probe
  *                     says start-failed at once, a render rejects with
- *                     graphic_renderer_unavailable and leaves nothing;
+ *                     graphic_renderer_unavailable and leaves nothing; a
+ *                     renderer that fails: the probe's detail leads with its
+ *                     own error line;
  *                     abort mid-render kills it at once; an FFmpeg failure,
  *                     a failed later move into baked/ and, across disks
  *                     (injected EXDEV), a copy whose source can't be removed
@@ -82,7 +84,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createSocket } from "node:dgram";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -885,8 +887,10 @@ async function runRenderer(bin: Extract<RendererBinary, { ok: true }>, args: str
 // survives the next core start and fails. renderMotion without the abort listener → the
 // abort row renders to the end and fails. moveAll without its rollback → the later-move
 // row finds the .mov in baked/ and fails. moveAll's EXDEV branch recording `to` only after
-// rm(from) → the EXDEV row finds the copied .mov in baked/. The renderer's stdin 'end' handler dropped → the
-// success row's renderer is killed after the 10 s wait instead of exiting 0 (R2). The
+// rm(from) → the EXDEV row finds the copied .mov in baked/. probeMotionRenderer without the
+// renderer's error line in its detail → the failing-renderer row fails. The renderer's stdin
+// 'end' handler dropped → the success row's renderer is killed after the 10 s wait instead of
+// exiting 0 (R2). The
 // renderer without the --zr-scratch check → the no-scratch row fails; without
 // app.setPath("userData") → the profile row finds Chromium's files in HOME and fails.
 async function r5(work: string) {
@@ -939,6 +943,17 @@ async function r5(work: string) {
   const probe = await Promise.race([probeMotionRenderer(x.data, { binary: bad, env: x.env }), hung(10_000)]);
   check(probe !== "hung" && !probe.ok && probe.reason === "start-failed" && Date.now() - t0 < 5000,
     `a renderer that cannot start: the probe says start-failed at once (${JSON.stringify(probe)}; ${Date.now() - t0} ms)`);
+  // A renderer that starts and fails (fail() in motion-renderer.cjs: its error line on stdout, then exit 1), with only noise on stderr.
+  const failing: RendererBinary = {
+    ok: true,
+    command: touch(join(x.dir, "failing-renderer"), `#!/bin/sh\necho "ERROR:dbus/bus.cc:406] Failed to connect to the bus" >&2\necho '{"type":"error","code":"graphic_renderer_unavailable","message":"the probe frame is wrong"}'\nexit 1\n`),
+    args: [],
+  };
+  chmodSync(failing.command, 0o755);
+  const failed = await probeMotionRenderer(x.data, { binary: failing, env: x.env });
+  const detail = failed.ok ? "" : failed.detail;
+  check(!failed.ok && detail.startsWith("graphic_renderer_unavailable: the probe frame is wrong; exit 1; ") && detail.includes("Failed to connect to the bus"),
+    `a renderer that fails: the probe's detail leads with the renderer's own error line, then the stderr tail (${JSON.stringify(failed)})`);
   t0 = Date.now();
   const nostart = await Promise.race([render(x, "nostart", { module: PATTERN, binary: bad }), hung(15_000)]);
   const e0 = nostart === "hung" ? undefined : (nostart.error as MotionRenderError | undefined);
