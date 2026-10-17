@@ -25,7 +25,12 @@
  *                  audio outlasts it (the table's frame count passes its last
  *                  frame): frames played across its end, and a first request
  *                  past it (1 s and 10 s after the end, and in a 0.1 fps
- *                  video), answer the real last frame.
+ *                  video), answer the real last frame. A video whose frame
+ *                  rate changes and one that starts 0.5 s after its file (its
+ *                  audio) does, each played in order past its end and asked
+ *                  for out of order (each a fresh seek): every frame is
+ *                  FFmpeg's fps filter at the asset's fps over the whole
+ *                  file, and the decode ends at the frame count.
  *  M3. dependent — an image larger than the canvas comes back fitted to it,
  *                  and that natural size places the next image the component
  *                  loads: both show where the size says.
@@ -143,6 +148,10 @@ interface Fixtures {
   tail: string;
   gap: string;
   slow: string;
+  /** 2 s at 30 fps, then every 6th frame for 2 s (the frame rate changes: 70 pictures, 18.261 fps on average). */
+  vfr: string;
+  /** Matroska: 3 s of 30 fps video from 0.5 s, 4 s of audio from 0 (the video starts after its file does). */
+  late: string;
   /** 400x200 PNG; 16x16 red PNG. */
   big: string;
   red: string;
@@ -170,6 +179,8 @@ function fixtures(work: string): Fixtures {
   longAudio(4, 5, "tail.mp4");
   longAudio(2, 12, "gap.mp4");
   longAudio(40, 60, "slow.mp4", 0.1);
+  ffmpeg([...src("160x90"), "-vf", "select='lt(n,60)+not(mod(n,6))'", "-vsync", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", at("vfr.mp4")]);
+  ffmpeg(["-itsoffset", "0.5", ...src("160x90", 3), "-f", "lavfi", "-i", "sine=duration=4", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", at("late.mkv")]);
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=400x200", "-frames:v", "1", at("big.png")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=16x16", "-frames:v", "1", at("red.png")]);
   ffmpeg(["-f", "lavfi", "-i", "nullsrc=s=1920x1080,format=gbrp,geq=r='random(1)*255':g='random(2)*255':b='random(3)*255'", "-frames:v", "1", at("noise.png")]);
@@ -184,7 +195,7 @@ function fixtures(work: string): Fixtures {
   const hugeFont = at("huge.ttf");
   writeFileSync(hugeFont, "");
   truncateSync(hugeFont, MEDIA_CAPS.fontBytes + 1);
-  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), tail: at("tail.mp4"), gap: at("gap.mp4"), slow: at("slow.mp4"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
+  return { dir, hd: at("hd.mp4"), small: at("small.mp4"), tail: at("tail.mp4"), gap: at("gap.mp4"), slow: at("slow.mp4"), vfr: at("vfr.mp4"), late: at("late.mkv"), big: at("big.png"), red: at("red.png"), noise: at("noise.mp4"), mono, hugeFont };
 }
 
 const font = (path: string): MotionAsset => ({ kind: "font", path, name: basename(path) });
@@ -265,11 +276,11 @@ function failedWith(run: Run, code: string, what: string, msg?: RegExp) {
   check(run.error?.code === code && (!msg || msg.test(run.error.message)), `${what}: ${code} (${run.error ? `${run.error.code}: ${run.error.message}` : "it rendered"})`);
 }
 
-/** FFmpeg's own RGBA decode of `file`'s frames `which` (in that order), read with `vf` before format=rgba. */
-function reference(file: string, which: number[], w: number, h: number, vf: string): Map<number, Buffer> {
+/** FFmpeg's own RGBA decode of `file`'s frames `which` (in that order), read with `vf` before format=rgba; `pre` (an fps filter) numbers the frames. */
+function reference(file: string, which: number[], w: number, h: number, vf: string, pre = ""): Map<number, Buffer> {
   const sorted = [...new Set(which)].sort((a, b) => a - b);
   const select = `select=${sorted.map((n) => `eq(n\\,${n})`).join("+")}`;
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", `${select},${vf},format=rgba`, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", `${pre ? `${pre},` : ""}${select},${vf},format=rgba`, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
   const out = new Map<number, Buffer>();
   sorted.forEach((n, i) => out.set(n, r.stdout.subarray(i * w * h * 4, (i + 1) * w * h * 4)));
   return out;
@@ -436,6 +447,50 @@ async function m2(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
       `a first request for source frame ${t} of the ${what} of audio answers its last frame, ${lastFrame} (${run.error?.message ?? JSON.stringify(run.media)})`);
     await leftNothing(run, f, `past-${asset}-${t}`, "past the real end");
   }
+
+  // Source frame k is the picture shown at k / fps: FFmpeg's fps filter at the asset's fps over the whole file, from the
+  // file's start (its first picture until the video starts, as FFmpeg's constant-rate output shows it), whatever the
+  // order of the requests. Each frame's page asks the core directly for source frame `T[n]`.
+  const byTime = (asset: "vfr" | "late", T: number[], o: Partial<RenderMotionOptions> = {}) => {
+    const page = handPage(`const T = ${JSON.stringify(T)}; root.replaceChildren(); await load(media(A.v, "t=" + T[n] + "&w=160&h=90"), true);`);
+    return render(f, `bytime-${asset}-${T[0]}-${T.length}`, { page, width: 160, height: 90, durationInFrames: T.length, assets: { v: lib[asset] }, ...o });
+  };
+  // `n`: the video's real frame count.
+  const conform = (asset: "vfr" | "late", n: number, T: number[]) => {
+    const ref = reference(fx[asset], T.map((t) => Math.min(t, n - 1)), 160, 90, SD_READ, `fps=${lib[asset].fps}:start_time=0`);
+    return T.map((t) => ref.get(Math.min(t, n - 1)) as Buffer);
+  };
+  const offBy = (run: Run, refs: Buffer[]) => refs.flatMap((r, i) => (run.frames[i] && maxDiff(run.frames[i], r, 160, 90) <= 1 ? [] : [i]));
+  const upTo = (n: number) => Array.from({ length: n }, (_, k) => k);
+  // Played in order, two frames past its real end: one decode, which ends at frame n - 1; frame n is decoded only when
+  // the table's count passes it, and later frames are the LRU's frame n - 1.
+  const played = async (asset: "vfr" | "late", n: number, what: string) => {
+    const T = upTo(n + 2);
+    const run = await byTime(asset, T);
+    const bad = offBy(run, conform(asset, n, T));
+    const decodes = n + (Math.round(lib[asset].duration * lib[asset].fps) > n ? 1 : 0);
+    check(!run.error && run.frames.length === T.length && bad.length === 0 && run.media?.spawns === 1 && run.media.decodes === decodes && run.media.lruHits === T.length - decodes,
+      `${what}: its frames 0-${n + 1} played in order are its fps filter's at ${lib[asset].fps} fps, from one decode that ends at its ${n} frames (${run.error?.message ?? `frames off: ${JSON.stringify(bad)}, ${JSON.stringify(run.media)}`})`);
+    await leftNothing(run, f, `bytime-${asset}-0-${T.length}`, what);
+  };
+  // Backwards and far apart, with no LRU: every request is a fresh seek (one FFmpeg process each).
+  const jumped = async (asset: "vfr" | "late", n: number, T: number[], what: string) => {
+    const run = await byTime(asset, T, { caps: { lruBytes: 1 } });
+    const bad = offBy(run, conform(asset, n, T));
+    check(!run.error && run.frames.length === T.length && bad.length === 0 && run.media?.spawns === T.length,
+      `${what}: its frames ${T.join(",")}, each a fresh seek, are the same frames of its fps filter (${run.error?.message ?? `frames off: ${JSON.stringify(bad.map((i) => T[i]))}, ${JSON.stringify(run.media)}`})`);
+    await leftNothing(run, f, `bytime-${asset}-${T[0]}-${T.length}`, what);
+  };
+  const vfrCount = Math.round(lib.vfr.duration * lib.vfr.fps);
+  check(vfrCount > 70 && lib.vfr.fps !== 30, `the variable-rate video averages ${lib.vfr.fps} fps: ${vfrCount} frames from its 70 pictures`);
+  await played("vfr", vfrCount, "a video whose frame rate changes");
+  await jumped("vfr", vfrCount, [74, 69, 66, 61, 58, 50, 45, 37, 33, 23, 10, 5, 1], "a video whose frame rate changes");
+  // 0.5 s late (0.523 s in the file): its first picture until frame 15, 106 frames from its 90 pictures; the
+  // table's count is its 4 s of audio's.
+  const lateCount = Math.round(lib.late.duration * lib.late.fps);
+  check(lateCount > 106, `the video that starts 0.5 s after its file has a frame count past its last frame (${lateCount})`);
+  await played("late", 106, "a video that starts 0.5 s after its file");
+  await jumped("late", 106, [100, 40, 16, 8, 0], "a video that starts 0.5 s after its file");
 }
 
 // ---- M3: a request that depends on loaded media ----------------------------------------
@@ -701,7 +756,7 @@ async function main() {
     try {
       const fx = fixtures(work);
       const lib: Record<string, MediaAsset> = {};
-      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, tail: fx.tail, gap: fx.gap, slow: fx.slow, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
+      for (const [k, p] of Object.entries({ hd: fx.hd, small: fx.small, tail: fx.tail, gap: fx.gap, slow: fx.slow, vfr: fx.vfr, late: fx.late, big: fx.big, red: fx.red, noise: fx.noise })) lib[k] = await probeAsset(p);
       if (part("M1")) await m1(work, fx, lib);
       if (part("M2")) await m2(work, fx, lib);
       if (part("M3")) await m3(work, fx, lib);

@@ -359,7 +359,7 @@ export class MotionMedia {
   private waiting: (() => void)[] = [];
   private clock = 0;
   private abort = new AbortController();
-  /** FFmpeg's flag that passes the decoded frames through as they are, set by the first decode. */
+  /** FFmpeg's flag that passes the filtered frames through as they are, set by the first decode. */
   private passthrough: string[] = [];
 
   constructor(
@@ -469,8 +469,13 @@ export class MotionMedia {
       );
     }
     this.stats.decodes++;
-    // A constant frame rate output would repeat the first frame after a seek when the file's audio starts sooner (one picture per source frame).
-    if (!this.passthrough.length) this.passthrough = passthroughFlag(await ffmpegVersion().catch(() => null));
+    // A constant frame rate output would repeat or drop pictures after a seek: the decode's frames go out as the fps filter gives them.
+    if (!this.passthrough.length) {
+      const v = await ffmpegVersion().catch((err: Error) => {
+        throw new MotionRenderError("graphic_media_failed", `FFmpeg's version could not be read (${err.message}), so no frame was decoded. Check the FFmpeg ${PRODUCT_NAME} uses.`);
+      });
+      this.passthrough = passthroughFlag(v);
+    }
     await this.slot();
     let png: Buffer;
     try {
@@ -514,9 +519,15 @@ export class MotionMedia {
     this.room();
     const a = e.asset as MediaAsset;
     const color = resolveSourceColor(a.color, a.height, a.videoCodec);
-    const vf = `scale=${box.w}:${box.h}:flags=${inputScaleFlags({ w: a.width, h: a.height }, box.w, box.h, true)}${inputColorOpts(color)},format=rgba`;
-    // -ss keeps the first frame at or after the time: half a frame early so a timestamp rounding can't skip frame `from` (frames.ts).
-    const seek = e.info.kind === "video" && from > 0 ? ["-ss", ((from - 0.5) / (e.info.fps as number)).toFixed(6)] : [];
+    const video = e.info.kind === "video";
+    const fps = e.info.fps as number;
+    // Source frame k of a video is the picture shown at k / fps on the file's own time grid (-copyts -start_at_zero:
+    // FFmpeg's times from the file's start, as an fps filter over the whole file reads them; its first picture before
+    // it begins), so a running decode and a fresh seek give a variable-rate source the same picture. -noaccurate_seek
+    // starts at the keyframe before the time, which keeps the picture shown at it; trim cuts at frame `from` exactly.
+    const conform = video ? `fps=${fps}:start_time=0,trim=start_pts=${from},` : "";
+    const vf = `${conform}scale=${box.w}:${box.h}:flags=${inputScaleFlags({ w: a.width, h: a.height }, box.w, box.h, true)}${inputColorOpts(color)},format=rgba`;
+    const seek = video ? ["-copyts", "-start_at_zero", ...(from > 0 ? ["-noaccurate_seek", "-ss", ((from - 0.5) / fps).toFixed(6)] : [])] : [];
     const one = e.info.kind === "image" ? ["-frames:v", "1"] : [];
     const args = [
       "-hide_banner", "-nostdin", "-loglevel", "error", ...seek, "-i", a.path,

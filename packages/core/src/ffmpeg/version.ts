@@ -92,8 +92,9 @@ export function preferredFilterScriptFlag(v: Pick<FfmpegVersion, "generation"> |
 
 /**
  * The output option that passes decoded frames through as they are, none
- * repeated or dropped (motion/motionmedia.ts): -fps_mode from 5.1, its older
- * spelling -vsync before. An unknown build counts as current.
+ * repeated or dropped (motion/motionmedia.ts): -fps_mode from FFmpeg 6 (it
+ * exists from 5.1, where -vsync still works), -vsync before. An unknown build
+ * counts as current.
  */
 export function passthroughFlag(v: Pick<FfmpegVersion, "generation"> | null): ["-fps_mode" | "-vsync", "passthrough"] {
   return v?.generation != null && v.generation < 6 ? ["-vsync", "passthrough"] : ["-fps_mode", "passthrough"];
