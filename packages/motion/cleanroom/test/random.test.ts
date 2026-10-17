@@ -23,9 +23,15 @@ test("random(null) is different on every call", () => {
 
 test("calling random() without a usable seed throws graphic_api_misuse", () => {
   throwsCode(() => (random as unknown as () => number)(), "graphic_api_misuse");
-  for (const bad of [undefined, true, {}, [], Number.NaN, Infinity]) {
+  for (const bad of [undefined, true, {}, []]) {
     throwsCode(() => random(bad as unknown as number), "graphic_api_misuse");
   }
+});
+
+test("parity r1 random-035/036/039, recorded choice: NaN and infinite seeds are accepted and give 0", () => {
+  assert.equal(random(Number.NaN), 0);
+  assert.equal(random(Infinity), 0);
+  assert.equal(random(-Infinity), 0);
 });
 
 test("recorded choice: number and string seeds differ; -0 and 0 are the same seed", () => {

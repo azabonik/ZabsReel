@@ -49,15 +49,32 @@ test("recorded choice: wrap repeats the range on both sides", () => {
   assert.equal(interpolate(25, [10, 20], [0, 10], { extrapolateRight: "wrap" }), 5);
 });
 
-test("recorded choice: identity returns the input, and works only with plain number outputs", () => {
-  assert.equal(interpolate(-7, [0, 1], [0, 2], { extrapolateLeft: "identity" }), -7);
-  throwsCode(() => interpolate(2, [0, 1], ["0px", "1px"], { extrapolateRight: "identity" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(2, [0, 1], [[0], [1]], { extrapolateRight: "identity" }), "graphic_api_misuse");
+test("parity r1 interp-025, recorded choice: wrap repeats the end segment on that side (a true loop, positive modulo)", () => {
+  const at = (f: number) => interpolate(f, [0, 10, 30], [0, 100, 0], { extrapolateLeft: "wrap", extrapolateRight: "wrap" });
+  assert.equal(at(-20), 0);
+  assert.equal(at(36), 70);
+  assert.equal(at(60), 50);
+  assert.equal(at(-5), 50, "left of the range the first segment repeats");
+  assert.equal(at(50), 100, "right of the range the last segment repeats from its start");
 });
 
-test("recorded choice: at an interior keyframe the segment that starts there applies", () => {
-  const easing = [() => 0.5, () => 0];
-  assert.equal(interpolate(10, [0, 10, 20], [0, 10, 0], { easing }), 10);
+test("parity r1 interp-148/149/200/201, recorded choice: identity returns the input, in every component of CSS values and tuples", () => {
+  assert.equal(interpolate(-7, [0, 1], [0, 2], { extrapolateLeft: "identity" }), -7);
+  assert.equal(interpolate(1.5, [0, 1], ["0px", "100px"], { extrapolateRight: "identity" }), "1.5px");
+  assert.equal(interpolate(2, [0, 1], ["0px 0%", "1px 5%"], { extrapolateRight: "identity" }), "2px 2%");
+  assert.deepEqual(interpolate(1.5, [0, 1], [[0, 0], [10, 20]], { extrapolateRight: "identity" }), [1.5, 1.5]);
+  // Discrete strings and booleans cannot show a number: still an error.
+  throwsCode(
+    () => interpolate(2, [0, 1], ["a", "b"], { extrapolateRight: "identity", easing: Easing.step1 }),
+    "graphic_api_misuse",
+  );
+});
+
+test("parity r1 interp-038/039/042, recorded choice: at an interior keyframe the segment that ends there applies", () => {
+  assert.equal(interpolate(10, [0, 10, 20], [0, 100, 200], { easing: (t) => t * 0.5 }), 50);
+  assert.equal(interpolate(10, [0, 10, 20], [0, 100, 200], { easing: () => 0.5 }), 50);
+  assert.equal(interpolate(10, [0, 10, 20], [0, 10, 0], { easing: [() => 0.5, () => 0] }), 5);
+  assert.equal(interpolate(0, [0, 10, 20], [0, 100, 200], { easing: () => 0.5 }), 50, "the first keyframe starts segment 0");
 });
 
 test("easing: one function for every segment, or one per segment", () => {
@@ -89,15 +106,21 @@ test("perceptual-scale: the documented examples at progress 0.5", () => {
   assert.equal(interpolate(1, [0, 1], [1, 2], opts), 2);
 });
 
-test("recorded choice: perceptual-scale works for tuples and scale strings, and is refused elsewhere", () => {
+test("parity r1 interp-106..109, recorded choice: perceptual-scale changes plain numbers only; other outputs interpolate linearly", () => {
   const opts = { output: "perceptual-scale" } as const;
-  const [a, b] = interpolate(0.5, [0, 1], [[0, 1], [1, 2]], opts);
-  close(a, Math.sqrt(0.5));
-  close(b, Math.sqrt(2.5));
-  assert.equal(interpolate(0.5, [0, 1], ["0", "1"], opts), String(Math.round(Math.sqrt(0.5) * 1e6) / 1e6));
-  throwsCode(() => interpolate(0.5, [0, 1], ["0px", "10px"], opts), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], [false, true], { ...opts, easing: Easing.step1 }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], ["a", "b"], { ...opts, easing: Easing.step1 }), "graphic_api_misuse");
+  assert.deepEqual(interpolate(0.5, [0, 1], [[0, 1], [1, 2]], opts), [0.5, 1.5]);
+  assert.equal(interpolate(0.5, [0, 1], ["1", "2"], opts), "1.5");
+  assert.equal(interpolate(0.5, [0, 1], ["0px", "100px"], opts), "50px");
+  assert.equal(interpolate(0.5, [0, 1], [false, true], { ...opts, easing: Easing.step1 }), false);
+  assert.equal(interpolate(0.5, [0, 1], ["a", "b"], { ...opts, easing: Easing.step1 }), "a");
+});
+
+test("parity r1 interp-100..105/111/113: perceptual-scale on numbers is kept as SPEC documents it (v4.0.490)", () => {
+  const opts = { output: "perceptual-scale" } as const;
+  close(interpolate(0.25, [0, 1], [-1, 1], opts), -Math.sqrt(0.5));
+  // Easing first (0.25), then the scale mapping: sqrt(0 + 0.25 * 1) = 0.5.
+  close(interpolate(0.5, [0, 1], [0, 1], { ...opts, easing: Easing.quad }), 0.5);
+  close(interpolate(1, [0, 10, 20], [1, 3, 0.5], opts), Math.sqrt(1 + 0.1 * 8));
 });
 
 test("posterize: with 3, frames 0-2 use frame 0's value and frames 3-5 frame 3's", () => {
@@ -105,9 +128,11 @@ test("posterize: with 3, frames 0-2 use frame 0's value and frames 3-5 frame 3's
   assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map(at), [0, 0, 0, 3, 3, 3, 6]);
 });
 
-test("recorded choice: posterize uses floor(input / n) * n, also for fractional n and negative input", () => {
-  close(interpolate(0.3, [0, 1], [0, 1], { posterize: 0.1 }), 0.3);
-  close(interpolate(0.25, [0, 1], [0, 1], { posterize: 0.1 }), 0.2);
+test("parity r1 interp-089/090, recorded choice: posterize is a plain floor(input / n) * n in floating point", () => {
+  close(interpolate(0.3, [0, 1], [0, 1], { posterize: 0.1 }), 0.2, 1e-12);
+  close(interpolate(0.7, [0, 1], [0, 1], { posterize: 0.1 }), 0.6, 1e-12);
+  close(interpolate(0.25, [0, 1], [0, 1], { posterize: 0.1 }), 0.2, 1e-12);
+  assert.equal(interpolate(7.5, [0, 30], [0, 30], { posterize: 2.5 }), 7.5);
   assert.equal(interpolate(-1, [-10, 10], [-10, 10], { posterize: 3 }), -3);
 });
 
@@ -140,25 +165,38 @@ test("CSS transform strings: one value type per call and the same unit per compo
   throwsCode(() => interpolate(0.5, [0, 1], ["0px", "10em"]), "graphic_api_misuse");
   throwsCode(() => interpolate(0.5, [0, 1], ["1px 2px 3px 4px", "0px"]), "graphic_api_misuse");
   throwsCode(() => interpolate(0.5, [0, 1], ["left top 10%", "right"], { outputType: "transform-origin" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], ["10px", "20px 30px"], { outputType: "transform-origin" }), "graphic_api_misuse");
 });
 
-test("outputType checks the value type", () => {
+test("parity r1 interp-141, recorded choice: transform-origin keeps the number of components written", () => {
+  assert.equal(interpolate(0.5, [0, 1], ["0px", "100px"], { outputType: "transform-origin" }), "50px");
+  assert.equal(interpolate(0.5, [0, 1], ["left", "right"]), "50%");
+  assert.equal(interpolate(0.5, [0, 1], ["top", "bottom"]), "50% 50%", "a lone vertical keyword needs its x");
+  assert.equal(interpolate(0.5, [0, 1], ["0%", "50% 100%"], { outputType: "transform-origin" }), "25% 75%");
+});
+
+test("parity r1 interp-145/158, recorded choice: an outputType the values do not fit, or an unknown one, is ignored", () => {
   assert.equal(interpolate(0.5, [0, 1], ["0px", "10px"], { outputType: "translate" }), "5px");
   assert.equal(interpolate(0.5, [0, 1], [1, 3], { outputType: "scale" }), 2);
-  throwsCode(() => interpolate(0.5, [0, 1], ["1", "2"], { outputType: "translate" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], ["10px", "20px"], { outputType: "rotate" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], ["10px", "20px"], { outputType: "scale" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], [0, 90], { outputType: "rotate" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(0.5, [0, 1], [0, 1], { outputType: "skew" as "scale" }), "graphic_api_misuse");
+  assert.equal(interpolate(0.5, [0, 1], ["0px", "100px"], { outputType: "rotate" }), "50px");
+  assert.equal(interpolate(0.5, [0, 1], ["0px", "100px"], { outputType: "bogus" as "scale" }), "50px");
+  assert.equal(interpolate(0.5, [0, 1], ["1", "2"], { outputType: "translate" }), "1.5");
+  assert.equal(interpolate(0.5, [0, 1], [0, 90], { outputType: "rotate" }), 45);
+  assert.equal(interpolate(0.5, [0, 1], ["10px", "20px 30px"], { outputType: "transform-origin" }), "15px 15px");
 });
 
-test("recorded choice: font-weight accepts numbers, numeric strings, normal and bold, and returns a number", () => {
-  assert.equal(interpolate(0.5, [0, 1], ["normal", "bold"], { outputType: "font-weight" }), 550);
-  assert.equal(interpolate(0.5, [0, 1], ["100", 900] as unknown as string[], { outputType: "font-weight" }), 500);
-  assert.equal(interpolate(0, [0], ["bold"], { outputType: "font-weight" }), 700);
+test("parity r1 interp-162, recorded choice: font-weight gives a number for numbers and a numeric string for strings", () => {
+  assert.equal(interpolate(0.5, [0, 1], ["100", "900"], { outputType: "font-weight" }), "500");
+  assert.equal(interpolate(0.5, [0, 1], ["normal", "bold"], { outputType: "font-weight" }), "550");
+  assert.equal(interpolate(0.5, [0, 1], [100, 900], { outputType: "font-weight" }), 500);
+  assert.equal(interpolate(0, [0], ["bold"], { outputType: "font-weight" }), "700");
   throwsCode(() => interpolate(0.5, [0, 1], ["normal", "bold"]), "graphic_api_misuse");
   throwsCode(() => interpolate(0.5, [0, 1], ["thin", "bold"], { outputType: "font-weight" }), "graphic_api_misuse");
+});
+
+test("parity r1 interp-181/182, recorded choice: CSS values under Easing.step1 are CSS values (reformatted), not verbatim", () => {
+  assert.equal(interpolate(5, [0, 10], ["0.50px", "100px"], { easing: Easing.step1 }), "0.5px");
+  assert.equal(interpolate(10, [0, 10], ["0.50px", "100.0px"], { easing: Easing.step1 }), "100px");
+  assert.equal(interpolate(5, [0, 10], ["#ff0000", "#00ff00"], { easing: Easing.step1 }), "#ff0000", "non-CSS strings stay verbatim");
 });
 
 test("discrete strings need Easing.step1 and hold each keyframe's value until the next keyframe", () => {
@@ -209,15 +247,22 @@ test("range rules: same length, at least one value, strictly increasing finite i
   throwsCode(() => interpolate(1, [0, 1], [0, "1px"] as unknown as number[]), "graphic_api_misuse");
 });
 
-test("recorded choice: the input must be a finite number", () => {
-  for (const bad of [Number.NaN, Infinity, undefined, "3"]) {
-    throwsCode(() => interpolate(bad as number, [0, 1], [0, 1]), "graphic_api_misuse");
+test("parity r1 interp-061..065, recorded choice: NaN and infinite inputs are accepted and go through the arithmetic", () => {
+  assert.ok(Number.isNaN(interpolate(Number.NaN, [0, 10], [0, 1])));
+  assert.equal(`${interpolate(Number.NaN, [0, 10], [0, 1])}`, "NaN");
+  assert.equal(interpolate(Infinity, [0, 10], [0, 1], { extrapolateRight: "clamp" }), 1);
+  assert.equal(interpolate(-Infinity, [0, 10], [0, 1], { extrapolateLeft: "clamp" }), 0);
+  assert.equal(interpolate(Infinity, [0, 10], [0, 1]), Infinity);
+  for (const bad of [undefined, "3", null]) {
+    throwsCode(() => interpolate(bad as unknown as number, [0, 1], [0, 1]), "graphic_api_misuse");
   }
 });
 
-test("invalid extrapolation and output options throw graphic_api_misuse", () => {
-  throwsCode(() => interpolate(1, [0, 1], [0, 1], { extrapolateLeft: "mirror" as "clamp" }), "graphic_api_misuse");
-  throwsCode(() => interpolate(1, [0, 1], [0, 1], { output: "log" as "linear" }), "graphic_api_misuse");
+test("parity r1 interp-068/110, recorded choice: unknown extrapolation and output values count as the defaults", () => {
+  assert.equal(interpolate(5, [0, 10], [0, 1], { extrapolateRight: "bogus" as "clamp" }), 0.5);
+  assert.equal(interpolate(15, [0, 10], [0, 1], { extrapolateRight: "bogus" as "clamp" }), 1.5, "like extend");
+  assert.equal(interpolate(-5, [0, 10], [0, 1], { extrapolateLeft: 3 as unknown as "clamp" }), -0.5);
+  assert.equal(interpolate(0.5, [0, 1], [0, 1], { output: "bogus" as "linear" }), 0.5);
   throwsCode(() => interpolate(1, [0, 1], [0, 1], "clamp" as unknown as object), "graphic_api_misuse");
 });
 

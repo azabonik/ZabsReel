@@ -25,20 +25,20 @@ const DISPLAY_CLASSES = new Set([
   "block", "inline-block", "inline", "flex", "inline-flex", "grid", "inline-grid", "hidden",
   "contents", "table", "flow-root", "list-item",
 ]);
-const POSITION_CLASSES = new Set(["static", "fixed", "absolute", "relative", "sticky"]);
 
 /**
- * The default styles that a Tailwind class in `className` sets too. Only classes without a variant
- * prefix (such as `md:` or `hover:`) count, since prefixed ones apply only some of the time.
+ * The default styles that a Tailwind class in `className` sets too. A variant prefix (`md:`,
+ * `hover:` and so on) does not matter: `md:flex-row` counts like `flex-row`. Classes are matched
+ * as written otherwise (an important marker such as `flex-row!` is not recognised), and position
+ * classes (`relative`, `absolute`, ...) do not drop the default position.
  */
 export function fillDefaultsOverriddenBy(className: string | undefined): Set<FillKey> {
   const dropped = new Set<FillKey>();
   if (!className) return dropped;
   for (const token of className.split(/\s+/)) {
-    if (token === "" || token.includes(":")) continue;
-    // Strip the important marker (`!flex` or `flex!`) and the negative-value dash (`-top-2`).
-    const cls = token.replace(/^!|!$/g, "").replace(/^-/, "");
-    if (POSITION_CLASSES.has(cls)) dropped.add("position");
+    if (token === "") continue;
+    // The utility after the last variant prefix, without a negative-value dash (`-top-2`).
+    const cls = token.slice(token.lastIndexOf(":") + 1).replace(/^-/, "");
     if (DISPLAY_CLASSES.has(cls)) dropped.add("display");
     if (/^flex-(row|col)(-reverse)?$/.test(cls)) dropped.add("flexDirection");
     if (/^inset-x-/.test(cls)) {

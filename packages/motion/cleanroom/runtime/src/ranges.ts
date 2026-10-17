@@ -3,9 +3,10 @@
 import type { EasingFunction } from "./easing";
 import { describeValue, misuse } from "./errors";
 
+/** Any number is accepted; NaN and infinities go through the arithmetic (NaN in, NaN out). */
 export function checkInput(input: unknown, where: string): number {
-  if (typeof input !== "number" || !Number.isFinite(input)) {
-    throw misuse(`${where}: the input must be a finite number (usually the frame), but got ${describeValue(input)}.`);
+  if (typeof input !== "number") {
+    throw misuse(`${where}: the input must be a number (usually the frame), but got ${describeValue(input)}.`);
   }
   return input;
 }
@@ -61,20 +62,21 @@ export function readPosterize(value: unknown, where: string): number | null {
   return value;
 }
 
-/** Rounds the input down to a multiple of `step` (values within 1e-9 of a multiple count as on it). */
+/** Rounds the input down to a multiple of `step`: floor(x / step) * step, as computed in floating point. */
 export function posterizeInput(x: number, step: number | null): number {
   if (step === null) return x;
-  const q = x / step;
-  const nearest = Math.round(q);
-  const steps = Math.abs(q - nearest) < 1e-9 ? nearest : Math.floor(q);
-  return steps * step;
+  return Math.floor(x / step) * step;
 }
 
-/** Index of the segment for x: the one starting at the last keyframe <= x (clamped to the ends). */
+/**
+ * Index of the segment for x: the first one whose end is >= x, so an input exactly on an interior
+ * keyframe belongs to the segment that ends there (progress 1). Clamped to the first and last
+ * segments outside the range.
+ */
 export function segmentAt(xs: readonly number[], x: number): number {
   const last = xs.length - 2;
   for (let i = 0; i < last; i++) {
-    if (x < xs[i + 1]) return i;
+    if (x <= xs[i + 1]) return i;
   }
   return Math.max(0, last);
 }

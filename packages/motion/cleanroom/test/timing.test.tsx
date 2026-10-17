@@ -384,16 +384,36 @@ test("AbsoluteFill drops a default style that a Tailwind class sets (flex flex-r
   m.app.unmount();
 });
 
-test("recorded choice: Tailwind detection covers position, inset, sides, size and display classes, not variant-prefixed ones", () => {
+test("parity r1 abs-fill-layers, recorded choice: Tailwind detection covers display, direction, inset, sides and size classes", () => {
   const set = (c: string) => [...fillDefaultsOverriddenBy(c)].sort();
-  assert.deepEqual(set("relative"), ["position"]);
-  assert.deepEqual(set("inset-4"), ["bottom", "left", "right", "top"]);
+  assert.deepEqual(set("relative"), [], "position classes keep the default position");
+  assert.deepEqual(set("absolute static fixed sticky"), []);
+  assert.deepEqual(set("inset-0"), ["bottom", "left", "right", "top"]);
   assert.deepEqual(set("inset-x-2"), ["left", "right"]);
   assert.deepEqual(set("-top-2 w-1/2 h-10"), ["height", "top", "width"]);
   assert.deepEqual(set("size-8"), ["height", "width"]);
-  assert.deepEqual(set("!grid flex-col-reverse"), ["display", "flexDirection"]);
-  assert.deepEqual(set("md:flex-row hover:hidden flex-1 flex-wrap"), []);
+  assert.deepEqual(set("grid flex-col-reverse"), ["display", "flexDirection"]);
+  assert.deepEqual(set("md:flex-row"), ["flexDirection"], "a variant prefix does not matter");
+  assert.deepEqual(set("hover:hidden"), ["display"]);
+  assert.deepEqual(set("flex-row! !grid"), [], "important markers are not recognised");
+  assert.deepEqual(set("flex-1 flex-wrap"), []);
   assert.deepEqual(set(""), []);
+});
+
+test("parity r1 abs-fill-layers: className 'relative' keeps the fill absolutely positioned; 'md:flex-row' gives a row", async () => {
+  const m = mount(makeHost(), () => (
+    <>
+      <AbsoluteFill className="relative" id="rel" />
+      <AbsoluteFill className="md:flex-row" id="md" />
+      <AbsoluteFill className="flex-row!" id="imp" />
+    </>
+  ));
+  await m.app.renderFrame(0);
+  const style = (id: string) => (m.container.querySelector(`#${id}`) as HTMLElement).style;
+  assert.equal(style("rel").position, "absolute");
+  assert.equal(style("md").flexDirection, "");
+  assert.equal(style("imp").flexDirection, "column");
+  m.app.unmount();
 });
 
 test("recorded choice: AbsoluteFill without timing props does not shift time and works outside a graphic", async () => {

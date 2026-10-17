@@ -2,7 +2,10 @@
 // own choices (see NOTES.md).
 
 import { describeValue, misuse } from "./errors";
-import { DEFAULT_REST_THRESHOLD, readSpringPhysics, springDisplacement, springSettleTime } from "./spring";
+import { DEFAULT_REST_THRESHOLD, readSpringPhysics, settleFrame, springDisplacement } from "./spring";
+
+/** Easing.spring measures its physics over this many frames (at as many frames per second). */
+const EASING_SPAN_FRAMES = 30;
 
 export type EasingFunction = (t: number) => number;
 
@@ -33,6 +36,14 @@ function finiteParam(value: unknown, where: string, name: string): number {
   return value;
 }
 
+/** Any number, including 0, negative and non-finite values (the formula then decides). */
+function numberParam(value: unknown, where: string, name: string): number {
+  if (typeof value !== "number") {
+    throw misuse(`${where}: ${name} must be a number, but got ${describeValue(value)}.`);
+  }
+  return value;
+}
+
 function checkEasing(easing: unknown, where: string): EasingFunction {
   if (typeof easing !== "function") {
     throw misuse(`${where} needs an easing function such as Easing.quad, but got ${describeValue(easing)}.`);
@@ -49,7 +60,8 @@ function bezier(x1: number, y1: number, x2: number, y2: number): EasingFunction 
   if (x1 < 0 || x1 > 1 || x2 < 0 || x2 > 1) {
     throw misuse(`${where}: x1 and x2 must be between 0 and 1, since time cannot run backwards.`);
   }
-  if (x1 === y1 && x2 === y2) return linear;
+  // Outside 0..1 the curve holds its end values (0 before, 1 after).
+  if (x1 === y1 && x2 === y2) return (t) => clamp01(t);
   // Each axis as the polynomial ((a s + b) s + c) s over the curve parameter s in [0, 1].
   const cx = 3 * x1;
   const bx = 3 * (x2 - x1) - cx;
@@ -80,12 +92,9 @@ function bezier(x1: number, y1: number, x2: number, y2: number): EasingFunction 
     }
     return (lo + hi) / 2;
   };
-  // Outside 0..1 the curve continues along its end tangents.
-  const startSlope = cx > 0 ? cy / cx : x2 > 0 ? y2 / x2 : 1;
-  const endSlope = x2 < 1 ? (1 - y2) / (1 - x2) : x1 < 1 ? (1 - y1) / (1 - x1) : 1;
   return (t) => {
-    if (t <= 0) return t * startSlope;
-    if (t >= 1) return 1 + (t - 1) * endSlope;
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
     return yAt(paramFor(t));
   };
 }
@@ -121,12 +130,15 @@ function springEasing(config: EasingSpringConfig = {}): EasingFunction {
   if (typeof rest !== "number" || !(rest > 0 && rest < 1)) {
     throw misuse(`${where}: durationRestThreshold must be a number between 0 and 1, but got ${describeValue(rest)}.`);
   }
-  const span = springSettleTime(physics, rest);
-  if (!Number.isFinite(span)) {
+  // The spring runs over a span of 30 frames at 30 fps, stretched like spring({durationInFrames: 30}):
+  // its whole-frame settle length (for `rest`) is scaled onto the span, so progress 1 is the frame
+  // from which it stays within `rest` of its end.
+  const settle = settleFrame(physics, 1 / EASING_SPAN_FRAMES, rest);
+  if (settle === Infinity) {
     throw misuse(`${where}: this spring has no damping, so it never settles. Give it some damping.`);
   }
+  const span = settle / EASING_SPAN_FRAMES; // seconds of the natural curve per unit of progress
   const allowTail = config.allowTail === true;
-  // The spring is stretched so that it comes within `rest` of its end exactly at progress 1.
   const easing: EasingFunction = (t) => {
     if (t <= 0) return 0;
     if (!allowTail && t >= 1) return 1;
@@ -148,8 +160,7 @@ export const Easing = {
   quad: ((t) => t * t) as EasingFunction,
   cubic: ((t) => t * t * t) as EasingFunction,
   poly(n: number): EasingFunction {
-    finiteParam(n, "Easing.poly()", "n");
-    if (n <= 0) throw misuse("Easing.poly(): n must be greater than 0.");
+    numberParam(n, "Easing.poly()", "n");
     return (t) => t ** n;
   },
   sin: ((t) => 1 - Math.cos((t * Math.PI) / 2)) as EasingFunction,
@@ -157,24 +168,20 @@ export const Easing = {
     const c = clamp01(t);
     return 1 - Math.sqrt(1 - c * c);
   }) as EasingFunction,
-  exp: ((t) => (t <= 0 ? 0 : 2 ** (10 * (t - 1)))) as EasingFunction,
+  exp: ((t) => 2 ** (10 * (t - 1))) as EasingFunction,
   elastic(bounciness = 1): EasingFunction {
-    finiteParam(bounciness, "Easing.elastic()", "bounciness");
-    if (bounciness < 0) throw misuse("Easing.elastic(): bounciness must be 0 or more.");
-    // The cosine is negative (past the target) about `bounciness` times; the envelope shrinks
-    // the swings to nothing at t = 1, where the cosine is zero.
-    const omega = (bounciness + 0.5) * Math.PI;
-    return (t) => {
-      const c = clamp01(t);
-      return 1 - (1 - c) ** 2 * Math.cos(omega * c);
-    };
+    numberParam(bounciness, "Easing.elastic()", "bounciness");
+    // A cubed quarter-cosine envelope (1 at t = 0, 0 at t = 1) times an oscillation of
+    // `bounciness` half-turns per unit of time.
+    const omega = bounciness * Math.PI;
+    return (t) => 1 - Math.cos((t * Math.PI) / 2) ** 3 * Math.cos(omega * t);
   },
-  back(s = 1.5): EasingFunction {
+  back(s = 1.70158): EasingFunction {
     finiteParam(s, "Easing.back()", "s");
     // A cubic that dips below 0 before rising to 1; larger s dips further.
     return (t) => t * t * t - s * t * t * (1 - t);
   },
-  bounce: ((t) => 1 - bounceOut(1 - t)) as EasingFunction,
+  bounce: ((t) => bounceOut(t)) as EasingFunction,
   bezier,
   in(easing: EasingFunction): EasingFunction {
     return checkEasing(easing, "Easing.in()");

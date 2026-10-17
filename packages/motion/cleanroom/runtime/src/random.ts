@@ -42,11 +42,8 @@ export function makeRandom(onNull?: () => void): (seed: RandomSeed) => number {
       return Math.random();
     }
     if (typeof seed === "number") {
-      if (!Number.isFinite(seed)) {
-        throw misuse(
-          `random() got the seed ${String(seed)}. Number seeds must be finite; check the arithmetic that builds the seed.`,
-        );
-      }
+      // NaN and the infinities are accepted and give 0.
+      if (!Number.isFinite(seed)) return 0;
       return unitFromKey(seedKey(seed));
     }
     if (typeof seed === "string") return unitFromKey(seedKey(seed));

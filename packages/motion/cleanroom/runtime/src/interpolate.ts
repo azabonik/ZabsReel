@@ -31,25 +31,21 @@ interface Settings {
   posterize: number | null;
 }
 
-function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T, name: string): T {
-  if (value === undefined) return fallback;
-  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
-    throw misuse(`${WHERE}: ${name} must be one of ${allowed.map((a) => `"${a}"`).join(", ")}, but got ${describeValue(value)}.`);
-  }
-  return value as T;
+/** An option value outside its documented set counts as not given. */
+function pick<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : undefined;
 }
 
 function readSettings(options: unknown, segments: number): Settings {
   if (options === undefined || options === null) options = {};
   if (typeof options !== "object") throw misuse(`${WHERE}: the options must be an object.`);
   const o = options as Record<string, unknown>;
-  const output = pick(o.output, ["linear", "perceptual-scale"] as const, "linear", "output");
   return {
-    left: pick(o.extrapolateLeft, EXTRAPOLATE, "extend", "extrapolateLeft"),
-    right: pick(o.extrapolateRight, EXTRAPOLATE, "extend", "extrapolateRight"),
+    left: pick(o.extrapolateLeft, EXTRAPOLATE) ?? "extend",
+    right: pick(o.extrapolateRight, EXTRAPOLATE) ?? "extend",
     easings: readEasings(o.easing, segments, WHERE),
-    perceptual: output === "perceptual-scale",
-    outputType: o.outputType === undefined ? undefined : pick(o.outputType, OUTPUT_TYPES, "scale", "outputType"),
+    perceptual: pick(o.output, ["linear", "perceptual-scale"] as const) === "perceptual-scale",
+    outputType: pick(o.outputType, OUTPUT_TYPES),
     posterize: readPosterize(o.posterize, WHERE),
   };
 }
@@ -61,9 +57,7 @@ interface NumericPlan {
   /** Each keyframe as a vector of numbers. */
   points: number[][];
   finish(vector: number[]): unknown;
-  /** Whether output: "perceptual-scale" may apply. */
-  scaleLike: boolean;
-  /** Plain number outputs, the only ones extrapolate "identity" works with. */
+  /** Plain number outputs: the only ones output: "perceptual-scale" changes. */
   plain: boolean;
 }
 
@@ -120,8 +114,9 @@ function isKeyword(part: string): boolean {
 
 /** The CSS value types one keyframe string could be. */
 function typesOf(value: string): Set<CssType> {
-  const parts = splitParts(value);
   const out = new Set<CssType>();
+  const parts = value.trim().split(/\s+/);
+  if (parts[0] === "" || parts.length > 3) return out;
   const nums = parts.map(parseNumber);
   const bareZero = (i: number) => nums[i] !== null && nums[i]!.value === 0 && nums[i]!.unit === "";
   if (nums.every((n) => n !== null && n.unit === "")) out.add("scale");
@@ -155,6 +150,10 @@ function lengthComponent(part: string, allowPercent: boolean, value: string): Co
   return { value: n.value, unit: n.unit };
 }
 
+/**
+ * A transform-origin keyframe as written: one component stays one (a horizontal keyword or a
+ * length), except a lone vertical keyword, which needs the x component (50%) before it.
+ */
 function parseOrigin(value: string): Component[] {
   const parts = splitParts(value);
   const lower = parts.map((p) => p.toLowerCase());
@@ -162,8 +161,8 @@ function parseOrigin(value: string): Component[] {
   if (parts.length === 1) {
     const p = lower[0];
     if (p === "top" || p === "bottom") return [{ value: 50, unit: "%" }, { value: Y_KEYWORDS[p], unit: "%" }];
-    if (p in X_KEYWORDS) return [{ value: X_KEYWORDS[p], unit: "%" }, { value: 50, unit: "%" }];
-    return [lengthComponent(parts[0], true, value), { value: 50, unit: "%" }];
+    if (p in X_KEYWORDS) return [{ value: X_KEYWORDS[p], unit: "%" }];
+    return [lengthComponent(parts[0], true, value)];
   }
   let [a, b] = [parts[0], parts[1]];
   let [la, lb] = [lower[0], lower[1]];
@@ -231,7 +230,6 @@ function cssPlan(values: readonly string[], type: CssType): NumericPlan {
   return {
     kind: "numeric",
     points,
-    scaleLike: type === "scale",
     plain: false,
     finish: (vector) => vector.map((v, j) => `${formatNumber(v)}${units[j]}`).join(" "),
   };
@@ -239,7 +237,8 @@ function cssPlan(values: readonly string[], type: CssType): NumericPlan {
 
 const FONT_WEIGHT_KEYWORDS: Record<string, number> = { normal: 400, bold: 700 };
 
-function fontWeight(value: unknown): number {
+/** A font weight as a number, or null if the value is not one. */
+function fontWeight(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
     const key = value.trim().toLowerCase();
@@ -247,31 +246,45 @@ function fontWeight(value: unknown): number {
     const n = parseNumber(key);
     if (n && n.unit === "") return n.value;
   }
-  throw misuse(`${WHERE}: ${describeValue(value)} is not a font weight; use a number such as 400, or "normal" or "bold".`);
+  return null;
+}
+
+/** Font weights: a number when every keyframe is a number, otherwise a numeric string. */
+function fontWeightPlan(values: readonly unknown[]): NumericPlan | null {
+  const weights = values.map(fontWeight);
+  if (weights.some((w) => w === null)) return null;
+  const asNumbers = values.every((v) => typeof v === "number");
+  return {
+    kind: "numeric",
+    points: weights.map((w) => [w as number]),
+    plain: false,
+    finish: (v) => (asNumbers ? v[0] : formatNumber(v[0])),
+  };
+}
+
+/** The plan for an explicit outputType, or null when the values do not fit it (then it is ignored). */
+function typedPlan(values: readonly unknown[], outputType: InterpolateOutputType): NumericPlan | null {
+  if (outputType === "font-weight") return fontWeightPlan(values);
+  if (!values.every((v) => typeof v === "string")) return null;
+  try {
+    return cssPlan(values as readonly string[], outputType);
+  } catch {
+    return null;
+  }
 }
 
 function makePlan(values: readonly unknown[], s: Settings): Plan {
-  const { outputType } = s;
-  if (outputType === "font-weight") {
-    return {
-      kind: "numeric",
-      points: values.map((v) => [fontWeight(v)]),
-      scaleLike: false,
-      plain: false,
-      finish: (v) => v[0],
-    };
+  if (s.outputType !== undefined) {
+    const typed = typedPlan(values, s.outputType);
+    if (typed) return typed;
   }
   if (values.every((v) => typeof v === "number")) {
     values.forEach((v) => {
       if (!Number.isFinite(v)) throw misuse(`${WHERE}: outputRange must hold finite numbers, but got ${String(v)}.`);
     });
-    if (outputType !== undefined && outputType !== "scale") {
-      throw misuse(`${WHERE}: outputType "${outputType}" needs strings with CSS units, such as "10px" or "45deg".`);
-    }
-    return { kind: "numeric", points: values.map((v) => [v as number]), scaleLike: true, plain: true, finish: (v) => v[0] };
+    return { kind: "numeric", points: values.map((v) => [v as number]), plain: true, finish: (v) => v[0] };
   }
   if (values.every((v) => typeof v === "boolean")) {
-    if (outputType !== undefined) throw misuse(`${WHERE}: outputType does not apply to boolean outputs.`);
     requireStep1(s, "Boolean outputs");
     return { kind: "discrete", values };
   }
@@ -284,32 +297,26 @@ function makePlan(values: readonly unknown[], s: Settings): Plan {
     if (tuples.some((t) => t.some((n) => typeof n !== "number" || !Number.isFinite(n)))) {
       throw misuse(`${WHERE}: numeric tuples must hold only finite numbers.`);
     }
-    if (outputType !== undefined) throw misuse(`${WHERE}: outputType does not apply to numeric tuples.`);
-    return {
-      kind: "numeric",
-      points: tuples.map((t) => [...(t as number[])]),
-      scaleLike: true,
-      plain: false,
-      finish: (v) => v.slice(),
-    };
+    return { kind: "numeric", points: tuples.map((t) => [...(t as number[])]), plain: false, finish: (v) => v.slice() };
   }
   if (values.every((v) => typeof v === "string")) {
     const strings = values as readonly string[];
-    if (outputType !== undefined) return cssPlan(strings, outputType);
-    if (s.easings.every((e) => e === Easing.step1)) return { kind: "discrete", values };
+    // CSS values are interpolated as CSS values, also under Easing.step1 (they then hold too).
     const type = detectCssType(strings);
-    if (type === null) {
-      throw misuse(
-        `${WHERE}: the strings ${describeValue(values)} are not CSS transform values of one kind. For strings that switch at each keyframe, pass easing: Easing.step1; for colours, use interpolateColors().`,
-      );
-    }
-    return cssPlan(strings, type);
+    if (type !== null) return cssPlan(strings, type);
+    if (s.easings.every((e) => e === Easing.step1)) return { kind: "discrete", values };
+    throw misuse(
+      `${WHERE}: the strings ${describeValue(values)} are not CSS transform values of one kind. For strings that switch at each keyframe, pass easing: Easing.step1; for colours, use interpolateColors().`,
+    );
   }
   throw misuse(`${WHERE}: outputRange must hold only numbers, only strings, only booleans, or only numeric tuples.`);
 }
 
 function singleValue(value: unknown, s: Settings): unknown {
-  if (s.outputType === "font-weight") return fontWeight(value);
+  if (s.outputType === "font-weight") {
+    const plan = fontWeightPlan([value]);
+    if (plan) return plan.finish(plan.points[0]);
+  }
   if (Array.isArray(value)) return value.slice();
   if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") return value;
   throw misuse(`${WHERE}: outputRange must hold numbers, strings, booleans or numeric tuples, but got ${describeValue(value)}.`);
@@ -318,12 +325,19 @@ function singleValue(value: unknown, s: Settings): unknown {
 const toScaleSpace = (v: number) => Math.sign(v) * v * v;
 const fromScaleSpace = (a: number) => Math.sign(a) * Math.sqrt(Math.abs(a));
 
+/** x moved into [start, start + width) by whole widths. */
+function wrapInto(x: number, start: number, width: number): number {
+  let offset = x - start - width * Math.floor((x - start) / width);
+  if (offset >= width) offset = 0;
+  return start + offset;
+}
+
 export function interpolate(
   input: number,
   inputRange: readonly number[],
   outputRange: readonly string[],
   options: InterpolateOptions & { outputType: "font-weight" },
-): number;
+): number | string;
 export function interpolate(input: number, inputRange: readonly number[], outputRange: readonly number[], options?: InterpolateOptions): number;
 export function interpolate(input: number, inputRange: readonly number[], outputRange: readonly string[], options?: InterpolateOptions): string;
 export function interpolate(input: number, inputRange: readonly number[], outputRange: readonly boolean[], options?: InterpolateOptions): boolean;
@@ -339,32 +353,33 @@ export function interpolate(input: number, inputRange: readonly number[], output
   const s = readSettings(options, xs.length - 1);
   if (xs.length === 1) return singleValue(outputRange[0], s);
   const plan = makePlan(outputRange, s);
-  if (s.perceptual && (plan.kind === "discrete" || !plan.scaleLike)) {
-    throw misuse(`${WHERE}: output: "perceptual-scale" only works with numbers, numeric tuples and scale values.`);
-  }
-  if ((s.left === "identity" || s.right === "identity") && (plan.kind === "discrete" || !plan.plain)) {
-    throw misuse(`${WHERE}: extrapolate "identity" returns the input number, so it only works with plain number outputs.`);
-  }
+  const n = xs.length;
 
   let x = posterizeInput(x0, s.posterize);
   const first = xs[0];
-  const last = xs[xs.length - 1];
+  const last = xs[n - 1];
   const side = x < first ? s.left : x > last ? s.right : null;
-  if (side === "identity") return x;
+  if (side === "identity") {
+    if (plan.kind === "discrete") {
+      throw misuse(`${WHERE}: extrapolate "identity" returns the input number, which a discrete string or boolean range cannot show.`);
+    }
+    // Every component of the result is the input itself (in its unit, for CSS values).
+    return plan.finish(new Array<number>(plan.points[0].length).fill(x));
+  }
+  let i = segmentAt(xs, x);
   if (side === "clamp") x = x < first ? first : last;
   if (side === "wrap") {
-    const span = last - first;
-    let offset = (x - first) - span * Math.floor((x - first) / span);
-    if (offset >= span) offset = 0;
-    x = first + offset;
+    // The end segment on that side repeats.
+    i = x < first ? 0 : n - 2;
+    x = wrapInto(x, xs[i], xs[i + 1] - xs[i]);
   }
 
-  const i = segmentAt(xs, x);
   const progress = (at: number, seg: number) => (at - xs[seg]) / (xs[seg + 1] - xs[seg]);
   const eased = s.easings[i](progress(x, i));
   if (plan.kind === "discrete") return plan.values[eased >= 1 ? i + 1 : i];
 
-  const points = s.perceptual ? plan.points.map((p) => p.map(toScaleSpace)) : plan.points;
+  const perceptual = s.perceptual && plan.plain;
+  const points = perceptual ? plan.points.map((p) => p.map(toScaleSpace)) : plan.points;
   const a = points[i];
   const b = points[i + 1];
   const vector = a.map((v, k) => v + eased * (b[k] - v));
@@ -375,5 +390,5 @@ export function interpolate(input: number, inputRange: readonly number[], output
     const rest = easing(progress(x, j)) - 1;
     for (let k = 0; k < vector.length; k++) vector[k] += rest * (points[j + 1][k] - points[j][k]);
   }
-  return plan.finish(s.perceptual ? vector.map(fromScaleSpace) : vector);
+  return plan.finish(perceptual ? vector.map(fromScaleSpace) : vector);
 }

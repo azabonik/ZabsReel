@@ -4,7 +4,9 @@
 // rest from `from`, with the damping ratio capped at 1 (critical damping). Overdamped settings
 // therefore behave like a critically damped spring, which settles quickly instead of creeping
 // towards the target. With this model measureSpring({fps: 30, config: {damping: 200}}) is 23, the
-// value SPEC section 7 documents.
+// value SPEC section 7 documents. The time rules below (64 ms per frame at most, stretching by a
+// whole number of frames, `to` after a stretched spring ends) follow the values the parity
+// rounds observed (NOTES.md section 5.13).
 
 import { describeValue, misuse } from "./errors";
 
@@ -40,6 +42,13 @@ export interface MeasureSpringOptions {
 /** The rest threshold used where none is given (measureSpring's documented default). */
 export const DEFAULT_REST_THRESHOLD = 0.005;
 
+/** A frame never advances the spring by more than this many seconds, however low the fps. */
+export const MAX_SECONDS_PER_FRAME = 0.064;
+
+export function secondsPerFrame(fps: number): number {
+  return Math.min(1 / fps, MAX_SECONDS_PER_FRAME);
+}
+
 export interface SpringPhysics {
   /** Natural angular frequency, rad/s. */
   omega: number;
@@ -58,16 +67,20 @@ function finiteOr(value: unknown, fallback: number, where: string, name: string)
   return value as number;
 }
 
+/** Any number is accepted; out-of-range values give whatever the formulas give (NaN, a still spring). */
+function numberOr(value: unknown, fallback: number, where: string, name: string): number {
+  if (value === undefined) return fallback;
+  check(typeof value === "number", where, `${name} must be a number, but got ${describeValue(value)}.`);
+  return value as number;
+}
+
 export function readSpringPhysics(config: unknown, where: string): SpringPhysics {
   if (config === undefined || config === null) config = {};
   check(typeof config === "object", where, "config must be an object.");
   const c = config as Partial<Record<keyof SpringConfig, unknown>>;
-  const mass = finiteOr(c.mass, 1, where, "config.mass");
-  const damping = finiteOr(c.damping, 10, where, "config.damping");
-  const stiffness = finiteOr(c.stiffness, 100, where, "config.stiffness");
-  check(mass > 0, where, "config.mass must be greater than 0.");
-  check(stiffness > 0, where, "config.stiffness must be greater than 0.");
-  check(damping >= 0, where, "config.damping must be 0 or more.");
+  const mass = numberOr(c.mass, 1, where, "config.mass");
+  const damping = numberOr(c.damping, 10, where, "config.damping");
+  const stiffness = numberOr(c.stiffness, 100, where, "config.stiffness");
   const clamping = c.overshootClamping ?? false;
   check(typeof clamping === "boolean", where, "config.overshootClamping must be true or false.");
   return {
@@ -98,16 +111,20 @@ function bisect(lo: number, hi: number, outside: (t: number) => boolean): number
 
 /**
  * The last time (seconds) at which the spring is `threshold` or more away from its target;
- * after it, the spring stays within the threshold. Infinity for an undamped spring.
+ * after it, the spring stays within the threshold. Infinity for an undamped spring, NaN when
+ * the config makes the curve undefined.
  */
 export function springSettleTime(p: SpringPhysics, threshold: number): number {
   if (threshold >= 1) return 0;
   const { omega, zeta } = p;
+  // A spring without stiffness never moves; a config that makes the curve NaN has no settle time.
+  if (omega === 0) return Infinity;
+  if (!(omega > 0) || !Number.isFinite(omega) || Number.isNaN(zeta)) return Number.NaN;
   const outside = (t: number) => Math.abs(springDisplacement(p, t)) >= threshold;
   if (zeta >= 1) {
     // The critically damped curve approaches the target monotonically.
     let hi = 1 / omega;
-    while (outside(hi)) hi *= 2;
+    while (outside(hi) && hi < 1e12) hi *= 2;
     return bisect(0, hi, outside);
   }
   if (zeta <= 0) return Infinity;
@@ -120,12 +137,15 @@ export function springSettleTime(p: SpringPhysics, threshold: number): number {
   return bisect(k * halfPeriod, (k + 1) * halfPeriod, outside);
 }
 
-/** Smallest whole frame from which every later frame is within `threshold` of the target. */
-export function settleFrame(p: SpringPhysics, fps: number, threshold: number): number {
+/**
+ * Smallest whole frame from which every later frame is within `threshold` of the target, with
+ * frames `dt` seconds apart.
+ */
+export function settleFrame(p: SpringPhysics, dt: number, threshold: number): number {
   const t = springSettleTime(p, threshold);
-  if (!Number.isFinite(t)) return Infinity;
-  let frame = Math.floor(t * fps + 1e-9);
-  while (frame >= 0 && Math.abs(springDisplacement(p, frame / fps)) <= threshold) frame--;
+  if (!Number.isFinite(t)) return t;
+  let frame = Math.floor(t / dt + 1e-9);
+  while (frame >= 0 && Math.abs(springDisplacement(p, frame * dt)) <= threshold) frame--;
   return frame + 1;
 }
 
@@ -144,7 +164,19 @@ export function measureSpring(options: MeasureSpringOptions): number {
   const fps = positive(options.fps, where, "fps");
   const threshold = options.threshold === undefined ? DEFAULT_REST_THRESHOLD : positive(options.threshold, where, "threshold");
   const physics = readSpringPhysics(options.config, where);
-  return settleFrame(physics, fps, threshold);
+  return settleFrame(physics, secondsPerFrame(fps), threshold);
+}
+
+/** The double next to `to` on the side of `from`. */
+function justShortOf(to: number, from: number): number {
+  const bits = new DataView(new ArrayBuffer(8));
+  if (to === 0) return from > 0 ? Number.MIN_VALUE : -Number.MIN_VALUE;
+  bits.setFloat64(0, to);
+  const raw = bits.getBigUint64(0);
+  // Moving towards zero decrements the magnitude bits; moving away increments them.
+  const towardZero = (from < to) === (to > 0);
+  bits.setBigUint64(0, towardZero ? raw - 1n : raw + 1n);
+  return bits.getFloat64(0);
 }
 
 export function spring(options: SpringOptions): number {
@@ -155,36 +187,40 @@ export function spring(options: SpringOptions): number {
   const fps = positive(options.fps, where, "fps");
   const from = finiteOr(options.from, 0, where, "from");
   const to = finiteOr(options.to, 1, where, "to");
-  const delay = finiteOr(options.delay, 0, where, "delay");
+  const delay = numberOr(options.delay, 0, where, "delay");
   const reverse = options.reverse ?? false;
   check(typeof reverse === "boolean", where, "reverse must be true or false.");
   const physics = readSpringPhysics(options.config, where);
+  const dt = secondsPerFrame(fps);
 
-  // Seconds of the natural curve per frame, and the curve's length in frames (for reverse).
-  let secondsPerFrame = 1 / fps;
+  // Natural frames per requested frame, and the curve's length in requested frames (for reverse).
+  let scale = 1;
   let length = 0;
+  let stretchedTo: number | null = null;
   if (options.durationInFrames !== undefined) {
-    const stretchTo = positive(options.durationInFrames, where, "durationInFrames");
-    const rest = options.durationRestThreshold ?? DEFAULT_REST_THRESHOLD;
-    check(
-      typeof rest === "number" && rest > 0 && rest < 1,
-      where,
-      `durationRestThreshold must be a number between 0 and 1, but got ${describeValue(rest)}.`,
-    );
-    const natural = springSettleTime(physics, rest);
-    check(Number.isFinite(natural), where, "this spring has no damping, so it never settles and cannot be stretched to a duration.");
-    secondsPerFrame = natural / stretchTo;
-    length = stretchTo;
+    stretchedTo = positive(options.durationInFrames, where, "durationInFrames");
+    const rest = numberOr(options.durationRestThreshold, DEFAULT_REST_THRESHOLD, where, "durationRestThreshold");
+    check(rest > 0, where, `durationRestThreshold must be greater than 0, but got ${describeValue(rest)}.`);
+    const natural = settleFrame(physics, dt, rest);
+    check(natural !== Infinity, where, "this spring has no damping, so it never settles and cannot be stretched to a duration.");
+    scale = natural / stretchedTo;
+    length = stretchedTo;
   } else if (reverse) {
-    length = settleFrame(physics, fps, DEFAULT_REST_THRESHOLD);
-    check(Number.isFinite(length), where, "this spring has no damping, so it never ends and cannot be reversed.");
+    length = settleFrame(physics, dt, DEFAULT_REST_THRESHOLD);
+    check(length !== Infinity, where, "this spring has no damping, so it never ends and cannot be reversed.");
   }
 
   // Stretch, then reverse, then delay (SPEC section 6, "Order of operations").
   let position = frame - delay;
   if (reverse) position = length - position;
-  const u = position <= 0 ? -1 : springDisplacement(physics, position * secondsPerFrame);
+  // A stretched spring is over after its duration: from then on it is exactly `to`.
+  if (stretchedTo !== null && position > stretchedTo) return to;
+  // Before the start (including a NaN delay) the spring holds its starting value.
+  const u = position > 0 ? springDisplacement(physics, position * scale * dt) : -1;
   let value = from + (to - from) * (1 + u);
-  if (physics.overshootClamping && (to >= from ? value > to : value < to)) value = to;
+  if (physics.overshootClamping && (to >= from ? value > to : value < to)) return to;
+  // An unstretched spring approaches `to` without reaching it, even when the remaining distance is
+  // below floating-point precision.
+  if (stretchedTo === null && value === to && from !== to && position > 0) value = justShortOf(to, from);
   return value;
 }

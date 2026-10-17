@@ -66,7 +66,7 @@ test("config: a smaller mass is quicker; higher damping removes the bounce", () 
   assert.ok(values.every((v) => v <= 1));
 });
 
-test("overshootClamping replaces any value beyond to with to", () => {
+test("parity r1 spring-015 (kept, decided from SPEC): overshootClamping replaces any value beyond to with to, both directions", () => {
   const values = Array.from({ length: 90 }, (_, f) => spring({ frame: f, fps, config: { overshootClamping: true } }));
   assert.ok(Math.max(...values) === 1);
   const down = Array.from({ length: 90 }, (_, f) =>
@@ -77,15 +77,85 @@ test("overshootClamping replaces any value beyond to with to", () => {
 
 test("durationInFrames stretches the curve; durationRestThreshold 0.001 covers 99.9 % by the end (documented)", () => {
   const end = spring({ frame: 30, fps, durationInFrames: 30, durationRestThreshold: 0.001, config: { damping: 200 } });
-  assert.ok(end >= 0.999 - 1e-9 && end < 1, String(end));
+  assert.ok(Math.abs(end - 1) <= 0.001, String(end));
   const half = spring({ frame: 15, fps, durationInFrames: 30, config: { damping: 200 } });
   const longHalf = spring({ frame: 15, fps, durationInFrames: 60, config: { damping: 200 } });
   assert.ok(longHalf < half, "a longer duration is slower");
   // recorded choice: the default durationRestThreshold is 0.005
   const defaultEnd = spring({ frame: 30, fps, durationInFrames: 30, config: { damping: 200 } });
-  assert.ok(Math.abs(1 - defaultEnd - 0.005) < 1e-6);
+  assert.ok(Math.abs(1 - defaultEnd) <= 0.005);
   // durationRestThreshold is ignored without durationInFrames
   assert.equal(spring({ frame: 9, fps, durationRestThreshold: 0.2 }), spring({ frame: 9, fps }));
+});
+
+const near = (a: number, b: number) =>
+  assert.ok(Math.abs(a - b) <= 1e-4 * Math.max(1, Math.abs(b)), `${a} vs ${b}`);
+
+test("parity r1 spring-022..026/041..043, recorded choice: a stretched spring scales its whole-frame settle length onto durationInFrames", () => {
+  const d30 = (frame: number, extra: Partial<Parameters<typeof spring>[0]> = {}) =>
+    spring({ frame, fps, durationInFrames: 30, ...extra });
+  near(d30(1), 0.043399);
+  near(d30(21), 0.981963);
+  near(d30(29.5), 0.995114);
+  near(d30(1, { durationRestThreshold: 0.001 }), 0.080445);
+  near(d30(20, { durationRestThreshold: 0.001 }), 0.988398);
+  near(d30(30, { durationRestThreshold: 0.001 }), 1.000448);
+  near(d30(22, { config: { overshootClamping: true } }), 0.975967);
+  near(spring({ frame: 1, fps: 60, durationInFrames: 30 }), 0.043399);
+  near(spring({ frame: 21, fps: 60, durationInFrames: 30 }), 0.981963);
+  near(spring({ frame: 1, fps, durationInFrames: 15, config: { damping: 200 } }), 0.093592);
+  near(spring({ frame: 11, fps, durationInFrames: 15, config: { damping: 200 } }), 0.97605);
+  near(spring({ frame: 1, fps, durationInFrames: 60, config: { damping: 5 } }), 0.055512);
+  near(spring({ frame: 35, fps, durationInFrames: 60, config: { damping: 5 } }), 0.979115);
+});
+
+test("parity r1 spring-022..026/041, recorded choice: after its duration a stretched spring is exactly `to`", () => {
+  assert.equal(spring({ frame: 40, fps, durationInFrames: 30 }), 1);
+  assert.equal(spring({ frame: 39, fps, durationInFrames: 30, durationRestThreshold: 0.001 }), 1);
+  assert.equal(spring({ frame: 20, fps, durationInFrames: 15, config: { damping: 200 } }), 1);
+  assert.equal(spring({ frame: 70, fps, durationInFrames: 60, config: { damping: 5 } }), 1);
+  assert.equal(spring({ frame: 31, fps, durationInFrames: 30, config: { overshootClamping: true } }), 1);
+  assert.notEqual(spring({ frame: 30, fps, durationInFrames: 30 }), 1, "at the duration itself the curve still applies");
+  assert.equal(spring({ frame: 40, fps, durationInFrames: 30, from: 5, to: -2 }), -2);
+});
+
+test("parity r1 spring-018/021: reverse and delay with a stretched spring", () => {
+  const rev = (frame: number) => spring({ frame, fps, reverse: true, durationInFrames: 30 });
+  near(rev(0), 0.996846);
+  near(rev(15), 1.10414);
+  near(rev(29), 0.043399);
+  const delayed = (frame: number) => spring({ frame, fps, delay: 10, durationInFrames: 20, reverse: true });
+  assert.equal(delayed(0), 1);
+  near(delayed(15), 0.974359);
+  near(delayed(29), 0.092121);
+});
+
+test("parity r1 spring-011/measure-025, recorded choice: a frame advances the spring by at most 64 ms", () => {
+  near(spring({ frame: 1, fps: 1 }), 0.161909);
+  near(spring({ frame: 6, fps: 1 }), 1.159616);
+  near(spring({ frame: 10, fps: 1 }), 0.985795);
+  assert.equal(measureSpring({ fps: 1, config: { damping: 200 } }), 12);
+  assert.equal(spring({ frame: 2, fps: 10 }), spring({ frame: 2, fps: 1 / 0.064 }));
+  assert.notEqual(spring({ frame: 2, fps: 20 }), spring({ frame: 2, fps: 10 }), "above 15.625 fps a frame is 1/fps");
+});
+
+test("parity r1 spring-032, recorded choice: an unstretched spring never becomes exactly `to`", () => {
+  const late = spring({ frame: 1000, fps });
+  assert.notEqual(late, 1);
+  assert.ok(Math.abs(late - 1) < 1e-15);
+  const down = spring({ frame: 1000, fps, from: 5, to: 2 });
+  assert.ok(down !== 2 && down > 2 && down - 2 < 1e-14);
+  assert.equal(spring({ frame: 1000, fps, from: 1, to: 1 }), 1, "no motion: from equals to");
+  assert.equal(spring({ frame: 1000, fps, to: 0, from: -1 }) < 0, true);
+});
+
+test("parity r1 spring-053/054/058/059/061/064, recorded choice: unusual config and options give values instead of errors", () => {
+  assert.ok(Number.isNaN(spring({ frame: 10, fps, config: { mass: 0 } })));
+  assert.equal(spring({ frame: 10, fps, config: { stiffness: 0 } }), 0);
+  assert.ok(Number.isNaN(spring({ frame: 10, fps, config: { mass: -1 } })));
+  assert.equal(spring({ frame: 10, fps, durationInFrames: 30, durationRestThreshold: 1.5 }), 0);
+  assert.equal(`${spring({ frame: 10, fps, durationInFrames: 30, durationRestThreshold: 1.5 })}`, "0");
+  assert.equal(spring({ frame: 10, fps, delay: Number.NaN }), 0);
 });
 
 test("delay: with delay 25 the output stays at the start for frames 0-24 and moves from 25 on", () => {
@@ -132,11 +202,9 @@ test("recorded choice: invalid input throws graphic_api_misuse", () => {
     { frame: Number.NaN, fps },
     { frame: 0, fps: 0 },
     { frame: 0, fps: -30 },
-    { frame: 0, fps, config: { mass: 0 } },
-    { frame: 0, fps, config: { stiffness: -1 } },
-    { frame: 0, fps, config: { damping: -1 } },
+    { frame: 0, fps, config: { mass: "1" as unknown as number } },
     { frame: 0, fps, durationInFrames: 0 },
-    { frame: 0, fps, durationInFrames: 30, durationRestThreshold: 1 },
+    { frame: 0, fps, durationInFrames: 30, durationRestThreshold: 0 },
     { frame: 0, fps, durationInFrames: 30, config: { damping: 0 } },
     { frame: 0, fps, reverse: true, config: { damping: 0 } },
     { frame: 0, fps, from: Number.NaN },

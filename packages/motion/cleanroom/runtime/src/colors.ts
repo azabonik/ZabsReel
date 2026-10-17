@@ -131,18 +131,15 @@ function multiply(m: readonly number[][], v: readonly number[]): [number, number
   return [0, 1, 2].map((i) => m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]) as [number, number, number];
 }
 
-// CSS Color 4 conversion matrices.
-const D50_TO_D65 = [
-  [0.9554734527042182, -0.023098536874261423, 0.0632593086610217],
-  [-0.028369706963208136, 1.0099954580058226, 0.021041398966943008],
-  [0.012314001688319899, -0.020507696433477912, 1.3303659366080753],
-];
+// XYZ (D65) to linear sRGB, as in CSS Color 4.
 const XYZ_D65_TO_LINEAR_SRGB = [
   [3.2409699419045226, -1.537383177570094, -0.4986107602930034],
   [-0.9692436362808796, 1.8759675015077202, 0.04155505740717559],
   [0.05563007969699366, -0.20397695888897652, 1.0569715142428786],
 ];
-const D50_WHITE = [0.3457 / 0.3585, 1, (1 - 0.3457 - 0.3585) / 0.3585];
+// lab() and lch() are read relative to the D65 white point, with no chromatic adaptation (the
+// reference library's observed conversion; CSS Color 4 itself defines Lab on D50).
+const D65_WHITE = [0.3127 / 0.329, 1, (1 - 0.3127 - 0.329) / 0.329];
 
 function labToRgb(l: number, a: number, b: number): [number, number, number] {
   const kappa = 24389 / 27;
@@ -153,8 +150,8 @@ function labToRgb(l: number, a: number, b: number): [number, number, number] {
   const x = fx ** 3 > epsilon ? fx ** 3 : (116 * fx - 16) / kappa;
   const y = l > kappa * epsilon ? fy ** 3 : l / kappa;
   const z = fz ** 3 > epsilon ? fz ** 3 : (116 * fz - 16) / kappa;
-  const d65 = multiply(D50_TO_D65, [x * D50_WHITE[0], y * D50_WHITE[1], z * D50_WHITE[2]]);
-  return multiply(XYZ_D65_TO_LINEAR_SRGB, d65).map(encodeSrgb) as [number, number, number];
+  const xyz = [x * D65_WHITE[0], y * D65_WHITE[1], z * D65_WHITE[2]];
+  return multiply(XYZ_D65_TO_LINEAR_SRGB, xyz).map(encodeSrgb) as [number, number, number];
 }
 
 function oklabToRgb(l: number, a: number, b: number): [number, number, number] {
@@ -255,13 +252,28 @@ export function parseColor(text: string): Rgba | null {
   return fromFunction(m[1], m[2]);
 }
 
-function channel(v: number): number {
-  return Math.round(Math.min(255, Math.max(0, v)));
+/** A colour as four 8-bit channels (alpha too, 0..255). */
+interface Bytes {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
 }
 
-export function formatRgba(c: Rgba): string {
-  const alpha = Math.round(Math.min(1, Math.max(0, c.a)) * 1000) / 1000;
-  return `rgba(${channel(c.r)}, ${channel(c.g)}, ${channel(c.b)}, ${alpha})`;
+/** Keyframe colours are clipped to the sRGB gamut and rounded to 8 bits before interpolating. */
+function toBytes(c: Rgba): Bytes {
+  const byte = (v: number) => Math.round(Math.min(255, Math.max(0, v)));
+  return { r: byte(c.r), g: byte(c.g), b: byte(c.b), a: byte(c.a * 255) };
+}
+
+/** The result is rounded but not clamped: an easing that overshoots can give channels outside 0..255. */
+function formatBytes(c: Bytes): string {
+  const n = (v: number) => {
+    const r = Math.round(v);
+    return String(r === 0 ? 0 : r);
+  };
+  const alpha = Math.round((c.a / 255) * 1000) / 1000;
+  return `rgba(${n(c.r)}, ${n(c.g)}, ${n(c.b)}, ${alpha === 0 ? 0 : alpha})`;
 }
 
 const WHERE = "interpolateColors()";
@@ -281,20 +293,21 @@ export function interpolateColors(
         `${WHERE}: ${describeValue(c)} is not a colour it understands. Use a CSS colour name, a hex colour, or rgb(), hsl(), hwb(), lab(), lch(), oklab() or oklch().`,
       );
     }
-    return parsed;
+    return toBytes(parsed);
   });
   if (options !== undefined && (typeof options !== "object" || options === null)) {
     throw misuse(`${WHERE}: the options must be an object.`);
   }
   const easings = readEasings(options?.easing, xs.length - 1, WHERE);
   const step = readPosterize(options?.posterize, WHERE);
-  if (xs.length === 1) return formatRgba(colors[0]);
+  if (xs.length === 1) return formatBytes(colors[0]);
   // There are no extrapolation options: inputs outside the range hold the end colours.
   const x = Math.min(xs[xs.length - 1], Math.max(xs[0], posterizeInput(x0, step)));
   const i = segmentAt(xs, x);
   const e = easings[i]((x - xs[i]) / (xs[i + 1] - xs[i]));
   const a = colors[i];
   const b = colors[i + 1];
-  const mix = (p: number, q: number) => p + e * (q - p);
-  return formatRgba({ r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b), a: mix(a.a, b.a) });
+  // A channel that is the same at both ends keeps that value, whatever the progress (even NaN).
+  const mix = (p: number, q: number) => (p === q ? p : p + e * (q - p));
+  return formatBytes({ r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b), a: mix(a.a, b.a) });
 }

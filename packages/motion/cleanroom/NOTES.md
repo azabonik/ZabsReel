@@ -156,12 +156,15 @@ Dropped (not forwarded to any element):
   `hidden`, it acts as a Sequence whose container is the fill `<div>` itself, and renders nothing
   outside its range.
 - `<AbsoluteFill>` style: the default styles, minus the ones a Tailwind class overrides, then the
-  user's `style` on top. Tailwind detection looks only at classes without a variant prefix (`md:`,
-  `hover:` and so on): `static|fixed|absolute|relative|sticky` (position); `block`, `flex`, `grid`,
-  `hidden`, `inline*`, `contents`, `table`, `flow-root`, `list-item` (display);
-  `flex-row|flex-col[-reverse]` (flexDirection); `inset-*`, `inset-x-*`, `inset-y-*`, `top-*`,
-  `right-*`, `bottom-*`, `left-*` (sides); `w-*`, `h-*`, `size-*` (size). The important marker
-  (`!x` or `x!`) and the negative dash are stripped first.
+  user's `style` on top. Tailwind detection (revised in round 1 to the reference's observed
+  behaviour): a variant prefix does not matter (`md:flex-row` counts like `flex-row`; the part after
+  the last `:` is matched); the class is otherwise matched as written, so important markers
+  (`flex-row!`, `!grid`) are not recognised; position classes (`relative`, `absolute`, ...) do not
+  drop the default position. Detected: `block`, `flex`, `grid`, `hidden`, `inline*`, `contents`,
+  `table`, `flow-root`, `list-item` (display); `flex-row|flex-col[-reverse]` (flexDirection);
+  `inset-*`, `inset-x-*`, `inset-y-*`, `top-*`, `right-*`, `bottom-*`, `left-*` (sides); `w-*`,
+  `h-*`, `size-*` (size). A leading negative-value dash (`-top-2`) is ignored; round 1 had no
+  evidence either way on that.
 - Crop props: clamped to 0..1 and applied as `clip-path: inset(...)`. Opposite crops that overlap
   meet in the middle of their overlap (an empty region). An inline `borderRadius` and the
   per-corner longhands become the inset's `round` part (missing corners are 0). They need
@@ -322,31 +325,52 @@ Dropped (not forwarded to any element):
 
 ### 5.11 interpolate()
 
-- `inputRange` must hold finite numbers and be strictly increasing; the input must be a finite
-  number. Every violated constraint (these, and the ones SPEC states) throws `graphic_api_misuse`.
-- At an interior keyframe the segment that starts there applies (progress 0).
+(Round 1 changed several of these to the reference's observed behaviour; section 9 lists the cases.)
+
+- `inputRange` must hold finite numbers and be strictly increasing; otherwise
+  `graphic_api_misuse`. The input may be any number: NaN and infinities go through the arithmetic
+  (`interpolate(NaN, ...)` is NaN; `Infinity` with a right clamp gives the last value). A
+  non-number input throws `graphic_api_misuse`.
+- At an interior keyframe the segment that ends there applies (progress 1). The first keyframe
+  starts segment 0.
 - `extend` uses the first or last segment's mapping, including its easing, with progress outside
   0..1.
-- `wrap` maps the input into `[first, last)` with a positive modulo, on either side.
-- `identity` returns the (posterized) input; it is only allowed with plain number outputs.
-- `posterize: n` uses `floor(input / n) * n` (an input within 1e-9 of a multiple counts as on it),
-  for any positive `n` and for negative inputs alike, before extrapolation.
+- `wrap` repeats the end segment on that side: left of the range the first segment, right of it the
+  last one, each wrapped with a positive modulo into `[start, end)` of that segment. (The parity
+  rows cannot tell a positive modulo from JavaScript's `%` on the left side; the positive modulo is
+  the reading of SPEC's "repeats in a loop".)
+- `identity` returns the (posterized) input as every component of the result: a number for plain
+  numbers, the input in each component's unit for CSS values (`"1.5px"`), and an array full of the
+  input for numeric tuples. For discrete strings and booleans it still throws `graphic_api_misuse`.
+- `posterize: n` is a plain `floor(input / n) * n` in floating point (so `0.3` with `n = 0.1` gives
+  `0.2`, because `0.3 / 0.1` is `2.9999999999999996`), for any positive `n` and for negative inputs
+  alike, before extrapolation.
+- Option values outside their documented sets (`extrapolateLeft`, `extrapolateRight`, `output`,
+  `outputType`) count as not given: `extend`, `linear`, no output type.
 - CSS transform strings: components separated by spaces, at most three. Detection without
   `outputType`: the first of scale, translate, rotate, transform-origin that every keyframe fits.
   Scale needs unitless numbers; translate lengths or percentages; rotate `deg|rad|grad|turn`;
   transform-origin keywords (normalized to percentages; `top left` equals `left top`), lengths and
   percentages, and a length as the third component. A length-only range is detected as translate;
   pass `outputType: "transform-origin"` for a length-only origin. A bare `0` takes the unit the
-  other keyframes use. Missing components: scale 1, translate and rotate 0, transform-origin 50%
-  (x, y) and 0 (z). Results: each number rounded to 6 decimals, then its unit, joined by single
-  spaces (`"50px 25px"`).
-- `outputType: "font-weight"`: numbers, numeric strings, `"normal"` (400) and `"bold"` (700); the
-  result is a number. Other keywords throw `graphic_api_misuse`.
-- Strings with `Easing.step1` on every segment are discrete strings and come back verbatim; other
-  strings are CSS values; strings that fit no CSS type throw `graphic_api_misuse`.
+  other keyframes use. A transform-origin keyframe keeps the number of components written (a lone
+  `left`/`center`/`right` or length is one component; a lone `top`/`bottom` becomes `50% <y>`).
+  Missing components, when keyframes differ in length: scale 1, translate and rotate 0,
+  transform-origin 50% (x, y) and 0 (z). Results: each number rounded to 6 decimals, then its unit,
+  joined by single spaces (`"50px 25px"`).
+- An `outputType` that the values do not fit is ignored: the values are then read as they would be
+  without it (`["0px", "100px"]` with `outputType: "rotate"` gives `"50px"`).
+- `outputType: "font-weight"`: numbers, numeric strings, `"normal"` (400) and `"bold"` (700). The
+  result is a number when every keyframe is a number, otherwise a numeric string (`"500"`). Other
+  keywords make the outputType not fit (then, for keyword strings, `graphic_api_misuse`).
+- Strings are read as CSS values whenever they are CSS values, also with `Easing.step1` (then they
+  hold, reformatted: `"0.50px"` gives `"0.5px"`). Strings that are not CSS values need
+  `Easing.step1` on every segment and come back verbatim (discrete strings); otherwise
+  `graphic_api_misuse`.
 - Numeric tuples return a new array of numbers.
-- `output: "perceptual-scale"` works for numbers, numeric tuples (per component) and scale strings;
-  anything else throws `graphic_api_misuse`.
+- `output: "perceptual-scale"` changes plain number outputs only (SPEC's documented mapping).
+  Numeric tuples, CSS strings (scale strings included), discrete strings and booleans interpolate as
+  without it.
 - `Easing.spring({ allowTail: true })` on a segment: when a later segment applies, the earlier
   segment's leftover motion (its easing evaluated past progress 1, minus 1, times that segment's
   output change) is added to the result. This makes the value continuous at the keyframe.
@@ -358,11 +382,20 @@ Dropped (not forwarded to any element):
   `lab()`, `lch()`, `oklab()`, `oklch()` in space syntax with an optional `/ alpha`; `none` as 0;
   hue units `deg`, `rad`, `grad`, `turn`. `currentColor` and anything else throw
   `graphic_api_misuse`.
-- Every colour is converted to sRGB (CSS Color 4 conversions; Lab and LCH use D50) and interpolated
-  per channel in non-premultiplied sRGB, alpha included.
+- Every colour is converted to sRGB (CSS Color 4 conversions for hsl, hwb, oklab, oklch).
+  `lab()` and `lch()` are read against the D65 white point with no chromatic adaptation. This
+  follows the reference library's observed values; CSS Color 4 itself defines Lab on D50, and SPEC
+  leaves the conversion open.
+- Each keyframe colour is then clipped to 0..255 per channel and rounded to 8 bits, alpha included
+  (`round(alpha * 255)`). Interpolation happens per channel on those values, non-premultiplied.
+- A channel that is equal at both ends of the segment keeps that value whatever the progress (so a
+  NaN input gives `rgba(NaN, 0, NaN, 1)` from red to blue).
 - Inputs outside the input range hold the first or last colour (there is no extrapolation).
-- Channels are clamped to 0..255 and rounded to whole numbers; alpha is clamped to 0..1 and rounded
-  to 3 decimals. Format: `rgba(r, g, b, a)` with `", "` separators.
+- `Easing.spring({ allowTail: true })` has no tail here: only `interpolate()` carries a segment's
+  leftover motion into the next segment. In `interpolateColors()` each segment uses its own easing.
+- The result's channels are rounded to whole numbers but not clamped: an easing that overshoots can
+  give values outside 0..255 (`rgba(-39, 147, 0, 1)`). Alpha is the 8-bit value divided by 255,
+  rounded to 3 decimals (`25%` gives `0.251`). Format: `rgba(r, g, b, a)` with `", "` separators.
 
 ### 5.13 spring() and measureSpring()
 
@@ -371,46 +404,68 @@ Dropped (not forwarded to any element):
   mass)` gives the same, critically damped, curve: overdamped settings cannot be told apart from
   critical damping. High-damping springs (such as `damping: 200`) therefore settle in well under a
   second. The model also reproduces SPEC 7's documented `measureSpring` example (23), which a
-  physically overdamped curve (about 318 frames) would not. Other curves are not meant to match any
-  other library numerically.
+  physically overdamped curve (about 318 frames) would not. Round 1's parity rows agree with this
+  model to within about 2e-6 (well inside the report's 1e-4) wherever they sample it (default,
+  `damping: 200`, `damping: 5`, `mass: 2, stiffness: 50`).
+- Time: a frame advances the spring by `min(1 / fps, 0.064)` seconds. Above 15.625 fps that is just
+  `1 / fps`; at lower frame rates each frame counts as 64 ms (the reference's observed values at
+  1 fps; `measureSpring({fps: 1, config: {damping: 200}})` is 12).
 - `measureSpring` returns a whole number of frames: the smallest frame from which every later frame
   is within `threshold` of the target. Distance is measured on the 0-to-1 curve, so `from` and `to`
   do not matter. An undamped spring returns `Infinity`.
 - The default of `durationRestThreshold` is 0.005 (the same as `measureSpring`'s `threshold`).
-- `durationInFrames`: the curve is stretched so that the last moment it is `durationRestThreshold`
-  (as a share of the distance) away from `to` falls exactly on `durationInFrames`. This uses the
-  continuous settle time, not `measureSpring`'s whole-frame value.
+- `durationInFrames`: the spring's whole-frame settle length `N` (`measureSpring`'s count, with
+  `durationRestThreshold` as the threshold) is scaled onto `durationInFrames`: requested frame `g`
+  shows the natural curve at frame `g * N / durationInFrames`. Frames after `durationInFrames` give
+  exactly `to`; the frame `durationInFrames` itself still shows the curve (within the threshold of
+  `to`, so it may overshoot slightly, e.g. 1.000448).
 - `reverse` without `durationInFrames` uses `measureSpring`'s length (threshold 0.005). The value at
   frame `g` (after the delay) is the curve at `length - g`, so a reversed spring starts near `to`
-  (within the threshold) and holds `from` once it is over.
-- Before its start (negative frames, or during `delay`) the spring holds its starting value: `from`,
-  or, for a reversed spring, the value at its length.
-- The value approaches `to` and is never snapped to it (except by `overshootClamping`).
+  (within the threshold) and holds `from` once it is over. A stretched, reversed spring before its
+  start (during a delay) is past its duration, so it is exactly `to`.
+- Before its start (negative frames, or during `delay`, or with a NaN `delay`) the spring holds its
+  starting value: `from`, or, for a reversed spring, the value at its length.
+- An unstretched spring approaches `to` without reaching it: when the remaining distance is below
+  floating-point precision (e.g. frame 1000), the result is the double next to `to` on the side of
+  `from`, so `spring({frame: 1000, fps: 30}) === 1` is `false`. This applies only when `from !== to`,
+  without clamping and without stretching (a stretched spring ends exactly at `to`;
+  `overshootClamping` gives exactly `to`).
 - Fractional frames are evaluated on the continuous curve.
-- Invalid input (`fps <= 0`, a non-finite `frame`, `mass <= 0`, `stiffness <= 0`, `damping < 0`,
-  `durationInFrames <= 0`, `durationRestThreshold` outside (0, 1), non-finite `from`/`to`/`delay`)
-  throws `graphic_api_misuse`, as does stretching or reversing an undamped spring.
+- `config.mass`, `config.damping`, `config.stiffness` and `durationRestThreshold` accept any number;
+  the formulas then decide: `mass: 0` or `mass: -1` gives NaN, `stiffness: 0` gives a spring that
+  never moves (`from`), `durationRestThreshold: 1.5` gives a settle length of 0 (the stretched
+  spring stays at `from` until its duration ends).
+- Still `graphic_api_misuse`: `fps <= 0`, a non-finite `frame`, non-numbers in the config,
+  `durationInFrames <= 0`, `durationRestThreshold <= 0`, non-finite `from`/`to`, and stretching or
+  reversing an undamped spring.
 
 ### 5.14 Easing
 
+The formulas below were derived from the reference's values in round 1 where SPEC gives none
+(section 9); they are written in this runtime's own code.
+
 - `ease` is `bezier(0.42, 0, 1, 1)` (the preset SPEC links).
 - `sin(t) = 1 - cos(t * pi / 2)`; `circle(t) = 1 - sqrt(1 - t^2)` with `t` clamped to 0..1;
-  `exp(t) = 2^(10 (t - 1))`, and 0 for `t <= 0`.
-- `elastic(bounciness = 1)`: `1 - (1 - t)^2 * cos((bounciness + 0.5) * pi * t)`, `t` clamped to
-  0..1. 0 never overshoots; 1 overshoots once; `N` swings past the end about `N` times. Negative
-  bounciness throws `graphic_api_misuse`.
-- `back(s = 1.5)`: `t^3 - s * t^2 * (1 - t)`, which dips about 8 % below 0 with the default.
-- `bounce`: the "in" form of a ball drop with three bounces, each keeping half the speed;
-  `Easing.out(Easing.bounce)` is the drop itself. `t` is clamped to 0..1.
+  `exp(t) = 2^(10 (t - 1))` for every `t` (so `exp(0)` is `2^-10`, about 0.000977).
+- `elastic(bounciness = 1)`: `1 - cos(pi t / 2)^3 * cos(bounciness * pi * t)`, evaluated as written
+  for every `t` and every number of bounciness (negative included). 0 never overshoots inside 0..1;
+  1 overshoots once.
+- `back(s = 1.70158)`: `t^3 - s * t^2 * (1 - t)` (the same as `t^2 ((s + 1) t - s)`).
+- `bounce`: a ball drop with three bounces, each keeping half the speed: 0 at `t = 0`, touching 1
+  at `t = 1/2.75` and between the bounces, 1 at `t = 1`. `t` is clamped to 0..1.
+  `Easing.out(Easing.bounce)` is its mirror image.
 - `in(e) = e`; `out(e)(t) = 1 - e(1 - t)`; `inOut(e)(t) = e(2t) / 2` for `t < 0.5`, else
   `1 - e(2 (1 - t)) / 2`.
 - `step0` and `step1` return 0 when their condition is false.
-- `bezier` needs `x1` and `x2` in 0..1; outside 0..1 the progress follows the curve's end tangents.
-- The polynomial, trigonometric and `back` formulas are evaluated as written for progress outside
-  0..1.
-- `Easing.spring(config)`: the spring is stretched so that it comes within `durationRestThreshold`
-  (default 0.005) of its end exactly at progress 1, so the 30-frame span and its fps cancel out.
-  Without `allowTail`, progress >= 1 gives exactly 1; with it, the spring keeps moving past 1.
+- `bezier` needs `x1` and `x2` in 0..1 (else `graphic_api_misuse`); outside 0..1 the progress holds:
+  0 before 0, 1 after 1. This includes the linear `bezier(0, 0, 1, 1)` and `ease`.
+- `poly(n)` accepts any number `n` (`poly(0)(0)` is `0 ** 0`, 1).
+- The polynomial, trigonometric, `elastic` and `back` formulas are evaluated as written for progress
+  outside 0..1.
+- `Easing.spring(config)(p)` is `spring({frame: 30 p, fps: 30, durationInFrames: 30, config})`: the
+  whole-frame settle length at 30 fps (threshold `durationRestThreshold`, default 0.005) is scaled
+  onto the 30-frame span. Progress <= 0 gives 0. Without `allowTail`, progress >= 1 gives exactly 1;
+  with it, the spring keeps moving past 1.
 
 ### 5.15 random()
 
@@ -420,7 +475,9 @@ Dropped (not forwarded to any element):
   They do not match SPEC's documented `random(1)`, which SPEC says cannot be reproduced.
 - `random(null)` returns `Math.random()`. The module object's `random` calls `host.log` once per
   host, on the first `random(null)`; `index.ts`'s `random` logs nothing (it has no host).
-- Non-finite numbers, `undefined`, booleans, objects and no argument throw `graphic_api_misuse`.
+- NaN, `Infinity` and `-Infinity` are accepted and give 0.
+- `undefined`, booleans, objects and no argument throw `graphic_api_misuse` (SPEC documents the
+  no-argument error).
 
 ### 5.16 Errors
 
@@ -438,9 +495,9 @@ Dropped (not forwarded to any element):
   suspension is not treated as a delay.
 - Updates that user code schedules after the marker commit (for example from the effect of a user
   transition that React batched with the marker) are not waited for.
-- `random()`'s numbers and `spring()`'s curves are this runtime's own and do not reproduce
-  Remotion's values (SPEC says they cannot be reproduced from the spec), except the documented
-  `measureSpring` example.
+- `random()`'s numbers are this runtime's own and do not reproduce Remotion's values (SPEC says they
+  cannot be reproduced from the spec). `spring()` matches the reference wherever round 1 sampled
+  it; between those samples it is this runtime's model.
 
 ## 8. Testing
 
@@ -457,3 +514,78 @@ Dropped (not forwarded to any element):
   the runtime imports only `react`, `react-dom` (only `createRoot` and `flushSync`) and its own
   files. `test/moduleObject.test.tsx` compiles graphic code with sucrase and runs it against the
   module object.
+- `test/parity-r1.test.ts` replays every example row of round 1's action cases
+  (`test/parity-r1.cases.ts`, generated from `feedback/feedback-r1/values.json`): rows of fixed
+  cases must match the reference within the report's tolerance; kept cases must still differ. Tests
+  named "parity r1 <case id>" check the individual changes.
+
+## 9. Parity round 1
+
+Round 1 compared this runtime with the original library, version 4.0.481, which is older than the
+documentation SPEC.md was written from. The policy applied, case by case:
+
+1. Where this runtime threw and the reference returned a value, the input is now accepted and
+   behaves like the reference, unless SPEC.md documents the error explicitly.
+2. Where both returned different values: if SPEC.md leaves the behaviour open, the reference's
+   behaviour (as its rows show) is adopted; if SPEC.md documents it and dates it after 4.0.481, this
+   runtime's behaviour is kept; if SPEC.md documents it without a date, the decision is made from
+   SPEC.md (recorded below).
+3. Informational cases (the reference throws, this runtime returns a value) need no change unless
+   SPEC.md requires the throw.
+
+A rule used for mixed cases: when a feature is dated after 4.0.481 but the specific question is one
+SPEC.md lists as unspecified (for example how `output: "perceptual-scale"` treats tuples, what
+`outputType: "font-weight"` returns, how a transform-origin value is formatted), the question counts
+as open, and the reference's behaviour is adopted. The reference shows the feature's absence there,
+which is a valid answer to the open question. The documented part of the feature is kept.
+
+### 9.1 Changed to the reference's behaviour (SPEC open)
+
+- Easing formulas: `exp`, `elastic`, `back`'s default, `bounce`, `bezier` (and `ease`) outside
+  0..1, `poly(0)`, negative `elastic` bounciness (section 5.14).
+- `Easing.spring` and stretched `spring()`: whole-frame settle length scaled onto the duration,
+  exactly `to` after a stretched spring's duration, 64 ms per frame at most, never exactly `to` for
+  an unstretched spring, unusual config values accepted (section 5.13).
+- `interpolate`: NaN and infinite inputs, the interior-keyframe segment, `wrap` on multi-segment
+  ranges, plain-floor `posterize`, `identity` with CSS strings and tuples, unknown option values,
+  `perceptual-scale` on non-numbers, an `outputType` that does not fit, `font-weight` results,
+  transform-origin component count, CSS values under `Easing.step1` (section 5.11).
+- `interpolateColors`: D65 Lab/LCH, 8-bit keyframe colours, unclamped results, equal-channel rule
+  for NaN progress, the interior-keyframe segment (section 5.12).
+- `random`: NaN and infinite seeds give 0 (section 5.15).
+- `<AbsoluteFill>` Tailwind detection (section 5.1).
+
+### 9.2 Kept: SPEC.md documents the behaviour and dates it after 4.0.481
+
+The reference lacks these, and the differences it shows come from that.
+
+- `output: "perceptual-scale"` on numbers (v4.0.490).
+- `Easing.spring`'s `allowTail` and `durationRestThreshold` (v4.0.483). The base curve now matches;
+  the tail and the custom threshold stay.
+- `trimBefore` on `<Sequence>` (v4.0.482) and on `<Series.Sequence>` (v4.0.497); `playbackRate` on
+  `<Sequence>`, `<Series>`, `<Series.Sequence>` and `<Loop>` (v4.0.528). This includes
+  `useVideoConfig().durationInFrames`, where SPEC's own worked example (90) depends on them.
+- `<AbsoluteFill>`'s timing props (v4.0.501), `hidden` included.
+- The crop props on `<Sequence>` (v4.0.500).
+
+### 9.3 Kept: SPEC.md documents the behaviour without a date (decided from SPEC.md)
+
+- `loop` on `<Sequence>`, and `Loop.useLoop()` inside a looping Sequence: SPEC 12 documents both
+  explicitly ("plays the child range ... again and again until the parent is over"; "inside a
+  looping Sequence, `Loop.useLoop()` reports the current iteration"). The 4.0.481 reference
+  behaves as if the prop did not exist (no repetition, `useLoop()` is `null`), which suggests a
+  later feature. SPEC is followed.
+- `overshootClamping` on a decreasing spring (`from > to`): SPEC 6 says "any value beyond `to` is
+  replaced by `to`". For a spring moving downwards, "beyond" is below `to` (past the target in the
+  direction of travel), so those values are clamped. The reference clamps only values above `to`.
+
+### 9.4 No change
+
+- Informational cases (color-031, color-032, color-033, color-034, color-036, color-038, color-067,
+  interp-130, interp-161, interp-169, interp-170, interp-171, interp-177, interp-178, interp-179,
+  interp-180, interp-185, interp-186, interp-191, spring-037): the reference throws where this
+  runtime returns a value. Only their ids were provided; SPEC.md documents no error that would
+  require a throw in any of the behaviours they could target.
+- Compositions the reference refused to render (`interpolate-strings`, `sequence-edge-fractional`,
+  `series-edge`): the reference throws (they use discrete strings and booleans from v4.0.509 and
+  v4.0.530, fractional timing values, and Series rates and offsets). SPEC.md requires no throw there.
