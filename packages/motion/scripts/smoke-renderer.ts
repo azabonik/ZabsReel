@@ -94,7 +94,8 @@
  *                     of order equal the same frames in order, also for a
  *                     CSS keyframe animation and an element.animate() one,
  *                     whose box is where frame / fps puts it (slice 3b2:
- *                     CSS and Web Animations on the virtual clock); delayRender
+ *                     CSS and Web Animations on the virtual clock), and a
+ *                     scroll-driven CSS animation renders (left alone); delayRender
  *                     holds the capture until continueRender; props reach a
  *                     component with no React import; a failed frame fails
  *                     the render with its code (a component's own throw:
@@ -1381,6 +1382,18 @@ export default function Slide() {
 }
 `;
 
+/** A box on a scroll-driven CSS animation (animation-timeline: scroll()): its progress does not depend on time. */
+const SCROLL_TSX = `import { AbsoluteFill } from "remotion";
+export default function Scrolled() {
+  return (
+    <AbsoluteFill>
+      <style>{"@keyframes zr-scroll { from { left: 0px; } to { left: 440px; } } .zr-scroll { animation: zr-scroll linear both; animation-timeline: scroll(root); }"}</style>
+      <div className="zr-scroll" style={{ position: "absolute", left: 0, top: 20, width: 40, height: 40, background: "rgb(30, 200, 90)" }} />
+    </AbsoluteFill>
+  );
+}
+`;
+
 const THROWS_AT_2 = `import { AbsoluteFill, useCurrentFrame } from "remotion";
 export default () => {
   if (useCurrentFrame() === 2) throw new Error("boom at two");
@@ -1401,7 +1414,9 @@ export default () => {
 // currentTime = now (no playback rate) → the rate-2 and backwards rows fail; without its
 // backwards branch → the backwards row fails; without the `currentTime = 0` that completes
 // the pause (reverse()'s pending rate unread) → the backwards and element.animate()
-// out-of-order rows fail. loader.js not waiting for the frame's promise →
+// out-of-order rows fail; without its skip of animations on another timeline → the
+// scroll-driven row fails (setting a scroll() animation's currentTime throws a TypeError).
+// loader.js not waiting for the frame's promise →
 // the delayRender row fails. loader.js reporting frameReady when the frame rejects (slice
 // 1's behaviour) → the error rows and the "frames before the failed one" row fail;
 // motion-renderer.cjs sending the page's failure as a plain "error" line → the error rows
@@ -1484,7 +1499,7 @@ async function r9(work: string) {
       const wrong = inOrder.frames.map((b, n) => {
         const inside = same(px(b, 40 * n + 20, y, SLIDE_W), box);
         const before = n === 0 || px(b, 40 * n - 4, y, SLIDE_W)[3] === 0;
-        const after = px(b, 40 * n + 44, y, SLIDE_W)[3] === 0;
+        const after = 40 * n + 44 >= SLIDE_W || px(b, 40 * n + 44, y, SLIDE_W)[3] === 0;
         return inside && before && after ? -1 : n;
       }).filter((n) => n >= 0);
       const edge = (b: Buffer) => { for (let x = 0; x < SLIDE_W; x++) if (px(b, x, y, SLIDE_W)[3] > 0) return x; return -1; };
@@ -1492,6 +1507,14 @@ async function r9(work: string) {
         `${what}${how}: at frame n the box's left edge is at 40n px, frame / fps into the animation (frames off: ${JSON.stringify(wrong)}; left edges ${JSON.stringify(inOrder.frames.map(edge))})`);
     }
     await leftNothing(shuffled, f, `${id}-out`, `${what} out of order`);
+  }
+  // An animation on a scroll() timeline is left alone: every frame renders, and they are all the same.
+  {
+    const f = fresh(work, "scroll");
+    const run = await render(f, "scroll", { graphic: { source: SCROLL_TSX }, width: SLIDE_W, height: 200, durationInFrames: 12, previewPath: undefined });
+    check(!run.error && run.frames.length === 12 && run.frames.every((b) => b.equals(run.frames[0])),
+      `a scroll-driven CSS animation (animation-timeline: scroll()) renders 12 frames, all the same (${run.error?.message ?? `${run.frames.length} frames`})`);
+    await leftNothing(run, f, "scroll", "scroll-driven animation");
   }
 
   // delayRender: the frame is captured only after continueRender.

@@ -13,10 +13,13 @@
 //   (frame / fps), set by loader.js for each frame;
 // - puts CSS animations and transitions and Web Animations on that time:
 //   loader.js calls syncAnimations() after the frame is drawn and before it is
-//   painted, which pauses every animation in document.getAnimations() and sets
+//   painted, which pauses every animation on the document timeline and sets
 //   its currentTime as if it had played from the timeline's start (time 0) at
 //   its playback rate. So frame n shows the same thing whichever frames came
 //   before it (a transition still starts from the previous frame's style).
+//   Animations on another timeline (a scroll() or view() one) are left alone:
+//   their progress does not depend on time, and their currentTime cannot be
+//   set in milliseconds.
 (function () {
   "use strict";
   var g = window;
@@ -49,10 +52,12 @@
   };
   Object.defineProperty(document.timeline, "currentTime", { get: function () { return now; } });
   var getAnimations = Document.prototype.getAnimations;
+  var timeline = document.timeline;
   function syncAnimations() {
     var all = getAnimations.call(document);
     for (var i = 0; i < all.length; i++) {
       var a = all[i];
+      if (a.timeline !== timeline) continue;
       a.pause();
       // Setting the time completes the pause at once, and with it a pending playback rate
       // (reverse(), updatePlaybackRate()), so playbackRate reads the rate it plays at.
