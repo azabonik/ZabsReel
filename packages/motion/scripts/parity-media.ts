@@ -34,9 +34,10 @@
  *  - zabsreel: renderMotion with the graphic {source, props: {}} and the
  *    fixtures as the project library describes them (probeAsset), keyed by id;
  *    rendered twice (the repeat: the same job in its own child), because its
- *    frames of library media are not always the same from one render to the
+ *    frames of library media were not always the same from one render to the
  *    next (finding ZR-MEDIA-SETTLE: a frame captured before the requested
- *    source frame is painted, blank or the previous source frame).
+ *    source frame is painted, blank or the previous source frame; fixed in
+ *    slice 4f, so a frame the two renders differ on is now a regression).
  * Both render every frame as an overlay (ProRes 4444 with alpha). Frames: the
  * header's frames, compared as parity-render.ts does (D8: pct_within_4 >= 99.5
  * and max_diff <= 32). Audio, for `audio: yes`: the reference's sound track and
@@ -125,7 +126,6 @@
  *        [--scratch=<folder>] [--require-netns] [--self-test]
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
@@ -135,7 +135,7 @@ import { fileURLToPath } from "node:url";
 import type { bundle as Bundle } from "@remotion/bundler";
 import type { renderMedia as RenderMedia } from "@remotion/renderer";
 import type { MediaAsset } from "../../core/src/types.js";
-import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, offline, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
+import { compare, decodeFrames, DRIFT, type Fixture, FIXTURES, fmt, generateFixtures, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, offline, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
 
 const SELF = fileURLToPath(import.meta.url);
 const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
@@ -144,91 +144,11 @@ const BASELINE = ["offthread-plain.tsx", "video-plain.tsx", "img-sizes.tsx"];
 /** A row whose ZabsReel frame or sound differs between two renders of the same job, one passing against the reference and one failing. */
 export const NONDET = "zabsreel nondeterministic";
 /** The finding behind NONDET, as the summary names it. */
-const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media before the requested source frame is painted, differently from one render to the next: a blank frame (the background only) or the previous source frame (the fixture's counter one lower than asked), mostly in video cases, also seen once in an Img case. Which frames and cases it hits varies from run to run (this run's: zabsreelRepeat.nondeterministic). A frame both renders capture the same wrong way is not detected by the repeat and is an ordinary mismatch row. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
+const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer captured some frames of library media before the requested source frame was painted (a blank frame, the previous source frame or part of one), differently from one render to the next, because Chromium let the page's next frame start before the last one was rastered and drawn. Fixed in slice 4f (motion-renderer.cjs's compositor switches and loader.js's wait for every image's decode; smoke-motion-settle.ts), so every frame or sound listed in zabsreelRepeat.nondeterministic is a regression of that fix. A frame both renders capture the same wrong way is not detected by the repeat and is an ordinary mismatch row.";
 
 type Pipeline = "reference" | "zabsreel";
 /** The two ZabsReel renders' verdicts against the reference, for a frame or sound they differ on. */
 type Verdict = "both pass" | "split" | "both fail";
-
-// ---- fixtures (FIXTURES.md) ---------------------------------------------------------------
-
-interface FixtureSpec {
-  id: string;
-  kind: "video" | "image" | "audio";
-  ext: string;
-  /** FIXTURES.md's numbers. */
-  width?: number;
-  height?: number;
-  fps?: number;
-  seconds?: number;
-  hasAudio: boolean;
-  channels?: number;
-  /** An image's pixel format (img_c's alpha). */
-  pixFmt?: string;
-  args: string[];
-}
-
-const BITEXACT = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact"];
-/** `exprs` once per channel, 48 kHz, `seconds` long. */
-const tone = (expr: string, channels: number, seconds: number) => `aevalsrc='${Array(channels).fill(expr).join("|")}':s=48000:d=${seconds}`;
-const SINE = (hz: number) => `0.5*sin(2*PI*${hz}*t)`;
-/** A 100 ms 1 kHz beep at every whole second. */
-const BEEP = `if(lt(mod(t,1),0.1),${SINE(1000)},0)`;
-
-function video(id: string, width: number, height: number, fps: number, seconds: number, sound?: string): FixtureSpec {
-  return {
-    id, kind: "video", ext: "mp4", width, height, fps, seconds, hasAudio: !!sound, channels: sound ? 2 : undefined,
-    args: [
-      // One testsrc picture per frame: its counter (seconds at rate 1) reads the frame number.
-      "-f", "lavfi", "-i", `testsrc=size=${width}x${height}:rate=1:duration=${fps * seconds}`,
-      ...(sound ? ["-f", "lavfi", "-i", tone(sound, 2, seconds)] : []),
-      "-vf", `settb=1/${fps},setpts=N,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`, "-r", String(fps),
-      "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-g", String(fps), "-bf", "0", "-threads", "1",
-      "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
-      ...(sound ? ["-c:a", "aac", "-b:a", "192k"] : []), "-movflags", "+faststart",
-    ],
-  };
-}
-
-function image(id: string, ext: "png" | "jpg", width: number, height: number, pixFmt: string, vf: string, codec: string[]): FixtureSpec {
-  return { id, kind: "image", ext, width, height, hasAudio: false, pixFmt, args: ["-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1:duration=1`, "-vf", vf, "-frames:v", "1", ...codec] };
-}
-
-function audio(id: string, expr: string, channels: number, seconds: number): FixtureSpec {
-  return { id, kind: "audio", ext: "wav", seconds, hasAudio: true, channels, args: ["-f", "lavfi", "-i", tone(expr, channels, seconds), "-c:a", "pcm_s16le"] };
-}
-
-const RING = "if(lt(hypot(X-256,Y-256),180),255,if(lt(hypot(X-256,Y-256),230),128,0))";
-export const FIXTURES: FixtureSpec[] = [
-  video("vid_a", 1920, 1080, 30, 6, SINE(440)),
-  video("vid_b", 1280, 720, 25, 4),
-  video("vid_c", 640, 360, 60, 3),
-  image("img_a", "png", 800, 600, "rgb24", "format=rgb24", ["-c:v", "png"]),
-  image("img_b", "jpg", 1920, 1080, "yuvj420p", "format=yuvj420p", ["-c:v", "mjpeg", "-q:v", "2"]),
-  image("img_c", "png", 512, 512, "rgba", `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${RING}'`, ["-c:v", "png"]),
-  audio("aud_a", BEEP, 2, 8),
-  audio("aud_b", SINE(220), 1, 2.5),
-];
-
-export interface Fixture {
-  id: string;
-  ext: string;
-  file: string;
-  sha256: string;
-  bytes: number;
-}
-
-/** Generate every fixture into `dir` with the FFmpeg on PATH; returns each file with its sha256. */
-export function generateFixtures(dir: string): Fixture[] {
-  mkdirSync(dir, { recursive: true });
-  return FIXTURES.map((f) => {
-    const file = join(dir, `${f.id}.${f.ext}`);
-    const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...f.args, ...BITEXACT, file], { encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`FFmpeg could not make ${f.id}: ${r.stderr.trim()}`);
-    const bytes = readFileSync(file);
-    return { id: f.id, ext: f.ext, file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
-  });
-}
 
 /** The project library's record of each fixture (probeAsset, as an import does), keyed by id. */
 async function libraryOf(fixtures: Fixture[]): Promise<Record<string, MediaAsset>> {
@@ -852,15 +772,12 @@ function beeps(onsets: number[], level: number, seconds = 2, right = 1): Pcm {
   return pcm;
 }
 
-// Frame 0 is not compared: ZabsReel's renderer does not always paint a library video's frame
-// before it is captured (finding ZR-MEDIA-SETTLE, SETTLE above; at frame 0 the video is missing,
-// seen here on one side only). S4 needs the same frames on both sides; the full run finds
-// such frames from the repeat instead.
+// Frame 0 too: it was the frame ZR-MEDIA-SETTLE (SETTLE above) hit most, the video missing.
 const SELF_TSX = [
   "// size: 320x180",
   "// fps: 30",
   "// durationInFrames: 45",
-  "// frames: 1, 10, 20, 31, 44",
+  "// frames: 0, 1, 10, 20, 31, 44",
   "// audio: yes",
   "// spec: self-test",
   "// why: library video, an image with alpha and beeps at 0 s and 1 s",

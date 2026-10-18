@@ -1,11 +1,13 @@
 /**
  * What the two parity harnesses share (parity-render.ts, non-media, and
  * parity-media.ts, library media and audio): the composition header, D8's
- * frame comparison, FFmpeg frame decoding, the child process that renders one
- * side in fresh folders, and the private network namespace. A dev tool, not
- * shipped. Importing it starts nothing.
+ * frame comparison, FFmpeg frame decoding, the media fixtures (also
+ * smoke-motion-settle.ts's), the child process that renders one side in fresh
+ * folders, and the private network namespace. A dev tool, not shipped.
+ * Importing it starts nothing.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { networkInterfaces } from "node:os";
@@ -128,6 +130,86 @@ export function writePng(file: string, rgba: Buffer, w: number, h: number): void
   mkdirSync(dirname(file), { recursive: true });
   const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${w}x${h}`, "-i", "pipe:0", "-frames:v", "1", file], { input: rgba });
   if (r.status !== 0) throw new Error(`FFmpeg could not write ${file}: ${String(r.stderr).trim()}`);
+}
+
+// ---- fixtures (FIXTURES.md) ---------------------------------------------------------------
+
+export interface FixtureSpec {
+  id: string;
+  kind: "video" | "image" | "audio";
+  ext: string;
+  /** FIXTURES.md's numbers. */
+  width?: number;
+  height?: number;
+  fps?: number;
+  seconds?: number;
+  hasAudio: boolean;
+  channels?: number;
+  /** An image's pixel format (img_c's alpha). */
+  pixFmt?: string;
+  args: string[];
+}
+
+const BITEXACT = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact"];
+/** `exprs` once per channel, 48 kHz, `seconds` long. */
+const tone = (expr: string, channels: number, seconds: number) => `aevalsrc='${Array(channels).fill(expr).join("|")}':s=48000:d=${seconds}`;
+const SINE = (hz: number) => `0.5*sin(2*PI*${hz}*t)`;
+/** A 100 ms 1 kHz beep at every whole second. */
+const BEEP = `if(lt(mod(t,1),0.1),${SINE(1000)},0)`;
+
+function video(id: string, width: number, height: number, fps: number, seconds: number, sound?: string): FixtureSpec {
+  return {
+    id, kind: "video", ext: "mp4", width, height, fps, seconds, hasAudio: !!sound, channels: sound ? 2 : undefined,
+    args: [
+      // One testsrc picture per frame: its counter (seconds at rate 1) reads the frame number.
+      "-f", "lavfi", "-i", `testsrc=size=${width}x${height}:rate=1:duration=${fps * seconds}`,
+      ...(sound ? ["-f", "lavfi", "-i", tone(sound, 2, seconds)] : []),
+      "-vf", `settb=1/${fps},setpts=N,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`, "-r", String(fps),
+      "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-g", String(fps), "-bf", "0", "-threads", "1",
+      "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+      ...(sound ? ["-c:a", "aac", "-b:a", "192k"] : []), "-movflags", "+faststart",
+    ],
+  };
+}
+
+function image(id: string, ext: "png" | "jpg", width: number, height: number, pixFmt: string, vf: string, codec: string[]): FixtureSpec {
+  return { id, kind: "image", ext, width, height, hasAudio: false, pixFmt, args: ["-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1:duration=1`, "-vf", vf, "-frames:v", "1", ...codec] };
+}
+
+function audio(id: string, expr: string, channels: number, seconds: number): FixtureSpec {
+  return { id, kind: "audio", ext: "wav", seconds, hasAudio: true, channels, args: ["-f", "lavfi", "-i", tone(expr, channels, seconds), "-c:a", "pcm_s16le"] };
+}
+
+const RING = "if(lt(hypot(X-256,Y-256),180),255,if(lt(hypot(X-256,Y-256),230),128,0))";
+export const FIXTURES: FixtureSpec[] = [
+  video("vid_a", 1920, 1080, 30, 6, SINE(440)),
+  video("vid_b", 1280, 720, 25, 4),
+  video("vid_c", 640, 360, 60, 3),
+  image("img_a", "png", 800, 600, "rgb24", "format=rgb24", ["-c:v", "png"]),
+  image("img_b", "jpg", 1920, 1080, "yuvj420p", "format=yuvj420p", ["-c:v", "mjpeg", "-q:v", "2"]),
+  image("img_c", "png", 512, 512, "rgba", `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${RING}'`, ["-c:v", "png"]),
+  audio("aud_a", BEEP, 2, 8),
+  audio("aud_b", SINE(220), 1, 2.5),
+];
+
+export interface Fixture {
+  id: string;
+  ext: string;
+  file: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** Generate every fixture into `dir` with the FFmpeg on PATH; returns each file with its sha256. */
+export function generateFixtures(dir: string): Fixture[] {
+  mkdirSync(dir, { recursive: true });
+  return FIXTURES.map((f) => {
+    const file = join(dir, `${f.id}.${f.ext}`);
+    const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...f.args, ...BITEXACT, file], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`FFmpeg could not make ${f.id}: ${r.stderr.trim()}`);
+    const bytes = readFileSync(file);
+    return { id: f.id, ext: f.ext, file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+  });
 }
 
 // ---- one side, in a child process -------------------------------------------------------

@@ -94,6 +94,16 @@ app.setPath("temp", path.join(scratch, "tmp"));
 if (process.platform === "darwin") app.dock?.hide();
 // Software compositing: capturePage then returns the frame just drawn (slice 1 measured the GPU path returning stale frames).
 app.disableHardwareAcceleration();
+// The captured frame is the frame the page drew (finding ZR-MEDIA-SETTLE, smoke-motion-settle.ts):
+// the page's next frame, so loader.js's second animation frame, starts only once the last
+// commit is active; a frame is drawn only once every stage of it is done, its tiles rastered;
+// and a tile is rastered whole, never only its changed part. Without these, under load, a new
+// library bitmap could still be rastering when the main captured (the previous source frame, part
+// of one, or nothing), and seams of partly rastered tiles varied from render to render. loader.js
+// also waits for every image's decode.
+app.commandLine.appendSwitch("disable-main-frame-before-activation");
+app.commandLine.appendSwitch("run-all-compositor-stages-before-draw");
+app.commandLine.appendSwitch("disable-partial-raster");
 app.commandLine.appendSwitch("mute-audio");
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 // chromeguard.ts's switches: no host name resolves, and no ambient sign-in (both spellings).
