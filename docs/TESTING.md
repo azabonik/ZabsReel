@@ -20,7 +20,7 @@ Plus how to test the **packaged installer** offline.
 
 | Need | Check | Install |
 |---|---|---|
-| Node.js ≥ 22.12 (motion graphics need 22.15 or later, for `module.registerHooks`) | `node --version` | https://nodejs.org |
+| Node.js ≥ 22.12 (the Remotion add-on path needs 22.15 or later, for `module.registerHooks`) | `node --version` | https://nodejs.org |
 | FFmpeg + ffprobe on PATH (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 — see [FFmpeg versions](#ffmpeg-versions)) | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | (AI testing) Claude Desktop | — | https://claude.ai/download |
 

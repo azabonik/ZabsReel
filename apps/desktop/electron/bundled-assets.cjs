@@ -11,10 +11,11 @@
 // In DEV (not packaged) this is a no-op: we keep relying on a PATH ffmpeg and the
 // engine's own ~/.aive download-on-first-use path.
 //
-// Hybrid bundling: everything here is local from the first run. Motion graphics
-// are the exception: they need the graphics add-on (Remotion and its headless
-// shell), which no installer holds; the user installs it from Help → Graphics
-// add-on (graphics-addon.cjs) into the data folder.
+// Hybrid bundling: everything here is local from the first run, motion graphics
+// too (ZabsReel's own renderer ships in the app). The only part not bundled is
+// the optional Remotion add-on (Remotion and its headless shell), which no
+// installer holds; the user installs it from Help → Graphics add-on
+// (graphics-addon.cjs) into the data folder.
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");

@@ -39,6 +39,7 @@ exception" paragraph of CONTRIBUTING.md, which this repository keeps
 unchanged).
 
 Remotion itself is licensed under its own terms, not under the GPL. ZabsReel
-does not include Remotion: its motion graphics load a copy of Remotion that the
-user installs as the graphics add-on (Help → Graphics add-on), under Remotion's
-own terms. See THIRD_PARTY_LICENSES.md.
+does not include Remotion: motion graphics render with ZabsReel's own renderer,
+which contains no Remotion code, or, if the user chooses the Remotion add-on,
+with a copy of Remotion that the user installs (Help → Graphics add-on), under
+Remotion's own terms. See THIRD_PARTY_LICENSES.md.

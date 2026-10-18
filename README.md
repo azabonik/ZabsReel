@@ -277,7 +277,7 @@ There is **no packaged installer for macOS or Linux yet** — the current releas
 
 ```bash
 # 1. Prerequisites
-#    • Node.js >= 22.12; motion graphics need 22.15 or later
+#    • Node.js >= 22.12 (the optional Remotion add-on path needs 22.15 or later)
 #                           (https://nodejs.org  — or `brew install node`)
 #    • Git
 #    • FFmpeg + ffprobe on your PATH, a tested version (4.4, 6.1, 7.1, 8.0, 8.1 or 9.0 —

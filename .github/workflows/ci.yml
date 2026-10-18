@@ -284,6 +284,15 @@ jobs:
       - name: Install FFmpeg
         run: choco install ffmpeg -y --no-progress
 
+      # choco puts shims on PATH that start the real ffmpeg.exe as their child;
+      # the core gets the real binaries, so R10's process row watches them.
+      - name: Point the core at the real FFmpeg (not choco's shims)
+        run: |
+          $exe = Get-ChildItem C:\ProgramData\chocolatey\lib\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "no ffmpeg.exe under C:\ProgramData\chocolatey\lib\ffmpeg" }
+          Add-Content -Path $env:GITHUB_ENV -Value "AIVE_FFMPEG=$($exe.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "AIVE_FFPROBE=$(Join-Path $exe.DirectoryName 'ffprobe.exe')"
+
       - name: Install dependencies
         run: npm ci
 

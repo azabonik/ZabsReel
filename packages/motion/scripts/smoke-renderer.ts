@@ -1258,7 +1258,9 @@ async function r10(work: string) {
   const winEnv = process.platform === "win32"
     ? { SystemRoot: process.env.SystemRoot, windir: process.env.windir, PATHEXT: process.env.PATHEXT, COMSPEC: process.env.COMSPEC, TEMP: tmp, TMP: tmp }
     : {};
-  const child = spawn(exe, [script, pathToFileURL(packedCore + sep).href, f.data, job, framesOut], { env: { ...f.env, ...winEnv }, stdio: ["ignore", "pipe", "pipe"] });
+  // The core's FFmpeg overrides, when set (CI's Windows job points them past choco's shims, so the processes row watches the real FFmpeg).
+  const ffmpegEnv = Object.fromEntries((["AIVE_FFMPEG", "AIVE_FFPROBE"] as const).filter((k) => process.env[k]).map((k) => [k, process.env[k]]));
+  const child = spawn(exe, [script, pathToFileURL(packedCore + sep).href, f.data, job, framesOut], { env: { ...f.env, ...winEnv, ...ffmpegEnv }, stdio: ["ignore", "pipe", "pipe"] });
   const watch = LINUX ? watchTree(child.pid!) : null;
   type PackedResult = LaunchResult & { error: { code: string | null; message: string } | null; media: MediaStats | null; routes: { media: number; font: number }; pids: number[]; spawned: string[] };
   const got: { out: PackedResult | null } = { out: null };

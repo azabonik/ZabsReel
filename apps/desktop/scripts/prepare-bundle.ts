@@ -2,16 +2,17 @@
  * Stage the heavy local binaries/models the editor needs into
  * `apps/desktop/build/resources/aive/`, so electron-builder can ship them as
  * `extraResources` and the packaged app runs **fully offline on first launch**
- * for everything except motion graphics.
+ * (motion graphics too: ZabsReel's own renderer ships in the app).
  *
  * Bundling strategy = HYBRID (see docs/PROJECT_STATUS.md §5 / the Phase-5 plan):
  *   bundled here  → FFmpeg + ffprobe, whisper-cli (+ DLLs) + base.en model,
  *                   YuNet + RVM ONNX, an OSS font (Noto Sans, OFL-1.1).
- *   NOT bundled   → Larger whisper models (they download on demand). Motion
- *                   graphics need the graphics add-on (Remotion and its
- *                   headless shell), which the user installs from Help →
- *                   Graphics add-on; no installer holds it (the afterPack
- *                   gate, scripts/check-no-remotion.mjs).
+ *   NOT bundled   → Larger whisper models (they download on demand), and the
+ *                   optional Remotion add-on (Remotion and its headless
+ *                   shell), which the user installs from Help → Graphics
+ *                   add-on; no installer holds it (the afterPack gate,
+ *                   scripts/check-no-remotion.mjs). ZabsReel's own motion
+ *                   renderer ships in the app.
  *
  * The packaged app points the engine's env overrides (AIVE_FFMPEG / AIVE_FFPROBE
  * / AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL / AIVE_YUNET_MODEL / AIVE_RVM_MODEL / AIVE_FONT) at
