@@ -96,7 +96,7 @@ export interface ResolvedMusic {
  * Decompose a speed multiplier into a chain of `atempo` factors, since a single
  * atempo only accepts 0.5..2.0. e.g. speed 4 -> [2,2]; speed 0.25 -> [0.5,0.5].
  */
-function atempoFactors(speed: number): number[] {
+export function atempoFactors(speed: number): number[] {
   const factors: number[] = [];
   let s = speed;
   while (s > 2.0 + 1e-9) {

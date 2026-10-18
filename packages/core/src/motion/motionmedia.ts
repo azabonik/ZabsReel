@@ -397,6 +397,11 @@ export class MotionMedia {
     }
   }
 
+  /** The asset behind `handle` (the audio mix's lookup, motionaudio.ts), or undefined. */
+  source(handle: string): { id: string; asset: MotionAsset; info: PageAsset } | undefined {
+    return this.byHandle.get(handle);
+  }
+
   /** Stop every decode and font read. */
   async close(): Promise<void> {
     this.abort.abort();

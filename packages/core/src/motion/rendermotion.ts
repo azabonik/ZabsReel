@@ -5,6 +5,7 @@ import { PRODUCT_NAME } from "../brand.js";
 import { adaptFfmpegArgs, FfmpegError, ffmpegStderrDetail, runTool, spawnFfmpegStream } from "../ffmpeg/executor.js";
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "../io/gatedfs.js";
 import { graphicModule, type GraphicStart } from "./graphicmodule.js";
+import { AUDIO_CAPS, GraphicAudio, mixGraphicAudio, mixLimitMs, type AudioCaps, type AudioStats } from "./motionaudio.js";
 import { GRAPHIC_CODES, MotionRenderError, type GraphicCode } from "./motionerror.js";
 import { MEDIA_CAPS, MotionMedia, parseMediaRequest, requireOnline, type MediaCaps, type MediaReply, type MediaStats, type MotionAsset } from "./motionmedia.js";
 import { graphicPreviewProxy, tagGraphicColor } from "./render.js";
@@ -20,7 +21,10 @@ import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
  * checked, before the renderer starts (graphicmodule.ts); the page runs it on
  * the clean-room runtime (MOTION-PLAN D5). The graphic's library media and
  * fonts reach the page only as the core's answers to its requests, on fd 4
- * (motionmedia.ts; MOTION-PLAN D4).
+ * (motionmedia.ts; MOTION-PLAN D4). Its sound comes back as cues with each
+ * frame; once the video is encoded the core mixes them (motionaudio.ts; D4
+ * E3): into a standalone card's .mp4, or for an overlay into a .wav of its
+ * own that the caller places as a linked audio clip.
  *
  * Everything a render writes stays in its motion/<id> folder (workDir) until
  * the whole render has succeeded; only then are the files moved into baked/,
@@ -57,6 +61,8 @@ export interface MotionLimits {
   frameMs: number;
   /** The whole render: 120 s + 1 s per frame. */
   totalMs: number;
+  /** The audio mix (and a standalone card's mux): 60 s + 2 x the graphic's length. */
+  mixMs: number;
 }
 
 /** The largest props a graphic takes: their JSON text in UTF-8 (D5). */
@@ -88,6 +94,12 @@ export interface RenderMotionOptions {
   /** Overlay only: the .webm preview proxy in baked/ (best-effort, as today). */
   previewPath?: string;
   /**
+   * Overlay only: where its sound goes in baked/ when it has any (a 48 kHz
+   * stereo .wav). Default: outPath's name with "-audio.wav" for its
+   * extension (baked/<id>-graphic-audio.wav for baked/<id>-graphic.mov).
+   */
+  audioPath?: string;
+  /**
    * The graphic's assets: asset id -> the core's own record (a library
    * MediaAsset, or a font file). The page learns each one's kind and sizes
    * under a random per-render handle, never its path or name, and the core
@@ -111,8 +123,9 @@ export interface RenderMotionOptions {
    */
   binary?: RendererBinary;
   limits?: Partial<MotionLimits>;
-  /** Tests: D4's media caps (motionmedia.ts MEDIA_CAPS), and the media counters when the render ends, failed or not. */
+  /** Tests: D4's media caps (motionmedia.ts MEDIA_CAPS) and audio caps (motionaudio.ts AUDIO_CAPS), and the media counters when the render ends, failed or not. */
   caps?: Partial<MediaCaps>;
+  audioCaps?: Partial<AudioCaps>;
   onMedia?: (stats: MediaStats) => void;
   heapMb?: number;
   entries?: Record<string, string>;
@@ -137,6 +150,10 @@ export interface RenderMotionResult {
   framesMs: number;
   /** What its media requests did. */
   media: MediaStats;
+  /** Overlay only: its sound in baked/, when it has any (a standalone card's is in outPath). */
+  audioPath?: string;
+  /** What its audio cues did. */
+  audio: AudioStats;
 }
 
 /** The renderer's environment for a render in `scratch` (see {@link RENDERER_ENV}). */
@@ -243,7 +260,7 @@ function checkOptions(o: RenderMotionOptions): void {
 
 /** The renderer's limits for `o` (D2): 30 s per frame, 120 s + 1 s per frame in all. */
 function limitsOf(o: RenderMotionOptions): MotionLimits {
-  return { frameMs: 30_000, totalMs: 120_000 + 1000 * o.durationInFrames, ...o.limits };
+  return { frameMs: 30_000, totalMs: 120_000 + 1000 * o.durationInFrames, mixMs: mixLimitMs(o.durationInFrames, o.fps), ...o.limits };
 }
 
 /**
@@ -275,15 +292,44 @@ async function pageModule(o: RenderMotionOptions, limits: MotionLimits, assets: 
 export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotionResult> {
   checkOptions(o);
   const limits = limitsOf(o);
-  const media = new MotionMedia(o.assets ?? {}, { width: o.width, height: o.height, caps: { ...MEDIA_CAPS, ...o.caps }, requireMedia: o.requireMedia ?? requireOnline });
+  const requireMedia = o.requireMedia ?? requireOnline;
+  const media = new MotionMedia(o.assets ?? {}, { width: o.width, height: o.height, caps: { ...MEDIA_CAPS, ...o.caps }, requireMedia });
+  const audio = new GraphicAudio((handle) => media.source(handle), { fps: o.fps, caps: { ...AUDIO_CAPS, ...o.audioCaps }, requireMedia });
   const module = await pageModule(o, limits, media.page);
   const encoded = join(o.workDir, o.alpha ? "out.mov" : "out.mp4");
   const preview = join(o.workDir, "graphic.webm");
+  const audioPath = o.audioPath ?? `${o.outPath.replace(/\.[^./\\]*$/, "")}-audio.wav`;
   try {
     await mkdir(join(o.workDir, "tmp"), { recursive: true });
     await writeFile(join(o.workDir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
-    const framesMs = await renderFrames(o, encoded, module, limits, media);
+    const framesMs = await renderFrames(o, encoded, module, limits, media, audio);
     if (!o.alpha) await tagGraphicColor(encoded, o.signal);
+    // The sound (D4 E3): mixed inside workDir; a standalone card's goes into its .mp4, an overlay's stays a .wav.
+    const ranges = audio.ranges();
+    let video = encoded;
+    let wav: string | undefined;
+    if (ranges.length > 0) {
+      const mixed = join(o.workDir, "graphic-audio.wav");
+      const muxed = join(o.workDir, "out-mux.mp4");
+      try {
+        await mixGraphicAudio({
+          ranges,
+          pathOf: (handle) => media.source(handle)!.asset.path,
+          fps: o.fps,
+          durationInFrames: o.durationInFrames,
+          wav: mixed,
+          mux: o.alpha ? undefined : { video: encoded, out: muxed },
+          workDir: o.workDir,
+          limitMs: limits.mixMs,
+          signal: o.signal,
+        });
+      } catch (err) {
+        if (o.signal?.aborted) throw canceled();
+        throw err;
+      }
+      if (o.alpha) wav = mixed;
+      else video = muxed;
+    }
     let previewMade = false;
     if (o.alpha && o.previewPath) {
       try {
@@ -294,8 +340,12 @@ export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotion
       }
     }
     if (o.signal?.aborted) throw canceled();
-    await moveAll([[encoded, o.outPath], ...(previewMade && o.previewPath ? [[preview, o.previewPath] as const] : [])]);
-    return { outPath: o.outPath, previewPath: previewMade ? o.previewPath : undefined, framesMs, media: { ...media.stats } };
+    await moveAll([
+      [video, o.outPath],
+      ...(wav ? [[wav, audioPath] as const] : []),
+      ...(previewMade && o.previewPath ? [[preview, o.previewPath] as const] : []),
+    ]);
+    return { outPath: o.outPath, previewPath: previewMade ? o.previewPath : undefined, audioPath: wav ? audioPath : undefined, framesMs, media: { ...media.stats }, audio: { ...audio.stats } };
   } finally {
     await media.close();
     o.onMedia?.({ ...media.stats });
@@ -413,8 +463,12 @@ function writeReply(out: Writable, id: number, reply: MediaReply): void {
   if (reply.body.length > 0) out.write(reply.body);
 }
 
-/** The renderer and FFmpeg for one render: frames 0..N-1 (or `o.frames`) into `encoded`. Returns the milliseconds the frames took. */
-async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits, media: MotionMedia): Promise<number> {
+/**
+ * The renderer and FFmpeg for one render: frames 0..N-1 (or `o.frames`) into
+ * `encoded`, each frame's audio cues into `audio`. Returns the milliseconds
+ * the frames took.
+ */
+async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits, media: MotionMedia, audio: GraphicAudio): Promise<number> {
   const bin = o.binary ?? rendererBinary();
   if (!bin.ok) throw new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (${bin.reason}: ${bin.detail}).`);
   const order = o.frames ?? Array.from({ length: o.durationInFrames }, (_, n) => n);
@@ -490,7 +544,14 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
       }
       o.onMessage?.(msg);
       if (msg.type === "ready") ready = true;
-      else if (msg.type === "frame" && msg.n === order[done]) done++;
+      else if (msg.type === "frame" && msg.n === order[done]) {
+        try {
+          audio.add(msg.n, msg.cues);
+          done++;
+        } catch (err) {
+          failWith(err as Error);
+        }
+      }
       else if (msg.type === "frame-error") failWith(pageFailure(msg));
       else if (msg.type === "media") answer(msg);
       else if (msg.type === "error") reported = msg;

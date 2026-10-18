@@ -206,5 +206,16 @@ jobs:
           command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends strace)
           npx tsx packages/motion/scripts/smoke-motion-media.ts
 
+      # The motion renderer's sound (MOTION-PLAN D4 E3, D-SPLIT): the cue
+      # merge and its caps, a card's mix at the right times, rates and volumes
+      # (measured from the files, never played), an overlay's .wav as one
+      # linked audio clip in the export and an audioOnly render, the split
+      # rule, and every failure (the mix's limit, a failed move, an offline
+      # file) leaving baked/ as it was. Fixtures are made with lavfi.
+      - name: Smoke — motion renderer audio (Electron offscreen, no network)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          npx tsx packages/motion/scripts/smoke-motion-audio.ts
+
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts

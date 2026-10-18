@@ -438,6 +438,14 @@ export interface GraphicOverlay {
   code?: string;
   /** Props passed to the component when it was rendered. */
   props?: Record<string, unknown>;
+  /**
+   * The graphic's own sound (ZabsReel's motion renderer, MOTION-PLAN D4 E3):
+   * the id of the one audio clip that plays it, over the graphic's window and
+   * linked to this clip. It follows the graphic: removing the graphic removes
+   * it, set_graphic_window moves and trims it, and a split of this clip trims
+   * it to end with the piece that keeps the graphic (engine.ts splitClip).
+   */
+  audioClipId?: string;
 }
 
 /** A motion graphic resolved for rendering (asset path + placement window in seconds). */

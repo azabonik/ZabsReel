@@ -37,6 +37,7 @@ export type MotionErrorCode =
   | "graphic_compile_error"
   | "graphic_media_decodes_cap"
   | "graphic_decode_timeout"
+  | "graphic_mix_timeout"
   | GraphicCode;
 
 /** A render that ended without a result; `code` is what add_graphic reports. */
