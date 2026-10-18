@@ -8,7 +8,10 @@
  *  D1. settle — the worst cases of the media parity set (video-plain,
  *               offthread-endat, offthread-60fps, offthread-style,
  *               img-transparency; packages/motion/parity/media/compositions,
- *               as they are), each rendered RENDERS times at once, every
+ *               as they are), and offthread-rate-half, whose source
+ *               positions fall between and on the halves of source frames
+ *               (so the source-frame rounding counts), each rendered
+ *               RENDERS times at once, every
  *               frame of it. Rendering them at once is the point: the late
  *               frames came under load (the parity harness renders three
  *               pipelines at once), never in a lone render. Every frame:
@@ -101,6 +104,8 @@ const SETTLE_CASES: Case[] = [
   { file: "video-plain.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => nearest("vid_a", n), background: () => hex("#1b2836") }] },
   // endAt 75: source frame n on frames 0..74, the background from 75.
   { file: "offthread-endat.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => (n < 75 ? nearest("vid_a", n) : hex("#2b1b36")), background: () => hex("#2b1b36") }] },
+  // playbackRate 0.5: source position n/2, so every odd frame is a tie and goes up (frame 59 shows source frame 30; NOTES.md 5.5 lists the reference's 29 there as an outlier).
+  { file: "offthread-rate-half.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => nearest("vid_a", n * 0.5), background: () => hex("#1b3628") }] },
   // vid_c (640x360, 60 fps) at the canvas's own shape: source frame 2n, its last (179) once it ends at frame 90.
   { file: "offthread-60fps.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "scale=1920:1080:flags=bilinear", asset: "vid_c", at: (n) => nearest("vid_c", n), background: () => hex("#1b2836") }] },
   {
