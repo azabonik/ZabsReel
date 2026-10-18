@@ -63,6 +63,23 @@
  *  M8. measure   — a 60 s, 30 fps graphic with one full-canvas 1920x1080
  *                  library video: 1,800 decodes from one FFmpeg process,
  *                  within the caps (its time is printed).
+ *  M9. hardening — records of real files whose numbers are no sane ones (fps
+ *                  NaN, 0 or over 1000; a duration under one frame, so frame
+ *                  count 0; a frame count that is no number; a duration NaN;
+ *                  a size not whole; an image or audio file with no size or
+ *                  duration) are left out of the table, while 1000 fps and
+ *                  one frame are kept; a graphic that uses the fps-NaN, the
+ *                  frame-count-0 or the 1001 fps record fails with
+ *                  graphic_asset_unknown and starts no decode. The search for
+ *                  a video's real end (a request past it) counts each of its
+ *                  decodes toward the decode cap: a 0.1 fps video and a
+ *                  1,000,000 s record of a 4 s file answer their last frame
+ *                  with as many decodes as FFmpeg processes, and with a lower
+ *                  cap end graphic_media_decodes_cap; a record that claims
+ *                  2^33 s ends graphic_media_failed after 16 search passes;
+ *                  a close that comes as a pass starts lets no later pass
+ *                  start (graphic_render_canceled). Each leaves no renderer,
+ *                  no FFmpeg and nothing in baked/.
  *
  * Linux only (it reads /proc and runs Linux's Electron). Needs `npm run
  * build` (dist/zr-runtime.js), FFmpeg and strace (M5, M6). Ports: none.
@@ -77,7 +94,7 @@ import { fileURLToPath } from "node:url";
 import { FFMPEG_BIN } from "../../core/src/ffmpeg/executor.js";
 import { probeAsset } from "../../core/src/ffmpeg/ffprobe.js";
 import type { GraphicStart } from "../../core/src/motion/graphicmodule.js";
-import { MEDIA_CAPS, type MediaStats, type MotionAsset } from "../../core/src/motion/motionmedia.js";
+import { MAX_ASSET_FPS, MEDIA_CAPS, MotionMedia, requireOnline, SEARCH_PASSES, type MediaStats, type MotionAsset } from "../../core/src/motion/motionmedia.js";
 import { renderMotion, type RendererMessage, type RenderMotionOptions } from "../../core/src/motion/rendermotion.js";
 import type { MediaAsset } from "../../core/src/types.js";
 import { check, failureCount, fresh, gone, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
@@ -90,6 +107,10 @@ const EVIL = "zr-evil";
 const touched: string[] = [];
 /** The commands the core started: [file, ...args]. */
 const spawned: string[][] = [];
+/** The PIDs of the FFmpeg processes the core started. */
+const ffmpegPids: number[] = [];
+/** When set, runs as each media decode (an FFmpeg writing PNGs to its stdout) is about to start. */
+let beforeDecode: (() => void) | null = null;
 /** When set, each FFmpeg the core starts runs under strace, logging to `${tracePrefix}.<n>`. */
 let tracePrefix: string | null = null;
 let traced = 0;
@@ -109,7 +130,12 @@ let traced = 0;
   const realSpawn = cp.spawn;
   cp.spawn = (file, args = [], opts = {}) => {
     spawned.push([file, ...args]);
-    if (!tracePrefix || file !== FFMPEG_BIN) return realSpawn(file, args, opts);
+    if (file === FFMPEG_BIN && args.includes("image2pipe")) beforeDecode?.();
+    if (!tracePrefix || file !== FFMPEG_BIN) {
+      const child = realSpawn(file, args, opts);
+      if (file === FFMPEG_BIN && child.pid) ffmpegPids.push(child.pid);
+      return child;
+    }
     // In its own process group: a kill reaches strace and FFmpeg (strace 5.16 has no --kill-on-exit).
     const child = realSpawn("strace", ["-f", "-qq", "-e", "trace=%file,%network", "-o", `${tracePrefix}.${++traced}`, file, ...args], { ...opts, detached: true });
     const kill = child.kill.bind(child);
@@ -743,6 +769,112 @@ async function m8(work: string, fx: Fixtures) {
   await leftNothing(run, f, "measure", "measure");
 }
 
+// ---- M9: hardening -------------------------------------------------------------------
+
+/** The media decodes the core has started (FFmpeg writing PNGs to its stdout). */
+const decodesStarted = () => spawned.filter((a) => a[0] === FFMPEG_BIN && a.includes("image2pipe")).length;
+
+async function m9(work: string, _fx: Fixtures, lib: Record<string, MediaAsset>) {
+  console.log("M9. asset records checked, the frame-count search bounded...");
+  const f = fresh(work, "hardening");
+  const audio = { ...lib.small, hasVideo: false, hasAudio: true, isImage: undefined };
+  // Records of real files with numbers no probe of a real file gives (forged or misread): none reaches the page.
+  const refused: Record<string, MotionAsset> = {
+    fpsNaN: { ...lib.small, fps: NaN },
+    fpsZero: { ...lib.small, fps: 0 },
+    fpsHigh: { ...lib.small, fps: MAX_ASSET_FPS + 1 },
+    // 0.01 s at 30 fps is no whole frame: frame count 0.
+    noFrame: { ...lib.small, duration: 0.01 },
+    // Its duration at its fps is Infinity.
+    endless: { ...lib.small, duration: Number.MAX_VALUE },
+    durNaN: { ...lib.small, duration: NaN },
+    halfPixel: { ...lib.small, width: 160.5 },
+    imgNaN: { ...lib.big, height: NaN },
+    audNaN: { ...audio, duration: NaN },
+    audInf: { ...audio, duration: Infinity },
+  };
+  const kept: Record<string, MotionAsset> = { fpsMax: { ...lib.small, fps: MAX_ASSET_FPS }, oneFrame: { ...lib.small, duration: 1 / 30 } };
+  const table = await render(f, "records", { page: handPage(`log("ASSETS", Object.keys(A));`), width: 64, height: 32, assets: { ...refused, ...kept } });
+  const ta = table.start?.assets ?? {};
+  check(!table.error && same(Object.keys(ta), Object.keys(kept)) && same(logged(table, "ASSETS")[0], Object.keys(kept)),
+    `records with fps NaN, 0 or ${MAX_ASSET_FPS + 1}, frame count 0 or no number, duration NaN, a size not whole, an image with no height and audio of NaN or Infinity seconds are left out of the table (${table.error?.message ?? JSON.stringify(Object.keys(ta))})`);
+  check(ta.fpsMax?.fps === MAX_ASSET_FPS && ta.oneFrame?.frameCount === 1, `a video at ${MAX_ASSET_FPS} fps and one of one frame are kept (${JSON.stringify([ta.fpsMax, ta.oneFrame])})`);
+  await leftNothing(table, f, "records", "asset records");
+  for (const id of ["fpsNaN", "noFrame", "fpsHigh"]) {
+    const d0 = decodesStarted();
+    const run = await render(f, `refused-${id}`, { graphic: { source: VIDEO_TSX(id) }, width: 160, height: 90, assets: refused });
+    failedWith(run, "graphic_asset_unknown", `a graphic that uses the record ${id}`, new RegExp(id));
+    check(decodesStarted() === d0 && run.ms < 30_000, `the record ${id}: no decode started, and the render ended in ${run.ms} ms`);
+    await leftNothing(run, f, `refused-${id}`, `the record ${id}`);
+  }
+
+  // A request past a video's real end searches for it (realFrames): each of the search's decodes counts toward the cap.
+  const past = (id: string, asset: MediaAsset, t: number, caps?: RenderMotionOptions["caps"]) =>
+    render(f, id, { page: handPage(`log("SIZE", await load(media(A.v, "t=${t}&w=160&h=90"), true));`), width: 160, height: 90, assets: { v: asset }, caps });
+  /** After a render: no FFmpeg the core started since `p0` is left. */
+  const noFfmpeg = async (p0: number, what: string) => {
+    const left = await gone(ffmpegPids.slice(p0), 2000);
+    check(ffmpegPids.length > p0 && left.length === 0, `${what}: no FFmpeg process left (${ffmpegPids.length - p0} started, left ${JSON.stringify(left)})`);
+  };
+  // The real 0.1 fps video (4 frames, 60 s of audio), frame 5: the first decode, 2 search passes, the last frame's decode.
+  const slowT = Math.round(lib.slow.duration * lib.slow.fps) - 1;
+  let p0 = ffmpegPids.length;
+  const slow = await past("slow-search", lib.slow, slowT);
+  check(!slow.error && same(logged(slow, "SIZE")[0], { w: 160, h: 90 }) && slow.media?.decodes === 4 && slow.media.spawns === 4,
+    `frame ${slowT} of the 0.1 fps video with 4 frames: its last frame, 4 decodes counted for 4 FFmpeg processes (${slow.error?.message ?? JSON.stringify(slow.media)})`);
+  await leftNothing(slow, f, "slow-search", "0.1 fps search");
+  await noFfmpeg(p0, "0.1 fps search");
+  p0 = ffmpegPids.length;
+  const slowCap = await past("slow-cap", lib.slow, slowT, { decodes: 3 });
+  failedWith(slowCap, "graphic_media_decodes_cap", "the 0.1 fps video's search with a cap of 3 decodes");
+  check(slowCap.media?.spawns === 3, `the search stopped at the cap: 3 FFmpeg processes (${JSON.stringify(slowCap.media)})`);
+  await leftNothing(slowCap, f, "slow-cap", "0.1 fps search at the cap");
+  await noFfmpeg(p0, "0.1 fps search at the cap");
+
+  // The 4 s file under a record of 1,000,000 s at 1 fps: 11 passes (2 s ... 2 * 4^10 s back) reach frame 0.
+  const long = { ...lib.small, fps: 1, duration: 1e6 };
+  p0 = ffmpegPids.length;
+  const longRun = await past("long-search", long, 999_999);
+  check(!longRun.error && same(logged(longRun, "SIZE")[0], { w: 160, h: 90 }) && longRun.media?.decodes === 13 && longRun.media.spawns === 13,
+    `frame 999999 of a 1,000,000 s record of a 4 s file: its last frame, 13 decodes counted (the first, 11 search passes, the last frame's) for 13 FFmpeg processes (${longRun.error?.message ?? JSON.stringify(longRun.media)})`);
+  await leftNothing(longRun, f, "long-search", "long search");
+  await noFfmpeg(p0, "long search");
+  p0 = ffmpegPids.length;
+  const longCap = await past("long-cap", long, 999_999, { decodes: 5 });
+  failedWith(longCap, "graphic_media_decodes_cap", "the long search with a cap of 5 decodes");
+  check(longCap.media?.spawns === 5, `the long search stopped at the cap: 5 FFmpeg processes (${JSON.stringify(longCap.media)})`);
+  await leftNothing(longCap, f, "long-cap", "long search at the cap");
+  await noFfmpeg(p0, "long search at the cap");
+  // 2^33 s at 1 fps: 16 passes reach 2 * 4^15 s back, not frame 0; the search ends there.
+  p0 = ffmpegPids.length;
+  const huge = await past("huge-search", { ...lib.small, fps: 1, duration: 2 ** 33 }, 2 ** 33 - 1);
+  failedWith(huge, "graphic_media_failed", "a record of 2^33 s of a 4 s file", /ends long before/);
+  check(huge.media?.decodes === 1 + SEARCH_PASSES && huge.media.spawns === 1 + SEARCH_PASSES, `it stopped after ${SEARCH_PASSES} search passes: ${1 + SEARCH_PASSES} decodes counted for as many FFmpeg processes (${JSON.stringify(huge.media)})`);
+  await leftNothing(huge, f, "huge-search", "pass cap");
+  await noFfmpeg(p0, "pass cap");
+
+  // A close (the render ends) as the search's 3rd pass starts its decode: no pass after it starts one.
+  const mm = new MotionMedia({ v: long }, { width: 160, height: 90, caps: { ...MEDIA_CAPS }, requireMedia: requireOnline });
+  const d0 = decodesStarted();
+  p0 = ffmpegPids.length;
+  let closed: Promise<void> | undefined;
+  beforeDecode = () => {
+    if (decodesStarted() - d0 === 4) closed = mm.close();
+  };
+  let err: (Error & { code?: string }) | undefined;
+  try {
+    await mm.answer({ id: 1, route: "media", handle: mm.page.v.handle, t: 999_999, w: 160, h: 90, frame: 0 });
+  } catch (e) {
+    err = e as typeof err;
+  } finally {
+    beforeDecode = null;
+  }
+  await closed;
+  check(!!closed && err?.code === "graphic_render_canceled" && decodesStarted() - d0 === 4,
+    `a close as the 3rd search pass starts: graphic_render_canceled, and no decode after it (${err ? `${err.code}: ${err.message}` : "it answered"}; ${decodesStarted() - d0} decodes started)`);
+  await noFfmpeg(p0, "close during the search");
+}
+
 // ---- main ----------------------------------------------------------------------------
 
 let summarized = false;
@@ -753,7 +885,7 @@ async function main() {
   const only = args.find((a) => a.startsWith("--only="))?.slice(7).split(",");
   const part = (name: string) => !only || only.includes(name);
   if (!LINUX) {
-    console.log("  skip M1-M8: they read /proc and run Linux's Electron");
+    console.log("  skip M1-M9: they read /proc and run Linux's Electron");
   } else {
     const work = mkdtempSync(join(tmpdir(), "zr-motion-media-"));
     try {
@@ -768,6 +900,7 @@ async function main() {
       if (part("M6")) await m6(work, fx, lib);
       if (part("M7")) await m7(work, fx);
       if (part("M8")) await m8(work, fx);
+      if (part("M9")) await m9(work, fx, lib);
     } finally {
       rmSync(work, { recursive: true, force: true, maxRetries: 5 });
     }

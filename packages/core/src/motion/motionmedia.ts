@@ -17,7 +17,8 @@ import { MotionRenderError } from "./motionerror.js";
  * (asset id -> MediaAsset, or a font file). The page gets each usable asset
  * under a random per-render handle with its kind and sizes only (the
  * runtime's AssetInfo); its path and name stay here. An asset of no kind the
- * runtime knows (no video or audio stream, sizes missing) is left out, so the
+ * runtime knows (no video or audio stream, sizes missing), or whose sizes,
+ * frame rate or duration are no sane numbers (validAsset), is left out, so the
  * page reports it as graphic_asset_unknown.
  *
  * The page asks for zrmotion://media/<handle>?t=&w=&h= (a video's source
@@ -110,7 +111,7 @@ export interface MediaReply {
 /** What a render's media did. */
 export interface MediaStats {
   requests: number;
-  /** Requests FFmpeg answered (LRU misses). */
+  /** FFmpeg decodes counted toward caps.decodes: each LRU miss, and each decode of a video's frame-count search (realFrames). */
   decodes: number;
   lruHits: number;
   lruBytes: number;
@@ -128,6 +129,11 @@ export interface MediaStats {
 
 const NOT_FOUND: MediaReply = { status: 404, body: Buffer.alloc(0) };
 
+/** A video's frame rate is above 0 and at most this (a probe's rate past it is no real one). */
+export const MAX_ASSET_FPS = 1000;
+/** Decodes of one frame-count search (realFrames): the 16th starts 2 * 4^15 s (68 years) before the frame. */
+export const SEARCH_PASSES = 16;
+
 /** A request line's fields, checked, or null. */
 export function parseMediaRequest(msg: Record<string, unknown>): MediaRequest | null {
   const num = (v: unknown) => v === undefined || (typeof v === "number" && Number.isFinite(v));
@@ -138,20 +144,34 @@ export function parseMediaRequest(msg: Record<string, unknown>): MediaRequest | 
   return { id: id as number, route, handle, t: t as number | undefined, w: w as number | undefined, h: h as number | undefined, frame: frame as number };
 }
 
-/** The page's view of `a` under `handle`, or null when the runtime has no kind for it. */
+/** The page's view of `a` under `handle`, or null when the runtime has no kind for it or its record fails validAsset. */
 function pageAsset(a: MotionAsset, handle: string): PageAsset | null {
   if ("kind" in a) return a.kind === "font" ? { handle, kind: "font" } : null;
-  const pos = (v: number) => Number.isFinite(v) && v > 0;
-  const sized = Number.isInteger(a.width) && Number.isInteger(a.height) && a.width > 0 && a.height > 0;
-  if (a.hasVideo && a.isImage) return sized ? { handle, kind: "image", width: a.width, height: a.height } : null;
-  if (a.hasVideo) {
-    if (!sized || !pos(a.fps) || !pos(a.duration)) return null;
+  let info: PageAsset | null = null;
+  if (a.hasVideo && a.isImage) info = { handle, kind: "image", width: a.width, height: a.height };
+  else if (a.hasVideo) {
     // A MediaAsset has no frame count: its duration at its frame rate. The video stream can end sooner (its audio
     // runs longer); a decode that reaches its end tells the real count (Entry.frames), and later frames answer the last.
-    const frameCount = Math.max(1, Math.round(a.duration * a.fps));
-    return { handle, kind: "video", width: a.width, height: a.height, durationSeconds: a.duration, fps: a.fps, frameCount, hasAudio: a.hasAudio };
-  }
-  return a.hasAudio && pos(a.duration) ? { handle, kind: "audio", durationSeconds: a.duration } : null;
+    const frameCount = Math.round(a.duration * a.fps);
+    info = { handle, kind: "video", width: a.width, height: a.height, durationSeconds: a.duration, fps: a.fps, frameCount, hasAudio: a.hasAudio };
+  } else if (a.hasAudio) info = { handle, kind: "audio", durationSeconds: a.duration };
+  return info && validAsset(info) ? info : null;
+}
+
+/**
+ * The record holds the runtime's host guarantees with sane numbers (the
+ * probe's are not checked): sizes are whole pixels, a video's frame rate
+ * above 0 and at most MAX_ASSET_FPS, its frame count a whole number of at
+ * least 1, every duration above 0. The decodes' seek times and the frame
+ * count search (realFrames) rest on these.
+ */
+function validAsset(info: PageAsset): boolean {
+  const pos = (v: number | undefined) => typeof v === "number" && Number.isFinite(v) && v > 0;
+  const pixels = (v: number | undefined) => Number.isSafeInteger(v) && (v as number) > 0;
+  if (info.kind === "audio") return pos(info.durationSeconds);
+  if (!pixels(info.width) || !pixels(info.height)) return false;
+  if (info.kind === "image") return true;
+  return pos(info.fps) && (info.fps as number) <= MAX_ASSET_FPS && pos(info.durationSeconds) && pixels(info.frameCount);
 }
 
 /** G4's default: an offline asset (missing, on a server not allowed, a folder not checked) is refused with media_offline. */
@@ -467,13 +487,7 @@ export class MotionMedia {
       this.stats.lruHits++;
       return { status: 200, body: hit };
     }
-    if (this.stats.decodes >= caps.decodes) {
-      throw new MotionRenderError(
-        "graphic_media_decodes_cap",
-        `The graphic needed more than ${caps.decodes.toLocaleString("en-US")} video frames and images decoded. Make it shorter, or show fewer different frames (a frame shown again is not decoded again).`,
-      );
-    }
-    this.stats.decodes++;
+    this.countDecode();
     // A constant frame rate output would repeat or drop pictures after a seek: the decode's frames go out as the fps filter gives them.
     if (!this.passthrough.length) {
       const v = await ffmpegVersion().catch((err: Error) => {
@@ -490,6 +504,18 @@ export class MotionMedia {
     }
     this.remember(key, png);
     return { status: 200, body: png };
+  }
+
+  /** One more FFmpeg decode toward caps.decodes; past it, graphic_media_decodes_cap. */
+  private countDecode(): void {
+    const { decodes } = this.o.caps;
+    if (this.stats.decodes >= decodes) {
+      throw new MotionRenderError(
+        "graphic_media_decodes_cap",
+        `The graphic needed more than ${decodes.toLocaleString("en-US")} video frames and images decoded. Make it shorter, or show fewer different frames (a frame shown again is not decoded again).`,
+      );
+    }
+    this.stats.decodes++;
   }
 
   /** Wait for one of caps.concurrent decode slots; a freed slot passes straight to the first waiter. */
@@ -520,7 +546,7 @@ export class MotionMedia {
   }
 
   private spawn(e: Entry, from: number, box: { w: number; h: number }): Decoder {
-    if (this.abort.signal.aborted) throw new MotionRenderError("graphic_render_canceled", "Motion-graphic render canceled");
+    this.canceled();
     this.room();
     const a = e.asset as MediaAsset;
     const color = resolveSourceColor(a.color, a.height, a.videoCodec);
@@ -562,7 +588,10 @@ export class MotionMedia {
       // Seeked past the video's end (its container runs longer, for example its audio): answer its real last frame.
       if (!image && past && t > 0 && (await s.clean())) {
         const frames = await this.realFrames(e, t, reach);
-        if (frames) return await this.decode(e, frames - 1, box, false);
+        if (frames) {
+          this.countDecode();
+          return await this.decode(e, frames - 1, box, false);
+        }
       }
       const why = await s.failure();
       throw new MotionRenderError(
@@ -604,17 +633,32 @@ export class MotionMedia {
   /**
    * The real frame count of a video with no frame t: decodes at 1x1 (cheap)
    * from further back each time (2 s, 8 s, 32 s ... before t, then from 0)
-   * until one reaches the end. Null when none gives a picture.
+   * until one reaches the end. Null when none gives a picture. Each pass is
+   * a decode toward caps.decodes and first checks that the render goes on;
+   * after SEARCH_PASSES passes that did not reach frame 0 the video is
+   * graphic_media_failed.
    */
   private async realFrames(e: Entry, t: number, reach: number): Promise<number | null> {
     // At least one frame back: a video under 0.25 fps reaches 0 frames in 2 s.
-    for (let back = Math.max(1, reach); ; back *= 4) {
+    let back = Math.max(1, reach);
+    for (let pass = 0; pass < SEARCH_PASSES; pass++, back *= 4) {
+      this.canceled();
+      this.countDecode();
       const from = Math.max(0, t - back);
       const s = this.stream(e, from, { w: 1, h: 1 }, reach);
       await this.read(e, s, t);
       if (s.ended) return s.next;
       if (s.last || from === 0 || !(await s.clean())) return null;
     }
+    throw new MotionRenderError(
+      "graphic_media_failed",
+      `Frame ${t} of the video "${e.id}" could not be read: its file ends long before the ${e.info.frameCount} frames the project library gives it. Check the asset in the project library (import it again), or use another one.`,
+    );
+  }
+
+  /** The render ended (close): no new decode starts. */
+  private canceled(): void {
+    if (this.abort.signal.aborted) throw new MotionRenderError("graphic_render_canceled", "Motion-graphic render canceled");
   }
 
   /** Keep `png` for `key`; past caps.lruBytes the least recently used answers go (no error). */
