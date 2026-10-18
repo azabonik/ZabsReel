@@ -1,0 +1,959 @@
+/**
+ * Media parity: library video, images and audio (MOTION-PLAN D8 "Media" and
+ * "Audio"; decisions.md MEDIA PARITY BATCH and its REFERENCE-SIDE NOTE, PARITY
+ * POLICY, R-PARITY-SCHEMA). A dev tool, not shipped.
+ *
+ * Fixtures. The media batch's compositions name the assets of FIXTURES.md by
+ * id (asset("vid_a")). Each run generates them with FFmpeg's own sources (no
+ * download, no font lookup) into its scratch folder and records their sha256:
+ *  - videos: testsrc stepped one picture per frame, so its own counter shows
+ *    the frame number and its gradient bar moves every frame (one frame off
+ *    fails D8 on about 13 % of the pixels); H.264 yuv420p, BT.709 tagged,
+ *    limited range, one keyframe per second and no B-frames, one encoder
+ *    thread (x264 output depends on the thread count); vid_a has a constant
+ *    stereo 440 Hz tone (AAC);
+ *  - images: testsrc2 (img_a PNG, img_b JPEG; img_c PNG with alpha 255 inside
+ *    a circle, 128 in a ring around it and 0 outside);
+ *  - audio (WAV, 48 kHz, sample-exact): aud_a a 100 ms 1 kHz beep at every
+ *    whole second (stereo, 8 s), aud_b a mono 220 Hz tone (2.5 s);
+ *  levels 0.5 (peak) throughout.
+ *
+ * Each composition (header as parity-render.ts's, plus `// audio: yes|no`)
+ * is rendered through both pipelines, each in its own child process with fresh
+ * HOME/USERPROFILE/XDG_CONFIG_HOME/AIVE_DATA_DIR/TMPDIR folders and no sound
+ * device:
+ *  - reference: Remotion 4.0.481 of this checkout called directly (its
+ *    bundler and renderer, public API only), NOT ZabsReel's guarded add-on
+ *    path, which refuses library media. The scaffold is the add-on path's
+ *    (Root and entry), with a public folder holding the fixtures and the
+ *    source rewritten on this side only: asset("<id>") becomes
+ *    staticFile("<id>.<ext>") and the import names staticFile instead of
+ *    asset. Its browser is the pinned headless shell (never a download),
+ *    started through a wrapper that adds --mute-audio; its server takes a
+ *    port in 5030-5039; the render keeps its sound (not Remotion's muted).
+ *  - zabsreel: renderMotion with the graphic {source, props: {}} and the
+ *    fixtures as the project library describes them (probeAsset), keyed by id.
+ * Both render every frame as an overlay (ProRes 4444 with alpha). Frames: the
+ * header's frames, compared as parity-render.ts does (D8: pct_within_4 >= 99.5
+ * and max_diff <= 32). Audio, for `audio: yes`: the reference's sound track and
+ * ZabsReel's overlay .wav (no file or no track is silence), decoded by the same
+ * FFmpeg to 48 kHz stereo floats over the composition's length, then:
+ *  - rms_db_max_diff: the largest difference, over 20 ms windows and both
+ *    channels, of the windows' RMS level in dBFS, each clamped at -40 dBFS
+ *    (below it both sides count as silence); windows at and next to a start
+ *    or end of sound on either side are left out, so a sub-window timing
+ *    difference is measured once, by the second metric, and not again as a
+ *    level jump;
+ *  - onset_ms_max_diff: each start and end of sound (a sample above 0.01,
+ *    -40 dBFS, after / before at least 20 ms below it, both channels), paired
+ *    in order; a different count is a mismatch of its own ("edges a:b").
+ *  The rule, AUDIO: rms_db_max_diff <= 1 dB and onset_ms_max_diff <= 5 ms.
+ *  Why: 1 dB is about the smallest level difference a listener notices, so a
+ *  volume or curve difference that can be heard fails while codec and
+ *  resampling noise (well under 0.1 dB on these steady tones) passes; 5 ms is
+ *  under a third of a frame at 60 fps (16.7 ms) and a sixth at 30 fps, so a
+ *  whole-frame timing difference always fails, while encoder delays the
+ *  decoders remove and resampler delays (under 1 ms) pass.
+ *
+ * Writes to --out: render-all.jsonl / render-mismatches.jsonl (frame rows) and
+ * audio-all.jsonl / audio-mismatches.jsonl (one audio row per composition and
+ * size), each row exactly {case, function, size, input, metric, expected,
+ * actual, spec, why} (R-PARITY-SCHEMA: never the reference's error text; a
+ * composition the reference fails to render is "reference refused (drift
+ * candidate)" in its frame and audio rows); images/<case>/<size>/ with the two
+ * decoded frames and a heatmap of each failing frame, and audio.json with both
+ * sides' window levels and edges (for the orchestrator only); render-summary.json
+ * with every metric, the fixtures (sha256 and probe), the media baseline
+ * (offthread-plain, video-plain, img-sizes: plain mapping and sizing, so their
+ * numbers show how far the two decodes of the same pictures differ), timing,
+ * the error texts and the versions.
+ *
+ * Exit: 0 every frame and audio row passes; 2 a pipeline could not render a
+ * composition (named on stderr; the other rows are still written); 3 every
+ * composition rendered and some rows fail; 1 the harness itself failed.
+ *
+ * --self-test (to --out): the run is offline (only loopback); referenceSource
+ * rewrites; compareAudio() on known signals; the fixtures are generated twice
+ * with equal sha256 and probe as FIXTURES.md lists them (img_c with alpha), with every frame
+ * distinct from its neighbours and the beeps where they belong; no sound file
+ * or no sound track is silence; a self-test
+ * composition (video, image, beeps) rendered through ZabsReel on both sides
+ * passes with 100/0 frames and 0/0 audio; with a brighter background and half
+ * the volume on the second side only, every frame and the audio row fail, each
+ * side's image shows its own background and each side's level is its own; the
+ * same composition through the real reference has the beeps where they belong,
+ * and its browser ran with --mute-audio; one only the reference side refuses is
+ * exactly "reference refused (drift candidate)" in every row.
+ *
+ * Linux only; the whole run re-executes itself in a private network namespace
+ * (loopback only). Needs `npm run build` (dist/zr-runtime.js) and FFmpeg with
+ * libx264.
+ * Run: npx tsx packages/motion/scripts/parity-media.ts --out=<folder>
+ *        [--cases=<folder of .tsx>] [--only=offthread-plain.tsx,audio-two.tsx]
+ *        [--scratch=<folder>] [--require-netns] [--self-test]
+ */
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { createRequire } from "node:module";
+import { networkInterfaces, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { bundle as Bundle } from "@remotion/bundler";
+import type { renderMedia as RenderMedia } from "@remotion/renderer";
+import type { MediaAsset } from "../../core/src/types.js";
+import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
+
+const SELF = fileURLToPath(import.meta.url);
+const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
+/** Cases of plain mapping and sizing, reported apart as the media baseline. */
+const BASELINE = ["offthread-plain.tsx", "video-plain.tsx", "img-sizes.tsx"];
+
+type Pipeline = "reference" | "zabsreel";
+
+// ---- fixtures (FIXTURES.md) ---------------------------------------------------------------
+
+interface FixtureSpec {
+  id: string;
+  kind: "video" | "image" | "audio";
+  ext: string;
+  /** FIXTURES.md's numbers. */
+  width?: number;
+  height?: number;
+  fps?: number;
+  seconds?: number;
+  hasAudio: boolean;
+  channels?: number;
+  /** An image's pixel format (img_c's alpha). */
+  pixFmt?: string;
+  args: string[];
+}
+
+const BITEXACT = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact"];
+/** `exprs` once per channel, 48 kHz, `seconds` long. */
+const tone = (expr: string, channels: number, seconds: number) => `aevalsrc='${Array(channels).fill(expr).join("|")}':s=48000:d=${seconds}`;
+const SINE = (hz: number) => `0.5*sin(2*PI*${hz}*t)`;
+/** A 100 ms 1 kHz beep at every whole second. */
+const BEEP = `if(lt(mod(t,1),0.1),${SINE(1000)},0)`;
+
+function video(id: string, width: number, height: number, fps: number, seconds: number, sound?: string): FixtureSpec {
+  return {
+    id, kind: "video", ext: "mp4", width, height, fps, seconds, hasAudio: !!sound, channels: sound ? 2 : undefined,
+    args: [
+      // One testsrc picture per frame: its counter (seconds at rate 1) reads the frame number.
+      "-f", "lavfi", "-i", `testsrc=size=${width}x${height}:rate=1:duration=${fps * seconds}`,
+      ...(sound ? ["-f", "lavfi", "-i", tone(sound, 2, seconds)] : []),
+      "-vf", `settb=1/${fps},setpts=N,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`, "-r", String(fps),
+      "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-g", String(fps), "-bf", "0", "-threads", "1",
+      "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+      ...(sound ? ["-c:a", "aac", "-b:a", "192k"] : []), "-movflags", "+faststart",
+    ],
+  };
+}
+
+function image(id: string, ext: "png" | "jpg", width: number, height: number, pixFmt: string, vf: string, codec: string[]): FixtureSpec {
+  return { id, kind: "image", ext, width, height, hasAudio: false, pixFmt, args: ["-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1:duration=1`, "-vf", vf, "-frames:v", "1", ...codec] };
+}
+
+function audio(id: string, expr: string, channels: number, seconds: number): FixtureSpec {
+  return { id, kind: "audio", ext: "wav", seconds, hasAudio: true, channels, args: ["-f", "lavfi", "-i", tone(expr, channels, seconds), "-c:a", "pcm_s16le"] };
+}
+
+const RING = "if(lt(hypot(X-256,Y-256),180),255,if(lt(hypot(X-256,Y-256),230),128,0))";
+export const FIXTURES: FixtureSpec[] = [
+  video("vid_a", 1920, 1080, 30, 6, SINE(440)),
+  video("vid_b", 1280, 720, 25, 4),
+  video("vid_c", 640, 360, 60, 3),
+  image("img_a", "png", 800, 600, "rgb24", "format=rgb24", ["-c:v", "png"]),
+  image("img_b", "jpg", 1920, 1080, "yuvj420p", "format=yuvj420p", ["-c:v", "mjpeg", "-q:v", "2"]),
+  image("img_c", "png", 512, 512, "rgba", `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${RING}'`, ["-c:v", "png"]),
+  audio("aud_a", BEEP, 2, 8),
+  audio("aud_b", SINE(220), 1, 2.5),
+];
+
+export interface Fixture {
+  id: string;
+  ext: string;
+  file: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** Generate every fixture into `dir` with the FFmpeg on PATH; returns each file with its sha256. */
+export function generateFixtures(dir: string): Fixture[] {
+  mkdirSync(dir, { recursive: true });
+  return FIXTURES.map((f) => {
+    const file = join(dir, `${f.id}.${f.ext}`);
+    const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...f.args, ...BITEXACT, file], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`FFmpeg could not make ${f.id}: ${r.stderr.trim()}`);
+    const bytes = readFileSync(file);
+    return { id: f.id, ext: f.ext, file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+  });
+}
+
+/** The project library's record of each fixture (probeAsset, as an import does), keyed by id. */
+async function libraryOf(fixtures: Fixture[]): Promise<Record<string, MediaAsset>> {
+  const { probeAsset } = await import("../../core/src/ffmpeg/ffprobe.js");
+  const lib: Record<string, MediaAsset> = {};
+  for (const f of fixtures) lib[f.id] = await probeAsset(f.file);
+  return lib;
+}
+
+/** How each fixture differs from FIXTURES.md, as probed (an empty list: it matches). */
+function fixtureProblems(fixtures: Fixture[], lib: Record<string, MediaAsset>): string[] {
+  const out: string[] = [];
+  for (const spec of FIXTURES) {
+    const a = lib[spec.id];
+    const file = fixtures.find((f) => f.id === spec.id)!.file;
+    const say = (what: string, got: unknown, want: unknown) => got !== want && out.push(`${spec.id}: ${what} ${String(got)}, not ${String(want)}`);
+    say("hasAudio", a.hasAudio, spec.hasAudio);
+    if (spec.kind === "audio") {
+      say("hasVideo", a.hasVideo, false);
+      say("duration", a.duration, spec.seconds);
+    } else {
+      say("width", a.width, spec.width);
+      say("height", a.height, spec.height);
+      say("isImage", !!a.isImage, spec.kind === "image");
+    }
+    if (spec.kind === "video") {
+      say("fps", a.fps, spec.fps);
+      // validAsset's frame count (motionmedia.ts) and the pictures actually in the file.
+      say("frame count", Math.round(a.duration * a.fps), spec.fps! * spec.seconds!);
+      const n = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", file], { encoding: "utf8" });
+      say("pictures", Number(n.stdout.trim()), spec.fps! * spec.seconds!);
+    }
+    if (spec.pixFmt) {
+      const p = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0", file], { encoding: "utf8" });
+      say("pixel format", p.stdout.trim(), spec.pixFmt);
+    }
+    if (spec.channels) {
+      const c = spawnSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels,sample_rate", "-of", "csv=p=0", file], { encoding: "utf8" });
+      say("sample rate and channels", c.stdout.trim(), `48000,${spec.channels}`);
+    }
+  }
+  return out;
+}
+
+// ---- the reference side's source -----------------------------------------------------------
+
+/**
+ * The composition as the reference renders it: each asset("<id>") becomes
+ * staticFile("<id>.<ext>") (the fixture in its public folder) and the import
+ * from "remotion" names staticFile instead of asset. Throws on an id no
+ * fixture has, and when an asset( call or the asset import is left.
+ */
+export function referenceSource(tsx: string, ext: Record<string, string>): string {
+  let out = tsx.replace(/\basset\(\s*(["'])([^"']+)\1\s*\)/g, (_m, _q: string, id: string) => {
+    if (!ext[id]) throw new Error(`no fixture for asset("${id}")`);
+    return `staticFile(${JSON.stringify(`${id}.${ext[id]}`)})`;
+  });
+  out = out.replace(/import\s*\{([^}]*)\}\s*from\s*(["'])remotion\2;?/, (_m, names: string) => {
+    const list = names.split(",").map((s) => s.trim()).filter((s) => s && s !== "asset");
+    if (!list.includes("staticFile")) list.push("staticFile");
+    return `import {${list.join(", ")}} from "remotion";`;
+  });
+  if (/\basset\s*\(/.test(out) || /import\s*\{[^}]*\basset\b[^}]*\}\s*from/.test(out)) throw new Error("an asset() call or import is left after the rewrite");
+  return out;
+}
+
+// ---- audio ---------------------------------------------------------------------------------
+
+export const AUDIO_RULE = { rate: 48000, windowMs: 20, floorDb: -40, threshold: 0.01, gapMs: 20, rmsDb: 1, onsetMs: 5 };
+const WINDOW = (AUDIO_RULE.rate * AUDIO_RULE.windowMs) / 1000;
+/** Two channels of 48 kHz samples. */
+export type Pcm = [Float32Array, Float32Array];
+
+/** `file`'s first sound track, decoded by FFmpeg to 48 kHz stereo floats, cut or padded with silence to `samples`; no file or no track: silence. */
+function decodeAudio(file: string | undefined, samples: number): { pcm: Pcm; channels: number } {
+  const pcm: Pcm = [new Float32Array(samples), new Float32Array(samples)];
+  if (!file) return { pcm, channels: 0 };
+  const p = spawnSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", file], { encoding: "utf8" });
+  if (p.status !== 0) throw new Error(`ffprobe could not read ${basename(file)}`);
+  const channels = Number(p.stdout.trim() || 0);
+  if (!channels) return { pcm, channels: 0 };
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-map", "0:a:0", "-ac", "2", "-ar", String(AUDIO_RULE.rate), "-f", "f32le", "pipe:1"], { maxBuffer: samples * 8 + (64 << 20) });
+  if (r.status !== 0) throw new Error(`FFmpeg could not decode the sound of ${basename(file)}: ${String(r.stderr).trim().split("\n").pop()}`);
+  const n = Math.min(samples, Math.floor(r.stdout.length / 8));
+  for (let i = 0; i < n; i++) {
+    pcm[0][i] = r.stdout.readFloatLE(8 * i);
+    pcm[1][i] = r.stdout.readFloatLE(8 * i + 4);
+  }
+  return { pcm, channels };
+}
+
+/** Each 20 ms window's RMS level in dBFS, clamped at the floor. */
+function levels(ch: Float32Array): number[] {
+  const out: number[] = [];
+  for (let s = 0; s < ch.length; s += WINDOW) {
+    const e = Math.min(ch.length, s + WINDOW);
+    let sum = 0;
+    for (let i = s; i < e; i++) sum += ch[i] * ch[i];
+    out.push(Math.max(AUDIO_RULE.floorDb, 20 * Math.log10(Math.sqrt(sum / (e - s)))));
+  }
+  return out;
+}
+
+/** Sample index of each start and end of sound (either channel above the threshold), ends after a 20 ms gap. */
+function soundEdges(pcm: Pcm): number[] {
+  const gap = (AUDIO_RULE.rate * AUDIO_RULE.gapMs) / 1000;
+  const out: number[] = [];
+  let last = -1;
+  let on = false;
+  for (let i = 0; i < pcm[0].length; i++) {
+    if (Math.max(Math.abs(pcm[0][i]), Math.abs(pcm[1][i])) > AUDIO_RULE.threshold) {
+      if (!on) out.push(i);
+      on = true;
+      last = i;
+    } else if (on && i - last > gap) {
+      out.push(last + 1);
+      on = false;
+    }
+  }
+  if (on) out.push(last + 1);
+  return out;
+}
+
+export interface AudioMetrics {
+  rms_db_max_diff: number;
+  /** null: the two sides have a different number of starts and ends of sound. */
+  onset_ms_max_diff: number | null;
+  /** Each side's starts and ends of sound, in ms. */
+  edges: [number[], number[]];
+  /** Each side's loudest window, dBFS. */
+  loudest: [number, number];
+  /** Windows compared (the others are at a start or end of sound). */
+  windows: number;
+  pass: boolean;
+}
+
+const ms = (samples: number) => Math.round((samples * 1e5) / AUDIO_RULE.rate) / 100;
+
+/** Two sounds of the same length (AUDIO rule in the header). */
+export function compareAudio(a: Pcm, b: Pcm): AudioMetrics {
+  const ea = soundEdges(a);
+  const eb = soundEdges(b);
+  const skip = new Set<number>();
+  for (const e of [...ea, ...eb]) for (const d of [-1, 0, 1]) skip.add(Math.floor(e / WINDOW) + d);
+  let rms = 0;
+  let windows = 0;
+  const loudest: [number, number] = [AUDIO_RULE.floorDb, AUDIO_RULE.floorDb];
+  for (let c = 0; c < 2; c++) {
+    const la = levels(a[c]);
+    const lb = levels(b[c]);
+    for (let k = 0; k < la.length; k++) {
+      loudest[0] = Math.max(loudest[0], la[k]);
+      loudest[1] = Math.max(loudest[1], lb[k]);
+      if (skip.has(k)) continue;
+      if (c === 0) windows++;
+      rms = Math.max(rms, Math.abs(la[k] - lb[k]));
+    }
+  }
+  const onset = ea.length === eb.length ? Math.max(0, ...ea.map((x, i) => Math.abs(x - eb[i]))) : null;
+  const metrics = {
+    rms_db_max_diff: Math.round(rms * 100) / 100,
+    onset_ms_max_diff: onset === null ? null : ms(onset),
+    edges: [ea.map(ms), eb.map(ms)] as [number[], number[]],
+    loudest: loudest.map((v) => Math.round(v * 100) / 100) as [number, number],
+    windows,
+  };
+  return { ...metrics, pass: metrics.onset_ms_max_diff !== null && metrics.onset_ms_max_diff <= AUDIO_RULE.onsetMs && metrics.rms_db_max_diff <= AUDIO_RULE.rmsDb };
+}
+
+const fmtAudio = (m: AudioMetrics) => `${m.rms_db_max_diff}/${m.onset_ms_max_diff ?? `edges ${m.edges[0].length}:${m.edges[1].length}`}`;
+const AUDIO_EXPECTED = `AUDIO: <=${AUDIO_RULE.rmsDb} dB (${AUDIO_RULE.windowMs} ms RMS windows, floor ${AUDIO_RULE.floorDb} dBFS) / <=${AUDIO_RULE.onsetMs} ms (each start and end of sound)`;
+
+// ---- one side, in a child process -----------------------------------------------------------
+
+interface Job {
+  pipeline: Pipeline;
+  source: string;
+  width: number;
+  height: number;
+  fps: number;
+  durationInFrames: number;
+  fixtures: Fixture[];
+  /** The project library's records (zabsreel side). */
+  library: Record<string, MediaAsset>;
+  /** The child's folder: home/, data/ (AIVE_DATA_DIR, with baked/), tmp/; results in data/baked/. */
+  dir: string;
+}
+
+/** The browser wrapper's log of every launch's arguments. */
+const BROWSER_LOG = "browser-args.txt";
+
+/** A free port in 5030-5039 (the ports this harness may open; in the private namespace they are its own). */
+function port(): Promise<number> {
+  const tryPort = (p: number): Promise<number> =>
+    new Promise((ok, fail) => {
+      if (p > 5039) return fail(new Error("no free port in 5030-5039"));
+      const srv = createServer();
+      srv.once("error", () => tryPort(p + 1).then(ok, fail));
+      srv.listen(p, "127.0.0.1", () => srv.close(() => ok(p)));
+    });
+  return tryPort(5030);
+}
+
+/** The reference: this checkout's Remotion bundler and renderer, called directly (public API), with the fixtures in the public folder. */
+async function referenceRender(job: Job, mov: string): Promise<void> {
+  const { graphicComposition, rootSource } = await import("../../core/src/motion/render.js");
+  const src = join(job.dir, "src");
+  const publicDir = join(job.dir, "public");
+  mkdirSync(src, { recursive: true });
+  mkdirSync(publicDir, { recursive: true });
+  for (const f of job.fixtures) copyFileSync(f.file, join(publicDir, `${f.id}.${f.ext}`));
+  const opts = { code: "", width: job.width, height: job.height, fps: job.fps, durationInFrames: job.durationInFrames, outPath: mov, workDir: src };
+  writeFileSync(join(src, "Graphic.tsx"), referenceSource(job.source, Object.fromEntries(job.fixtures.map((f) => [f.id, f.ext]))));
+  writeFileSync(join(src, "Root.tsx"), rootSource(opts));
+  writeFileSync(join(src, "index.ts"), 'import { registerRoot } from "remotion";\nimport { RemotionRoot } from "./Root";\nregisterRoot(RemotionRoot);\n');
+  // Silent tests: every launch of the pinned shell gets --mute-audio (and is logged).
+  const browser = join(job.dir, "browser.sh");
+  writeFileSync(browser, `#!/bin/sh\nprintf '%s\\n' "$0" --mute-audio "$@" >> '${join(job.dir, BROWSER_LOG)}'\nexec '${SHELL}' --mute-audio "$@"\n`, { mode: 0o755 });
+
+  // Loaded here only: the parent process never loads Remotion.
+  const req = createRequire(join(REPO, "package.json"));
+  const { bundle } = req("@remotion/bundler") as { bundle: typeof Bundle };
+  const { renderMedia } = req("@remotion/renderer") as { renderMedia: typeof RenderMedia };
+  const modules = join(REPO, "node_modules");
+  const serveUrl = await bundle({
+    entryPoint: join(src, "index.ts"),
+    publicDir,
+    enableCaching: false,
+    // The scaffold is outside the checkout's node_modules tree: react and remotion resolve from it.
+    webpackOverride: (config) => ({ ...config, resolve: { ...config.resolve, modules: [modules, ...((config.resolve && config.resolve.modules) || ["node_modules"])] } }),
+  });
+  await renderMedia({
+    composition: graphicComposition(opts),
+    serveUrl,
+    port: await port(),
+    browserExecutable: browser,
+    onBrowserDownload: () => {
+      throw new Error("the parity harness never downloads a browser");
+    },
+    chromeMode: "headless-shell",
+    codec: "prores",
+    proResProfile: "4444",
+    pixelFormat: "yuva444p10le",
+    imageFormat: "png",
+    colorSpace: "default",
+    outputLocation: mov,
+    inputProps: {},
+    logLevel: "error",
+  });
+}
+
+/** The child: one render through `job.pipeline`; writes result.json in its folder. */
+async function child(jobFile: string): Promise<void> {
+  const job = JSON.parse(readFileSync(jobFile, "utf8")) as Job;
+  const data = join(job.dir, "data");
+  const mov = join(data, "baked", "graphic.mov");
+  const t0 = Date.now();
+  let out: Outcome;
+  try {
+    if (job.pipeline === "reference") {
+      await referenceRender(job, mov);
+      out = { ok: true, mov, audio: mov, ms: Date.now() - t0 };
+    } else {
+      const { renderMotion } = await import("../../core/src/motion/rendermotion.js");
+      const res = await renderMotion({
+        width: job.width, height: job.height, fps: job.fps, durationInFrames: job.durationInFrames, alpha: true, outPath: mov,
+        audioPath: join(data, "baked", "graphic-audio.wav"),
+        graphic: { source: job.source, props: {} },
+        assets: job.library,
+        workDir: join(data, "motion", "parity"),
+      });
+      out = { ok: true, mov, audio: res.audioPath, ms: Date.now() - t0 };
+    }
+  } catch (err) {
+    const e = err as Error & { code?: unknown };
+    out = { ok: false, error: `${e.name}: ${e.message}`, code: typeof e.code === "string" ? e.code : undefined, ms: Date.now() - t0 };
+  }
+  writeFileSync(join(job.dir, "result.json"), JSON.stringify(out));
+}
+
+// ---- one composition --------------------------------------------------------------------
+
+interface Row {
+  case: string;
+  function: "render" | "audio";
+  size: string;
+  input: string;
+  metric: "pct_within_4/max_diff" | "rms_db_max_diff/onset_ms_max_diff";
+  expected: string;
+  actual: string;
+  spec: string;
+  why: string;
+}
+
+type Side = Outcome & { browserArgs?: string[]; channels?: number };
+
+interface SizeResult {
+  size: string;
+  reference: Side;
+  zabsreel: Side;
+  frames: ({ frame: number } & Metrics)[];
+  audio?: Omit<AudioMetrics, "pass"> & { pass: boolean };
+  /** A decode failure after both rendered. */
+  error?: string;
+}
+
+interface CaseResult {
+  case: string;
+  spec: string;
+  why: string;
+  audio: boolean;
+  status: "pass" | "mismatch" | typeof DRIFT | "zabsreel failed" | "harness error";
+  sizes: SizeResult[];
+}
+
+interface Run {
+  out: string;
+  scratch: string;
+  fixtures: Fixture[];
+  library: Record<string, MediaAsset>;
+  /** Which pipeline renders each side (the self-test renders ZabsReel on both). */
+  sides: { reference: Pipeline; zabsreel: Pipeline };
+  /** Self-test: change one side's composition before it renders (the header is read from the original). */
+  sourceA?: (tsx: string) => string;
+  sourceB?: (tsx: string) => string;
+}
+
+const FILES = ["render-all.jsonl", "render-mismatches.jsonl", "audio-all.jsonl", "audio-mismatches.jsonl"];
+
+function rowsFile(run: Run, name: string, rows: Row[]): void {
+  if (rows.length) appendFileSync(join(run.out, name), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+/** What the reference's browser wrapper logged (the parent reads it before the child folder goes). */
+function browserArgs(side: Outcome): string[] | undefined {
+  if (!side.ok) return undefined;
+  const log = join(dirname(dirname(dirname(side.mov))), BROWSER_LOG);
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : undefined;
+}
+
+/** Render `file` at each header size through both sides, compare frames and sound, append its rows. */
+async function runCase(run: Run, file: string, source = readFileSync(file, "utf8")): Promise<CaseResult> {
+  const name = basename(file);
+  const header = parseHeader(source);
+  const result: CaseResult = { case: name, spec: header.spec, why: header.why, audio: header.audio, status: "pass", sizes: [] };
+  const rows: Row[] = [];
+  const mismatches: Row[] = [];
+  const audioRows: Row[] = [];
+  const audioMismatches: Row[] = [];
+  for (const { w, h } of header.sizes) {
+    const size = `${w}x${h}`;
+    const job = { source, width: w, height: h, fps: header.fps, durationInFrames: header.durationInFrames, fixtures: run.fixtures, library: run.library };
+    const tag = `${name.replace(/\.tsx$/, "")}-${size}`;
+    const [a, b] = await Promise.all([
+      runPipeline(SELF, run.scratch, `${tag}-a`, { ...job, source: run.sourceA?.(source) ?? source, pipeline: run.sides.reference }),
+      runPipeline(SELF, run.scratch, `${tag}-b`, { ...job, source: run.sourceB?.(source) ?? source, pipeline: run.sides.zabsreel }),
+    ]);
+    const reference: Side = { ...a, browserArgs: browserArgs(a) };
+    const zabsreel: Side = { ...b, browserArgs: browserArgs(b) };
+    const sized: SizeResult = { size, reference, zabsreel, frames: [] };
+    result.sizes.push(sized);
+    const row = (n: number, actual: string): Row => ({ case: name, function: "render", size, input: `frame ${n}`, metric: "pct_within_4/max_diff", expected: `D8: >=${RULE.pct} / <=${RULE.max}`, actual, spec: header.spec, why: header.why });
+    const audioRow = (actual: string): Row => ({ case: name, function: "audio", size, input: `audio 0-${header.durationInFrames - 1}`, metric: "rms_db_max_diff/onset_ms_max_diff", expected: AUDIO_EXPECTED, actual, spec: header.spec, why: header.why });
+    let failed: string | undefined;
+    if (!a.ok) failed = b.ok ? DRIFT : `${DRIFT}; zabsreel failed: ${b.code ?? "error"}`;
+    else if (!b.ok) failed = `zabsreel failed: ${b.code ?? "error"}`;
+    const dir = join(run.out, "images", name.replace(/\.tsx$/, ""), size);
+    if (!failed && a.ok && b.ok) {
+      try {
+        const fa = decodeFrames(a.mov, w, h, header.frames);
+        const fb = decodeFrames(b.mov, w, h, header.frames);
+        for (const n of header.frames) {
+          const m = compare(fa.get(n)!, fb.get(n)!);
+          sized.frames.push({ frame: n, ...m });
+          const r = row(n, fmt(m));
+          rows.push(r);
+          if (!m.pass) {
+            mismatches.push(r);
+            writePng(join(dir, `frame-${n}-reference.png`), fa.get(n)!, w, h);
+            writePng(join(dir, `frame-${n}-zabsreel.png`), fb.get(n)!, w, h);
+            writePng(join(dir, `frame-${n}-diff.png`), heatmap(fa.get(n)!, fb.get(n)!), w, h);
+          }
+        }
+        if (header.audio) {
+          const samples = Math.round((header.durationInFrames / header.fps) * AUDIO_RULE.rate);
+          const sa = decodeAudio(a.audio, samples);
+          const sb = decodeAudio(b.audio, samples);
+          reference.channels = sa.channels;
+          zabsreel.channels = sb.channels;
+          const m = compareAudio(sa.pcm, sb.pcm);
+          sized.audio = m;
+          const r = audioRow(fmtAudio(m));
+          audioRows.push(r);
+          if (!m.pass) audioMismatches.push(r);
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, "audio.json"), JSON.stringify({ windowMs: AUDIO_RULE.windowMs, metrics: m, reference: sa.pcm.map(levels), zabsreel: sb.pcm.map(levels) }) + "\n");
+        }
+      } catch (err) {
+        sized.error = (err as Error).message;
+        failed = "harness error";
+      }
+    }
+    if (failed) {
+      for (const n of header.frames) {
+        const r = row(n, failed);
+        rows.push(r);
+        mismatches.push(r);
+      }
+      if (header.audio) {
+        const r = audioRow(failed);
+        audioRows.push(r);
+        audioMismatches.push(r);
+      }
+    }
+    for (const o of [a, b]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
+    const allPass = sized.frames.every((f) => f.pass) && (!sized.audio || sized.audio.pass);
+    const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zabsreel failed" : allPass ? "pass" : "mismatch";
+    const rank = ["pass", "mismatch", "zabsreel failed", DRIFT, "harness error"];
+    if (rank.indexOf(status) > rank.indexOf(result.status)) result.status = status;
+    const worst = sized.frames.length ? `min pct ${Math.min(...sized.frames.map((f) => f.pct_within_4))}, max diff ${Math.max(...sized.frames.map((f) => f.max_diff))}` : failed;
+    const sound = sized.audio ? `; audio ${fmtAudio(sized.audio)}` : "";
+    console.log(`  ${name} ${size}: ${worst}${sound} (${run.sides.reference} ${(a.ms / 1000).toFixed(1)} s, ${run.sides.zabsreel} ${(b.ms / 1000).toFixed(1)} s)`);
+  }
+  rowsFile(run, "render-all.jsonl", rows);
+  rowsFile(run, "render-mismatches.jsonl", mismatches);
+  rowsFile(run, "audio-all.jsonl", audioRows);
+  rowsFile(run, "audio-mismatches.jsonl", audioMismatches);
+  return result;
+}
+
+/** A baseline case's numbers per size: its worst frame and the mean of its mean_diff. */
+function baseline(results: CaseResult[]) {
+  return results
+    .filter((r) => BASELINE.includes(r.case))
+    .map((r) => ({
+      case: r.case,
+      status: r.status,
+      sizes: r.sizes.map((s) => ({
+        size: s.size,
+        min_pct_within_4: s.frames.length ? Math.min(...s.frames.map((f) => f.pct_within_4)) : null,
+        max_diff: s.frames.length ? Math.max(...s.frames.map((f) => f.max_diff)) : null,
+        mean_diff: s.frames.length ? Math.round((s.frames.reduce((t, f) => t + f.mean_diff, 0) / s.frames.length) * 1e4) / 1e4 : null,
+      })),
+    }));
+}
+
+function freshOut(out: string): void {
+  mkdirSync(out, { recursive: true });
+  for (const f of [...FILES, "render-summary.json"]) rmSync(join(out, f), { force: true });
+  rmSync(join(out, "images"), { recursive: true, force: true });
+  for (const f of FILES) writeFileSync(join(out, f), "");
+}
+
+// ---- the run ------------------------------------------------------------------------------
+
+async function parity(run: Run, casesDir: string, only: string[] | undefined, netns: boolean): Promise<number> {
+  const names = readdirSync(casesDir).filter((f) => f.endsWith(".tsx") && (!only || only.includes(f))).sort();
+  // The baseline first.
+  names.sort((a, b) => Number(BASELINE.includes(b)) - Number(BASELINE.includes(a)));
+  if (!names.length) throw new Error(`no compositions in ${casesDir}`);
+  freshOut(run.out);
+  const t0 = Date.now();
+  const results: CaseResult[] = [];
+  for (const name of names) {
+    let r: CaseResult;
+    try {
+      r = await runCase(run, join(casesDir, name));
+    } catch (err) {
+      // A header the harness cannot read: the case is named, the run goes on.
+      r = { case: name, spec: "", why: "", audio: false, status: "harness error", sizes: [] };
+      console.log(`  ${name}: ${(err as Error).message}`);
+      (r as CaseResult & { error?: string }).error = (err as Error).message;
+    }
+    results.push(r);
+  }
+  const count = (s: CaseResult["status"]) => results.filter((r) => r.status === s).map((r) => r.case);
+  const frames = results.flatMap((r) => r.sizes.flatMap((s) => s.frames));
+  const sounds = results.flatMap((r) => r.sizes.flatMap((s) => (s.audio ? [s.audio] : [])));
+  const summary = {
+    rule: `D8: pct_within_4 >= ${RULE.pct} and max_diff <= ${RULE.max} (per pixel and channel, RGBA 8-bit, both ProRes 4444 files decoded by the same FFmpeg)`,
+    audioRule: `${AUDIO_EXPECTED}; both sides decoded by the same FFmpeg to ${AUDIO_RULE.rate} Hz stereo; a start or end of sound: a sample above ${AUDIO_RULE.threshold} after or before ${AUDIO_RULE.gapMs} ms below it; windows at and next to one are left out of the level metric. Why: 1 dB is about the smallest audible level difference; 5 ms is under a third of a frame at 60 fps, so a whole-frame timing difference always fails.`,
+    casesDir,
+    netns,
+    versions: versions(),
+    fixtures: run.fixtures.map((f) => ({ id: f.id, file: basename(f.file), sha256: f.sha256, bytes: f.bytes, probe: run.library[f.id] && { ...run.library[f.id], path: undefined, id: undefined, addedAt: undefined } })),
+    seconds: Math.round((Date.now() - t0) / 1000),
+    mediaBaseline: baseline(results),
+    counts: {
+      cases: results.length,
+      frames: frames.length,
+      framesPassing: frames.filter((f) => f.pass).length,
+      audioRows: sounds.length,
+      audioPassing: sounds.filter((s) => s.pass).length,
+    },
+    passing: count("pass"),
+    mismatching: count("mismatch"),
+    referenceRefused: count(DRIFT),
+    zabsreelFailed: count("zabsreel failed"),
+    harnessErrors: count("harness error"),
+    leftoverProcesses: leftovers,
+    cases: results,
+  };
+  writeFileSync(join(run.out, "render-summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  console.log(
+    `\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8, ${summary.counts.audioPassing}/${summary.counts.audioRows} audio rows pass; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`,
+  );
+  if (leftovers.length) console.log(`killed ${leftovers.reduce((t, l) => t + l.pids.length, 0)} leftover process(es): ${JSON.stringify(leftovers)}`);
+  const unrendered = results.filter((r) => r.status === DRIFT || r.status === "zabsreel failed" || r.status === "harness error");
+  if (unrendered.length) {
+    for (const r of unrendered) console.error(`NOT RENDERED: ${r.case} (${r.status})`);
+    return 2;
+  }
+  return summary.mismatching.length ? 3 : 0;
+}
+
+async function prepare(scratch: string): Promise<Pick<Run, "fixtures" | "library">> {
+  const fixtures = generateFixtures(join(scratch, "fixtures"));
+  const library = await libraryOf(fixtures);
+  const problems = fixtureProblems(fixtures, library);
+  if (problems.length) throw new Error(`the fixtures do not match FIXTURES.md: ${problems.join("; ")}`);
+  return { fixtures, library };
+}
+
+// ---- self-test ------------------------------------------------------------------------------
+
+let failures = 0;
+const check = (ok: boolean, msg: string) => {
+  if (!ok) failures++;
+  console.log(`  ${ok ? "ok  " : "FAIL"} ${msg}`);
+};
+
+const readRows = (file: string): Row[] => readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
+const KEYS = "case,function,size,input,metric,expected,actual,spec,why";
+
+/** `onsets` (ms) of 100 ms 1 kHz beeps at `level` (peak), `seconds` long; `right` scales the right channel. */
+function beeps(onsets: number[], level: number, seconds = 2, right = 1): Pcm {
+  const n = seconds * AUDIO_RULE.rate;
+  const pcm: Pcm = [new Float32Array(n), new Float32Array(n)];
+  for (const at of onsets) {
+    const s0 = Math.round((at * AUDIO_RULE.rate) / 1000);
+    for (let i = 0; i < AUDIO_RULE.rate / 10 && s0 + i < n; i++) {
+      const v = level * Math.sin((2 * Math.PI * 1000 * i) / AUDIO_RULE.rate);
+      pcm[0][s0 + i] = v;
+      pcm[1][s0 + i] = v * right;
+    }
+  }
+  return pcm;
+}
+
+// Frame 0 is not compared: ZabsReel's first frame of a library video is not always painted
+// when it is captured (seen in this self-test: the video missing on one side only).
+const SELF_TSX = [
+  "// size: 320x180",
+  "// fps: 30",
+  "// durationInFrames: 45",
+  "// frames: 1, 10, 20, 31, 44",
+  "// audio: yes",
+  "// spec: self-test",
+  "// why: library video, an image with alpha and beeps at 0 s and 1 s",
+  'import React from "react";',
+  'import {AbsoluteFill, Audio, Img, OffthreadVideo, asset} from "remotion";',
+  "",
+  "export default function SelfTest() {",
+  "  return (",
+  '    <AbsoluteFill style={{backgroundColor: "#203040"}}>',
+  '      <OffthreadVideo src={asset("vid_b")} muted style={{position: "absolute", left: 0, top: 0, width: 192, height: 108}} />',
+  '      <Img src={asset("img_c")} style={{position: "absolute", left: 210, top: 70, width: 100, height: 100}} />',
+  '      <Audio src={asset("aud_a")} volume={0.5} />',
+  "    </AbsoluteFill>",
+  "  );",
+  "}",
+  "",
+].join("\n");
+
+async function selfTest(out: string, scratch: string): Promise<number> {
+  console.log("S0. the run is offline...");
+  const nics = Object.keys(networkInterfaces());
+  check(process.env[NETNS] === "1" && nics.join() === "lo", `a private network namespace with loopback only (${nics.join(", ")})`);
+
+  console.log("S1. referenceSource() rewrites asset() to staticFile() on the reference side...");
+  const ext = { vid_a: "mp4", img_c: "png" };
+  const rewritten = referenceSource('import React from "react";\nimport {AbsoluteFill, OffthreadVideo, asset} from "remotion";\nconst a = <OffthreadVideo src={asset("vid_a")} />;\nconst b = asset( \'img_c\' );\n', ext);
+  check(
+    rewritten.includes('import {AbsoluteFill, OffthreadVideo, staticFile} from "remotion";') && rewritten.includes('src={staticFile("vid_a.mp4")}') && rewritten.includes('staticFile("img_c.png")') && !/\basset\b/.test(rewritten),
+    `asset("vid_a") -> staticFile("vid_a.mp4"), asset('img_c') -> staticFile("img_c.png"), the import names staticFile (${JSON.stringify(rewritten.split("\n")[1])})`,
+  );
+  const refuses = (tsx: string) => {
+    try {
+      referenceSource(tsx, ext);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  check(refuses('import {asset} from "remotion";\nasset("vid_z");'), "an id no fixture has throws");
+  check(refuses('import {asset} from "remotion";\nconst id = "vid_a";\nasset(id);'), "an asset() call left after the rewrite throws");
+
+  console.log("S2. compareAudio() on known sounds...");
+  const near = (got: number[], want: number[], tol: number) => got.length === want.length && got.every((v, i) => Math.abs(v - want[i]) <= tol);
+  const at = [0, 1000];
+  const same = compareAudio(beeps(at, 0.25), beeps(at, 0.25));
+  check(same.pass && same.rms_db_max_diff === 0 && same.onset_ms_max_diff === 0 && near(same.edges[0], [0, 100, 1000, 1100], 0.1), `identical beeps: 0/0, edges at 0, 100, 1000, 1100 ms (${fmtAudio(same)}, ${same.edges[0]})`);
+  const quieter = compareAudio(beeps(at, 0.25), beeps(at, 0.125));
+  check(!quieter.pass && Math.abs(quieter.rms_db_max_diff - 6.02) < 0.05 && quieter.onset_ms_max_diff === 0, `half the level: 6.02 dB, fails (${fmtAudio(quieter)})`);
+  const right = compareAudio(beeps(at, 0.25), beeps(at, 0.25, 2, 0.5));
+  check(!right.pass && Math.abs(right.rms_db_max_diff - 6.02) < 0.05, `the right channel alone at half the level fails (${fmtAudio(right)})`);
+  const late = compareAudio(beeps(at, 0.25), beeps([0, 1010], 0.25));
+  check(!late.pass && Math.abs(late.onset_ms_max_diff! - 10) < 0.1 && late.rms_db_max_diff <= 1, `the second beep 10 ms late fails on timing alone (${fmtAudio(late)})`);
+  const early = compareAudio(beeps(at, 0.25), beeps([0, 999], 0.25));
+  check(early.pass && Math.abs(early.onset_ms_max_diff! - 1) < 0.1, `the second beep 1 ms early passes: the windows at its start and end are left out (${fmtAudio(early)})`);
+  const extra = compareAudio(beeps(at, 0.25), beeps([0, 500, 1000], 0.25));
+  check(!extra.pass && extra.onset_ms_max_diff === null && fmtAudio(extra).endsWith("/edges 4:6"), `an extra beep fails on the count (${fmtAudio(extra)})`);
+  const silent = compareAudio(beeps(at, 0.25), beeps([], 0.25));
+  check(!silent.pass && fmtAudio(silent).endsWith("/edges 4:0"), `silence against beeps fails (${fmtAudio(silent)})`);
+
+  console.log("S3. the fixtures: twice the same bytes, as FIXTURES.md lists them...");
+  const { fixtures, library } = await prepare(scratch);
+  const again = generateFixtures(join(scratch, "fixtures-again"));
+  check(fixtures.every((f, i) => f.sha256 === again[i].sha256), `generated twice, equal sha256 (${fixtures.map((f) => `${f.id} ${f.sha256.slice(0, 12)}`).join(", ")})`);
+  rmSync(join(scratch, "fixtures-again"), { recursive: true, force: true });
+  check(fixtureProblems(fixtures, library).length === 0, "sizes, frame rates, frame counts, durations and sound as FIXTURES.md (probeAsset, ffprobe)");
+  const vid = (id: string) => fixtures.find((f) => f.id === id)!;
+  const neighbours = (id: string, w: number, h: number, pairs: number[][]) => {
+    const fr = decodeFrames(vid(id).file, w, h, pairs.flat());
+    return pairs.map(([x, y]) => compare(fr.get(x)!, fr.get(y)!));
+  };
+  const steps = [...neighbours("vid_a", 1920, 1080, [[0, 1], [89, 90], [178, 179]]), ...neighbours("vid_b", 1280, 720, [[0, 1], [98, 99]]), ...neighbours("vid_c", 640, 360, [[0, 1], [178, 179]])];
+  check(steps.every((m) => !m.pass), `neighbouring frames fail D8 against each other (${steps.map(fmt).join(", ")})`);
+  const tracks = (id: string, seconds: number) => decodeAudio(vid(id).file, seconds * AUDIO_RULE.rate).pcm;
+  const ea = compareAudio(tracks("aud_a", 8), tracks("aud_a", 8)).edges[0];
+  const want = Array.from({ length: 8 }, (_, k) => [k * 1000, k * 1000 + 100]).flat();
+  check(near(ea, want, 0.1), `aud_a beeps 100 ms at every whole second (${ea.join(", ")})`);
+  const eb = compareAudio(tracks("aud_b", 3), tracks("aud_b", 3)).edges[0];
+  check(near(eb, [0, 2500], 0.1), `aud_b sounds from 0 to 2500 ms (${eb.join(", ")})`);
+  const silence = (file: string | undefined) => {
+    try {
+      const q = decodeAudio(file, 4800);
+      return q.channels === 0 && q.pcm.every((c) => c.length === 4800 && c.every((v) => v === 0));
+    } catch {
+      return false;
+    }
+  };
+  check(silence(undefined), "no sound file decodes to silence of the asked length");
+  check(silence(vid("vid_b").file), "a file with no sound track (vid_b) decodes to silence of the asked length");
+
+  const selfDir = join(scratch, "self-case");
+  mkdirSync(selfDir, { recursive: true });
+  const selfFile = join(selfDir, "self.tsx");
+  writeFileSync(selfFile, SELF_TSX);
+  const listed = parseHeader(SELF_TSX);
+  const both: Run = { out: join(out, "self"), scratch, fixtures, library, sides: { reference: "zabsreel", zabsreel: "zabsreel" } };
+
+  console.log("S4. the self-test composition rendered twice through ZabsReel passes against itself...");
+  freshOut(both.out);
+  const r4 = await runCase(both, selfFile);
+  const frames4 = r4.sizes.flatMap((s) => s.frames);
+  const all4 = readRows(join(both.out, "render-all.jsonl"));
+  const audio4 = readRows(join(both.out, "audio-all.jsonl"));
+  check(r4.status === "pass" && frames4.length === listed.frames.length && frames4.every((f) => f.max_diff === 0), `every frame equal: ${frames4.map(fmt).join(", ")} (${r4.status})`);
+  check(all4.length === frames4.length && all4.every((r) => Object.keys(r).join() === KEYS && r.actual === "100/0"), `render-all.jsonl: one row per frame, keys ${KEYS}, actual 100/0`);
+  const a4 = r4.sizes[0].audio;
+  check(!!a4 && a4.pass && a4.rms_db_max_diff === 0 && a4.onset_ms_max_diff === 0 && a4.edges[0].length === 4, `the sound is equal, with both beeps (${a4 && fmtAudio(a4)}, ${a4?.edges[0]})`);
+  check(audio4.length === 1 && Object.keys(audio4[0]).join() === KEYS && audio4[0].function === "audio" && audio4[0].actual === "0/0", `audio-all.jsonl: one row, keys ${KEYS}, actual 0/0 (${JSON.stringify(audio4.map((r) => r.actual))})`);
+  check(["render-mismatches.jsonl", "audio-mismatches.jsonl"].every((f) => readFileSync(join(both.out, f), "utf8") === ""), "render-mismatches.jsonl and audio-mismatches.jsonl are empty");
+
+  console.log("S5. a brighter background and half the volume on the second side only: every row fails, each side shows its own...");
+  const altered: Run = {
+    ...both,
+    out: join(out, "altered"),
+    sourceB: (tsx) => {
+      if (!tsx.includes('"#203040"') || !tsx.includes("volume={0.5}")) throw new Error("the self-test composition changed");
+      return tsx.replace('"#203040"', '"#485868"').replace("volume={0.5}", "volume={0.25}");
+    },
+  };
+  freshOut(altered.out);
+  const r5 = await runCase(altered, selfFile);
+  const frames5 = r5.sizes.flatMap((s) => s.frames);
+  const mis5 = readRows(join(altered.out, "render-mismatches.jsonl"));
+  const amis5 = readRows(join(altered.out, "audio-mismatches.jsonl"));
+  check(r5.status === "mismatch" && frames5.length === listed.frames.length && frames5.every((f) => !f.pass && f.max_diff >= 36 && f.max_diff <= 44), `every frame fails, max_diff about 40 (${frames5.map(fmt).join(", ")})`);
+  check(mis5.length === listed.frames.length && mis5.every((r) => r.case === "self.tsx" && Object.keys(r).join() === KEYS), `render-mismatches.jsonl holds ${mis5.length} rows of ${listed.frames.length}`);
+  const a5 = r5.sizes[0].audio;
+  check(!!a5 && !a5.pass && Math.abs(a5.rms_db_max_diff - 6.02) < 0.5 && a5.onset_ms_max_diff !== null && a5.onset_ms_max_diff <= AUDIO_RULE.onsetMs, `the audio row fails on level, about 6 dB, the beeps in place (${a5 && fmtAudio(a5)})`);
+  check(amis5.length === 1 && amis5[0].function === "audio" && Object.keys(amis5[0]).join() === KEYS, "audio-mismatches.jsonl holds its row");
+  // compare() and compareAudio() are symmetric: only the images and the levels show which side was decoded as which.
+  const pixel = (side: Pipeline) => {
+    const png = join(altered.out, "images", "self", "320x180", `frame-${listed.frames[0]}-${side}.png`);
+    if (!existsSync(png)) return null;
+    const px = decodeFrames(png, 320, 180, [0]).get(0)!;
+    const i = (170 * 320 + 160) * 4;
+    return [px[i], px[i + 1], px[i + 2]];
+  };
+  const p5a = pixel("reference");
+  const p5b = pixel("zabsreel");
+  check(!!p5a && !!p5b && near(p5a, [0x20, 0x30, 0x40], 4) && near(p5b, [0x48, 0x58, 0x68], 4), `the background is #203040 in the first side's image and #485868 in the second's (${p5a} and ${p5b})`);
+  // aud_a's beeps peak at 0.5: at volume 0.5 a full window is 0.25/sqrt(2) = -15.05 dBFS, at 0.25 -21.07 dBFS.
+  check(!!a5 && Math.abs(a5.loudest[0] + 15.05) < 0.5 && Math.abs(a5.loudest[1] + 21.07) < 0.5, `the first side's loudest window is -15.05 dBFS and the second's -21.07 (${a5?.loudest})`);
+
+  console.log("S6. the self-test composition through the real reference: the beeps where they belong, the browser muted...");
+  const real: Run = { ...both, out: join(out, "reference"), sides: { reference: "reference", zabsreel: "zabsreel" } };
+  freshOut(real.out);
+  const r6 = await runCase(real, selfFile);
+  const s6 = r6.sizes[0];
+  console.log(`    (status ${r6.status}; reference ${s6.reference.ok ? "rendered" : (s6.reference as { error: string }).error})`);
+  check(s6.reference.ok && !!s6.audio, "the reference rendered it, with its sound compared");
+  const e6 = s6.audio?.edges[0] ?? [];
+  check(near(e6, [0, 100, 1000, 1100], AUDIO_RULE.onsetMs), `the reference's beeps start and end at 0, 100, 1000, 1100 ms (${e6.join(", ")})`);
+  check(!!s6.audio && Math.abs(s6.audio.loudest[0] + 15.05) < 1, `at aud_a's level times 0.5, -15.05 dBFS (${s6.audio?.loudest[0]})`);
+  const args6 = s6.reference.browserArgs ?? [];
+  check(args6.length > 1 && args6[0].endsWith("browser.sh") && args6[1] === "--mute-audio", `its browser started through the wrapper with --mute-audio first (${args6.slice(0, 2).join(" ")})`);
+  check(!leftovers.length, `no process was left behind (${JSON.stringify(leftovers)})`);
+
+  console.log("S7. a composition only the reference side refuses (its source made to throw) is exactly a drift candidate...");
+  const driftOut = join(out, "drift");
+  const drift: Run = { ...real, out: driftOut, sourceA: (tsx) => tsx.replace("  return (", '  throw new Error("media parity self-test drift");\n  return (') };
+  const code7 = await parity(drift, selfDir, undefined, process.env[NETNS] === "1");
+  const mis7 = readRows(join(driftOut, "render-mismatches.jsonl"));
+  const amis7 = readRows(join(driftOut, "audio-mismatches.jsonl"));
+  const summary7 = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zabsreelFailed: string[]; cases: CaseResult[] };
+  check(code7 === 2, `the run exits 2 (it exited ${code7})`);
+  check(mis7.length === listed.frames.length && mis7.every((r) => r.actual === DRIFT) && amis7.length === 1 && amis7[0].actual === DRIFT, `every frame row and the audio row say exactly "${DRIFT}" (${JSON.stringify([...mis7, ...amis7].map((r) => r.actual))})`);
+  const sized7 = summary7.cases[0].sizes[0];
+  check(summary7.referenceRefused.join() === "self.tsx" && !summary7.zabsreelFailed.length && !sized7.reference.ok && sized7.zabsreel.ok, "the summary lists it as refused by the reference only, ZabsReel rendered it");
+  check(![...mis7, ...amis7].some((r) => r.actual.includes("self-test drift")), "no row carries the error text");
+
+  console.log(failures === 0 ? "\nMEDIA PARITY HARNESS SELF-TEST PASSED" : `\n${failures} CHECK(S) FAILED`);
+  return failures === 0 ? 0 : 1;
+}
+
+// ---- main ---------------------------------------------------------------------------------
+
+async function main(): Promise<number> {
+  const args = process.argv.slice(2);
+  const arg = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+  const jobFile = arg("child");
+  if (jobFile) {
+    await child(jobFile);
+    return 0;
+  }
+  // The whole run in a private network namespace (loopback only), so neither pipeline reaches a real host.
+  const code = inPrivateNetns(SELF, args);
+  if (code !== null) return code;
+  const out = arg("out");
+  if (!out) throw new Error("--out=<folder> is required");
+  if (!existsSync(SHELL)) throw new Error(`the pinned headless shell is missing: ${SHELL}`);
+  const scratchParent = arg("scratch") ?? tmpdir();
+  mkdirSync(scratchParent, { recursive: true });
+  const scratch = mkdtempSync(join(scratchParent, "zr-media-"));
+  try {
+    if (args.includes("--self-test")) return await selfTest(resolve(out), scratch);
+    const only = arg("only")?.split(",");
+    const sides = { reference: "reference", zabsreel: "zabsreel" } as const;
+    return await parity({ out: resolve(out), scratch, sides, ...(await prepare(scratch)) }, resolve(arg("cases") ?? CASES), only, process.env[NETNS] === "1");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+main().then(
+  (code) => process.exit(code),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);
+
