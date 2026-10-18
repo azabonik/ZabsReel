@@ -36,7 +36,7 @@
  *    rendered twice (the repeat: the same job in its own child), because its
  *    frames of library media are not always the same from one render to the
  *    next (finding ZR-MEDIA-SETTLE: a frame captured before the requested
- *    source frame is painted, blank or a neighbouring source frame).
+ *    source frame is painted, blank or the previous source frame).
  * Both render every frame as an overlay (ProRes 4444 with alpha). Frames: the
  * header's frames, compared as parity-render.ts does (D8: pct_within_4 >= 99.5
  * and max_diff <= 32). Audio, for `audio: yes`: the reference's sound track and
@@ -59,10 +59,15 @@
  *  whole-frame timing difference always fails, while encoder delays the
  *  decoders remove and resampler delays (under 1 ms) pass.
  * Repeatability: each frame of ZabsReel's render is compared with the same
- * frame of its repeat, and its sound with the repeat's. A frame that is not
- * pixel-identical (or a sound that is not 0/0) is "zabsreel nondeterministic":
- * its row carries exactly that actual whatever the reference shows, since one
- * sample of a random output says nothing about a behaviour difference.
+ * frame of its repeat, and its sound with the repeat's; a frame that is not
+ * pixel-identical (or a sound that is not 0/0) is nondeterministic. The repeat
+ * is also compared with the reference. Where the two renders get different
+ * verdicts (one passes the rule, the other fails), the row's actual is exactly
+ * "zabsreel nondeterministic": the two samples disagree on whether there is a
+ * behaviour difference. Where both fail, the row is a mismatch with the first
+ * render's metric, since both samples show the difference. The count of
+ * identical frames is a lower bound on the noise only, not a noise floor: a
+ * frame both renders get wrong the same way is not detected by the repeat.
  *
  * Writes to --out: render-all.jsonl / render-mismatches.jsonl (frame rows) and
  * audio-all.jsonl / audio-mismatches.jsonl (one audio row per composition and
@@ -75,8 +80,10 @@
  * heatmap of each failing or nondeterministic frame (and the repeat's frame of
  * the latter), and audio.json with each side's window levels and edges (for the
  * orchestrator only); render-summary.json with every metric (each frame's and
- * sound's repeat metric too), zabsreelRepeat (the ZabsReel-against-ZabsReel
- * noise floor and every nondeterministic frame and sound), the fixtures (sha256 and probe), the media baseline
+ * sound's repeat metrics too: against ZabsReel's first render and against the
+ * reference), zabsreelRepeat (how many frames and sounds the two ZabsReel
+ * renders agree on, how the others split, and every nondeterministic frame and
+ * sound with its verdicts), the fixtures (sha256 and probe), the media baseline
  * (offthread-plain, video-plain, img-sizes: plain mapping and sizing, so their
  * numbers show how far the two decodes of the same pictures differ), timing,
  * the error texts and the versions.
@@ -100,8 +107,14 @@
  * same composition through the real reference has the beeps where they belong,
  * and its browser ran with --mute-audio; one only the reference side refuses is
  * exactly "reference refused (drift candidate)" in every row; one whose repeat
- * alone differs is "zabsreel nondeterministic" in every row, in no mismatches
- * file, listed in the summary, and exits 3.
+ * alone differs (the first render passes, the repeat fails), and one whose
+ * second side alone differs (the first render fails, the repeat passes), is
+ * "zabsreel nondeterministic" in every row, in no mismatches file, listed in
+ * the summary, and exits 3; one whose second side and repeat differ from the
+ * reference and from each other (both fail) is a mismatch in every row, with
+ * the first render's metric and the repeat's against the reference, and is
+ * counted as both failing; one whose repeat differs by one step (both pass)
+ * passes and exits 0.
  *
  * Linux only; the whole run re-executes itself in a private network namespace
  * (loopback only). Needs `npm run build` (dist/zr-runtime.js) and FFmpeg with
@@ -127,12 +140,14 @@ const SELF = fileURLToPath(import.meta.url);
 const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
 /** Cases of plain mapping and sizing, reported apart as the media baseline. */
 const BASELINE = ["offthread-plain.tsx", "video-plain.tsx", "img-sizes.tsx"];
-/** A row whose ZabsReel frame or sound differs between two renders of the same job. */
+/** A row whose ZabsReel frame or sound differs between two renders of the same job, one passing against the reference and one failing. */
 export const NONDET = "zabsreel nondeterministic";
 /** The finding behind NONDET, as the summary names it. */
-const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media before the requested source frame is painted, differently from one render to the next. Seen in media-run1 (review round 1): at composition frame 0 a blank frame (the background only), later the previous source frame (vid_a's counter reads 59 where 60 is asked); the flagged frames cluster at whole seconds of the source, where the fixtures have their keyframes; an Img case (img-transparency) is flagged too. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
+const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media before the requested source frame is painted, differently from one render to the next: a blank frame (the background only) or the previous source frame (the fixture's counter one lower than asked), mostly in video cases, also seen once in an Img case. Which frames and cases it hits varies from run to run (this run's: zabsreelRepeat.nondeterministic). A frame both renders capture the same wrong way is not detected by the repeat and is an ordinary mismatch row. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
 
 type Pipeline = "reference" | "zabsreel";
+/** The two ZabsReel renders' verdicts against the reference, for a frame or sound they differ on. */
+type Verdict = "both pass" | "split" | "both fail";
 
 // ---- fixtures (FIXTURES.md) ---------------------------------------------------------------
 
@@ -515,9 +530,13 @@ interface SizeResult {
   zabsreel: Side;
   /** ZabsReel's second render of the same job. */
   repeat: Side;
-  /** repeat: this frame against the repeat's; nondeterministic: they differ at all. */
-  frames: ({ frame: number; repeat: Metrics; nondeterministic: boolean } & Metrics)[];
-  audio?: AudioMetrics & { repeat: AudioMetrics; nondeterministic: boolean };
+  /**
+   * repeat: this frame against the repeat's; repeatReference: the reference's against the
+   * repeat's; nondeterministic: the two ZabsReel renders differ at all; split: they get
+   * different verdicts against the reference (the row is NONDET, in no mismatches file).
+   */
+  frames: ({ frame: number; repeat: Metrics; repeatReference: Metrics; nondeterministic: boolean; split: boolean } & Metrics)[];
+  audio?: AudioMetrics & { repeat: AudioMetrics; repeatReference: AudioMetrics; nondeterministic: boolean; split: boolean };
   /** A decode failure after both rendered. */
   error?: string;
 }
@@ -597,11 +616,14 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
         for (const n of header.frames) {
           const m = compare(fa.get(n)!, fb.get(n)!);
           const again = compare(fb.get(n)!, fc.get(n)!);
+          const repeatReference = compare(fa.get(n)!, fc.get(n)!);
           const nondeterministic = again.max_diff > 0;
-          sized.frames.push({ frame: n, ...m, repeat: again, nondeterministic });
-          const r = row(n, nondeterministic ? NONDET : fmt(m));
+          // Both renders failing is a mismatch (both samples show it); only a split verdict is NONDET.
+          const split = nondeterministic && m.pass !== repeatReference.pass;
+          sized.frames.push({ frame: n, ...m, repeat: again, repeatReference, nondeterministic, split });
+          const r = row(n, split ? NONDET : fmt(m));
           rows.push(r);
-          if (!m.pass && !nondeterministic) mismatches.push(r);
+          if (!m.pass && !split) mismatches.push(r);
           if (!m.pass || nondeterministic) {
             writePng(join(dir, `frame-${n}-reference.png`), fa.get(n)!, w, h);
             writePng(join(dir, `frame-${n}-zabsreel.png`), fb.get(n)!, w, h);
@@ -619,11 +641,13 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
           sized.repeat.channels = sc.channels;
           const m = compareAudio(sa.pcm, sb.pcm);
           const again = compareAudio(sb.pcm, sc.pcm);
+          const repeatReference = compareAudio(sa.pcm, sc.pcm);
           const nondeterministic = !(again.rms_db_max_diff === 0 && again.onset_ms_max_diff === 0);
-          sized.audio = { ...m, repeat: again, nondeterministic };
-          const r = audioRow(nondeterministic ? NONDET : fmtAudio(m));
+          const split = nondeterministic && m.pass !== repeatReference.pass;
+          sized.audio = { ...m, repeat: again, repeatReference, nondeterministic, split };
+          const r = audioRow(split ? NONDET : fmtAudio(m));
           audioRows.push(r);
-          if (!m.pass && !nondeterministic) audioMismatches.push(r);
+          if (!m.pass && !split) audioMismatches.push(r);
           mkdirSync(dir, { recursive: true });
           writeFileSync(join(dir, "audio.json"), JSON.stringify({ windowMs: AUDIO_RULE.windowMs, metrics: sized.audio, reference: sa.pcm.map(levels), zabsreel: sb.pcm.map(levels), repeat: sc.pcm.map(levels) }) + "\n");
         }
@@ -645,8 +669,8 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
       }
     }
     for (const o of [a, b, c]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
-    const random = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].filter((x) => x.nondeterministic);
-    const differ = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].some((x) => !x.pass && !x.nondeterministic);
+    const random = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].filter((x) => x.split);
+    const differ = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].some((x) => !x.pass && !x.split);
     const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zabsreel failed" : differ ? "mismatch" : random.length ? NONDET : "pass";
     const rank = ["pass", NONDET, "mismatch", "zabsreel failed", DRIFT, "harness error"];
     if (rank.indexOf(status) > rank.indexOf(result.status)) result.status = status;
@@ -710,9 +734,13 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
   const count = (s: CaseResult["status"]) => results.filter((r) => r.status === s).map((r) => r.case);
   const frames = results.flatMap((r) => r.sizes.flatMap((s) => s.frames));
   const sounds = results.flatMap((r) => r.sizes.flatMap((s) => (s.audio ? [s.audio] : [])));
+  const verdict = (x: { pass: boolean; repeatReference: { pass: boolean } }): Verdict => (x.pass && x.repeatReference.pass ? "both pass" : x.pass || x.repeatReference.pass ? "split" : "both fail");
   const random = results.flatMap((r) =>
-    r.sizes.filter((s) => s.frames.some((f) => f.nondeterministic) || s.audio?.nondeterministic).map((s) => ({ case: r.case, size: s.size, frames: s.frames.filter((f) => f.nondeterministic).map((f) => f.frame), audio: !!s.audio?.nondeterministic })),
+    r.sizes
+      .filter((s) => s.frames.some((f) => f.nondeterministic) || s.audio?.nondeterministic)
+      .map((s) => ({ case: r.case, size: s.size, frames: s.frames.filter((f) => f.nondeterministic).map((f) => ({ frame: f.frame, verdict: verdict(f) })), audio: s.audio?.nondeterministic ? verdict(s.audio) : null })),
   );
+  const differing = <T extends { nondeterministic: boolean; pass: boolean; repeatReference: { pass: boolean } }>(xs: T[], v: string) => xs.filter((x) => x.nondeterministic && verdict(x) === v).length;
   const summary = {
     rule: `D8: pct_within_4 >= ${RULE.pct} and max_diff <= ${RULE.max} (per pixel and channel, RGBA 8-bit, both ProRes 4444 files decoded by the same FFmpeg)`,
     audioRule: `${AUDIO_EXPECTED}; both sides decoded by the same FFmpeg to ${AUDIO_RULE.rate} Hz stereo; a start or end of sound: a sample above ${AUDIO_RULE.threshold} after or before ${AUDIO_RULE.gapMs} ms below it; windows at and next to one are left out of the level metric. Why: 1 dB is about the smallest audible level difference; 5 ms is under a third of a frame at 60 fps, so a whole-frame timing difference always fails.`,
@@ -722,23 +750,32 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     fixtures: run.fixtures.map((f) => ({ id: f.id, file: basename(f.file), sha256: f.sha256, bytes: f.bytes, probe: run.library[f.id] && { ...run.library[f.id], path: undefined, id: undefined, addedAt: undefined } })),
     seconds: Math.round((Date.now() - t0) / 1000),
     mediaBaseline: baseline(results),
-    // ZabsReel against its own repeat: the noise floor of its side (each frame's and sound's repeat metric is in cases).
+    // ZabsReel against its own repeat (each frame's and sound's repeat metrics are in cases). Identical
+    // is a lower bound on its noise, not a noise floor: a frame both renders get wrong the same way is
+    // not seen here. Differing ones: split (NONDET rows), both fail (mismatch rows) or both pass.
     zabsreelRepeat: {
       finding: SETTLE,
       framesCompared: frames.length,
       framesIdentical: frames.filter((f) => !f.nondeterministic).length,
+      framesSplit: differing(frames, "split"),
+      framesBothFailReference: differing(frames, "both fail"),
+      framesBothPassReference: differing(frames, "both pass"),
       audioCompared: sounds.length,
       audioIdentical: sounds.filter((s) => !s.nondeterministic).length,
+      audioSplit: differing(sounds, "split"),
+      audioBothFailReference: differing(sounds, "both fail"),
+      audioBothPassReference: differing(sounds, "both pass"),
       nondeterministic: random,
     },
+    // Nondeterministic here: the rows marked NONDET (a split verdict).
     counts: {
       cases: results.length,
       frames: frames.length,
-      framesPassing: frames.filter((f) => f.pass && !f.nondeterministic).length,
-      framesNondeterministic: frames.filter((f) => f.nondeterministic).length,
+      framesPassing: frames.filter((f) => f.pass && !f.split).length,
+      framesNondeterministic: frames.filter((f) => f.split).length,
       audioRows: sounds.length,
-      audioPassing: sounds.filter((s) => s.pass && !s.nondeterministic).length,
-      audioNondeterministic: sounds.filter((s) => s.nondeterministic).length,
+      audioPassing: sounds.filter((s) => s.pass && !s.split).length,
+      audioNondeterministic: sounds.filter((s) => s.split).length,
     },
     passing: count("pass"),
     nondeterministic: count(NONDET),
@@ -779,6 +816,23 @@ const check = (ok: boolean, msg: string) => {
 };
 
 const readRows = (file: string): Row[] => readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
+const readSummary = (out: string) =>
+  JSON.parse(readFileSync(join(out, "render-summary.json"), "utf8")) as {
+    counts: { framesPassing: number; framesNondeterministic: number; audioNondeterministic: number };
+    zabsreelRepeat: Record<"framesSplit" | "framesBothFailReference" | "framesBothPassReference" | "audioSplit" | "audioBothFailReference" | "audioBothPassReference", number> & { finding: string; nondeterministic: { case: string; size: string; frames: { frame: number; verdict: Verdict }[]; audio: Verdict | null }[] };
+    passing: string[];
+    nondeterministic: string[];
+    mismatching: string[];
+    cases: CaseResult[];
+  };
+/** A source change: each `from` replaced by its `to`; throws when one is missing. */
+const swap =
+  (...pairs: [string, string][]) =>
+  (tsx: string) =>
+    pairs.reduce((t, [from, to]) => {
+      if (!t.includes(from)) throw new Error("the self-test composition changed");
+      return t.replace(from, to);
+    }, tsx);
 const KEYS = "case,function,size,input,metric,expected,actual,spec,why";
 
 /** `onsets` (ms) of 100 ms 1 kHz beeps at `level` (peak), `seconds` long; `right` scales the right channel. */
@@ -798,8 +852,8 @@ function beeps(onsets: number[], level: number, seconds = 2, right = 1): Pcm {
 
 // Frame 0 is not compared: ZabsReel's renderer does not always paint a library video's frame
 // before it is captured (finding ZR-MEDIA-SETTLE, SETTLE above; at frame 0 the video is missing,
-// seen here on one side only). S4 needs the same frames on both sides; the full run marks
-// such frames "zabsreel nondeterministic" from the repeat instead.
+// seen here on one side only). S4 needs the same frames on both sides; the full run finds
+// such frames from the repeat instead.
 const SELF_TSX = [
   "// size: 320x180",
   "// fps: 30",
@@ -986,30 +1040,110 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   check(summary7.referenceRefused.join() === "self.tsx" && !summary7.zabsreelFailed.length && !sized7.reference.ok && sized7.zabsreel.ok, "the summary lists it as refused by the reference only, ZabsReel rendered it");
   check(![...mis7, ...amis7].some((r) => r.actual.includes("self-test drift")), "no row carries the error text");
 
-  console.log(`S8. ZabsReel's repeat alone differs (a brighter background and half the volume): every row is exactly "${NONDET}", in no mismatches file...`);
+  console.log(`S8. ZabsReel's repeat alone differs (a brighter background and half the volume; the first render passes, the repeat fails): every row is exactly "${NONDET}", in no mismatches file...`);
   const randomOut = join(out, "repeat");
   const random: Run = { ...both, out: randomOut, sourceRepeat: altered.sourceB };
   const code8 = await parity(random, selfDir, undefined, offline());
   const all8 = readRows(join(randomOut, "render-all.jsonl"));
   const audio8 = readRows(join(randomOut, "audio-all.jsonl"));
-  const summary8 = JSON.parse(readFileSync(join(randomOut, "render-summary.json"), "utf8")) as {
-    counts: { framesPassing: number; framesNondeterministic: number; audioNondeterministic: number };
-    zabsreelRepeat: { finding: string; nondeterministic: { case: string; size: string; frames: number[]; audio: boolean }[] };
-    nondeterministic: string[];
-    mismatching: string[];
-  };
+  const summary8 = readSummary(randomOut);
   check(code8 === 3, `the run exits 3 (it exited ${code8})`);
   check(all8.length === listed.frames.length && all8.every((r) => r.actual === NONDET && Object.keys(r).join() === KEYS), `every frame row says exactly "${NONDET}" (${JSON.stringify(all8.map((r) => r.actual))})`);
   check(audio8.length === 1 && audio8[0].actual === NONDET, `the audio row says exactly "${NONDET}" (${JSON.stringify(audio8.map((r) => r.actual))})`);
   check(["render-mismatches.jsonl", "audio-mismatches.jsonl"].every((f) => readFileSync(join(randomOut, f), "utf8") === ""), "render-mismatches.jsonl and audio-mismatches.jsonl are empty");
   const listed8 = summary8.zabsreelRepeat.nondeterministic;
   check(
-    summary8.nondeterministic.join() === "self.tsx" && !summary8.mismatching.length && listed8.length === 1 && listed8[0].case === "self.tsx" && listed8[0].size === "320x180" && listed8[0].frames.join() === listed.frames.join() && listed8[0].audio && summary8.zabsreelRepeat.finding.startsWith("ZR-MEDIA-SETTLE"),
+    summary8.nondeterministic.join() === "self.tsx" &&
+      !summary8.mismatching.length &&
+      listed8.length === 1 &&
+      listed8[0].case === "self.tsx" &&
+      listed8[0].size === "320x180" &&
+      listed8[0].frames.map((f) => f.frame).join() === listed.frames.join() &&
+      listed8[0].frames.every((f) => f.verdict === "split") &&
+      listed8[0].audio === "split" &&
+      summary8.zabsreelRepeat.finding.startsWith("ZR-MEDIA-SETTLE"),
     `the summary lists the case, its frames and its sound as nondeterministic, not as a mismatch (${JSON.stringify(listed8)})`,
   );
   check(summary8.counts.framesPassing === 0 && summary8.counts.framesNondeterministic === listed.frames.length && summary8.counts.audioNondeterministic === 1, `counts: 0 frames passing, ${listed.frames.length} frames and 1 sound nondeterministic (${JSON.stringify(summary8.counts)})`);
   const p8 = pixel("zabsreel-repeat", randomOut);
   check(!!p8 && near(p8, [0x48, 0x58, 0x68], 4), `the repeat's own frame is saved, background #485868 (${p8})`);
+
+  console.log(`S9. the second side alone differs (the first render fails, its repeat of the original passes): every row is exactly "${NONDET}", in no mismatches file...`);
+  const secondOut = join(out, "second");
+  const second: Run = { ...altered, out: secondOut, sourceRepeat: swap(['"#485868"', '"#203040"'], ["volume={0.25}", "volume={0.5}"]) };
+  const code9 = await parity(second, selfDir, undefined, offline());
+  const rows9 = [...readRows(join(secondOut, "render-all.jsonl")), ...readRows(join(secondOut, "audio-all.jsonl"))];
+  const summary9 = readSummary(secondOut);
+  const s9 = summary9.cases[0].sizes[0];
+  check(
+    s9.frames.length === listed.frames.length && s9.frames.every((f) => !f.pass && f.repeatReference.pass && f.split) && !!s9.audio && !s9.audio.pass && s9.audio.repeatReference.pass && s9.audio.split,
+    `the first render fails and the repeat passes against the reference: frames ${s9.frames.map((f) => `${fmt(f)} and ${fmt(f.repeatReference)}`).join(", ")}, audio ${s9.audio && `${fmtAudio(s9.audio)} and ${fmtAudio(s9.audio.repeatReference)}`}`,
+  );
+  check(rows9.length === listed.frames.length + 1 && rows9.every((r) => r.actual === NONDET), `every frame row and the audio row say exactly "${NONDET}" (${JSON.stringify(rows9.map((r) => r.actual))})`);
+  check(["render-mismatches.jsonl", "audio-mismatches.jsonl"].every((f) => readFileSync(join(secondOut, f), "utf8") === ""), "render-mismatches.jsonl and audio-mismatches.jsonl are empty");
+  const z9 = summary9.zabsreelRepeat;
+  check(
+    code9 === 3 && summary9.nondeterministic.join() === "self.tsx" && !summary9.mismatching.length && z9.framesSplit === listed.frames.length && z9.audioSplit === 1 && z9.framesBothFailReference === 0 && z9.audioBothFailReference === 0,
+    `exits 3, the case nondeterministic, ${listed.frames.length} frames and 1 sound split (exit ${code9}, ${JSON.stringify({ ...z9, finding: undefined, nondeterministic: undefined })})`,
+  );
+
+  console.log("S10. the second side and its repeat differ from the reference and from each other (both fail): every row is a mismatch with the first render's metric...");
+  const bothOut = join(out, "both-fail");
+  const bothFail: Run = { ...altered, out: bothOut, sourceRepeat: swap(['"#485868"', '"#708090"'], ["volume={0.25}", "volume={0.125}"]) };
+  const code10 = await parity(bothFail, selfDir, undefined, offline());
+  const mis10 = readRows(join(bothOut, "render-mismatches.jsonl"));
+  const amis10 = readRows(join(bothOut, "audio-mismatches.jsonl"));
+  const summary10 = readSummary(bothOut);
+  const s10 = summary10.cases[0].sizes[0];
+  // #485868 is 40 from #203040 and #708090 is 80 from it, 40 from #485868; the volumes 0.25 and 0.125 are 6 and 12 dB below 0.5.
+  check(
+    s10.frames.length === listed.frames.length &&
+      s10.frames.every((f) => f.nondeterministic && !f.split && !f.pass && f.max_diff >= 36 && f.max_diff <= 44 && f.repeat.max_diff >= 36 && f.repeat.max_diff <= 44 && !f.repeatReference.pass && f.repeatReference.max_diff >= 76 && f.repeatReference.max_diff <= 84),
+    `every frame differs from its repeat and both fail: first ${s10.frames.map(fmt).join(", ")}; repeat against the first ${s10.frames.map((f) => fmt(f.repeat)).join(", ")}; repeat against the reference ${s10.frames.map((f) => fmt(f.repeatReference)).join(", ")}`,
+  );
+  const a10 = s10.audio;
+  check(
+    !!a10 && a10.nondeterministic && !a10.split && !a10.pass && Math.abs(a10.rms_db_max_diff - 6.02) < 0.5 && Math.abs(a10.repeat.rms_db_max_diff - 6.02) < 0.5 && !a10.repeatReference.pass && Math.abs(a10.repeatReference.rms_db_max_diff - 12.04) < 0.5,
+    `the sound differs from its repeat and both fail: ${a10 && `${fmtAudio(a10)}, repeat against the first ${fmtAudio(a10.repeat)}, against the reference ${fmtAudio(a10.repeatReference)}`}`,
+  );
+  check(
+    mis10.length === listed.frames.length && mis10.every((r, i) => r.input === `frame ${listed.frames[i]}` && r.actual === fmt(s10.frames[i])) && amis10.length === 1 && !!a10 && amis10[0].actual === fmtAudio(a10),
+    `render-mismatches.jsonl and audio-mismatches.jsonl hold every row with the first render's metric (${JSON.stringify([...mis10, ...amis10].map((r) => r.actual))})`,
+  );
+  const z10 = summary10.zabsreelRepeat;
+  check(
+    code10 === 3 &&
+      summary10.mismatching.join() === "self.tsx" &&
+      !summary10.nondeterministic.length &&
+      summary10.counts.framesNondeterministic === 0 &&
+      summary10.counts.audioNondeterministic === 0 &&
+      z10.framesBothFailReference === listed.frames.length &&
+      z10.audioBothFailReference === 1 &&
+      z10.framesSplit === 0 &&
+      z10.audioSplit === 0 &&
+      z10.nondeterministic.length === 1 &&
+      z10.nondeterministic[0].frames.map((f) => f.frame).join() === listed.frames.join() &&
+      z10.nondeterministic[0].frames.every((f) => f.verdict === "both fail") &&
+      z10.nondeterministic[0].audio === "both fail",
+    `exits 3, the case a mismatch, its frames and sound listed as nondeterministic with both failing and counted so (exit ${code10}, ${JSON.stringify({ ...z10, finding: undefined })})`,
+  );
+
+  console.log("S11. the repeat differs from the first render by one step (both pass): every row passes, the case passes...");
+  const nearOut = join(out, "both-pass");
+  const bothPass: Run = { ...both, out: nearOut, sourceRepeat: swap(['"#203040"', '"#213141"'], ["volume={0.5}", "volume={0.49}"]) };
+  const code11 = await parity(bothPass, selfDir, undefined, offline());
+  const rows11 = [...readRows(join(nearOut, "render-all.jsonl")), ...readRows(join(nearOut, "audio-all.jsonl"))];
+  const summary11 = readSummary(nearOut);
+  const s11 = summary11.cases[0].sizes[0];
+  check(
+    s11.frames.length === listed.frames.length && s11.frames.every((f) => f.nondeterministic && !f.split && f.pass && f.repeatReference.pass) && !!s11.audio && s11.audio.nondeterministic && !s11.audio.split && s11.audio.pass && s11.audio.repeatReference.pass,
+    `every frame and the sound differ from the repeat and both pass: repeat ${s11.frames.map((f) => fmt(f.repeat)).join(", ")}, audio ${s11.audio && fmtAudio(s11.audio.repeat)}`,
+  );
+  const z11 = summary11.zabsreelRepeat;
+  check(
+    code11 === 0 && summary11.passing.join() === "self.tsx" && rows11.every((r) => r.actual !== NONDET) && z11.framesBothPassReference === listed.frames.length && z11.audioBothPassReference === 1 && summary11.counts.framesPassing === listed.frames.length,
+    `exits 0, the case passes, no row is "${NONDET}", counted as both passing (exit ${code11}, ${JSON.stringify(rows11.map((r) => r.actual))}, ${JSON.stringify({ ...z11, finding: undefined, nondeterministic: undefined })})`,
+  );
 
   console.log(failures === 0 ? "\nMEDIA PARITY HARNESS SELF-TEST PASSED" : `\n${failures} CHECK(S) FAILED`);
   return failures === 0 ? 0 : 1;
