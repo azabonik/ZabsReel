@@ -1859,18 +1859,11 @@ export class EditorEngine extends EventEmitter {
   splitClip(clipId: string, atFrame: number): { left: string; right: string; atFrame: number } {
     return this.mutate(() => {
       const { clip } = this.findClip(clipId);
-      const owner = this.graphicAudioOwner(clipId);
-      if (owner) {
-        throw new Error(
-          `Clip "${clipId}" is the sound of motion graphic "${owner.graphic.id}" on clip "${owner.host.id}" and follows that graphic. Split the clip the graphic is on (split_clip on "${owner.host.id}"), or move or shorten the graphic's window with set_graphic_window.`,
-        );
-      }
+      this.refuseGraphicAudioCut(clipId);
       const cut = EditorEngine.cutPoint(clip, Math.round(atFrame), this.project.fps, "split");
       const splitAbs = clip.startFrame + cut.local;
       // A graphic's audio clip follows its graphic, not the linked split (D-SPLIT): it is left out here and trimmed below.
-      const linked = this.linkedClips(clip);
-      const graphicAudio = new Set(linked.flatMap((m) => (m.graphics ?? []).flatMap((g) => (g.audioClipId ? [g.audioClipId] : []))));
-      const group = linked.filter((m) => !graphicAudio.has(m.id));
+      const group = this.linkedWithoutGraphicAudio(clip);
       let result = { left: clip.id, right: clip.id, atFrame: cut.local };
       const lefts: string[] = [];
       for (const member of group) {
@@ -1996,11 +1989,15 @@ export class EditorEngine extends EventEmitter {
    * one ends, and later clips move left by what the clip really lost, so the
    * next clip stays butted. A piece left on either side keeps at least one
    * source frame and one timeline frame; a side too short for that goes with
-   * the cut (no gap is left).
+   * the cut (no gap is left). A motion graphic's audio clip follows its
+   * graphic (followGraphicAudio); cut_range on that audio clip itself is
+   * refused.
    */
   cutRange(clipId: string, startFrame: number, endFrame: number): string[] {
     return this.mutate(() => {
       const { track, clip, index } = this.findClip(clipId);
+      this.refuseGraphicAudioCut(clipId);
+      const graphicAudio = this.graphicAudioStarts();
       const fps = this.project.fps;
       const dur = clipDurationFrames(clip, fps);
       const s = Math.round(startFrame);
@@ -2051,6 +2048,7 @@ export class EditorEngine extends EventEmitter {
       const cutAbs = clip.startFrame + e;
       for (const c of track.clips) if (c.startFrame >= cutAbs && !remaining.includes(c)) c.startFrame -= removed;
       EditorEngine.sortTrack(track);
+      this.followGraphicAudio(graphicAudio);
       return remaining.map((c) => c.id);
     });
   }
@@ -2063,12 +2061,14 @@ export class EditorEngine extends EventEmitter {
    * startFrame, endFrame}: the track lost endFrame − startFrame frames at
    * startFrame; none when they are equal) — the requested ranges, except where
    * a cut snaps to a source-frame boundary (a speed ramp, or a constant speed
-   * that is not 1x/2x/3x/4x — see planRippleCuts).
+   * that is not 1x/2x/3x/4x — see planRippleCuts). A motion graphic's audio
+   * clip is not cut: it follows its graphic (followGraphicAudio).
    */
   rippleDeleteRanges(ranges: { trackIndex: number; startFrame: number; endFrame: number }[]): { trackIndex: number; startFrame: number; endFrame: number }[] {
     return this.mutate(() => {
       const fps = this.project.fps;
       const applied = ranges.map((r) => ({ trackIndex: r.trackIndex, startFrame: Math.round(r.startFrame), endFrame: Math.round(r.startFrame) }));
+      const graphicAudio = this.graphicAudioStarts();
       for (const cut of this.planRippleCuts(ranges).sort((p, q) => q.start - p.start)) {
         const s = cut.start;
         // What the cut removes, on the timeline as it is now (later cuts are done): the range's
@@ -2090,8 +2090,8 @@ export class EditorEngine extends EventEmitter {
           for (const c of track.clips) {
             const cs = c.startFrame;
             const ce = clipEndFrame(c, fps);
-            if (ce <= s || cs >= e) {
-              kept.push(c); // fully outside the range
+            if (ce <= s || cs >= e || graphicAudio.has(c.id)) {
+              kept.push(c); // fully outside the range, or a graphic's sound (it follows the graphic, below)
               continue;
             }
             // Trim away the overlapping part; keep left and/or right remainders.
@@ -2135,6 +2135,7 @@ export class EditorEngine extends EventEmitter {
           applied[index] = { trackIndex, startFrame: s, endFrame: s + removed };
         }
       }
+      this.followGraphicAudio(graphicAudio);
       return applied;
     });
   }
@@ -3331,10 +3332,11 @@ export class EditorEngine extends EventEmitter {
     }
 
     const merged = EditorEngine.mergeSecondRanges(removed.map((r) => ({ start: r.start, end: r.end })));
-    // Cut this clip AND its linked members (same absolute ranges → stays in sync).
+    // Cut this clip AND its linked members (same absolute ranges → stays in sync). A graphic's audio clip
+    // follows its graphic instead (rippleDeleteRanges), so its track is not cut for it.
     const primaryRanges = this.sourceRangesToTimelineRanges([{ clip, trackIndex: track.index }], merged, padFrames);
     const allRanges = [...primaryRanges];
-    for (const member of this.linkedClips(clip)) {
+    for (const member of this.linkedWithoutGraphicAudio(clip)) {
       if (member.id === clip.id) continue;
       const memberTrack = this.findClip(member.id).track;
       for (const r of primaryRanges) {
@@ -5929,11 +5931,14 @@ export class EditorEngine extends EventEmitter {
         const oldEnd = target.startFrame + dur;
         const splitAbs = target.startFrame + c;
         const group = this.linkedClips(target);
+        // A graphic's audio clip is not split with the group (D-SPLIT): it is trimmed after the split below. It
+        // stays in `group` for the ripple, so freezing before the clip's first frame moves it with its graphic.
+        const splitting = this.linkedWithoutGraphicAudio(target);
         const tracks = new Set<Track>([track]);
         for (const m of group) tracks.add(this.findClip(m.id).track);
         // A clip entering through a transition overlaps the end of the clip before it. Freezing INSIDE that
         // overlap would leave the still and the right half stacked under the incoming clip.
-        for (const m of group) {
+        for (const m of splitting) {
           const mt = this.findClip(m.id).track;
           const mEnd = clipEndFrame(m, this.project.fps);
           const next = mt.clips.filter((x) => x.id !== m.id && x.startFrame > m.startFrame).sort((p, q) => p.startFrame - q.startFrame)[0];
@@ -5955,10 +5960,17 @@ export class EditorEngine extends EventEmitter {
         // A speed-ramped linked member can split a little before splitAbs (cutPoint): its right half moves too.
         const rightHalves = new Set<string>();
         let right: Clip = target; // the target's right half (the whole clip when the still goes before it)
-        for (const m of group) {
+        const lefts: string[] = [];
+        for (const m of splitting) {
           const r = m.id === target.id ? this.splitOne(m.id, c, false, srcFrame) : this.splitOne(m.id, splitAbs - m.startFrame, false);
           if (r) rightHalves.add(r.right);
+          if (r) lefts.push(r.left);
           if (r && m.id === target.id) right = this.findClip(r.right).clip;
+        }
+        // The graphics stay on the left piece (splitOne), so their sound ends with it, as in splitClip.
+        for (const id of lefts) {
+          const left = this.findClip(id).clip;
+          for (const g of left.graphics ?? []) this.trimGraphicAudio(g, clipEndFrame(left, fps));
         }
         let len = stillFrames;
         const moving = new Set<Clip>();
@@ -6580,8 +6592,8 @@ export class EditorEngine extends EventEmitter {
    * the render made sound (ZabsReel's motion renderer, MOTION-PLAN D4 E3),
    * that .wav as its own library asset placed as an audio clip over the
    * graphic's window (graphicAudioSpan; neither when no frame of the window
-   * is on the clip) on the first audio track free there, else on a new audio
-   * track. The audio clip joins the clip's link group (a
+   * is on the clip) on the first audio track free there (not locked or
+   * muted), else on a new audio track. The audio clip joins the clip's link group (a
    * new group when the clip has none) and the graphic's audioClipId names
    * it. add_graphic's motion-renderer path calls this (slice 5).
    */
@@ -6600,7 +6612,7 @@ export class EditorEngine extends EventEmitter {
       if (!audio || !span) return { graphic: g, clip: target, asset: baked };
       this.project.assets.push(audio);
       const end = span.start + span.frames;
-      const free = (t: Track) => !t.locked && t.clips.every((c) => c.startFrame >= end || clipEndFrame(c, this.project.fps) <= span.start);
+      const free = (t: Track) => !t.locked && !t.muted && t.clips.every((c) => c.startFrame >= end || clipEndFrame(c, this.project.fps) <= span.start);
       const track = this.tracksByIndex().find((t) => t.kind === "audio" && free(t)) ?? this.newTrack("audio");
       const audioClip = this.makeClip(audio.id, span.start, 0, span.frames);
       target.linkGroupId ??= newId("link");
@@ -6648,12 +6660,77 @@ export class EditorEngine extends EventEmitter {
     return undefined;
   }
 
+  /** The refusal for an edit that would cut a graphic's audio clip into pieces (split_clip, cut_range on it). */
+  private refuseGraphicAudioCut(clipId: string): void {
+    const owner = this.graphicAudioOwner(clipId);
+    if (owner) {
+      throw new Error(
+        `Clip "${clipId}" is the sound of motion graphic "${owner.graphic.id}" on clip "${owner.host.id}" and follows that graphic. Split the clip the graphic is on (split_clip on "${owner.host.id}"), or move or shorten the graphic's window with set_graphic_window.`,
+      );
+    }
+  }
+
+  /** A clip's link group without the audio clips of its members' graphics: those follow their graphic, not the group's cut (D-SPLIT). */
+  private linkedWithoutGraphicAudio(clip: Clip): Clip[] {
+    const linked = this.linkedClips(clip);
+    const graphicAudio = new Set(linked.flatMap((m) => (m.graphics ?? []).flatMap((g) => (g.audioClipId ? [g.audioClipId] : []))));
+    return linked.filter((m) => !graphicAudio.has(m.id));
+  }
+
+  /** Where each graphic's audio clip, and the clip its graphic is on, start now, by audio clip id (followGraphicAudio). */
+  private graphicAudioStarts(): Map<string, { host: number; audio: number }> {
+    const starts = new Map<string, { host: number; audio: number }>();
+    for (const { clip } of this.allClips()) {
+      for (const g of clip.graphics ?? []) {
+        const a = this.graphicAudioClip(g);
+        if (a && !starts.has(a.clip.id)) starts.set(a.clip.id, { host: clip.startFrame, audio: a.clip.startFrame });
+      }
+    }
+    return starts;
+  }
+
+  /**
+   * After a cut that moved or shortened clips (rippleDeleteRanges, cutRange),
+   * put each graphic's audio clip back with its graphic (D-SPLIT, I9): it
+   * moves by as much as the clip the graphic is on, and ends no later than
+   * that clip (trimGraphicAudio). A graphic copied onto both pieces of a cut
+   * keeps its sound on the first piece, and the copy's audioClipId is
+   * cleared. An audio clip whose graphic went with a removed clip is removed.
+   */
+  private followGraphicAudio(before: Map<string, { host: number; audio: number }>): void {
+    const owners = new Map<string, { host: Clip; g: GraphicOverlay }[]>();
+    for (const { clip } of this.allClips()) {
+      for (const g of clip.graphics ?? []) {
+        if (g.audioClipId && before.has(g.audioClipId)) (owners.get(g.audioClipId) ?? owners.set(g.audioClipId, []).get(g.audioClipId)!).push({ host: clip, g });
+      }
+    }
+    for (const [id, was] of before) {
+      const [first, ...copies] = (owners.get(id) ?? []).sort((p, q) => p.host.startFrame - q.host.startFrame);
+      if (!first) {
+        this.dropGraphicAudioClip(id);
+        continue;
+      }
+      for (const c of copies) delete c.g.audioClipId;
+      const a = this.graphicAudioClip(first.g);
+      if (!a) continue;
+      a.clip.startFrame = was.audio + first.host.startFrame - was.host;
+      EditorEngine.sortTrack(a.track);
+      this.trimGraphicAudio(first.g, clipEndFrame(first.host, this.project.fps));
+    }
+  }
+
   /** Remove a graphic's audio clip (only that clip, not its link group) and clear audioClipId. */
   private removeGraphicAudio(g: GraphicOverlay): void {
-    const a = this.graphicAudioClip(g);
+    const id = g.audioClipId;
     delete g.audioClipId;
+    if (id) this.dropGraphicAudioClip(id);
+  }
+
+  /** Take a graphic's audio clip off the timeline (only that clip, not its link group). */
+  private dropGraphicAudioClip(id: string): void {
+    const a = this.allClips().find(({ clip }) => clip.id === id);
     if (!a) return;
-    a.track.clips.splice(a.index, 1);
+    a.track.clips.splice(a.track.clips.indexOf(a.clip), 1);
     // A group the audio clip made for a clip that had none is left with that clip alone: unlink it.
     const group = a.clip.linkGroupId ? this.allClips().filter(({ clip }) => clip.linkGroupId === a.clip.linkGroupId) : [];
     if (group.length === 1) delete group[0].clip.linkGroupId;

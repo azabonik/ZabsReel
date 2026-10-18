@@ -787,14 +787,16 @@ async function waitFor(what: string, cond: () => boolean, ms: number): Promise<b
 
 /** The renderer run directly (its stdin held open, as the core does) until it exits; at most 30 s. */
 async function runRenderer(bin: Extract<RendererBinary, { ok: true }>, args: string[], env: Record<string, string>) {
-  const child = spawn(bin.command, [...bin.args, ...args], { env, stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(bin.command, [...bin.args, ...args], { env, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
+  let stderr = "";
   child.stdout?.on("data", (c: Buffer) => (stdout += c.toString()));
+  child.stderr?.on("data", (c: Buffer) => (stderr = (stderr + c.toString()).slice(-4000)));
   const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
   const code = await new Promise<number | null>((r) => child.once("exit", (c) => r(c)));
   clearTimeout(timer);
   child.stdin?.destroy();
-  return { code, stdout };
+  return { code, stdout, stderr };
 }
 
 // MUTATION: exited() and renderFrames without their "error" listeners (exit only) → the
@@ -940,7 +942,9 @@ async function r5(work: string) {
   const r2 = await runRenderer(bin, rendererArgs(scratch, 16, 16, ["--probe"]), rendererEnv(scratch, p.env));
   const inHome = filesUnder(p.home);
   const inScratch = filesUnder(scratch);
-  check(r2.code === 0 && /"probe":"ok"/.test(r2.stdout), `with --zr-scratch the probe runs (exit ${r2.code})`);
+  const probed = r2.code === 0 && /"probe":"ok"/.test(r2.stdout);
+  // On a failure the renderer's stderr tail goes in the message (the row failed once, then passed on a rerun).
+  check(probed, `with --zr-scratch the probe runs (exit ${r2.code}${probed ? "" : `; stderr: ${r2.stderr.trim().split("\n").slice(-5).join(" | ")}`})`);
   check(inScratch.some((x) => x.startsWith("profile/")) && inHome.length === 0, `Chromium's profile lands under motion/<id>/profile, nothing in HOME (${inScratch.length} files there; HOME: ${JSON.stringify(inHome.slice(0, 5))})`);
   check(filesUnder(p.data).every((x) => x.startsWith("motion/probe-test/")), `nothing else in the data folder (${JSON.stringify(filesUnder(p.data).filter((x) => !x.startsWith("motion/probe-test/")).slice(0, 5))})`);
 }

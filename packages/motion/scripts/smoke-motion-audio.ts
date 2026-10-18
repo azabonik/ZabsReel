@@ -51,6 +51,16 @@
  *                  piece leaves no clip of that sound; a split before the
  *                  window removes it and clears audioClipId; one after it
  *                  leaves it alone; split_clip on the audio clip is refused.
+ *                  The other cuts keep it one clip with its graphic too:
+ *                  freeze_frame inside the window ends it at the freeze point
+ *                  (and one before the clip moves it with the clip);
+ *                  ripple_delete_ranges ends it with the first piece (the
+ *                  graphic's copy on the second piece names no sound), moves
+ *                  it with the clip, and removes it with a removed clip;
+ *                  cut_range ends it with the left piece, and is refused on
+ *                  the audio clip; tighten_talk ends it with the first piece
+ *                  and leaves the rest of its track alone. A muted audio
+ *                  track is not free.
  *  A5. failures  — graphic_mix_timeout (a 1 ms limit) for an overlay and a
  *                  card, and a failed move of the .wav into baked/, each leave
  *                  baked/ as it was (the project changes only after a render
@@ -127,6 +137,8 @@ interface Fixtures {
   host: string;
   /** 2 s of 160x90 video with `two` as its AAC sound. */
   vid: string;
+  /** 8 s of 160x90 colour with a quiet 220 Hz AAC sound: a clip tighten_talk accepts (its source has audio). */
+  talk: string;
 }
 
 function ffmpeg(args: string[]): void {
@@ -145,7 +157,8 @@ function fixtures(work: string): Fixtures {
   ffmpeg([...sine(440, 1), ...sine(880, 1), "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1,volume=0.2", "-ac", "2", "-c:a", "pcm_s16le", at("two.wav")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=0x203040:s=160x90:r=30:d=8", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", at("host.mp4")]);
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=2", "-i", at("two.wav"), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", at("vid.mp4")]);
-  return { tone: at("tone.wav"), short: at("short.wav"), two: at("two.wav"), host: at("host.mp4"), vid: at("vid.mp4") };
+  ffmpeg(["-f", "lavfi", "-i", "color=c=0x203040:s=160x90:r=30:d=8", ...sine(220, 8), "-af", "volume=0.2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-c:a", "aac", "-shortest", at("talk.mp4")]);
+  return { tone: at("tone.wav"), short: at("short.wav"), two: at("two.wav"), host: at("host.mp4"), vid: at("vid.mp4"), talk: at("talk.mp4") };
 }
 
 /** A file's first audio channel, as 48 kHz floats (empty when it has no audio). */
@@ -638,6 +651,111 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
     !!refused && /split the clip the graphic is on/i.test(refused.message) && /set_graphic_window/.test(refused.message) && refused.message.includes(host.id) && engine.getProject().revision === rev && soundClips().length === 1,
     `split_clip on the audio clip: refused, naming the host clip and set_graphic_window, and nothing changes (${refused?.message})`,
   );
+
+  // A muted audio track is not free: the sound would play silent there.
+  engine.setTrackProperties(trackOf(acId)?.index ?? -1, { muted: true });
+  const r4 = engine.attachGraphic(host.id, { id: "gfx_four", assetId: baked.id, startFrame: 120, endFrame: 150 }, baked, sound);
+  // MUTATION: free() not testing muted → the sound goes on the muted track.
+  check(!!r4.audioClip && trackOf(r4.audioClip.id)?.id !== trackOf(acId)?.id && !trackOf(r4.audioClip.id)?.muted, `a muted audio track is not free: the sound goes on a new track (track ${trackOf(r4.audioClip?.id ?? "")?.index})`);
+  engine.undo();
+  engine.undo();
+  setup(soundClips().length === 1 && !trackOf(acId)?.muted, "undo restores the audio track");
+
+  const allClips = () => engine.getProject().tracks.flatMap((t) => t.clips);
+  const holders = () => allClips().filter((c) => c.graphics?.some((g) => g.id === "gfx_ov")).sort((p, q) => p.startFrame - q.startFrame);
+  const span = (c: Clip | undefined) => JSON.stringify(c && [c.startFrame, c.sourceInFrame, c.sourceOutFrame]);
+  const removeOnFirst = async (what: string) => {
+    await dispatch(engine, "remove_graphic", { clipId: holders()[0]?.id, graphicId: "gfx_ov" });
+    check(soundClips().length === 0, `${what}, then remove_graphic on the first piece: no clip of the sound is left (${soundClips().length})`);
+    engine.undo();
+  };
+
+  // freeze_frame inside the window (clip-local 2.5 s, timeline frame 105): the graphic stays on the left piece, so the sound ends there (D-SPLIT).
+  await engine.freezeFrame(host.id, 2.5, 1);
+  // MUTATION: no exclusion in freezeFrame → the sound splits into two new clips; the graphic names neither.
+  check(soundClips().length === 1 && holders()[0]?.graphics?.[0]?.audioClipId === acId, `freeze_frame inside the window: one audio clip, the same id, named by the left piece's graphic (${soundClips().map((c) => c.id).join(",")})`);
+  // MUTATION: no trim after freezeFrame's split → it still ends at 120.
+  check(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 45, `it ends at the freeze point, timeline frame 105 (${span(clipOf(acId))})`);
+  await removeOnFirst("freeze_frame");
+  engine.undo();
+  setup(clipOf(acId)?.sourceOutFrame === 60 && soundClips().length === 1, "undo restores the audio clip");
+  // Before the clip's first frame (ripple 'track'): the clip and its graphic move by the still's length, and so does the sound.
+  const still = await engine.freezeFrame(host.id, 0, 1);
+  // MUTATION: freezeFrame's tracks without the sound's (built from the group less the graphic's sound) → it stays at 60.
+  check(clipOf(acId)?.startFrame === 60 + still.durationFrames && clipOf(acId)?.sourceOutFrame === 60 && graphicOn(host.id)?.audioClipId === acId, `freeze_frame before the clip: the sound moves with it, by ${still.durationFrames} frames (${span(clipOf(acId))})`);
+  engine.undo();
+  setup(clipOf(acId)?.startFrame === 60, "undo restores the audio clip");
+
+  // ripple_delete_ranges [80, 90) on the clip's track and the sound's: the graphic is on both pieces (copied, as before
+  // the sound existed); its sound stays one clip and ends with the first piece.
+  const hostTrack = trackOf(host.id)?.index ?? -1;
+  const soundTrack = trackOf(acId)?.index ?? -1;
+  engine.rippleDeleteRanges([{ trackIndex: hostTrack, startFrame: 80, endFrame: 90 }, { trackIndex: soundTrack, startFrame: 80, endFrame: 90 }]);
+  // MUTATION: rippleDeleteRanges cutting the graphic's audio clip like any clip → two new clips of the sound.
+  // MUTATION: no followGraphicAudio in rippleDeleteRanges → it runs on past the first piece, to 120.
+  check(soundClips().length === 1 && clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 20, `ripple_delete_ranges inside the window: one audio clip, the same id, ending at 80 (${soundClips().map((c) => span(c)).join(",")})`);
+  // MUTATION: the copy's audioClipId not cleared → both pieces name the sound.
+  check(holders().length === 2 && holders()[0].graphics?.[0]?.audioClipId === acId && holders()[1].graphics?.[0]?.audioClipId === undefined, `the first piece's graphic names it, the copy on the second piece names no sound`);
+  await removeOnFirst("ripple_delete_ranges");
+  engine.undo();
+  // A range before the clip, on its track only: the clip moves left, and its sound with it.
+  engine.rippleDeleteRanges([{ trackIndex: hostTrack, startFrame: 0, endFrame: 20 }]);
+  // MUTATION: followGraphicAudio not moving the sound → it stays at 60.
+  check(clipOf(host.id)?.startFrame === 10 && clipOf(acId)?.startFrame === 40 && clipOf(acId)?.sourceOutFrame === 60, `ripple_delete_ranges before the clip: the sound moves with it to 40 (${span(clipOf(acId))})`);
+  engine.undo();
+  // A range over the whole clip, on its track only: the graphic goes with the clip, and so does its sound.
+  engine.rippleDeleteRanges([{ trackIndex: hostTrack, startFrame: 30, endFrame: 210 }]);
+  // MUTATION: followGraphicAudio keeping a sound whose graphic is gone → it stays.
+  check(!clipOf(host.id) && soundClips().length === 0, `ripple_delete_ranges over the whole clip: no clip of the sound is left (${soundClips().length})`);
+  engine.undo();
+  setup(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60, "undo restores the audio clip");
+
+  // cut_range [70, 80) of the clip: the left piece keeps the graphic and ends at 100; the sound ends there too.
+  await dispatch(engine, "cut_range", { clipId: host.id, startFrame: 70, endFrame: 80 });
+  // MUTATION: no followGraphicAudio in cutRange → it runs on to 120.
+  check(soundClips().length === 1 && clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 40 && holders()[0]?.graphics?.[0]?.audioClipId === acId, `cut_range inside the window: one audio clip, the same id, ending with the left piece at 100 (${span(clipOf(acId))})`);
+  engine.undo();
+  const rev2 = engine.getProject().revision;
+  let cutRefused: Error | null = null;
+  try {
+    await dispatch(engine, "cut_range", { clipId: acId, startFrame: 10, endFrame: 20 });
+  } catch (err) {
+    cutRefused = err as Error;
+  }
+  // MUTATION: no refusal in cutRange → the sound is cut into two new clips.
+  check(!!cutRefused && /set_graphic_window/.test(cutRefused.message) && cutRefused.message.includes(host.id) && engine.getProject().revision === rev2 && soundClips().length === 1, `cut_range on the audio clip: refused, and nothing changes (${cutRefused?.message})`);
+
+  // tighten_talk on a clip with words: a pause cut inside the window ends the sound with the first piece; the rest of the
+  // sound's track (a clip of another file there) is not cut for it.
+  const t = fresh(work, "tighten");
+  const te = new EditorEngine(t.data);
+  te.setProjectSettings({ width: 160, height: 90, fps: 30 });
+  const talk = await te.importVideo(fx.talk);
+  const other = await te.importVideo(fx.short);
+  const words = [
+    { text: "one", start: 0.2, end: 0.6 },
+    { text: "two", start: 1.0, end: 2.3 },
+    { text: "three", start: 4.0, end: 4.5 },
+  ];
+  (te as unknown as { setCachedTranscript(id: string, t: object): void }).setCachedTranscript(talk.id, { segments: [{ start: 0, end: 8, text: "one two three" }], words });
+  const th = te.addClip(talk.id, { trackIndex: 0, startFrame: 30, sourceInFrame: 0, sourceOutFrame: 180 });
+  const bedTrack = te.addTrack("audio");
+  const bed = te.addClip(other.id, { trackIndex: bedTrack.index, startFrame: 200 });
+  const ta = te.attachGraphic(th.id, { id: "gfx_t", assetId: baked.id, startFrame: 30, endFrame: 90 }, baked, sound).audioClip;
+  const teClips = () => te.getProject().tracks.flatMap((x) => x.clips);
+  const teSound = () => teClips().filter((c) => c.assetId === sound.id);
+  setup(!!ta && te.getProject().tracks.find((x) => x.clips.some((c) => c.id === ta.id))?.id === bedTrack.id && ta.startFrame === 60, "the sound goes on the track with the other clip");
+  const tight = await te.tightenTalk(th.id, { removeFillers: false });
+  const first = teClips().filter((c) => c.graphics?.length).sort((p, q) => p.startFrame - q.startFrame)[0];
+  const firstEnd = first ? first.startFrame + first.sourceOutFrame - first.sourceInFrame : -1;
+  const kept2 = teSound()[0];
+  setup(tight.cuts === 1 && firstEnd > 60 && firstEnd < 120, `tighten_talk cuts the long pause, inside the window (the first piece ends at ${firstEnd})`);
+  // MUTATION: no followGraphicAudio in rippleDeleteRanges → it runs on to 120.
+  check(teSound().length === 1 && kept2?.id === ta?.id && kept2.startFrame === 60 && 60 + kept2.sourceOutFrame === firstEnd && first?.graphics?.[0]?.audioClipId === ta?.id, `tighten_talk: one audio clip, the same id, ending with the first piece (${span(kept2)})`);
+  // MUTATION: tighten_talk cutting the sound's track for it (linkedClips, not linkedWithoutGraphicAudio) → the other clip there moves left.
+  check(teClips().find((c) => c.id === bed.id)?.startFrame === 200, `the other clip on the sound's track stays at 200 (${teClips().find((c) => c.id === bed.id)?.startFrame})`);
+  te.removeGraphic(first?.id ?? "", "gfx_t");
+  check(teSound().length === 0, `tighten_talk, then remove_graphic on the first piece: no clip of the sound is left (${teSound().length})`);
 }
 
 // ---- A5: failures ------------------------------------------------------------------
