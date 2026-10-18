@@ -805,6 +805,13 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   check(teClips().find((c) => c.id === bed.id)?.startFrame === 200, `the other clip on the sound's track stays at 200 (${teClips().find((c) => c.id === bed.id)?.startFrame})`);
   te.removeGraphic(first?.id ?? "", "gfx_t");
   check(teSound().length === 0, `tighten_talk, then remove_graphic on the first piece: no clip of the sound is left (${teSound().length})`);
+  // Both engines' timed writes (the run file's heartbeat, the crash-recovery autosave 30 s after the first edit) would
+  // otherwise land in A6's watch of every write, now that renders wait for each drawn frame and take longer.
+  for (const e of [engine, te]) {
+    await e.storage.dispose();
+    const pending = (e as unknown as { recoveryTimer: NodeJS.Timeout | null }).recoveryTimer;
+    if (pending) clearTimeout(pending);
+  }
 }
 
 // ---- A5: failures ------------------------------------------------------------------
