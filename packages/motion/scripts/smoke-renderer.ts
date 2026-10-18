@@ -200,6 +200,12 @@ const ALLOWED_ENV = new Set<string>([
 /** Variables Electron/Chromium set in their own process after start (not from the core). */
 const CHROMIUM_ENV = new Set(["CHROME_DESKTOP", "DBUS_SESSION_BUS_ADDRESS", "FC_FONTATIONS"]);
 const DESKTOP_MODULES = /[\\/](core-launcher|media-servers|graphics-addon)\.cjs$/;
+/**
+ * Windows: the names libuv's spawn adds to a child's environment whenever the
+ * environment it is given lacks them (src/win/process.c, required_vars), so
+ * the renderer has them whatever the core passes. Only R10 runs there.
+ */
+const WIN_SPAWN_ENV = new Set(["HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME"]);
 
 /** A fault to inject into the core's rename, copyFile and rm (gatedfs looks each fs/promises function up per call): the error to throw, or null. */
 let fsFault: ((name: string, args: unknown[]) => NodeJS.ErrnoException | null) | null = null;
@@ -1276,7 +1282,10 @@ async function r10(work: string) {
   check(modules.some((m) => /motion-renderer\.cjs$/.test(m)) && !modules.some((m) => DESKTOP_MODULES.test(m)),
     `the packed main.cjs dispatched to motion-renderer.cjs and loaded none of core-launcher, media-servers, graphics-addon (${JSON.stringify(modules.filter((m) => /\.cjs$/.test(m)).map((m) => m.split(/[\\/]/).pop()))})`);
   const env = (report?.env as string[] | undefined) ?? [];
-  const extraEnv = env.filter((k) => !ALLOWED_ENV.has(k) && !CHROMIUM_ENV.has(k));
+  // Windows names are case-insensitive, and libuv adds its required ones (WIN_SPAWN_ENV).
+  const win = process.platform === "win32";
+  const allowed = new Set([...ALLOWED_ENV, ...CHROMIUM_ENV, ...(win ? WIN_SPAWN_ENV : [])].map((k) => (win ? k.toUpperCase() : k)));
+  const extraEnv = env.filter((k) => !allowed.has(win ? k.toUpperCase() : k));
   check(env.length > 0 && extraEnv.length === 0, `the packed renderer's environment is the allowlist (extra: ${JSON.stringify(extraEnv)})`);
 
   // The render: real frames on fd 3, media and a font over fd 4.
