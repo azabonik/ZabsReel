@@ -24,8 +24,8 @@
  *                 the expected picture and the last source frames are the
  *                 others.
  *               No renderer is left. Without motion-renderer.cjs's wait for
- *               the drawn frame (drawn()) video-plain, offthread-endat and
- *               offthread-style fail here (measured): blank and previous
+ *               the drawn frame (drawn()) every video case fails here, and
+ *               img-transparency in some runs (measured): blank and previous
  *               source frames and parts of frames; without its
  *               disable-partial-raster, ring seams in offthread-style that
  *               differ from render to render.
