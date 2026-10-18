@@ -106,6 +106,8 @@ const RENDERER_DIFFERENCES = [
   "the crop props of Sequence",
   "lab() and lch() colours in interpolateColors",
 ];
+/** <Video> on ZabsReel's renderer draws FFmpeg's decode, as <OffthreadVideo> does (MOTION-PLAN D4 E1). The guide and SKILL.md say the same. */
+const VIDEO_COLOURS = `On ${PRODUCT_NAME}'s renderer <Video> and <Html5Video> show the same decoded frames as <OffthreadVideo>: their colours match <OffthreadVideo>'s, within about 14 levels of the add-on's <Video> (which the browser decodes).`;
 
 /** The graphics renderer setting: two radio buttons, and what each one means. */
 function RendererSetting(props: { renderer: GraphicsRenderer; version: string; saving: boolean; onChoose: (r: GraphicsRenderer) => void }) {
@@ -127,6 +129,7 @@ function RendererSetting(props: { renderer: GraphicsRenderer; version: string; s
         <summary>Where the two renderers differ</summary>
         <p className="ga-help">{`Only ${PRODUCT_NAME}'s renderer has these (from Remotion's newer documentation); the add-on's Remotion ${version} lacks them or treats them differently:`}</p>
         <ul>{RENDERER_DIFFERENCES.map((d) => <li key={d}>{d}</li>)}</ul>
+        <p className="ga-help">{VIDEO_COLOURS}</p>
         <p className="ga-help">{`${PRODUCT_NAME}'s own rules: media only by its library id (asset("…")), no staticFile, no remote URLs.`}</p>
       </details>
     </fieldset>

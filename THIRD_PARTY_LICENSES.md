@@ -9,8 +9,10 @@ redistribution. Packaged installers include a copy of this file, `LICENSE` and `
 
 > **TL;DR for redistributors**
 > - Everything bundled is freely redistributable. **Remotion is not bundled:**
->   motion graphics use a copy that the user installs as an optional add-on,
->   under Remotion's own license (see the **Remotion** section). Remotion is
+>   motion graphics render with ZabsReel's own renderer (GPL, no Remotion
+>   code), or, if the user chooses, with a copy of Remotion that the user
+>   installs as an optional add-on, under Remotion's own license (see the
+>   **Remotion** section). Remotion is
 >   *source-available, not OSI open-source*, and **companies with 4 or more
 >   people need their own Remotion license** to use it.
 > - **FFmpeg** is bundled as a GPL build and invoked as a separate process. If you
@@ -90,6 +92,28 @@ redistribution. Packaged installers include a copy of this file, `LICENSE` and `
 - **License:** MIT — © GitHub / OpenJS Foundation. Electron itself bundles
   Chromium (BSD-style) and Node.js (MIT); see Electron's own license manifest
   shipped in the app.
+
+### React 18.3.1 UMD builds (in `@aive/motion`)
+- **Role:** the React that ZabsReel's motion renderer loads into its render
+  page: `react.production.min.js` and `react-dom.production.min.js`,
+  unmodified, committed in `packages/motion/vendor/react-18.3.1/` with
+  pinned sha256 values.
+- **License:** MIT — © Facebook, Inc. and its affiliates (now Meta Platforms,
+  Inc.). The licence text ships beside the two files
+  (`resources/app/node_modules/@aive/motion/vendor/react-18.3.1/LICENSE` in the
+  installed app).
+- **Source:** https://github.com/facebook/react (v18.3.1); npm `react` and
+  `react-dom` 18.3.1.
+
+### sucrase
+- **Role:** compiles the TSX of an AI-written motion graphic in memory, in the
+  core, before the render (pure JavaScript, no native binary).
+- **License:** MIT — © 2012-2018 various contributors (sucrase's AUTHORS).
+  Its own dependencies are MIT, ISC (`glob`, `minimatch` and their helpers),
+  BlueOak-1.0.0 (`minipass`, `jackspeak`, `path-scurry`,
+  `package-json-from-dist`) and Apache-2.0 (`ts-interface-checker`); they ship
+  as their npm packages, in `resources/app/node_modules`.
+- **Source:** https://github.com/alangpierce/sucrase (3.35.0).
 
 ### npm runtime dependencies
 All MIT-licensed:

@@ -26,8 +26,10 @@ Plus how to test the **packaged installer** offline.
 
 Everything else (whisper.cpp + model, YuNet model) **auto-downloads on first
 use** and caches under `~/.aive`. The first run of captions / auto-reframe will
-pause to download — that's normal and happens only once. Motion graphics need
-the graphics add-on (Remotion and its headless shell): see
+pause to download — that's normal and happens only once. Motion graphics render
+with ZabsReel's own renderer (the dev Electron in `node_modules`, nothing to
+install); the Remotion add-on path needs the graphics add-on (Remotion and its
+headless shell): see
 [The graphics add-on in a source checkout](#the-graphics-add-on-in-a-source-checkout).
 
 ---
@@ -218,8 +220,8 @@ ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts
 # I12's linux-x64 writes of names NTFS refuses or folds
 npx tsx packages/core/scripts/smoke-addon.ts
 
-# ZabsReel's own motion renderer, the host (packages/motion; MOTION-PLAN slice 1;
-# add_graphic still renders with the add-on). The binary rule on fixture trees
+# ZabsReel's own motion renderer (packages/motion; docs/MOTION_RENDERER.md).
+# The binary rule on fixture trees
 # for win32, darwin and linux (packaged and source checkout); hand-written pages:
 # frames on the pipe exact per frame (B,G,R,A, premultiplied), straight alpha
 # after the ProRes 4444 round trip, an opaque standalone card with today's BT.601
@@ -234,9 +236,69 @@ npx tsx packages/core/scripts/smoke-addon.ts
 # exists, else a printed skip; its renderer files and the core's rendermotion.js
 # must be byte-identical to this tree's, so rebuild it after a change): no
 # window, no core, no port, only the allowlisted environment (a list written in
-# the smoke). Needs the build and FFmpeg; no display (Chromium's
-# headless platform); muted
+# the smoke); the clean-room lock, the vendored React's sha256, the runtime
+# build and the graphic's import check; graphics through the runtime (the title
+# template, seeking, CSS and Web Animations on the virtual clock, delayRender,
+# errors). R10, on Linux and Windows: the packed --dir build (AIVE_APP, else
+# build/dist/linux-unpacked or win-unpacked) holds this tree's renderer, runtime,
+# React (with its LICENSE) and the core's sucrase, and no parity/, scripts/ or
+# cleanroom/test, and renders a graphic with a library video, an image and a
+# font: real frames over fd 3, media and font answers over fd 4, the probe, no
+# process left. AIVE_APP naming a missing app is a failure, not a skip (CI's
+# packed jobs set it). Needs the build and FFmpeg; no display (Chromium's
+# headless platform); muted. Pack first, offline, with the installed Electron:
+#   (cd apps/desktop && npx electron-builder --linux --dir -c.electronDist=../../node_modules/electron/dist)
 npx tsx packages/motion/scripts/smoke-renderer.ts
+
+# The motion renderer's library media and fonts (MOTION-PLAN D4): the page's
+# asset table holds handles only (no path, file name or folder); the frames the
+# page shows are FFmpeg's own decode of those source frames (in order, jumps,
+# past the end, a variable-rate source, a video that starts late in its file);
+# a component whose next request depends on loaded media; every cap of D4's
+# table, one row each; an offline asset and a playlist renamed .mp4 refused
+# with nothing they name touched (strace); nothing written outside the render's
+# folder and no decoded frame file; a library font renders; a 60 s 1080p video
+# graphic within the caps; asset records with impossible numbers left out of the
+# table. Linux; needs the build, FFmpeg and strace; fixtures made with lavfi
+npx tsx packages/motion/scripts/smoke-motion-media.ts
+
+# The motion renderer's sound (MOTION-PLAN D4 E3, D-SPLIT): the cue merge and
+# its caps, a standalone card's mix at the right times, rates and volumes
+# (measured from the files, never played), an overlay's .wav as one linked audio
+# clip in the export and an audioOnly export, the split rule, and every failure
+# (the mix's limit, a failed move, an offline file) leaving baked/ as it was.
+# Linux; needs the build and FFmpeg
+npx tsx packages/motion/scripts/smoke-motion-audio.ts
+
+# Media frames are captured only once the requested source frame is painted
+# (finding ZR-MEDIA-SETTLE): the worst cases of the media parity set rendered
+# five at once (the load that made frames late), every frame byte-identical in
+# all five and showing FFmpeg's decode of its source frame; and 300 first frames
+# per case the same way. Linux; needs the build and FFmpeg with libx264.
+# --renders=<n> and --rounds=<n> change the load
+npx tsx packages/motion/scripts/smoke-motion-settle.ts
+
+# add_graphic on both renderers (MOTION-PLAN D7): the renderer setting
+# (<dataDir>/addons/renderer.json, written only by the UI hosts; no agent tool
+# can), renderer-unavailable with its reason in get_state and add_graphic's
+# refusal, get_state starting nothing, the probe at most once a minute, the
+# title template and the parity set through add_graphic, the refusals on the
+# add-on path, the project library and an overlay's sound, add_graphic's
+# `fonts`, and the same "Where the two renderers differ" text in the dialog,
+# the guide, SKILL.md, README.md and docs/MOTION_RENDERER.md. The Remotion
+# add-on's rows need the pinned headless shell and skip without it (with a
+# printed reason). Linux beyond S1, S2, S4 and S10; needs the build and FFmpeg;
+# port 5034
+npx tsx packages/motion/scripts/smoke-motion-switch.ts
+
+# The clean-room runtime's own unit tests (node --test through sucrase/register,
+# jsdom, React's development and production builds) and its typecheck, and the
+# lock gate: its files must match packages/motion/cleanroom/CLEANROOM.lock
+# (docs/MOTION_RENDERER.md, "The clean room"; --self-test proves a changed,
+# added or deleted file fails, on copies)
+npm run test:cleanroom
+node scripts/check-cleanroom-lock.mjs --self-test
+node scripts/check-cleanroom-lock.mjs
 
 # The pin is in sync with package-lock.json, every platform's download size is
 # known, and the add-on's fingerprint is the accepted one (CONTRIBUTING.md, "The
@@ -736,6 +798,44 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-col
 - Per-viewer switch: `localStorage["zabsreel.preview.gl"] = "off"` in the
   app's devtools forces the CSS fallback preview (to compare).
 
+### Motion renderer parity with Remotion (dev tools, run by hand)
+
+Two harnesses render the same compositions with Remotion 4.0.481 (this
+checkout's devDependency, with its pinned headless shell in
+`node_modules/.remotion`; nothing is downloaded, and a missing shell fails the
+run) and with ZabsReel's renderer, and compare the frames (D8's rule: a frame
+passes at 99.5 % of pixels within 4 levels and none more than 32 off) and, for
+media, the sound (window levels within 1 dB, sound edges within 5 ms). They are
+dev tools for the clean-room feedback rounds, not CI steps: they need Remotion's
+browser and take minutes to an hour. Each run re-executes itself in a private
+network namespace (loopback only) when `unshare` allows it; `--require-netns`
+makes a missing namespace a failure. Linux only; needs the build and FFmpeg
+(with libx264 for the media one). Every child gets fresh HOME, USERPROFILE,
+XDG_CONFIG_HOME, AIVE_DATA_DIR and TMPDIR folders, and every browser runs muted.
+
+```bash
+# Non-media: packages/motion/parity/compositions (control.tsx first: the noise floor)
+npx tsx packages/motion/scripts/parity-render.ts --self-test --out=/tmp/pr-selftest
+npx tsx packages/motion/scripts/parity-render.ts --out=/tmp/pr-run [--only=spring-motion.tsx] [--scratch=<folder>]
+
+# Media: packages/motion/parity/media (fixtures generated with lavfi, FIXTURES.md);
+# the reference is Remotion's renderer called directly (asset("x") becomes
+# staticFile on that side only), and ZabsReel's side renders twice, so a frame
+# that differs between its own two renders is reported as nondeterministic
+npx tsx packages/motion/scripts/parity-media.ts --self-test --out=/tmp/pm-selftest
+npx tsx packages/motion/scripts/parity-media.ts --out=/tmp/pm-run [--only=offthread-plain.tsx] [--scratch=<folder>]
+```
+
+`--out` gets `render-all.jsonl` and `render-mismatches.jsonl` (and
+`audio-all.jsonl` / `audio-mismatches.jsonl` for media), one row per case, size
+and frame in the fixed schema the clean-room implementer may receive (never the
+reference's own error text), plus `images/` (both decoded frames and a heatmap
+of each failing frame) and `render-summary.json`, which are for the maintainer
+only. Exit codes: 0 all rows pass, 3 some rows fail, 2 a pipeline could not
+render a composition, 1 the harness failed. Results go to the clean-room
+implementer only through the process in docs/MOTION_RENDERER.md, "The clean
+room".
+
 ### FFmpeg versions
 
 ZabsReel supports FFmpeg **4.4, 6.1, 7.1, 8.0, 8.1 and 9.0**
@@ -988,9 +1088,9 @@ the build.
 2. It's **unsigned**, so SmartScreen may warn — click **More info → Run anyway**.
 3. Launch the installed app. Import a clip, add it, **Export** — it should render
    using the bundled FFmpeg with **no internet connection** (try it with Wi-Fi
-   off). Captions and auto-reframe also work offline. Only **motion graphics**
-   need a download: the graphics add-on (**Help → Graphics add-on…**, Accept
-   and install), once.
+   off). Captions, auto-reframe and motion graphics (ZabsReel's renderer, the
+   default) also work offline. Only the optional Remotion graphics add-on is a
+   download (**Help → Graphics add-on…**, Accept and install), once.
 
 ---
 
@@ -1002,8 +1102,14 @@ the build.
   config path points to an existing `packages/mcp/dist/index.js`.
 - **First captions/reframe call hangs for a minute** — it's the one-time
   model download. Watch the core's stderr for `[whisper] downloading …`.
-- **`add_graphic` fails with `graphics_addon_missing`** — the graphics add-on
-  is not installed: install it from **Help → Graphics add-on…**, or, in a source
+- **`add_graphic` fails with `graphic_renderer_unavailable`** — ZabsReel's
+  renderer can't start on this computer; the error and `get_state`'s
+  `graphicsReason` say why (`no-binary`: no Electron found; `no-display`;
+  `sandbox-unavailable`: Chromium's sandbox can't run, for example when
+  unprivileged user namespaces are off on Linux; `start-failed`).
+- **`add_graphic` fails with `graphics_addon_missing`** — the renderer setting is
+  the Remotion add-on and the add-on is not installed: install it from
+  **Help → Graphics add-on…**, or, in a source
   checkout, start with `AIVE_REMOTION_ADDON=$PWD` (§3, "The graphics add-on in
   a source checkout").
 - **Motion graphics fails on a machine running a dev server** — Remotion's render

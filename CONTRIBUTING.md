@@ -96,10 +96,11 @@ an administrator, in the release workflow) and is skipped elsewhere.
 
 Distribution is **offline-first**: the installer bundles FFmpeg, whisper.cpp
 (+ `base.en`), the YuNet model, and an OSS font so the app works with no
-downloads on first run. Motion graphics are the one exception: they need the
-graphics add-on (Remotion and its headless shell), which the user installs from
-**Help → Graphics add-on** and which no installer may contain (see "Remotion is
-a devDependency only" below).
+downloads on first run, motion graphics included (ZabsReel's own renderer,
+`@aive/motion`). The one exception is the optional graphics add-on (Remotion
+and its headless shell), which the user installs from **Help → Graphics
+add-on** and which no installer may contain (see "Remotion is a devDependency
+only" below).
 
 ```bash
 node apps/desktop/scripts/prepare-bundle.ts     # stage bundled binaries → apps/desktop/build/resources/aive
@@ -123,6 +124,13 @@ A few non-obvious things if you touch the packaging:
   electron-builder copies the workspace's `packages/core` whole and ignores its
   `files` field). A core with `src/` takes itself for a source checkout and
   honours the developer variables in `docs/TESTING.md`.
+- `build.files` also leaves out `@aive/motion`'s `parity/`, `scripts/` and
+  `cleanroom/test/` (dev tools and tests). The packed app keeps its renderer
+  (`renderer/`), the built runtime (`dist/zr-runtime.js`), React's UMD builds
+  with their licence (`vendor/react-18.3.1/`) and the core's `sucrase` (a
+  production dependency). `smoke-renderer.ts` R10 checks this on a `--dir`
+  build and renders a graphic with it (docs/TESTING.md); CI runs it on Linux
+  and on Windows.
 - The `afterPack` hook (`apps/desktop/build/afterpack.cjs`) runs
   `node scripts/check-no-remotion.mjs <appOutDir>` on every build, `--dir`
   included, and fails it on any Remotion package, add-on-only package, headless
@@ -183,6 +191,28 @@ So:
   release (an update downloads only the changed packages). So prefer to leave
   the add-on's packages unchanged between deliberate Remotion upgrades: undo
   the lock change, or update only packages outside the add-on.
+
+## The clean-room runtime (`packages/motion/cleanroom`)
+
+ZabsReel's motion renderer runs a runtime compatible with Remotion's API that
+was written in a clean room, from Remotion's public documentation only
+([`docs/MOTION_RENDERER.md`](docs/MOTION_RENDERER.md), "The clean room"). To
+keep it clean:
+
+- Only a clean-room session changes `packages/motion/cleanroom/runtime/`,
+  `packages/motion/cleanroom/test/` and `packages/motion/cleanroom/NOTES.md`.
+  Never edit, move, reformat or regenerate them in a normal change, a typo
+  included; put wiring around them (`packages/motion/renderer`,
+  `packages/motion/scripts`, `packages/core/src/motion`).
+- `packages/motion/cleanroom/CLEANROOM.lock` lists the sha256 of each of
+  those files. `node scripts/check-cleanroom-lock.mjs` fails on a changed,
+  added or deleted file; CI runs it before the install.
+- When the runtime must behave differently, open an issue that describes the
+  observable behaviour you need (which file, what it should do, why), with no
+  code from Remotion. A clean-room session makes the change and regenerates
+  the lock.
+- Do not read Remotion's source if you will write runtime code, and never paste
+  Remotion code or text from it anywhere in this repository.
 
 ## Style
 

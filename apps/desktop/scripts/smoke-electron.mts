@@ -82,7 +82,8 @@
 //      on the Remotion add-on is refused (409 graphics_addon_missing) and the
 //      window shows the banner, whose Set up… opens the dialog. The dialog's
 //      Graphics renderer (MOTION-PLAN D7): ZabsReel's (the default) is chosen
-//      with no renderer.json, its help lists where the two renderers differ,
+//      with no renderer.json, its help lists where the two renderers differ
+//      (and that <Video> shows <OffthreadVideo>'s decoded frames there),
 //      a click on "Remotion add-on" makes main write renderer.json (get_state
 //      says graphicsRenderer "remotion"), and a click back on ZabsReel's makes
 //      the next add_graphic render with ZabsReel's renderer, no add-on
@@ -1326,6 +1327,9 @@ async function graphicsAddon(pw: PW, work: string) {
     const differ = await dlg.locator(".ga-differ li").allTextContents();
     check(differ.length === 7 && differ.some((d) => d.includes("loop on a Sequence")) && differ.some((d) => d.includes("lab() and lch()")) && (await dlg.innerText()).includes("no staticFile, no remote URLs"),
       `…and its help lists where the two renderers differ (${differ.length} items)`);
+    // MUTATION: drop the VIDEO_COLOURS paragraph from graphicsaddon.tsx's help → this row fails.
+    check((await dlg.locator(".ga-differ").innerText()).includes("<Video> and <Html5Video> show the same decoded frames as <OffthreadVideo>"),
+      "…and says <Video> and <Html5Video> show <OffthreadVideo>'s decoded frames on ZabsReel's renderer");
     await radio(/^Remotion add-on/).click();
     const chose = await waitFor("renderer.json", async () => existsSync(rendererFile) && JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "remotion" && (await radio(/^Remotion add-on/).isChecked()), 5000);
     const st = await coreRpc("get_state");

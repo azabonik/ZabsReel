@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-smoke:
@@ -178,18 +179,30 @@ jobs:
       - name: Smoke — graphics add-on (pin, core and installer)
         run: npx tsx packages/core/scripts/smoke-addon.ts
 
+      # The packed Linux app for smoke-renderer's packed rows (R6 (c), R10):
+      # electron-builder --dir with the Electron npm ci installed (nothing
+      # downloaded); its afterPack hook runs the packaging gate
+      # (check-no-remotion) on it.
+      - name: Pack the Linux app (--dir, the installed Electron)
+        working-directory: apps/desktop
+        run: npx electron-builder --linux --dir -c.electronDist=../../node_modules/electron/dist
+
       # ZabsReel's own motion renderer (packages/motion): the binary rule on
       # fixture trees, frames from hand-written pages through the offscreen
       # Electron renderer into FFmpeg, every network route refused (a private
       # network namespace, loopback listeners only), the limits and lifecycle,
-      # the probe launch rows (the packed-build row skips here); then the
+      # the probe launch rows (the packed build's included); then the
       # runtime wired in: the clean-room lock, the vendored React's sha256, a
       # reproducible runtime build, the graphic's import check, and graphics
-      # (the title template, seeking, delayRender, errors) through the renderer.
+      # (the title template, seeking, delayRender, errors) through the renderer;
+      # and the packed app rendering a graphic with library media and a font
+      # (R10). AIVE_APP makes a missing packed app a failure, not a skip.
       # Chromium's sandbox and the namespace need unprivileged user namespaces,
       # which Ubuntu 24.04's AppArmor restricts by default. With CI=true a
       # missing namespace fails the network part (R3) instead of skipping it.
       - name: Smoke — motion renderer host and runtime (Electron offscreen, no network)
+        env:
+          AIVE_APP: ${{ github.workspace }}/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-renderer.ts
@@ -244,3 +257,45 @@ jobs:
 
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts
+
+  # The packed Windows app renders (MOTION-PLAN D8 "Launch" row (c) on the build
+  # ZabsReel ships): electron-builder --dir with the Electron npm ci installed,
+  # then smoke-renderer's R1 (the binary rule on fixture trees) and R10 on it:
+  # the packed core's binary rule and probe, and one graphic with a library
+  # video, an image and a font rendered by the packed app (real frames over fd
+  # 3, media and font answers over fd 4), with no process left. One command
+  # per step: the default shell here is pwsh, which does not stop a
+  # multi-line run block when a native command fails.
+  windows-packaged-render:
+    runs-on: windows-latest
+    steps:
+      # The checkout keeps the repository's bytes (pinned hashes: React's UMD
+      # builds, CLEANROOM.lock), so no CRLF conversion.
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # The afterPack hook runs the packaging gate (check-no-remotion) on it.
+      - name: Pack the Windows app (--dir, the installed Electron)
+        working-directory: apps/desktop
+        run: npx electron-builder --win --dir "-c.electronDist=${{ github.workspace }}\node_modules\electron\dist"
+
+      - name: Smoke — the packed Windows app renders (frames over fd 3, media over fd 4, probe)
+        env:
+          AIVE_APP: ${{ github.workspace }}\apps\desktop\build\dist\win-unpacked\ZabsReel.exe
+        run: npx tsx packages/motion/scripts/smoke-renderer.ts --only=R1,R10

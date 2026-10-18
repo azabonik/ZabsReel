@@ -44,6 +44,11 @@
 // resolve, everything else goes to a dead proxy, WebRTC has no UDP route, and
 // zrmotion: serves only the table the core sent. The process exits when stdin
 // ends or the core's PID is gone.
+//
+// This process drives its own page over the DevTools protocol in-process
+// (webContents.debugger), only to force a draw before each capture (drawn()
+// below). There is no remote debugging port, and the page cannot reach the
+// protocol.
 "use strict";
 const { app, BrowserWindow, ipcMain, nativeImage, protocol, session } = require("electron");
 const net = require("node:net");

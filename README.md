@@ -86,7 +86,7 @@ A single persistent **core** owns all editing state. The AI mutates a non-destru
 
 - **FFmpeg** — all video processing, fully local. Invoked as an external process (not linked). It ships as a GPL build, which is compatible with this project's GPL-3.0 license.
 - **Whisper (whisper.cpp)** — local speech-to-text for captions.
-- **Remotion** — AI-authored React components for motion graphics, through the graphics add-on you install from inside ZabsReel (not bundled).
+- **Motion graphics** — AI-authored React components (Remotion's API), rendered by ZabsReel's own renderer in the app's Electron, or by Remotion itself through the optional graphics add-on you install from inside ZabsReel (not bundled).
 - **MCP server** — clean tool definitions any MCP client can call.
 - **Electron + React** — desktop UI: timeline, clip library, preview.
 
@@ -108,7 +108,7 @@ A full multi-track, frame-based editing workstation. Every capability is exposed
 - **Motion** — per-clip transforms with keyframe animation, native keyframe-animated text.
 - **Color** — grading (wheels / curves / white-balance), LUTs, and a stackable effects chain.
 - **Audio** — speed ramps, fades, crossfade transitions, background music + ducking, J/L audio cuts.
-- **Captions & graphics** — Whisper speech-to-text captions and Remotion-authored motion graphics.
+- **Captions & graphics** — Whisper speech-to-text captions and AI-authored motion graphics that can use the project's own video, images, sound and fonts.
 - **Media intelligence** — folders, transcript indexing + search, perceptual and CLIP semantic visual search, audio sync, and a vision-based `inspect_timeline` loop for the AI.
 - **Text-based editing** — word-level transcripts turn the words into the edit surface: `tighten_talk` strips filler words + long pauses in one call, `delete_transcript_ranges` cuts by word index, and `edit_by_transcript` assembles a cut from your edited script (Descript's loop, agent-driven).
 - **Adjustment layers & markers** — grade a whole scene with one source-less layer; leave named, annotated markers as a human↔AI review channel.
@@ -158,27 +158,46 @@ From a checkout of this repo (without npm):
 
 ## Install (packaged app)
 
-The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, and auto-reframe all work on first launch with **no downloads**. Motion graphics need the graphics add-on, which you install from inside ZabsReel (see [Motion graphics: the graphics add-on](#motion-graphics-the-graphics-add-on)).
+The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, auto-reframe and motion graphics all work on first launch with **no downloads**. Only the optional Remotion graphics add-on is a download (see [Motion graphics](#motion-graphics)).
 
 1. Run **`ZabsReel-<version>.exe`** and follow the installer.
 2. Because the build is **unsigned**, Windows SmartScreen may warn ("Windows protected your PC"). Click **More info → Run anyway**. (We can drop in an Authenticode certificate later — the config has a hook for it.)
 3. To drive it with AI, connect an MCP client — see **Connect your AI client** below.
 
+## Motion graphics
+
+The AI writes a motion graphic as a React component that uses [Remotion](https://www.remotion.dev)'s API (`add_graphic`). One setting decides what renders it: **Help → Graphics add-on… → Graphics renderer**.
+
+- **ZabsReel** (built in, the default): ZabsReel's own renderer, compatible with the part of Remotion's API that graphics use. Nothing to install, and it works offline. It runs in the app's own Electron with no network: a graphic can't fetch anything, load packages or open files.
+- **Remotion add-on**: Remotion 4.0.481 itself, which you install as the graphics add-on (below). Graphics there can't use the project's media.
+
+Only you change the setting; the AI reads it (`get_state`'s `graphicsRenderer`) and no tool can change it. Changing it re-renders nothing: graphics already made keep playing and exporting their files.
+
+On ZabsReel's renderer a graphic can use the project's own media and fonts:
+
+- **Library media by asset id.** `asset("<id>")` (the id from the project library) is the `src` of `Img`, `OffthreadVideo`, `Video` or `Audio`. Never a path, URL or `staticFile()`. An overlay graphic's sound becomes a linked audio clip over its window, which you can adjust like any clip.
+- **Fonts.** An installed font works by its CSS family name. A font file goes in through `add_graphic`'s `fonts` parameter, `{"<id>": "<absolute path of a .ttf, .otf, .ttc, .woff or .woff2 file>"}` (at most 16 files, 32 MB each, checked like `add_text`'s font); the graphic calls `loadFont(asset("<id>"))` and uses the family it returns.
+- When the renderer can't run on a computer, `get_state`'s `graphics` is `renderer-unavailable` with a reason (`no-binary`, `no-display`, `sandbox-unavailable` or `start-failed`) and `add_graphic` refuses with the same reason.
+
+**Where the two renderers differ.** Only ZabsReel's renderer has these (from Remotion's newer documentation; the add-on's 4.0.481 lacks them or treats them differently): loop on a Sequence (and Loop.useLoop inside one); the timing props of AbsoluteFill; trimBefore and playbackRate on Sequence, Series and Loop; interpolate's perceptual-scale output, and interpolating strings, colours and true/false values; Easing.spring's allowTail and durationRestThreshold; the crop props of Sequence; lab() and lch() colours in interpolateColors. And on ZabsReel's renderer `<Video>` and `<Html5Video>` show the same decoded frames as `<OffthreadVideo>`: their colours match `<OffthreadVideo>`'s, within about 14 levels of the add-on's `<Video>` (which the browser decodes). A component that needs an API ZabsReel's renderer lacks fails with a message that names it; choose the Remotion add-on for that component, or ask the AI to write it without that API.
+
+How the renderer works, and the clean-room process its runtime was written in: [`docs/MOTION_RENDERER.md`](docs/MOTION_RENDERER.md).
+
 ## Motion graphics: the graphics add-on
 
-Motion graphics render with [Remotion](https://www.remotion.dev) 4.0.481 and a Chrome headless shell. ZabsReel does not include either: you install them as the **graphics add-on**, from inside ZabsReel.
+The Remotion add-on path renders with [Remotion](https://www.remotion.dev) 4.0.481 and a Chrome headless shell. ZabsReel does not include either: you install them as the **graphics add-on**, from inside ZabsReel.
 
 1. Open **Help → Graphics add-on…** (in the desktop app, or in the browser with `npm run web`).
 2. Read the notice and Remotion's license, then click **Accept and install**. ZabsReel downloads the Remotion packages from `registry.npmjs.org` (about 55 MB on Windows, 83 MB on Linux) and the Chrome for Testing headless shell from Google (`storage.googleapis.com`, about 100 to 120 MB). The dialog shows the sizes for your computer. Each file must match the hash this version of ZabsReel pins, or nothing is installed.
 3. When the dialog says "Graphics are ready.", graphics work. The add-on is in ZabsReel's data folder (`addons/remotion/4.0.481`).
 
-Only you can install the add-on: the AI can't, and no tool can. When the AI asks for a graphic and the add-on is missing, the window shows a banner with **Set up…**, which opens the same dialog. The dialog also has **Remove** and **Reinstall**, and **Update** after a ZabsReel update that moves the pin (an update downloads only the packages that changed). These wait while a graphic renders.
+Only you can install the add-on: the AI can't, and no tool can. When the AI asks for a graphic on the Remotion add-on setting and the add-on is missing, the window shows a banner with **Set up…**, which opens the same dialog. The dialog also has **Remove** and **Reinstall**, and **Update** after a ZabsReel update that moves the pin (an update downloads only the packages that changed). These wait while a graphic renders.
 
 **License.** Remotion is separate software under its own license (the Remotion License), not part of ZabsReel and not covered by ZabsReel's GPL. It is free for individuals, non-profit organizations and companies of up to three people; larger companies need their own Remotion license. The headless shell comes from Google under Google's terms. See [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 **Proxies.** The desktop app downloads the add-on through Chromium's network stack, so it uses the system proxy settings. The web shell (`npm run web`) uses Node's `fetch`, which uses `HTTPS_PROXY` only when `NODE_USE_ENV_PROXY=1` is also set.
 
-**From source**, graphics need the add-on too. A source checkout already has Remotion in `node_modules` (a devDependency), so you can point ZabsReel at it instead: start with `AIVE_REMOTION_ADDON=$PWD` (see [`docs/TESTING.md`](docs/TESTING.md)). A packaged ZabsReel ignores that variable.
+**From source**, the add-on path needs the add-on too. A source checkout already has Remotion in `node_modules` (a devDependency), so you can point ZabsReel at it instead: start with `AIVE_REMOTION_ADDON=$PWD` (see [`docs/TESTING.md`](docs/TESTING.md)). A packaged ZabsReel ignores that variable.
 
 ## Connect your AI client
 
@@ -303,8 +322,8 @@ The app icon comes from `apps/desktop/build/icon.svg`. After you change it, run 
 
 ## Requirements
 
-- **Packaged app:** none — everything needed is bundled (first run is offline). Motion graphics need the graphics add-on, a download (see above).
-- **From source:** Node.js ≥ 22.12, plus FFmpeg + ffprobe on `PATH`. Motion graphics need Node.js 22.15 or later: ZabsReel gives Remotion its safety check as Remotion loads (`module.registerHooks`), and turns graphics off on an older Node. The packaged app's Electron runs Node 24.
+- **Packaged app:** none — everything needed is bundled (first run is offline). The optional Remotion graphics add-on is a download (see above).
+- **From source:** Node.js ≥ 22.12, plus FFmpeg + ffprobe on `PATH`. The Remotion add-on path needs Node.js 22.15 or later: ZabsReel gives Remotion its safety check as Remotion loads (`module.registerHooks`), and turns that path off on an older Node. The packaged app's Electron runs Node 24.
 
 ### Supported FFmpeg versions
 
@@ -402,4 +421,4 @@ This program is a modified version of SynthCut, Copyright © 2026 Relo (https://
 Bundled and downloaded third-party components, and their license obligations, are documented in **[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)**. Two points worth calling out:
 
 - **FFmpeg** ships as a GPL build and is invoked as a separate process. Its GPL terms are compatible with this project's GPL-3.0 license; redistributing the installer still carries the usual GPL "offer the source" obligation for that binary.
-- **Remotion** (motion graphics only) is **source-available, not OSI open-source** — companies of 4+ people need a paid license, and its field-of-use terms are **not** GPL-compatible. ZabsReel does not ship it: graphics load a copy that the user installs as the graphics add-on (Help → Graphics add-on), under Remotion's own license. The code that loads it is isolated to one optional module (`packages/core/src/motion/render.ts`) and can be swapped for a Puppeteer/Playwright renderer for a fully GPL-clean build. See `THIRD_PARTY_LICENSES.md`.
+- **Remotion** (motion graphics only) is **source-available, not OSI open-source** — companies of 4+ people need a paid license, and its field-of-use terms are **not** GPL-compatible. ZabsReel does not ship it: its own renderer (no Remotion code) is the default, and the add-on path loads a copy that the user installs as the graphics add-on (Help → Graphics add-on), under Remotion's own license. The code that loads it is isolated to one optional module (`packages/core/src/motion/render.ts`) and can be swapped for a Puppeteer/Playwright renderer for a fully GPL-clean build. See `THIRD_PARTY_LICENSES.md`.

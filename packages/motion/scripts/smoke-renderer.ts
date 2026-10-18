@@ -107,12 +107,36 @@
  *                     graphic_component_error) and leaves nothing; an unknown
  *                     import, a syntax error and props over 256 KB are refused
  *                     before any renderer starts.
+ *  R10. packed render — (Linux and Windows) the packed `--dir` build (AIVE_APP,
+ *                     else apps/desktop/build/dist/linux-unpacked or
+ *                     win-unpacked; skipped with a printed reason when there
+ *                     is none, a FAIL when AIVE_APP names one that is
+ *                     missing): its @aive/motion holds this tree's renderer
+ *                     files, dist/zr-runtime.js and vendor/react-18.3.1 (both
+ *                     UMD builds and React's LICENSE), byte-identical, and no
+ *                     parity/, scripts/ or cleanroom/test; its core's driver is
+ *                     this tree's build and finds its sucrase inside the app.
+ *                     Then the packed executable in Node mode runs the packed
+ *                     core: its binary rule gives the app with only the flag,
+ *                     its probe prints {"probe":"ok"} (no window, the dispatch
+ *                     loads none of the desktop modules, the allowlisted
+ *                     environment), and it renders a graphic with a library
+ *                     video, an image and a font (loadFont): exactly the
+ *                     frames' bytes on fd 3, the image's colour in its box,
+ *                     the video moving in its box, the font's glyphs unlike the
+ *                     fallback's, the media and font answers over fd 4 (one
+ *                     decode per video frame and one for the image, one font),
+ *                     the baked .mp4 with every frame; afterwards no process
+ *                     of the run is alive, the data folder holds only the
+ *                     output and HOME nothing (on Linux also: no core started,
+ *                     no port 5030-5039).
  *
  * Every renderer runs with fresh HOME/USERPROFILE/XDG_CONFIG_HOME and data
  * folders, muted. Ports: 5030-5033 (listeners) and 5036 (the core in R5).
  * On CI (CI=true) R3 fails instead of skipping when there is no namespace.
  * Needs `npm run build` (R5's core start, R6b, R8's dist/zr-runtime.js) and
- * FFmpeg. Linux only beyond R1 and R8. On GitHub Actions a skipped part is
+ * FFmpeg. Linux only beyond R1, R8 and R10 (CI's Windows job runs R1 and
+ * R10 on the packed Windows build). On GitHub Actions a skipped part is
  * also written to the step summary.
  * Run: npx tsx packages/motion/scripts/smoke-renderer.ts [--only=R1,R3]
  */
@@ -124,11 +148,12 @@ import { createHash } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isSourceCheckout } from "../../core/src/addon/resolve.js";
 import { RENDERER_FLAG, rendererBinary, type RendererBinary } from "../../core/src/motion/rendererbinary.js";
 import { graphicImportRefusal, unsupportedNameMessage } from "../../core/src/motion/graphicmodule.js";
+import type { MediaStats } from "../../core/src/motion/motionmedia.js";
 import { TITLE_CARD_TSX } from "../../core/src/motion/templates.js";
 import {
   MotionRenderError,
@@ -1056,6 +1081,263 @@ async function r6(work: string) {
   await childProbe(work, "(c) packed build", exe, join(packedCore, "dist", "motion", "rendermotion.js"), { command: realpathSync(exe), args: [RENDERER_FLAG] });
 }
 
+// ---- R10: the packed app renders ----------------------------------------------------------
+
+/** The packed app's executable on this platform (electron-builder --dir's layout). */
+const PACKED_EXE: Record<string, string[]> = {
+  linux: ["linux-unpacked", "zabsreel-desktop"],
+  win32: ["win-unpacked", "ZabsReel.exe"],
+  darwin: ["mac", "ZabsReel.app", "Contents", "MacOS", "ZabsReel"],
+};
+/** resources/app of the packed app whose executable is `exe`. */
+const packedApp = (exe: string) => (process.platform === "darwin" ? join(dirname(exe), "..", "Resources", "app") : join(dirname(exe), "resources", "app"));
+
+const PR_W = 320;
+const PR_H = 180;
+const PR_FRAMES = 6;
+/** The image's one colour (R, G, B). */
+const PR_RGB: [number, number, number] = [30, 200, 90];
+/** A library video, an image and a font (through loadFont), and the same text below in the fallback font. */
+const PACKED_TSX = `import { AbsoluteFill, OffthreadVideo, Img, asset, loadFont } from "remotion";
+const { fontFamily } = loadFont(asset("mono"));
+const line = { position: "absolute", left: 4, fontSize: 36, color: "#fff", whiteSpace: "nowrap" };
+export default function G() {
+  return (
+    <AbsoluteFill style={{ background: "#000" }}>
+      <OffthreadVideo src={asset("vid")} style={{ position: "absolute", left: 0, top: 0, width: 160, height: 90 }} />
+      <Img src={asset("img")} style={{ position: "absolute", left: 200, top: 10, width: 80, height: 60 }} />
+      <div style={{ ...line, top: 92, fontFamily }}>Wil 1 g</div>
+      <div style={{ ...line, top: 136 }}>Wil 1 g</div>
+    </AbsoluteFill>
+  );
+}`;
+
+/**
+ * The child "core" of R10, run by the packed executable in Node mode (as the packed
+ * desktop runs its core): the packed core's own binary rule, its probe, then one render of
+ * PACKED_TSX with the packed core's renderMotion. Every process it starts is recorded.
+ */
+const PACKED_CHILD = `
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const [core, data, job, framesOut] = process.argv.slice(2);
+const { fixtures, tsx, width, height, frames } = JSON.parse(readFileSync(job, "utf8"));
+const cp = createRequire(import.meta.url)("node:child_process");
+const realSpawn = cp.spawn;
+const spawned = [];
+cp.spawn = function (file, ...rest) {
+  const child = realSpawn.call(this, file, ...rest);
+  spawned.push({ pid: child.pid ?? null, file: String(file) });
+  return child;
+};
+syncBuiltinESMExports();
+const at = (p) => new URL(p, core).href;
+const { probeMotionRenderer, renderMotion } = await import(at("dist/motion/rendermotion.js"));
+const { rendererBinary } = await import(at("dist/motion/rendererbinary.js"));
+const { probeAsset } = await import(at("dist/ffmpeg/ffprobe.js"));
+const pids = [];
+const probe = await probeMotionRenderer(data, { onSpawn: (pid) => pids.push(pid) });
+const chunks = [];
+const routes = { media: 0, font: 0 };
+let media = null;
+let error = null;
+try {
+  const assets = { vid: await probeAsset(fixtures.vid), img: await probeAsset(fixtures.img), mono: { kind: "font", path: fixtures.font, name: "mono.ttf" } };
+  await renderMotion({
+    graphic: { source: tsx },
+    width, height, fps: 30, durationInFrames: frames, alpha: false,
+    workDir: join(data, "motion", "packed"),
+    outPath: join(data, "baked", "packed-graphic.mp4"),
+    assets,
+    onFrameData: (c) => chunks.push(Buffer.from(c)),
+    onMessage: (m) => { if (m.type === "media") routes[m.route === "font" ? "font" : "media"]++; },
+    onMedia: (s) => (media = s),
+    onSpawn: (pid) => pids.push(pid),
+  });
+} catch (err) {
+  error = { code: err.code ?? null, message: String(err.message).slice(0, 400) };
+}
+writeFileSync(framesOut, Buffer.concat(chunks));
+console.log(JSON.stringify({ binary: rendererBinary(), probe, error, media, routes, pids: [...pids, ...spawned.map((s) => s.pid).filter(Boolean)], spawned: spawned.map((s) => s.file.split(/[\\\\/]/).pop()) }));
+`;
+
+/** Whether `pid` is alive (portable: Windows has no /proc). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** A monospace font file of this computer (not the page's fallback font), or null. */
+function monoFont(): string | null {
+  const windows = join(process.env.SystemRoot ?? "C:\\Windows", "Fonts");
+  const fonts = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", join(windows, "consola.ttf"), join(windows, "cour.ttf")];
+  return fonts.find((p) => existsSync(p)) ?? null;
+}
+
+// MUTATION: build.files leaving out @aive/motion's vendor/ → the React rows fail (and the render
+// fails); leaving out sucrase → the sucrase row and the render fail; without the parity/scripts/
+// cleanroom/test exclusions → the "not shipped" row fails. motion-renderer.cjs answering the
+// font route with a 404 → the font rows fail; writing zeros to fd 3 → the image, video and font
+// rows fail; main.cjs's dispatch moved below its requires → the probe's module row fails;
+// motionmedia.ts's close() neither stopping nor awaiting its FFmpeg decodes → the core's
+// process does not end on its own and the processes row fails.
+async function r10(work: string) {
+  console.log("R10. the packed app renders: a library video, an image and a font, frames over fd 3, media over fd 4...");
+  const shape = PACKED_EXE[process.platform];
+  const exe = process.env.AIVE_APP || (shape ? join(DESKTOP, "build", "dist", ...shape) : "");
+  if (!exe || !existsSync(exe)) {
+    // A run that names its packed app (CI's packaged jobs) must never pass by skipping.
+    if (process.env.AIVE_APP) check(false, `the packed app AIVE_APP names exists (${exe})`);
+    else skipped("R10", `no packed build (${exe || process.platform}; npx electron-builder --dir in apps/desktop makes one)`);
+    return;
+  }
+  const app = packedApp(exe);
+  const packedCore = join(app, "node_modules", "@aive", "core");
+  const packedMotion = join(app, "node_modules", "@aive", "motion");
+  // What ships: this tree's renderer, runtime and React (byte-identical: a stale pack proves nothing), the core's sucrase.
+  const shipped = [
+    ...["motion-renderer.cjs", "preload.cjs", "page.html", "guard.js", "loader.js", "host.js"].map((n) => ["renderer", n]),
+    ["dist", "zr-runtime.js"],
+    ...["react.production.min.js", "react-dom.production.min.js", "LICENSE"].map((n) => ["vendor", "react-18.3.1", n]),
+  ];
+  const stale = shipped.filter((p) => {
+    const packed = join(packedMotion, ...p);
+    const built = join(REPO, "packages", "motion", ...p);
+    return !(existsSync(packed) && existsSync(built) && realpathSync(packed) !== realpathSync(built) && readFileSync(packed).equals(readFileSync(built)));
+  });
+  check(stale.length === 0, `the packed @aive/motion holds this tree's renderer files, dist/zr-runtime.js and vendor/react-18.3.1 (both UMD builds and React's LICENSE), byte-identical (missing or different: ${JSON.stringify(stale.map((p) => p.join("/")))})`);
+  const drivers = ["rendermotion.js", "motionmedia.js", "graphicmodule.js"].filter((n) => {
+    const packed = join(packedCore, "dist", "motion", n);
+    return !(existsSync(packed) && readFileSync(packed).equals(readFileSync(join(CORE_DIST, "motion", n))));
+  });
+  check(drivers.length === 0, `the packed core's motion driver is this tree's build (rebuild: npm run build, then electron-builder --dir; different: ${JSON.stringify(drivers)})`);
+  let sucrase = "";
+  try {
+    sucrase = realpathSync(createRequire(join(packedCore, "package.json")).resolve("sucrase"));
+  } catch {
+    /* not shipped */
+  }
+  check(!!sucrase && sucrase.startsWith(realpathSync(app) + sep), `the packed core finds its sucrase inside the packed app (${sucrase || "not found"})`);
+  const extra = ["parity", "scripts", join("cleanroom", "test")].filter((p) => existsSync(join(packedMotion, p)));
+  check(existsSync(packedMotion) && extra.length === 0, `the packed @aive/motion has no parity/, scripts/ or cleanroom/test (${JSON.stringify(extra)})`);
+
+  // Fixtures (FFmpeg's lavfi sources) and the font.
+  const f = fresh(work, "packed-render");
+  const fx = join(f.dir, "fixtures");
+  mkdirSync(fx, { recursive: true });
+  const font = monoFont();
+  if (!font) return check(false, "a monospace font for R10 is installed (DejaVuSansMono, LiberationMono, Consolas or Courier New)");
+  const hex = PR_RGB.map((v) => v.toString(16).padStart(2, "0")).join("");
+  for (const args of [
+    ["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", join(fx, "vid.mp4")],
+    ["-f", "lavfi", "-i", `color=c=0x${hex}:s=16x16`, "-frames:v", "1", join(fx, "img.png")],
+  ]) {
+    const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args], { encoding: "utf8" });
+    if (r.status !== 0) return check(false, `R10's fixture: ffmpeg ${args.join(" ")}: ${r.stderr}`);
+  }
+  writeFileSync(join(fx, "mono.ttf"), readFileSync(font));
+  const job = join(f.dir, "job.json");
+  writeFileSync(job, JSON.stringify({ fixtures: { vid: join(fx, "vid.mp4"), img: join(fx, "img.png"), font: join(fx, "mono.ttf") }, tsx: PACKED_TSX, width: PR_W, height: PR_H, frames: PR_FRAMES }));
+  const script = join(f.dir, "packed-child.mjs");
+  writeFileSync(script, PACKED_CHILD);
+  const framesOut = join(f.dir, "frames.raw");
+  // Windows: what any process there needs (the renderer's allowlist passes SystemRoot and windir on), temp in the row's folder.
+  const tmp = join(f.dir, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  const winEnv = process.platform === "win32"
+    ? { SystemRoot: process.env.SystemRoot, windir: process.env.windir, PATHEXT: process.env.PATHEXT, COMSPEC: process.env.COMSPEC, TEMP: tmp, TMP: tmp }
+    : {};
+  const child = spawn(exe, [script, pathToFileURL(packedCore + sep).href, f.data, job, framesOut], { env: { ...f.env, ...winEnv }, stdio: ["ignore", "pipe", "pipe"] });
+  const watch = LINUX ? watchTree(child.pid!) : null;
+  type PackedResult = LaunchResult & { error: { code: string | null; message: string } | null; media: MediaStats | null; routes: { media: number; font: number }; pids: number[]; spawned: string[] };
+  const got: { out: PackedResult | null } = { out: null };
+  let err = "";
+  child.stderr?.on("data", (c: Buffer) => (err = (err + c.toString()).slice(-4000)));
+  jsonLines(child, (m) => (got.out = m as unknown as PackedResult));
+  const done = await waitFor("R10's child", () => child.exitCode !== null || child.signalCode !== null, 180_000);
+  if (!done) child.kill("SIGKILL");
+  const watched = watch?.stop();
+  const r = got.out;
+  if (!r) console.log(`       (R10 child stderr: ${err.trim().split("\n").slice(-5).join(" | ")})`);
+
+  // The probe through the packed core's binary rule.
+  // Compared as real paths: on Windows the child's execPath may spell the same file another way (case, short names).
+  const binary = r?.binary;
+  check(!!binary?.ok && existsSync(binary.command) && realpathSync.native(binary.command) === realpathSync.native(exe) && same(binary.args, [RENDERER_FLAG]),
+    `the packed core's binary rule gives the app itself with only the flag (${JSON.stringify(binary)})`);
+  const report = r?.probe.ok ? r.probe.report : null;
+  check(report?.probe === "ok" && report?.visibleWindows === 0, `the packed app's probe prints {"probe":"ok"} with no visible window (${String(JSON.stringify(r?.probe)).slice(0, 300)})`);
+  const modules = (report?.modules as string[] | undefined) ?? [];
+  check(modules.some((m) => /motion-renderer\.cjs$/.test(m)) && !modules.some((m) => DESKTOP_MODULES.test(m)),
+    `the packed main.cjs dispatched to motion-renderer.cjs and loaded none of core-launcher, media-servers, graphics-addon (${JSON.stringify(modules.filter((m) => /\.cjs$/.test(m)).map((m) => m.split(/[\\/]/).pop()))})`);
+  const env = (report?.env as string[] | undefined) ?? [];
+  const extraEnv = env.filter((k) => !ALLOWED_ENV.has(k) && !CHROMIUM_ENV.has(k));
+  check(env.length > 0 && extraEnv.length === 0, `the packed renderer's environment is the allowlist (extra: ${JSON.stringify(extraEnv)})`);
+
+  // The render: real frames on fd 3, media and a font over fd 4.
+  check(!!r && r.error === null, `the packed app renders the graphic (${JSON.stringify(r?.error)})`);
+  const raw = existsSync(framesOut) ? readFileSync(framesOut) : Buffer.alloc(0);
+  const size = PR_W * PR_H * 4;
+  check(raw.length === PR_FRAMES * size, `fd 3 carried exactly ${PR_FRAMES} frames of ${PR_W}x${PR_H}x4 bytes (${raw.length} bytes)`);
+  const frames = Array.from({ length: Math.floor(raw.length / size) }, (_, i) => raw.subarray(i * size, (i + 1) * size));
+  const at = (fr: Buffer, x: number, y: number) => px(fr, x, y, PR_W);
+  const [R, G, B] = PR_RGB;
+  const image = frames.length > 0 && frames.every((fr) => near(at(fr, 240, 40), [B, G, R, 255], 2));
+  check(image, `the library image shows in its box in every frame, B,G,R,A (${JSON.stringify(frames.map((fr) => at(fr, 240, 40)))})`);
+  let lit = 0;
+  let moved = 0;
+  const first = frames[0];
+  const last = frames[frames.length - 1];
+  for (let y = 5; first && last && y < 85; y++) {
+    for (let x = 5; x < 155; x++) {
+      const a = at(first, x, y);
+      if (Math.max(a[0], a[1], a[2]) > 40) lit++;
+      if (!near(a, at(last, x, y), 16)) moved++;
+    }
+  }
+  check(lit > 6000 && moved > 200, `the library video shows in its box and moves from the first frame to the last (${lit} of 12000 pixels lit, ${moved} changed)`);
+  let ink = 0;
+  let differ = 0;
+  for (let y = 0; first && y < 42; y++) {
+    for (let x = 0; x < 196; x++) {
+      const a = first[((92 + y) * PR_W + x) * 4 + 1];
+      const b = first[((136 + y) * PR_W + x) * 4 + 1];
+      if (a > 128) ink++;
+      if (Math.abs(a - b) > 64) differ++;
+    }
+  }
+  check(ink > 200 && differ > 200, `the font from the font route draws glyphs that differ from the fallback font's (${ink} inked pixels, ${differ} differ)`);
+  check(!!r?.media && r.media.decodes === PR_FRAMES + 1 && r.media.fonts === 1 && r.routes.media >= 2 && r.routes.font === 1,
+    `the page's media requests went to the core and their answers back over fd 4: ${PR_FRAMES} video frames, the image and the font (${JSON.stringify({ decodes: r?.media?.decodes, fonts: r?.media?.fonts, routes: r?.routes })})`);
+  const out = join(f.data, "baked", "packed-graphic.mp4");
+  const counted = existsSync(out) ? spawnSync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", out], { encoding: "utf8" }).stdout.trim() : "";
+  check(counted === String(PR_FRAMES), `the baked .mp4 has the ${PR_FRAMES} frames (${counted || "no file"})`);
+
+  // Nothing left: no process, no scratch, no file but the output, no core.
+  const deadline = Date.now() + 2000;
+  const pids = [child.pid!, ...(r?.pids ?? [])];
+  let left = pids.filter(alive);
+  while (left.length > 0 && Date.now() < deadline) {
+    await sleep(50);
+    left = left.filter(alive);
+  }
+  check(!!r && done && child.exitCode === 0 && r.pids.length >= 2 && left.length === 0,
+    `the packed core's process ended on its own, and no process of the run is left: its renderers and FFmpeg (exit ${child.exitCode ?? child.signalCode}; ${pids.length} watched: ${JSON.stringify(r?.spawned)}; left ${JSON.stringify(left)})`);
+  const files = filesUnder(f.data);
+  check(same(files, ["baked/packed-graphic.mp4"]), `the data folder holds only the baked output: no motion/<id>, no probe folder (${JSON.stringify(files.slice(0, 5))})`);
+  const servers = [...filesUnder(f.home), ...files].filter((x) => x.endsWith("server.json"));
+  check(servers.length === 0 && filesUnder(f.home).length === 0, `nothing in HOME and no server.json (${JSON.stringify(filesUnder(f.home).slice(0, 5))})`);
+  if (watched) {
+    const cores = [...watched.seen.values()].filter((p) => /dist[\\/]cli\.js|aive-core/.test(p.cmd));
+    check(cores.length === 0 && watched.ports.size === 0, `no core started and no port 5030-5039 opened (${watched.seen.size} processes seen; ports ${JSON.stringify([...watched.ports])})`);
+  }
+}
+
 // ---- R7: measure ----------------------------------------------------------------------
 
 async function r7(work: string) {
@@ -1552,6 +1834,7 @@ async function main() {
       if (part("R7")) await r7(work);
       if (part("R9")) await r9(work);
     }
+    if (part("R10")) await r10(work);
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5 });
   }

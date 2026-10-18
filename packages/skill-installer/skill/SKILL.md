@@ -139,9 +139,12 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
     Series and Loop; interpolate's perceptual-scale output, and interpolating
     strings, colours and true/false values; Easing.spring's allowTail and
     durationRestThreshold; the crop props of Sequence; lab() and lch()
-    colours in interpolateColors. A component that needs an API ZabsReel's
-    renderer lacks fails naming it: tell the user it needs the Remotion
-    add-on setting.
+    colours in interpolateColors. And on ZabsReel's renderer `<Video>` and
+    `<Html5Video>` show the same decoded frames as `<OffthreadVideo>`: their
+    colours match `<OffthreadVideo>`'s, within about 14 levels of the
+    add-on's `<Video>` (which the browser decodes). A component that needs an
+    API ZabsReel's renderer lacks fails naming it: tell the user it needs the
+    Remotion add-on setting.
   - Changing the setting re-renders nothing: baked graphics keep playing and
     exporting their files; an overlay keeps its code, props and fonts for a later
     `add_graphic`, a standalone graphic keeps none.

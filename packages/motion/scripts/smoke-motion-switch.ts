@@ -83,7 +83,11 @@
  *                    network or packages, that an overlay's audio becomes a
  *                    linked audio clip, that only the user's setting
  *                    decides the renderer, and how a font file goes in
- *                    (add_graphic's fonts, loadFont(asset("<id>"))).
+ *                    (add_graphic's fonts, loadFont(asset("<id>"))); the
+ *                    dialog's help, the guide, SKILL.md, README.md and
+ *                    docs/MOTION_RENDERER.md say that <Video> and
+ *                    <Html5Video> show <OffthreadVideo>'s decoded frames,
+ *                    within about 14 levels of the add-on's <Video>.
  *  S11. fonts     — add_graphic's `fonts` (slice 5b): an overlay that loads a
  *                    .ttf path with loadFont(asset("f1")) draws glyphs that
  *                    differ from the fallback font's; the page's start data
@@ -800,6 +804,19 @@ function s10() {
     const missing = phrases.filter((p) => !text.includes(p));
     check(missing.length === 0, `${what}: library media by asset id, no network or packages, the linked audio clip, the setting decides, fonts (${JSON.stringify(missing)})`);
   }
+  // MUTATION: drop the <Video> colour sentence from the dialog (or the guide, SKILL.md, README.md or
+  // docs/MOTION_RENDERER.md) → this row fails.
+  const VIDEO = ["<Video> and <Html5Video> show the same decoded frames as <OffthreadVideo>", "colours match <OffthreadVideo>'s", "within about 14 levels of the add-on's <Video>"];
+  const plain = (t: string) => flat(t).replace(/`/g, "");
+  const texts: [string, string][] = [
+    ["the dialog's help", plain(read("apps", "desktop", "src", "graphicsaddon.tsx"))],
+    ["the MCP instructions", instructions],
+    ["SKILL.md", plain(skill)],
+    ["README.md", plain(read("README.md"))],
+    ["docs/MOTION_RENDERER.md", plain(read("docs", "MOTION_RENDERER.md"))],
+  ];
+  const noVideo = texts.filter(([, t]) => !VIDEO.every((v) => t.includes(v))).map(([what]) => what);
+  check(noVideo.length === 0, `where the renderers differ, each text says <Video> and <Html5Video> show <OffthreadVideo>'s decoded frames, within about 14 levels of the add-on's <Video> (missing in ${JSON.stringify(noVideo)})`);
 }
 
 // ---- S11: fonts ---------------------------------------------------------------------------------
