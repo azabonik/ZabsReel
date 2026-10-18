@@ -172,6 +172,9 @@ function VideoBody({
     imgProps.width = info.width;
     imgProps.height = info.height;
   }
+  // A frame in a box of another shape is letterboxed, as a video element shows it, unless the
+  // style says otherwise (round 2's frame images: notes/fit/r2-media-rules.js, part 4).
+  imgProps.style = { objectFit: "contain", ...imgProps.style };
   const { onVideoFrame } = props;
   return (
     <MediaImage

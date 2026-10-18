@@ -2,7 +2,7 @@
 // own choices (see NOTES.md).
 
 import { describeValue, misuse } from "./errors";
-import { DEFAULT_REST_THRESHOLD, readSpringPhysics, settleFrame, springDisplacement } from "./spring";
+import { DEFAULT_REST_THRESHOLD, elapsedSeconds, readSpringPhysics, settleFrame, springDisplacement } from "./spring";
 
 /** Easing.spring measures its physics over this many frames (at as many frames per second). */
 const EASING_SPAN_FRAMES = 30;
@@ -137,12 +137,12 @@ function springEasing(config: EasingSpringConfig = {}): EasingFunction {
   if (settle === Infinity) {
     throw misuse(`${where}: this spring has no damping, so it never settles. Give it some damping.`);
   }
-  const span = settle / EASING_SPAN_FRAMES; // seconds of the natural curve per unit of progress
   const allowTail = config.allowTail === true;
   const easing: EasingFunction = (t) => {
     if (t <= 0) return 0;
     if (!allowTail && t >= 1) return 1;
-    const value = 1 + springDisplacement(physics, t * span);
+    // Progress t is natural frame t * settle at 30 fps, timed like spring()'s frames.
+    const value = 1 + springDisplacement(physics, elapsedSeconds(t * settle, EASING_SPAN_FRAMES));
     return physics.overshootClamping && value > 1 ? 1 : value;
   };
   if (allowTail) tailEasings.add(easing);

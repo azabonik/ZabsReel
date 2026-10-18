@@ -106,7 +106,7 @@ test("volume is clamped to 0..4 (NaN -> 0), whether or not useWebAudioApi is set
   }
 });
 
-test("recorded choice: the volume callback gets the frame counted from the media's start, unscaled by its rate", async () => {
+test("recorded choice: the volume callback gets the media's frame on its parent's timeline, unscaled by its rate; from does not change it", async () => {
   const seen: number[] = [];
   const cues = await cuesAt(
     <Sequence from={10}>
@@ -116,14 +116,19 @@ test("recorded choice: the volume callback gets the frame counted from the media
         playbackRate={2}
         volume={(f) => {
           seen.push(f);
-          return f / 10;
+          return f / 20;
         }}
       />
     </Sequence>,
-    [15, 20],
+    [14, 15, 20],
   );
-  assert.deepEqual(volumes(cues), [[0], [0.5]]);
-  assert.ok(seen.includes(0) && seen.includes(5));
+  // Hidden before the Sequence's frame 5; the callback then gets 5 and 10 (the Sequence's frames).
+  assert.deepEqual(volumes(cues), [[], [0.25], [0.5]]);
+  assert.ok(seen.includes(5) && seen.includes(10) && !seen.includes(0));
+});
+
+test("parity r2 offthread-from-prop, recorded choice: from on audio hides it until then; the source time is not shifted", async () => {
+  assert.deepEqual(times(await cuesAt(<Html5Audio src="song" from={30} />, [29, 30, 45])), [[], [1], [1.5]]);
 });
 
 test("recorded choice: a volume callback result that is not a number counts as NaN, so 0", async () => {

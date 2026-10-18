@@ -49,6 +49,19 @@ export function secondsPerFrame(fps: number): number {
   return Math.min(1 / fps, MAX_SECONDS_PER_FRAME);
 }
 
+/**
+ * Seconds of spring time at (natural) frame `g >= 0`. Time advances in whole-frame steps, each at most
+ * MAX_SECONDS_PER_FRAME; a fractional frame lengthens the first step, which spans `1 + frac` frames (a
+ * frame below 1 is a single partial step). Derived from round 2's rows: notes/fit/r2-spring-steps.js.
+ */
+export function elapsedSeconds(g: number, fps: number): number {
+  const nearest = Math.round(g);
+  const frames = Math.abs(g - nearest) < 1e-9 ? nearest : g; // hide floating-point noise around whole frames
+  const frame = 1 / fps;
+  const steps = Math.max(1, Math.floor(frames));
+  return Math.min((frames - steps + 1) * frame, MAX_SECONDS_PER_FRAME) + (steps - 1) * secondsPerFrame(fps);
+}
+
 export interface SpringPhysics {
   /** Natural angular frequency, rad/s. */
   omega: number;
@@ -216,7 +229,7 @@ export function spring(options: SpringOptions): number {
   // A stretched spring is over after its duration: from then on it is exactly `to`.
   if (stretchedTo !== null && position > stretchedTo) return to;
   // Before the start (including a NaN delay) the spring holds its starting value.
-  const u = position > 0 ? springDisplacement(physics, position * scale * dt) : -1;
+  const u = position > 0 ? springDisplacement(physics, elapsedSeconds(position * scale, fps)) : -1;
   let value = from + (to - from) * (1 + u);
   if (physics.overshootClamping && (to >= from ? value > to : value < to)) return to;
   // An unstretched spring approaches `to` without reaching it, even when the remaining distance is

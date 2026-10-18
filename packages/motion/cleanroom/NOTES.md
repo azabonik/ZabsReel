@@ -213,12 +213,19 @@ Dropped (not forwarded to any element):
 
 ### 5.5 Media timing (BRIEF 6.3, 6.4)
 
-- Media components accept `from` (default 0), as a Sequence does (SPEC 10.6 and 10.7 leave it
-  open).
-- Media-local frame: `trimBefore + (f - from) * playbackRate`, where `f` already carries the
-  enclosing Sequences' shifts and rates, so rates multiply. With `loop`:
-  `trimBefore + ((f - from) * playbackRate) mod length`. Before `from`, or past
-  `durationInFrames`, nothing is mounted.
+(Round 2 changed `from`, `trimAfter` and the source-frame rounding to the reference's observed
+behaviour; section 10 lists the cases and the scripts that derive them.)
+
+- Media components accept `from` (default 0; SPEC 10.6 and 10.7 leave it open). It only keeps the
+  element unmounted before parent frame `from`; it does not shift the source: the media's timeline
+  starts at its parent's frame 0 whatever `from` is (derived: `notes/fit/r2-media-rules.js`,
+  part 2). Choices with no row evidence: `durationInFrames` and `trimAfter` also count from the
+  parent's frame 0 (so `from` does not extend the end), and the volume callback is unaffected by
+  `from`.
+- Media-local frame: `trimBefore + f * playbackRate`, where `f` is the parent's frame and already
+  carries the enclosing Sequences' shifts and rates, so rates multiply. With `loop`:
+  `trimBefore + (f * playbackRate) mod length`. Before `from`, or past `durationInFrames` (or
+  `trimAfter`, below), nothing is mounted.
 - Without `durationInFrames`, a non-looping media stays mounted to the end of its parent: the video
   shows its last frame (the clamp) and audio keeps producing cues past the source end (the host
   trims them).
@@ -226,20 +233,36 @@ Dropped (not forwarded to any element):
   `frameCount / fps` seconds for video and `durationSeconds` for audio, in composition frames. If
   nothing is left, `graphic_api_misuse`. A loop longer than the source shows the video's last
   frame (or gives audio source times past the end) for the rest of each iteration.
-- `trimBefore`, `durationInFrames` and `trimAfter` count media-local frames at the composition's
-  fps, before `playbackRate` (so the media takes `durationInFrames / playbackRate` parent frames).
-  `trimAfter` is the frame where playback stops, counted from the source start, so
-  `durationInFrames = trimAfter - trimBefore`; it must be greater than `trimBefore`.
-  `startFrom`/`endAt` are the old names. Mixing old and new names, or giving `trimAfter` together
-  with `durationInFrames`, throws `graphic_api_misuse`. A media `playbackRate` must be positive and
-  finite; one that changes between frames is used as given.
-- Seconds = media-local frame / composition fps. Source frame = floor(seconds × asset fps + 1e-9),
-  clamped to `0..frameCount-1`. A negative media-local frame (only possible with a negative
+- `trimBefore` and `durationInFrames` count media-local frames at the composition's fps, before
+  `playbackRate` (so the media takes `durationInFrames / playbackRate` parent frames; SPEC dates
+  the media `durationInFrames` v4.0.530).
+- `trimAfter` (and its old name `endAt`), without `loop`: the element stays mounted for
+  `trimAfter - trimBefore` parent frames, not divided by `playbackRate`; the source keeps advancing at
+  the rate meanwhile (clamped to its last frame). At rate 1 this is the same as playing source
+  frames `trimBefore..trimAfter-1`. Derived from round 2's rows (`notes/fit/r2-media-rules.js`,
+  part 3, the only candidate that fits all four trim compositions). With `loop`, the
+  `trimBefore..trimAfter` source range is what repeats (unchanged; the rows say nothing about loops at
+  rates other than 1). `trimAfter` must be greater than `trimBefore`. `startFrom`/`endAt` are the
+  old names. Mixing old and new names, or giving `trimAfter` together with `durationInFrames`,
+  throws `graphic_api_misuse`. A media `playbackRate` must be positive and finite; one that changes
+  between frames is used as given.
+- Seconds = media-local frame / composition fps. Source frame = the nearest source frame to
+  `seconds × asset fps`, ties going up (`floor(x + 0.5)`, with a 1e-9 tolerance), then clamped to
+  `0..frameCount-1`. Derived from round 2's rows (`notes/fit/r2-media-rules.js`, part 1): round
+  half up fits 34 of the 35 observations; floor fits 20, the other candidates fewer than 31. The
+  one observation it does not reproduce: in `offthread-rate-half`, frame 59 (position exactly 29.5)
+  showed source frame 29 in the reference, while every other exact tie (0.5, 1.5, 14.5, 15.5, 30.5,
+  59.5, 74.5) went up; no arithmetic order of the conversion reproduces that row, so it is left as
+  an outlier (this runtime shows 30). A negative media-local frame (only possible with a negative
   `trimBefore`) fails with `graphic_media_time`, for muted sources too.
 - A video inside `<Freeze>` shows the frame for the frozen time and is silent; audio inside
   `<Freeze>` adds no cue.
-- `volume`: default 1; a number, or a function called during render with the frame counted from
-  the media's own start on its parent's timeline (`f - from`, not scaled by the media's own rate).
+- `volume`: default 1; a number, or a function called during render with the media's frame on its
+  parent's timeline (`f`, counted from the parent's frame 0, not scaled by the media's own rate and
+  not shifted by `from`; inside a Sequence that is the Sequence's frame). Round 2's
+  `audio-volume-step-sequence` shows the reference counting differently (its step comes earlier),
+  but its single metric cannot tell "trimBefore included" from "composition frame" apart, so this
+  stays as it is (section 10.4).
   With `loopVolumeCurveBehavior: "repeat"` (the default) that count restarts with every iteration:
   of the media's own loop, and (because the parent's frame restarts) of an enclosing `<Loop>` or
   looping Sequence. With `"extend"` it keeps counting across all of them. A result that is not a
@@ -254,8 +277,14 @@ Dropped (not forwarded to any element):
 ### 5.6 Images and video frames
 
 - Size attributes come from the asset's `width`/`height` when the user gives none of `width`,
-  `height`, `style.width`, `style.height` (BRIEF 6.2). The `ref` of `<Img>` and of both video
-  components is the `<img>`. `<Html5Audio>` does not attach refs.
+  `height`, `style.width`, `style.height` (BRIEF 6.2). This is a BRIEF rule, so it stays even where
+  the reference stretches an unsized image or video in a flex container (round 2's `img-in-fill`,
+  section 10.3). The `ref` of `<Img>` and of both video components is the `<img>`. `<Html5Audio>`
+  does not attach refs.
+- Both video components put `object-fit: contain` on their `<img>` unless the user's `style` sets
+  `objectFit`: a frame in a box of another shape is letterboxed, as a video element shows it
+  (derived from round 2's frame images: `notes/fit/r2-media-rules.js`, part 4). `<Img>` keeps the
+  browser's default (`fill`). This does not change any size, so `img-in-fill` is unaffected.
 - An `<img>` whose URL is unchanged and already loaded holds no delay. "Loaded" means this element
   fired `load` for that URL, or reports `complete` with a non-zero `naturalWidth` when committed.
   While a new video frame loads, the browser keeps showing the previous one; the frame does not
@@ -407,9 +436,19 @@ Dropped (not forwarded to any element):
   physically overdamped curve (about 318 frames) would not. Round 1's parity rows agree with this
   model to within about 2e-6 (well inside the report's 1e-4) wherever they sample it (default,
   `damping: 200`, `damping: 5`, `mass: 2, stiffness: 50`).
-- Time: a frame advances the spring by `min(1 / fps, 0.064)` seconds. Above 15.625 fps that is just
-  `1 / fps`; at lower frame rates each frame counts as 64 ms (the reference's observed values at
-  1 fps; `measureSpring({fps: 1, config: {damping: 200}})` is 12).
+- Time: a whole frame advances the spring by `min(1 / fps, 0.064)` seconds. Above 15.625 fps that is
+  just `1 / fps`; at lower frame rates each frame counts as 64 ms (round 1's rows at 1 fps;
+  `measureSpring({fps: 1, config: {damping: 200}})` is 12; `notes/fit/r1-derive.js`, part 1).
+- Fractional frames (round 2): time advances in whole-frame steps, each at most 64 ms, and the
+  fraction lengthens the first step: frame `g >= 0` with `n = max(1, floor(g))` steps lasts
+  `min((g - n + 1) / fps, 0.064) + (n - 1) * min(1 / fps, 0.064)` seconds. A frame below 1 is one
+  partial step (`g / fps`, at most 64 ms). At 10 fps, frame 2.5 is 128 ms like frame 2; at 16 fps
+  frame 1.5 is 64 ms. Derived from round 2's rows (`notes/fit/r2-spring-steps.js`: the only one of
+  five candidates that fits all 24 unclamped rows, including stretched and reversed springs at 10,
+  15, 16 and 24 fps). The same rule applies to the natural frame of a stretched spring and to
+  `Easing.spring`. At 30 fps it only differs from `g / 30` for fractions above 0.92 (the first step
+  would pass 64 ms), which gives small jumps just below whole natural frames; round 1's rows still
+  all match.
 - `measureSpring` returns a whole number of frames: the smallest frame from which every later frame
   is within `threshold` of the target. Distance is measured on the 0-to-1 curve, so `from` and `to`
   do not matter. An undamped spring returns `Infinity`.
@@ -430,7 +469,9 @@ Dropped (not forwarded to any element):
   `from`, so `spring({frame: 1000, fps: 30}) === 1` is `false`. This applies only when `from !== to`,
   without clamping and without stretching (a stretched spring ends exactly at `to`;
   `overshootClamping` gives exactly `to`).
-- Fractional frames are evaluated on the continuous curve.
+- `overshootClamping` replaces every value beyond `to` (past the target in the direction of travel)
+  by `to`, as SPEC 6 documents. The reference never clamped in any parity row (decreasing in round
+  1, increasing in round 2); see sections 9.3 and 10.3.
 - `config.mass`, `config.damping`, `config.stiffness` and `durationRestThreshold` accept any number;
   the formulas then decide: `mass: 0` or `mass: -1` gives NaN, `stiffness: 0` gives a spring that
   never moves (`from`), `durationRestThreshold: 1.5` gives a settle length of 0 (the stretched
@@ -496,8 +537,11 @@ The formulas below were derived from the reference's values in round 1 where SPE
 - Updates that user code schedules after the marker commit (for example from the effect of a user
   transition that React batched with the marker) are not waited for.
 - `random()`'s numbers are this runtime's own and do not reproduce Remotion's values (SPEC says they
-  cannot be reproduced from the spec). `spring()` matches the reference wherever round 1 sampled
-  it; between those samples it is this runtime's model.
+  cannot be reproduced from the spec). `spring()` matches the reference wherever rounds 1 and 2
+  sampled it (except `overshootClamping`, kept from SPEC); between those samples it is this
+  runtime's model.
+- Media: four round-2 compositions keep differences for which no rule could be derived from the
+  rows (section 10.4).
 
 ## 8. Testing
 
@@ -518,6 +562,14 @@ The formulas below were derived from the reference's values in round 1 where SPE
   (`test/parity-r1.cases.ts`, generated from `feedback/feedback-r1/values.json`): rows of fixed
   cases must match the reference within the report's tolerance; kept cases must still differ. Tests
   named "parity r1 <case id>" check the individual changes.
+- `test/parity-r2.test.ts` does the same for round 2's spring rows (`test/parity-r2.cases.ts`, from
+  `feedback/feedback-r2/values.json`); the replay helpers are in `test/helpers/parity.ts`. Tests
+  named "parity r2 <case id>" check the media changes in `test/video.test.tsx` and
+  `test/audio.test.tsx` and the spring step rule in `test/spring.test.ts`.
+- `notes/fit/` holds the scripts that derive every formula or constant adopted from the parity rows
+  (`node notes/fit/<script>.js .` from this folder): `r1-derive.js` (round 1),
+  `r2-spring-steps.js` and `r2-media-rules.js` (round 2). They read only the feedback files and
+  print, for each rule, the candidates tried and how well each fits.
 
 ## 9. Parity round 1
 
@@ -540,6 +592,11 @@ as open, and the reference's behaviour is adopted. The reference shows the featu
 which is a valid answer to the open question. The documented part of the feature is kept.
 
 ### 9.1 Changed to the reference's behaviour (SPEC open)
+
+The constants and formulas below are derived from round 1's rows by `notes/fit/r1-derive.js`
+(64 ms per frame, the whole-frame stretch counts 28/39/23/62, `back`'s s = 1.70158, the `elastic`,
+`exp` and `bounce` formulas, `bezier` holding 0 and 1, D65 against D50 for `lab()`/`lch()`, 8-bit
+keyframe colours, and the end-segment `wrap`).
 
 - Easing formulas: `exp`, `elastic`, `back`'s default, `bounce`, `bezier` (and `ease`) outside
   0..1, `poly(0)`, negative `elastic` bounciness (section 5.14).
@@ -577,7 +634,9 @@ The reference lacks these, and the differences it shows come from that.
   later feature. SPEC is followed.
 - `overshootClamping` on a decreasing spring (`from > to`): SPEC 6 says "any value beyond `to` is
   replaced by `to`". For a spring moving downwards, "beyond" is below `to` (past the target in the
-  direction of travel), so those values are clamped. The reference clamps only values above `to`.
+  direction of travel), so those values are clamped. Round 2 showed that the reference does not clamp
+  increasing springs either: its `overshootClamping` had no observable effect in any row of either
+  round (section 10.3). SPEC is followed in both directions.
 
 ### 9.4 No change
 
@@ -589,3 +648,85 @@ The reference lacks these, and the differences it shows come from that.
 - Compositions the reference refused to render (`interpolate-strings`, `sequence-edge-fractional`,
   `series-edge`): the reference throws (they use discrete strings and booleans from v4.0.509 and
   v4.0.530, fractional timing values, and Series rates and offsets). SPEC.md requires no throw there.
+
+## 10. Parity round 2 (and BRIEF v5)
+
+BRIEF.md v5 changes section 5's fixed message to "... or choose the Remotion add-on as the graphics
+renderer in Help → Graphics add-on…." (U+2192 arrow, U+2026 ellipsis, then a full stop). The module
+object uses it exactly; `test/moduleObject.test.tsx` and `test/errors.test.ts` check it.
+
+Round 2 applied the same policy as round 1 (section 9) to spring cases at 10, 15, 16 and 24 fps and
+to a media batch rendered by both implementations. New in this round: every formula or constant
+adopted from the rows is derived by a script kept in `notes/fit/` (copied from `$TMPDIR/fit/`). A
+rule that no script could derive from the rows was not adopted.
+
+### 10.1 Derivation scripts
+
+- `notes/fit/r2-spring-steps.js`: inverts the round-1 curve for every round-2 row and tests five
+  rules for turning a fractional frame into time. Only "whole steps of at most 64 ms, the first
+  spanning 1 + the fraction" fits all 24 unclamped rows. It also shows that the 12
+  `overshootClamping` rows are exactly the unclamped curve.
+- `notes/fit/r2-media-rules.js`: reads the composition headers (frames compared), the rows (frames
+  that differed) and the frame images (decoded PNG pixels):
+  1. source-frame rounding: round half up fits 34 of 35 observations (floor 20, half even 29,
+     half down 26, ceil 30); the misfit is `offthread-rate-half` frame 59 (section 5.5);
+  2. `from` on a media element: "hidden before `from`, source not shifted" is the only fit;
+  3. `trimAfter` at a playbackRate other than 1: "`trimAfter - trimBefore` parent frames, not divided
+     by the rate" is the only fit across `offthread-trim-rate`, `offthread-trim`, `offthread-endat`
+     and `video-trim-legacy`;
+  4. object-fit: in `offthread-style` and `video-style` the expected frames show the box background
+     above and below the frame in an 800x800 box (letterboxed), where this runtime stretched it.
+- `notes/fit/r1-derive.js`: the round-1 constants (section 9.1), re-derived from round 1's rows.
+
+### 10.2 Changed to the reference's behaviour (SPEC or BRIEF leave it open)
+
+- Spring time for fractional frames (all value cases except the clamp ones; section 5.13).
+- Video source frame: nearest frame, ties up (`offthread-25fps`, `offthread-rate-half`,
+  `offthread-rate-fractional`, and the width-only box of `video-style`; BRIEF 6.3 leaves rounding to
+  the implementer; section 5.5).
+- `from` on media components (`offthread-from-prop`; SPEC 10.7 leaves it open; section 5.5).
+- `trimAfter`/`endAt` at a playbackRate other than 1 (`offthread-trim-rate`; SPEC 18.3 leaves the
+  units open; section 5.5).
+- `object-fit: contain` by default on video frames (`offthread-style`, `video-style`; SPEC does not
+  say how a frame fits a box of another shape; section 5.6).
+
+### 10.3 Kept
+
+- `overshootClamping` (the four `clamp-fromto` value cases): SPEC 6 documents it without a date
+  ("with `true`, any value beyond `to` is replaced by `to`"). The reference's `overshootClamping` had
+  no observable effect in any row of either round; this runtime clamps as SPEC says.
+- `img-in-fill`: with no size props, the reference lets an image and a video frame take whatever
+  size the flex container gives them. BRIEF 6.2 (and 6.3 for video) requires this runtime to set
+  the `<img>`'s width and height attributes to the asset's size in that case, and BRIEF overrides
+  SPEC. The new `object-fit: contain` does not change this.
+- `video-in-sequence-rate`: the difference comes from the Sequence's `playbackRate` (SPEC v4.0.528),
+  which the reference ignores; the media's own rate and the rounding agree.
+- `freeze-video` (audio): SPEC 15 documents that `<Video>` children of an active `<Freeze>` are
+  paused, so this runtime gives no cue while frozen (sound on frames 0-59 only). The reference's
+  sound differs (31 dB, 4 sound edges against this runtime's 2); the aggregate metric does not show
+  what it plays, and SPEC decides.
+
+### 10.4 Not adopted: no rule can be derived from the rows
+
+- `video-loop`: frames 1, 88, 91 and 178 differ in content, the rest agree. At frames 1 and 91 the
+  reference shows source frame 1 where `2 * (f mod 90)` gives 2; every source position here is an
+  exact integer, so no rounding rule explains it, and frames 45, 89, 135 and 179 follow the formula.
+  SPEC 19 says `<Html5Video>`'s frame accuracy is "not guaranteed" (a browser `<video>` seeking);
+  ZabsReel draws the exact frame.
+- `audio-volume-step-sequence`: the reference's volume step comes before this runtime's (frame 60),
+  but "trimBefore included" (frame 45) and "composition frame" (frame 30) both give the reported
+  13.98 dB and 0.02 ms, so the rows cannot tell which rule the reference uses.
+- `audio-volume-callback` (2.15 dB, 9.1 ms) and `audio-loop-volume-extend` (1.11 dB, 1.54 ms): a
+  ramping volume differs by less than a frame's worth at its quiet end. The cues carry the callback's
+  value at each frame (BRIEF 6.4); how the volume changes within a frame is not in the cue data, and
+  one aggregate figure per composition does not determine a rule.
+- `offthread-sound`: identical levels (0 dB) with one sound edge 9.35 ms away, below one frame
+  (33 ms). The cues start and stop on the right frames; a sub-frame offset is not expressible in
+  per-frame cues and no rule follows from one figure.
+
+### 10.5 No change
+
+- `host_side_informational` compositions (`img-sizes`, `img-timing`, `video-plain`,
+  `freeze-video` render, `html5video-trimbefore`, `video-loop-range`, `video-loop-trimbefore`,
+  `video-rate-2`, `video-sound-muted`): differences from the host's decoding pipeline.
+- No informational value cases this round.

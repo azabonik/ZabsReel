@@ -58,9 +58,19 @@ test("Video and OffthreadVideo behave like Html5Video", async () => {
   assert.deepEqual(await frames(<OffthreadVideo src="clip" />, [0, 7]), [0, 7]);
 });
 
-test("recorded choice: seconds use the composition fps, source frames the asset fps, rounded down", async () => {
-  // 24 fps asset in a 30 fps composition: frame 10 is 0.333 s, source frame 8.
-  assert.deepEqual(await frames(<Html5Video src="film" />, [0, 1, 10, 30]), [0, 0, 8, 24]);
+test("parity r2 offthread-25fps/rate-half/rate-fractional, recorded choice: the source frame is the nearest one, ties going up", async () => {
+  // 24 fps asset in a 30 fps composition: frame 1 is 0.8 source frames (nearest 1), frame 10 is exactly 8.
+  assert.deepEqual(await frames(<Html5Video src="film" />, [0, 1, 2, 10, 30]), [0, 1, 2, 8, 24]);
+  const assets25 = { ...assets, b: videoAsset("h-b", { fps: 25, frameCount: 100, durationSeconds: 4 }) };
+  // 25 fps in 30 fps: positions 0.83, 1.67, 2.5 (a tie, up), 4.17, 5, 5.83.
+  assert.deepEqual(await frames(<OffthreadVideo src="b" />, [1, 2, 3, 5, 6, 7], assets25), [1, 2, 3, 4, 5, 6]);
+  // playbackRate 0.5: every odd frame is a tie (n + 0.5) and goes up.
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" playbackRate={0.5} />, [1, 2, 3, 29, 149]), [1, 1, 2, 15, 75]);
+  // playbackRate 0.7: 2.1 -> 2, 2.8 -> 3, 3.5 -> 4, 4.9 -> 5.
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" playbackRate={0.7} />, [3, 4, 5, 7]), [2, 3, 4, 5]);
+  // The one row the rule does not reproduce: offthread-rate-half frame 59 (position 29.5) showed 29 in the
+  // reference, while every other tie went up. This runtime shows 30 (notes/fit/r2-media-rules.js, part 1).
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" playbackRate={0.5} />, [59]), [30]);
 });
 
 test("the source frame is clamped to 0..frameCount-1 (the last frame keeps showing)", async () => {
@@ -120,7 +130,7 @@ test("recorded choice: loop without durationInFrames repeats the rest of the sou
   // 300 source frames at 30 fps = 300 composition frames; after trimBefore 100, a 200-frame loop.
   assert.deepEqual(await frames(<Html5Video src="clip" loop trimBefore={100} />, [0, 199, 200, 250]), [100, 299, 100, 150]);
   // The 24 fps film lasts 2 s = 60 composition frames.
-  assert.deepEqual(await frames(<Html5Video src="film" loop />, [59, 60, 61]), [47, 0, 0]);
+  assert.deepEqual(await frames(<Html5Video src="film" loop />, [59, 60, 61]), [47, 0, 1]);
 });
 
 test("recorded choice: loop when nothing of the source is left after trimBefore throws graphic_api_misuse", async () => {
@@ -133,8 +143,40 @@ test("recorded choice: OffthreadVideo has no loop; the native loop attribute is 
   assert.deepEqual(await frames(<OffthreadVideo src="film" loop />, [70]), [47]);
 });
 
-test("recorded choice: media accept from like a Sequence", async () => {
-  assert.deepEqual(await frames(<Html5Video src="clip" from={20} />, [19, 20, 25]), [null, 0, 5]);
+test("parity r2 offthread-from-prop, recorded choice: from on a media element hides it until then but does not shift the source", async () => {
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" from={30} />, [0, 29, 30, 31, 119]), [null, null, 30, 31, 119]);
+  assert.deepEqual(await frames(<Html5Video src="clip" from={20} />, [19, 20, 25]), [null, 20, 25]);
+  // recorded choice (no row evidence): durationInFrames still counts from the parent's frame 0.
+  assert.deepEqual(await frames(<Html5Video src="clip" from={20} durationInFrames={30} />, [19, 20, 29, 30]), [null, 20, 29, null]);
+});
+
+test("parity r2 offthread-trim-rate, recorded choice: trimAfter ends the element after trimAfter - trimBefore parent frames, whatever the rate", async () => {
+  const tree = <OffthreadVideo src="clip" trimBefore={40} trimAfter={160} playbackRate={2} />;
+  // Source 40 + 2f (clamped at the last source frame, 299 here), mounted for 120 parent frames.
+  assert.deepEqual(await frames(tree, [0, 59, 60, 89, 119, 120]), [40, 158, 160, 218, 278, null]);
+  // At rate 1 this is the same as before: trimBefore 30 + trimAfter 120 ends at frame 90.
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" trimBefore={30} trimAfter={120} />, [89, 90]), [119, null]);
+  assert.deepEqual(await frames(<OffthreadVideo src="clip" endAt={75} />, [74, 75]), [74, null]);
+  // With loop, trimBefore..trimAfter is still the repeating source range (unchanged; no row evidence at rate != 1).
+  assert.deepEqual(await frames(<Html5Video src="clip" loop trimBefore={30} trimAfter={90} playbackRate={2} />, [0, 29, 30]), [30, 88, 30]);
+});
+
+test("parity r2 offthread-style/video-style, recorded choice: video frames are letterboxed (object-fit contain) unless the style says otherwise", async () => {
+  const m = mount(makeHost({ assets }), () => (
+    <>
+      <OffthreadVideo src="clip" className="a" style={{ width: 800, height: 800 }} />
+      <Html5Video src="clip" className="b" style={{ width: 800, height: 800, objectFit: "cover" }} />
+      <Html5Video src="clip" className="c" />
+    </>
+  ));
+  await renderLoaded(m, 0);
+  const style = (cls: string) => (m.container.querySelector(`.${cls}`) as HTMLElement).style;
+  assert.equal(style("a").objectFit, "contain");
+  assert.equal(style("a").width, "800px");
+  assert.equal(style("b").objectFit, "cover", "the user's objectFit wins");
+  assert.equal(style("c").objectFit, "contain");
+  assert.equal((m.container.querySelector(".c") as HTMLElement).getAttribute("width"), "1920", "BRIEF 6.2 sizing is unchanged");
+  m.app.unmount();
 });
 
 test("a negative source time fails the frame with graphic_media_time", async () => {
@@ -340,8 +382,9 @@ test("video components accept and ignore their ignored props; none of them reach
   for (const img of images(m.container)) {
     assert.deepEqual(
       [...img.attributes].map((a) => a.name).sort(),
-      ["height", "src", "width"],
+      ["height", "src", "style", "width"],
     );
+    assert.equal(img.getAttribute("style"), "object-fit: contain;", "only the default object-fit");
   }
   assert.equal(sourceFrame(m), 5);
   m.app.unmount();

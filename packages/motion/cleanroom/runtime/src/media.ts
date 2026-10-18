@@ -13,10 +13,13 @@ const EPS = 1e-9;
 export type LoopVolumeCurveBehavior = "repeat" | "extend";
 
 export interface MediaTiming {
+  /** The parent frame from which the element is mounted (it does not shift the source). */
   from: number;
   trimBefore: number;
-  /** Media-local frames played from trimBefore; Infinity for no limit. */
+  /** Media-local frames played from trimBefore (the loop length with `loop`); Infinity for no limit. */
   durationInFrames: number;
+  /** Parent frames the element stays mounted for, from the parent's frame 0 (trimAfter); Infinity for no limit. */
+  parentLength: number;
   playbackRate: number;
   loop: boolean;
   volumeCurve: LoopVolumeCurveBehavior;
@@ -48,7 +51,12 @@ export function readMediaTiming(props: RawMediaTiming, where: string, allowLoop:
   }
   const trimBefore = finiteNumber(present(props.trimBefore) ? props.trimBefore : props.startFrom, 0, where, "trimBefore");
   const trimAfterRaw = present(props.trimAfter) ? props.trimAfter : props.endAt;
-  let durationInFrames = duration(props.durationInFrames, where);
+  const durationInFrames = duration(props.durationInFrames, where);
+  const loop = allowLoop && props.loop === true;
+  if (allowLoop && present(props.loop) && typeof props.loop !== "boolean") {
+    throw misuse(`${where}: loop must be true or false.`);
+  }
+  let trimmedLength = Infinity;
   if (present(trimAfterRaw)) {
     if (present(props.durationInFrames)) {
       throw misuse(`${where}: give either durationInFrames or trimAfter, not both. durationInFrames is preferred.`);
@@ -57,16 +65,16 @@ export function readMediaTiming(props: RawMediaTiming, where: string, allowLoop:
     if (trimAfter <= trimBefore) {
       throw misuse(`${where}: trimAfter (${trimAfter}) must be greater than trimBefore (${trimBefore}).`);
     }
-    durationInFrames = trimAfter - trimBefore;
-  }
-  const loop = allowLoop && props.loop === true;
-  if (allowLoop && present(props.loop) && typeof props.loop !== "boolean") {
-    throw misuse(`${where}: loop must be true or false.`);
+    trimmedLength = trimAfter - trimBefore;
   }
   return {
     from: finiteNumber(props.from, 0, where, "from"),
     trimBefore,
-    durationInFrames,
+    // With loop, the trimBefore..trimAfter range is what repeats (media-local frames).
+    durationInFrames: loop && Number.isFinite(trimmedLength) ? trimmedLength : durationInFrames,
+    // Without loop, trimAfter ends the element after trimAfter - trimBefore parent frames, whatever
+    // the playbackRate (round 2's rows: notes/fit/r2-media-rules.js, part 3).
+    parentLength: loop ? Infinity : trimmedLength,
     playbackRate: positiveRate(props.playbackRate, where),
     loop,
     volumeCurve: oneOf(props.loopVolumeCurveBehavior, ["repeat", "extend"] as const, "repeat", where, "loopVolumeCurveBehavior"),
@@ -82,14 +90,16 @@ export interface MediaPosition {
 
 /**
  * Where a media element is at the parent's frame, or null when it is not mounted.
- * `sourceLength` is the source's length in media-local frames (used for `loop` without a
- * durationInFrames).
+ * The media's timeline starts at the parent's frame 0; `from` only keeps the element unmounted
+ * before that parent frame and does not shift the source (round 2's rows:
+ * notes/fit/r2-media-rules.js, part 2). `sourceLength` is the source's length in media-local frames
+ * (used for `loop` without a durationInFrames).
  */
 export function mediaPosition(parent: Timeline, t: MediaTiming, sourceLength: number, where: string): MediaPosition | null {
-  const sinceStart = parent.frame - t.from;
-  if (sinceStart < -EPS) return null;
-  const elapsed = Math.max(0, sinceStart) * t.playbackRate;
-  const extended = parent.unloopedFrame - t.from;
+  const f = parent.frame;
+  if (f < t.from - EPS) return null;
+  const elapsed = f * t.playbackRate;
+  const extended = parent.unloopedFrame;
   if (t.loop) {
     const cycle = Number.isFinite(t.durationInFrames) ? t.durationInFrames : sourceLength - t.trimBefore;
     if (!(cycle > 0)) {
@@ -97,15 +107,16 @@ export function mediaPosition(parent: Timeline, t: MediaTiming, sourceLength: nu
         `${where}: loop has nothing to repeat, because trimBefore is at or past the end of the source. Lower trimBefore or set durationInFrames.`,
       );
     }
-    const iteration = fuzzyFloor(elapsed / cycle);
-    const localFrame = t.trimBefore + Math.max(0, elapsed - iteration * cycle);
-    const volumeFrame = t.volumeCurve === "extend" ? extended : sinceStart - (iteration * cycle) / t.playbackRate;
+    const iteration = fuzzyFloor(Math.max(0, elapsed) / cycle);
+    const localFrame = t.trimBefore + elapsed - iteration * cycle;
+    const volumeFrame = t.volumeCurve === "extend" ? extended : f - (iteration * cycle) / t.playbackRate;
     return { localFrame: snap(localFrame), volumeFrame: snap(volumeFrame) };
   }
   if (elapsed >= t.durationInFrames - EPS) return null;
+  if (f >= t.parentLength - EPS) return null;
   return {
     localFrame: snap(t.trimBefore + elapsed),
-    volumeFrame: snap(t.volumeCurve === "extend" ? extended : sinceStart),
+    volumeFrame: snap(t.volumeCurve === "extend" ? extended : f),
   };
 }
 
@@ -118,9 +129,12 @@ export function assertNonNegativeTime(localFrame: number, where: string, id: str
   }
 }
 
-/** The source frame to show: floor(seconds * asset fps), clamped to the source's frames. */
+/**
+ * The source frame to show: the nearest one to seconds * asset fps, ties going up, then clamped to
+ * the source's frames (round 2's rows: notes/fit/r2-media-rules.js, part 1).
+ */
 export function sourceFrameAt(seconds: number, assetFps: number, frameCount: number): number {
-  const frame = fuzzyFloor(seconds * assetFps);
+  const frame = fuzzyFloor(seconds * assetFps + 0.5);
   return Math.min(Math.max(0, frameCount - 1), Math.max(0, frame));
 }
 

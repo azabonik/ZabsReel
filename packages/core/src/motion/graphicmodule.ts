@@ -46,7 +46,7 @@ export type GraphicModule = { ok: true; module: string } | { ok: false; code: "g
  * for word, so the agent reads the same text whichever side refuses it).
  */
 export function unsupportedNameMessage(name: string): string {
-  return `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or switch Settings → Graphics renderer to the Remotion add-on.`;
+  return `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
 }
 
 /** The refusal for a specifier outside {@link GRAPHIC_SPECIFIERS} (loader.js throws the same text in the page). */

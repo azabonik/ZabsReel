@@ -9,8 +9,9 @@ import { createModuleObject, createMotionApp } from "../runtime/src/host";
 import type { MotionHost } from "../runtime/src/host";
 import { makeHost, rejectsWithCode, throwsCode, ticks, track } from "./helpers/host";
 
+// BRIEF v5, section 5 (the renderer setting now lives in Help → Graphics add-on…).
 const fixedMessage = (name: string) =>
-  `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or switch Settings → Graphics renderer to the Remotion add-on.`;
+  `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
 
 const HOST_BOUND = new Set(["delayRender", "continueRender", "cancelRender", "loadFont", "random"]);
 

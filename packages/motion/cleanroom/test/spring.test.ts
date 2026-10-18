@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { measureSpring, spring } from "../runtime/src/index";
+import { elapsedSeconds } from "../runtime/src/spring";
 import { throwsCode } from "./helpers/host";
 
 const fps = 30;
@@ -190,7 +191,7 @@ test("order of operations: stretch, then reverse, then delay", () => {
   assert.ok(combined(5) > 0.99, "recorded choice: during the delay a reversed spring holds its starting value");
 });
 
-test("recorded choice: fractional frames are evaluated on the continuous curve", () => {
+test("recorded choice: at 30 fps fractional frames below the 64 ms cap follow the curve smoothly (step rule, round 2)", () => {
   const a = spring({ frame: 10, fps });
   const b = spring({ frame: 10.5, fps });
   const c = spring({ frame: 11, fps });
@@ -213,4 +214,47 @@ test("recorded choice: invalid input throws graphic_api_misuse", () => {
   throwsCode(() => spring(undefined as unknown as Parameters<typeof spring>[0]), "graphic_api_misuse");
   throwsCode(() => measureSpring({ fps: 0 }), "graphic_api_misuse");
   throwsCode(() => measureSpring({ fps, threshold: 0 }), "graphic_api_misuse");
+});
+
+test("parity r2 spring-fps*, recorded choice: frames advance in whole steps of at most 64 ms; the first step spans 1 + the fraction", () => {
+  const close6 = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-12, `${a} vs ${b}`);
+  // 10 fps (a frame would be 100 ms): a frame below 1 is one partial step; from frame 1 on every step is 64 ms
+  // and a fraction only lengthens the first step, which is capped already.
+  close6(elapsedSeconds(0.25, 10), 0.025);
+  close6(elapsedSeconds(1, 10), 0.064);
+  close6(elapsedSeconds(1.5, 10), 0.064);
+  close6(elapsedSeconds(2.5, 10), 0.128);
+  close6(elapsedSeconds(12.5, 10), 0.768);
+  // 16 fps (62.5 ms): the first step of 1.5 frames is 93.75 ms, capped to 64 ms.
+  close6(elapsedSeconds(1.5, 16), 0.064);
+  close6(elapsedSeconds(4.5, 16), 0.064 + 3 * 0.0625);
+  // 30 fps: continuous until the first step would pass 64 ms (fraction above 0.92).
+  close6(elapsedSeconds(29.5, 30), 29.5 / 30);
+  close6(elapsedSeconds(2.95, 30), 0.064 + 1 / 30);
+  // Whole frames are unchanged from round 1: n * min(1/fps, 0.064).
+  close6(elapsedSeconds(7, 10), 7 * 0.064);
+  close6(elapsedSeconds(7, 30), 7 / 30);
+  // Floating-point noise around whole frames does not change the step count.
+  close6(elapsedSeconds(3 - 1e-12, 10), 3 * 0.064);
+});
+
+test("parity r2 spring-fps*: fractional and stretched springs at low frame rates follow the step rule", () => {
+  const near = (a: number, b: number) => assert.ok(Math.abs(a - b) <= 1e-4 * Math.max(1, Math.abs(b)), `${a} vs ${b}`);
+  near(spring({ frame: 0.25, fps: 10 }), 0.028654);
+  near(spring({ frame: 2.5, fps: 10 }), 0.492353);
+  near(spring({ frame: 1.5, fps: 16, config: { damping: 200 } }), 0.13524);
+  near(spring({ frame: 6, fps: 10, durationInFrames: 12 }), 1.120108);
+  near(spring({ frame: 3, fps: 24, durationInFrames: 12 }), 0.964794);
+  near(spring({ frame: 5, fps: 10, reverse: true, durationInFrames: 10 }), 1.120108);
+  near(spring({ frame: 5, fps: 15, durationInFrames: 20, durationRestThreshold: 0.02, config: { damping: 200 } }), 0.366075);
+});
+
+test("parity r2 spring-fps*-clamp-fromto (kept, SPEC 6): overshootClamping clamps an increasing spring at `to` too", () => {
+  for (const fps of [10, 15, 16, 24]) {
+    const values = Array.from({ length: 30 }, (_, frame) =>
+      spring({ frame, fps, from: 20, to: 220, config: { damping: 8, overshootClamping: true } }),
+    );
+    assert.equal(Math.max(...values), 220);
+    assert.ok(values.some((v) => v === 220));
+  }
 });
