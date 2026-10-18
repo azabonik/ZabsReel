@@ -56,11 +56,16 @@
  *                  (and one before the clip moves it with the clip);
  *                  ripple_delete_ranges ends it with the first piece (the
  *                  graphic's copy on the second piece names no sound), moves
- *                  it with the clip, and removes it with a removed clip;
- *                  cut_range ends it with the left piece, and is refused on
- *                  the audio clip; tighten_talk ends it with the first piece
- *                  and leaves the rest of its track alone. A muted audio
- *                  track is not free.
+ *                  it with the clip, and removes it with a removed clip; a
+ *                  ripple before the window gives it to the second piece,
+ *                  which shows the graphic; cut_range ends it with the left
+ *                  piece, and is refused on the audio clip; trim_clip ends it
+ *                  with the clip (removed when the clip ends before the
+ *                  window); set_clip_speed on the clip leaves it at 1x where
+ *                  it was, ending no later than the clip, and on the audio
+ *                  clip leaves the clip alone and ends it with the window;
+ *                  tighten_talk ends it with the first piece and leaves the
+ *                  rest of its track alone. A muted audio track is not free.
  *  A5. failures  — graphic_mix_timeout (a 1 ms limit) for an overlay and a
  *                  card, and a failed move of the .wav into baked/, each leave
  *                  baked/ as it was (the project changes only after a render
@@ -91,7 +96,7 @@ import { AUDIO_CAPS, GraphicAudio, mixArgs, mixLimitMs, type AudioCaps, type Aud
 import type { MotionAsset, PageAsset } from "../../core/src/motion/motionmedia.js";
 import { renderMotion, type RenderMotionOptions, type RenderMotionResult } from "../../core/src/motion/rendermotion.js";
 import { dispatch } from "../../core/src/rpc.js";
-import type { Canvas, Clip, GraphicOverlay, MediaAsset, ResolvedRenderClip } from "../../core/src/types.js";
+import { clipEndFrame, type Canvas, type Clip, type GraphicOverlay, type MediaAsset, type ResolvedRenderClip } from "../../core/src/types.js";
 import { check, failureCount, filesUnder, fresh, gone, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
 
 const RATE = 48_000;
@@ -724,6 +729,50 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   }
   // MUTATION: no refusal in cutRange → the sound is cut into two new clips.
   check(!!cutRefused && /set_graphic_window/.test(cutRefused.message) && cutRefused.message.includes(host.id) && engine.getProject().revision === rev2 && soundClips().length === 1, `cut_range on the audio clip: refused, and nothing changes (${cutRefused?.message})`);
+
+  // ripple_delete_ranges [40, 50) on the clip's track only, before the window: the graphic shows on the second piece
+  // (its copy, window 30-90 from 40), so the sound goes there, to 70; the 10-frame first piece never shows it.
+  engine.rippleDeleteRanges([{ trackIndex: hostTrack, startFrame: 40, endFrame: 50 }]);
+  const [p1, p2] = holders();
+  // MUTATION: followGraphicAudio keeping the sound on the earliest piece only → it is removed (that piece ends at 40).
+  check(soundClips().length === 1 && clipOf(acId)?.startFrame === 70 && clipOf(acId)?.sourceOutFrame === 60 && p2?.startFrame === 40 && p2.graphics?.[0]?.audioClipId === acId && p1?.graphics?.[0]?.audioClipId === undefined, `ripple_delete_ranges before the window: the same audio clip, at 70, named by the second piece only (${span(clipOf(acId))})`);
+  // MUTATION: removeGraphic not removing the audio clip → it stays.
+  await dispatch(engine, "remove_graphic", { clipId: p2?.id, graphicId: "gfx_ov" });
+  check(soundClips().length === 0, `ripple_delete_ranges before the window, then remove_graphic on the second piece: no clip of the sound is left (${soundClips().length})`);
+  engine.undo();
+  engine.undo();
+  setup(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60, "undo restores the audio clip");
+
+  // trim_clip out to 50 (the clip ends at 80): the sound ends there too; out to 25 (it ends at 55, before the window): it goes.
+  await dispatch(engine, "trim_clip", { clipId: host.id, sourceOutFrame: 50 });
+  // MUTATION: no followGraphicAudio in trimClip → it runs on to 120.
+  check(soundClips().length === 1 && clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 20 && graphicOn(host.id)?.audioClipId === acId, `trim_clip out to 50: the same audio clip, ending with the clip at 80 (${span(clipOf(acId))})`);
+  engine.undo();
+  await dispatch(engine, "trim_clip", { clipId: host.id, sourceOutFrame: 25 });
+  // MUTATION: followGraphicAudio not clearing audioClipId when no piece shows the window → it names a clip that is gone.
+  check(soundClips().length === 0 && graphicOn(host.id) !== undefined && graphicOn(host.id)?.audioClipId === undefined, `trim_clip out to 25, before the window: the audio clip is removed and audioClipId cleared`);
+  engine.undo();
+  setup(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60, "undo restores the audio clip");
+
+  // set_clip_speed on the clip: the graphic plays at 1x in its clip-local window (graph.ts), so its sound stays where it
+  // was, at 1x, and ends no later than the clip.
+  const fps = engine.getProject().fps;
+  const sped = (await dispatch(engine, "set_clip_speed", { clipId: host.id, speed: 2 })) as { linked?: { clipId: string }[] };
+  // MUTATION: speedPartners counting the graphic's audio clip → it moves to 45 at 2x, 30 frames, and is reported linked.
+  check(clipOf(acId)?.startFrame === 60 && clipEndFrame(clipOf(acId)!, fps) === 120 && clipOf(acId)?.effects?.speed === undefined && !sped.linked?.some((l) => l.clipId === acId), `set_clip_speed 2 on the clip: the sound stays at 60-120, at 1x, not re-timed as a linked clip (${span(clipOf(acId))}, speed ${clipOf(acId)?.effects?.speed})`);
+  engine.undo();
+  await dispatch(engine, "set_clip_speed", { clipId: host.id, speed: 4 });
+  // MUTATION: no followGraphicAudio in changeSpeed → it runs on to 120, past the clip's end at 75.
+  check(clipEndFrame(clipOf(host.id)!, fps) === 75 && clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 15 && clipOf(acId)?.effects?.speed === undefined, `set_clip_speed 4 on the clip (it ends at 75): the sound ends with it, 15 frames at 1x (${span(clipOf(acId))})`);
+  engine.undo();
+  // set_clip_speed on the audio clip itself: the clip it follows is not re-timed, and the sound ends with the window.
+  await dispatch(engine, "set_clip_speed", { clipId: acId, speed: 0.5 });
+  // MUTATION: speedPartners of the graphic's audio clip naming the clip → the clip is slowed to 0.5x as its picture.
+  check(clipOf(host.id)?.effects?.speed === undefined && clipEndFrame(clipOf(host.id)!, fps) === 210, `set_clip_speed 0.5 on the audio clip: the clip stays 1x, ending at 210 (speed ${clipOf(host.id)?.effects?.speed})`);
+  // MUTATION: followGraphicAudio trimming to the clip's end, not the window's → it ends at 180.
+  check(clipOf(acId)?.startFrame === 60 && clipEndFrame(clipOf(acId)!, fps) === 120, `set_clip_speed 0.5 on the audio clip: it ends with the window at 120 (${span(clipOf(acId))})`);
+  engine.undo();
+  setup(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60 && !clipOf(acId)?.effects?.speed, "undo restores the audio clip");
 
   // tighten_talk on a clip with words: a pause cut inside the window ends the sound with the first piece; the rest of the
   // sound's track (a clip of another file there) is not cut for it.

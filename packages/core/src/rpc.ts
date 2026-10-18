@@ -420,7 +420,7 @@ export const methods = {
 
   ripple_delete_ranges: {
     description:
-      "Delete one or more timeline frame ranges and close the gaps (shift later clips left). Each range is { trackIndex, startFrame, endFrame }. Useful for cutting dead air across the timeline in one pass. The same range on several tracks removes the same frames from each. A range edge inside a speed-ramped or slowed / odd-speed clip moves to where its source frame starts playing (exact at 1x, 2x, 3x, 4x); `ranges` in the result is what was removed, one per requested range (endFrame === startFrame: nothing). A range that touches a LOCKED track is refused.",
+      "Delete one or more timeline frame ranges and close the gaps (shift later clips left). Each range is { trackIndex, startFrame, endFrame }. Useful for cutting dead air across the timeline in one pass. The same range on several tracks removes the same frames from each. A range edge inside a speed-ramped or slowed / odd-speed clip moves to where its source frame starts playing (exact at 1x, 2x, 3x, 4x); `ranges` in the result is what was removed, one per requested range (endFrame === startFrame: nothing); on a track that holds a motion graphic's audio clip, that clip is not cut (it follows its graphic, and only later clips there move). A range that touches a LOCKED track is refused.",
     schema: z
       .object({
         ranges: z
