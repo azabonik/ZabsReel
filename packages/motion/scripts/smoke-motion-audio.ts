@@ -24,7 +24,8 @@
  *                  and a 0.5 s file in a 1 s Sequence: its .mp4 has 48 kHz
  *                  stereo AAC whose levels, tones and silences fall where the
  *                  graphic put them (silence after the short file's end), and
- *                  its video keeps the BT.601 tags; a card with no sound
+ *                  its video keeps the BT.601 tags; a library video's own
+ *                  sound plays from its trimBefore; a card with no sound
  *                  still has no audio stream.
  *  A3. timing    — playbackRate 2 plays the source twice as fast at its own
  *                  pitch (a 440 Hz then 880 Hz source: each tone half as
@@ -124,6 +125,8 @@ interface Fixtures {
   two: string;
   /** 8 s of 160x90 colour, 30 fps, no audio: a host clip whose own sound is silence. */
   host: string;
+  /** 2 s of 160x90 video with `two` as its AAC sound. */
+  vid: string;
 }
 
 function ffmpeg(args: string[]): void {
@@ -141,7 +144,8 @@ function fixtures(work: string): Fixtures {
   ffmpeg([...sine(880, 0.5), ...quiet, at("short.wav")]);
   ffmpeg([...sine(440, 1), ...sine(880, 1), "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1,volume=0.2", "-ac", "2", "-c:a", "pcm_s16le", at("two.wav")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=0x203040:s=160x90:r=30:d=8", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", at("host.mp4")]);
-  return { tone: at("tone.wav"), short: at("short.wav"), two: at("two.wav"), host: at("host.mp4") };
+  ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=2", "-i", at("two.wav"), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", at("vid.mp4")]);
+  return { tone: at("tone.wav"), short: at("short.wav"), two: at("two.wav"), host: at("host.mp4"), vid: at("vid.mp4") };
 }
 
 /** A file's first audio channel, as 48 kHz floats (empty when it has no audio). */
@@ -235,7 +239,7 @@ const failedWith = (run: Run, code: string, what: string, msg?: RegExp) =>
   check(run.error?.code === code && (!msg || msg.test(run.error.message)), `${what}: ${code} (${run.error ? `${run.error.code}: ${run.error.message}` : "it rendered"})`);
 const why = (run: Run) => (run.error ? `${run.error.code ?? ""}: ${run.error.message}` : JSON.stringify(run.result?.audio));
 
-const TSX = (body: string) => `import { AbsoluteFill, Audio, Loop, Sequence, asset } from "remotion";
+const TSX = (body: string) => `import { AbsoluteFill, Audio, Loop, OffthreadVideo, Sequence, asset } from "remotion";
 export default function G() {
   return <AbsoluteFill style={{ background: "#123" }}>${body}</AbsoluteFill>;
 }`;
@@ -407,6 +411,15 @@ async function a2(work: string, lib: Record<string, MediaAsset>) {
   // MUTATION: the mix's last atrim dropped → the sound runs 0.1 s past the graphic (the silent base's margin).
   check(tail.rms < SILENT && Math.abs(s.length / RATE - 4) < 0.05, `3.5-4.0 s: silence after the short file's end; 4 s in all (${tail.rms.toExponential(1)}, ${(s.length / RATE).toFixed(3)} s)`);
   await leftNothing(run, f, "card", "card");
+
+  // A library video's own sound (E3: the audio of E1 videos), from 1 s into the file: the mix seeks a container that also has a
+  // picture and takes its audio stream.
+  const vs = await render(f, "vidsound", { graphic: { source: TSX(`<OffthreadVideo src={asset("vid")} trimBefore={30} />`) }, durationInFrames: 30, assets: { vid: lib.vid } });
+  const vsound = pcm(join(f.data, "baked", "vidsound-graphic.mp4"));
+  const vm = measure(vsound, 0.05, 0.9);
+  // MUTATION: only audio assets accepted as cue sources (a video's sound: graphic_asset_kind) → the render fails.
+  check(!vs.error && vs.result?.audio.ranges === 1 && vm.rms > 0.01 && near(vm.hz, 880, 0.03), `a library video's sound plays from its trimBefore: ${vm.hz.toFixed(0)} Hz, rms ${vm.rms.toFixed(5)} (${why(vs)})`);
+  await leftNothing(vs, f, "vidsound", "video sound");
 
   const silent = await render(f, "quiet", { graphic: { source: TSX(`<Sequence durationInFrames={10}><div /></Sequence>`) }, durationInFrames: 10 });
   const q = probe(join(f.data, "baked", "quiet-graphic.mp4"));
@@ -722,7 +735,7 @@ async function main() {
     try {
       const fx = fixtures(work);
       const lib: Record<string, MediaAsset> = {};
-      for (const [k, p] of Object.entries({ tone: fx.tone, short: fx.short, two: fx.two })) lib[k] = await probeAsset(p);
+      for (const [k, p] of Object.entries({ tone: fx.tone, short: fx.short, two: fx.two, vid: fx.vid })) lib[k] = await probeAsset(p);
       if (part("A2")) await a2(work, lib);
       if (part("A3")) await a3(work, lib);
       if (part("A4")) await a4(work, fx, lib);
