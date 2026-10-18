@@ -130,7 +130,7 @@ const BASELINE = ["offthread-plain.tsx", "video-plain.tsx", "img-sizes.tsx"];
 /** A row whose ZabsReel frame or sound differs between two renders of the same job. */
 export const NONDET = "zabsreel nondeterministic";
 /** The finding behind NONDET, as the summary names it. */
-const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media (OffthreadVideo/Video; frame 0 most often) before the requested source frame is painted: a blank frame or a neighbouring source frame, different from one render to the next. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
+const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media before the requested source frame is painted, differently from one render to the next. Seen in media-run1 (review round 1): at composition frame 0 a blank frame (the background only), later the previous source frame (vid_a's counter reads 59 where 60 is asked); the flagged frames cluster at whole seconds of the source, where the fixtures have their keyframes; an Img case (img-transparency) is flagged too. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
 
 type Pipeline = "reference" | "zabsreel";
 
@@ -797,8 +797,8 @@ function beeps(onsets: number[], level: number, seconds = 2, right = 1): Pcm {
 }
 
 // Frame 0 is not compared: ZabsReel's renderer does not always paint a library video's frame
-// before it is captured, frame 0 most often (finding ZR-MEDIA-SETTLE, SETTLE above; seen here as
-// the video missing on one side only). S4 needs the same frames on both sides; the full run marks
+// before it is captured (finding ZR-MEDIA-SETTLE, SETTLE above; at frame 0 the video is missing,
+// seen here on one side only). S4 needs the same frames on both sides; the full run marks
 // such frames "zabsreel nondeterministic" from the repeat instead.
 const SELF_TSX = [
   "// size: 320x180",
