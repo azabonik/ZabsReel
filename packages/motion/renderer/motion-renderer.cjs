@@ -94,15 +94,8 @@ app.setPath("temp", path.join(scratch, "tmp"));
 if (process.platform === "darwin") app.dock?.hide();
 // Software compositing: capturePage then returns the frame just drawn (slice 1 measured the GPU path returning stale frames).
 app.disableHardwareAcceleration();
-// The captured frame is the frame the page drew (finding ZR-MEDIA-SETTLE, smoke-motion-settle.ts):
-// the page's next frame, so loader.js's second animation frame, starts only once the last
-// commit is active; a frame is drawn only once every stage of it is done, its tiles rastered;
-// and a tile is rastered whole, never only its changed part. Without these, under load, a new
-// library bitmap could still be rastering when the main captured (the previous source frame, part
-// of one, or nothing), and seams of partly rastered tiles varied from render to render. loader.js
-// also waits for every image's decode.
-app.commandLine.appendSwitch("disable-main-frame-before-activation");
-app.commandLine.appendSwitch("run-all-compositor-stages-before-draw");
+// A changed tile is rastered whole: rastering only its changed part left antialiasing seams that
+// differed from render to render (a rounded ring over a video, smoke-motion-settle.ts D1).
 app.commandLine.appendSwitch("disable-partial-raster");
 app.commandLine.appendSwitch("mute-audio");
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
@@ -360,6 +353,8 @@ async function start(msg) {
   wc.on("console-message", (e, _level, message) => send({ type: "log", text: String(message ?? e.message).slice(0, 2000) }));
   render = { o, win, frames, pending: null, frame: -1 };
   await win.loadURL(PAGE_URL);
+  // In-process DevTools protocol (no port), for drawn() below.
+  wc.debugger.attach("1.3");
   send({ type: "ready" });
 }
 
@@ -380,6 +375,19 @@ ipcMain.on("zr-motion:log", (e, text) => {
   if (render && e.sender === render.win.webContents) send({ type: "log", text: String(text).slice(0, 2000) });
 });
 
+/**
+ * Waits until Chromium has drawn the page as it is now (finding ZR-MEDIA-SETTLE). The page's
+ * animation frames do not wait for that: under load capturePage copied the last frame drawn,
+ * which could still be the previous source frame of a video, part of it, or none (a render's
+ * first frame, for longer than 100 ms). A DevTools screenshot forces a new frame of the page's
+ * current state and answers with it, so capturePage then copies that frame exactly; the
+ * screenshot's small JPEG is thrown away. Measured: with it no late frame under load; with a
+ * 100 ms wait in its place, many.
+ */
+async function drawn() {
+  await render.win.webContents.debugger.sendCommand("Page.captureScreenshot", { format: "jpeg", quality: 1 });
+}
+
 async function renderFrame(n) {
   if (!render || render.pending) throw new Error("frame requested out of order");
   if (!Number.isInteger(n) || n < 0 || n >= render.o.frames) throw new Error(`bad frame ${n}`);
@@ -388,6 +396,7 @@ async function renderFrame(n) {
     render.frame = n;
     render.win.webContents.executeJavaScript(`typeof __zrMotionRender === "function" && __zrMotionRender(${n}, ${render.o.fps})`).catch(() => {});
   });
+  await drawn();
   const bytes = frameBytes(await render.win.webContents.capturePage(), render.o.width, render.o.height);
   await new Promise((resolve, reject) => render.frames.write(bytes, (err) => (err ? reject(err) : resolve())));
   send({ type: "frame", n, cues });

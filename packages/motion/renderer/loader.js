@@ -4,8 +4,7 @@
 // does it for a graphic; a hand-written test page does it itself). For frame
 // n the renderer main calls __zrMotionRender(n, fps), which sets the virtual
 // clock, runs fn(n), puts every CSS and Web Animation on a DocumentTimeline
-// at that time (guard.js's syncAnimations), waits until every loaded <img> in
-// the document is decoded (decoded() below), then for two animation frames so
+// at that time (guard.js's syncAnimations), waits for two animation frames so
 // the result is painted, syncing again in the second one's callbacks for
 // animations the graphic started in its own rAF callbacks, and reports
 // frameReady(n, cues) through the preload, with the audio cues of the
@@ -68,26 +67,6 @@
     }),
   });
 
-  // ZR-MEDIA-SETTLE: every loaded <img> decoded before the animation frames. img.decode() resolves
-  // once the compositor holds the decoded bitmap, so the frame the main captures has it: without
-  // this, a render's first frame of a 1080p video came out blank or half drawn about 2 times in
-  // 100 under load, whatever the renderer main's compositor switches (motion-renderer.cjs). Only
-  // loaded images: one with no source, still loading or broken shows nothing new, and its load is
-  // the runtime's business. A loaded image that cannot be decoded fails the frame, as a failed
-  // load does.
-  function decoded() {
-    var images = Array.prototype.filter.call(document.images, function (img) {
-      return img.complete && img.naturalWidth > 0;
-    });
-    return Promise.all(images.map(function (img) {
-      return img.decode().catch(function () {
-        var err = new Error("An image of the graphic could not be decoded (" + text(img.getAttribute("src")).slice(0, 200) + ").");
-        err.code = "graphic_media_failed";
-        throw err;
-      });
-    }));
-  }
-
   // Two animation frames, then the animations started since the first sync go to the frame's time too.
   function painted() {
     return new Promise(function (resolve, reject) {
@@ -118,7 +97,7 @@
           if (result && Array.isArray(result.cues)) cues = result.cues;
           // At once, while every animation the draw started is still current.
           clock.syncAnimations();
-          return decoded().then(painted);
+          return painted();
         })
         .then(
           function () { host.frameReady(n, cues); },

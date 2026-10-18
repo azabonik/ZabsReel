@@ -210,7 +210,8 @@ jobs:
       # requested source frame is painted (finding ZR-MEDIA-SETTLE): the worst
       # cases of the media parity set, five renders of each at once (the load
       # that made frames late), every frame byte-identical in all five and
-      # showing FFmpeg's own decode of its source frame. Fixtures are made with lavfi.
+      # showing FFmpeg's own decode of its source frame; and 300 first frames
+      # per case the same way. Fixtures are made with lavfi.
       - name: Smoke — motion renderer settled media frames (Electron offscreen, no network)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true

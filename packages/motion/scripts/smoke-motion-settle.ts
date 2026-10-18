@@ -23,27 +23,23 @@
  *                 media (offthread-endat from frame 75) the background is
  *                 the expected picture and the last source frames are the
  *                 others.
- *               No renderer is left. Without motion-renderer.cjs's
- *               compositor switches video-plain, offthread-endat and
+ *               No renderer is left. Without motion-renderer.cjs's wait for
+ *               the drawn frame (drawn()) video-plain, offthread-endat and
  *               offthread-style fail here (measured): blank and previous
- *               source frames, parts of frames, and ring seams that differ
- *               from render to render.
+ *               source frames and parts of frames; without its
+ *               disable-partial-raster, ring seams in offthread-style that
+ *               differ from render to render.
  *
  *  D2. first frames — frame 0 alone (a render's first picture of its media,
  *               where a not-yet-decoded image could be left out), of
  *               video-plain and img-transparency: RENDERS renders at once,
  *               ROUNDS rounds of them per case; every frame 0 byte-identical
- *               and showing its media as in D1. Without loader.js's wait
- *               for every image's decode about 2 in 100 showed the
- *               background only, or part of the video (measured).
- *  D3. decode — loader.js waits only for loaded images: beside a loaded
- *               one, a broken image and one with no source let the frame
- *               render; a loaded image whose decode() fails fails the frame
- *               with graphic_media_failed, as a failed load does.
- *
+ *               and showing its media as in D1. Without the renderer
+ *               main's drawn() many showed the background only, or part of
+ *               the video (measured: 291 of 300 in one run).
  * Linux only (it reads /proc and runs Linux's Electron). Needs `npm run
  * build` (dist/zr-runtime.js) and FFmpeg with libx264.
- * Run: npx tsx packages/motion/scripts/smoke-motion-settle.ts [--only=D1,D2,D3] [--renders=5] [--rounds=60]
+ * Run: npx tsx packages/motion/scripts/smoke-motion-settle.ts [--only=D1,D2] [--renders=5] [--rounds=60]
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -332,45 +328,6 @@ async function d2(work: string, fixtures: Fixture[], lib: Record<string, MediaAs
   }
 }
 
-/** A 1x1 red PNG. */
-const RED_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
-/** A hand-written page (no runtime) whose frame shows a loaded image, after `before` (page code) has run. */
-const decodePage = (before: string) => `
-const root = document.getElementById("root");
-const show = (src) => new Promise((resolve) => {
-  const i = document.createElement("img");
-  i.onload = i.onerror = () => resolve();
-  if (src !== null) i.src = src;
-  root.appendChild(i);
-  if (src === null) resolve();
-});
-zrMotion.onFrame(async () => {
-  await show(${JSON.stringify(RED_PNG)});
-  ${before}
-});
-`;
-
-async function d3(work: string) {
-  console.log("D3. decode: images that show nothing are not waited for; a loaded image that cannot be decoded fails the frame...");
-  const f = fresh(work, "decode");
-  const run = async (id: string, before: string) => {
-    const pids: number[] = [];
-    let error: (Error & { code?: string }) | undefined;
-    try {
-      await renderMotion({ module: decodePage(before), width: 16, height: 16, fps: 30, durationInFrames: 1, alpha: false, workDir: join(f.data, "motion", id), outPath: join(f.data, "baked", `${id}-graphic.mp4`), env: f.env, onSpawn: (pid) => pids.push(pid) });
-    } catch (err) {
-      error = err as typeof error;
-    }
-    await gone(pids, 3000);
-    return error;
-  };
-  // A broken image (its data is no picture) and one with no source: complete, with no natural size.
-  const quiet = await run("quiet", `await show("data:image/png;base64,AAAA"); await show(null);`);
-  check(!quiet, `a broken image and one with no source beside a loaded one: the frame renders (${quiet ? `${quiet.code}: ${quiet.message}` : "rendered"})`);
-  const failing = await run("failing", `HTMLImageElement.prototype.decode = function () { return Promise.reject(new DOMException("no", "EncodingError")); };`);
-  check(failing?.code === "graphic_media_failed" && /could not be decoded/.test(failing.message), `a loaded image whose decode fails: graphic_media_failed (${failing ? `${failing.code}: ${failing.message}` : "it rendered"})`);
-}
-
 let summarized = false;
 
 async function main() {
@@ -381,7 +338,7 @@ async function main() {
   const only = args.find((a) => a.startsWith("--only="))?.slice(7).split(",");
   const part = (name: string) => !only || only.includes(name);
   if (!LINUX) {
-    console.log("  skip D1-D3: they read /proc and run Linux's Electron");
+    console.log("  skip D1-D2: they read /proc and run Linux's Electron");
   } else {
     const work = mkdtempSync(join(tmpdir(), "zr-motion-settle-"));
     try {
@@ -390,7 +347,6 @@ async function main() {
       for (const fx of fixtures) lib[fx.id] = await probeAsset(fx.file);
       if (part("D1")) await d1(work, fixtures, lib, renders);
       if (part("D2")) await d2(work, fixtures, lib, renders, rounds);
-      if (part("D3")) await d3(work);
     } finally {
       rmSync(work, { recursive: true, force: true, maxRetries: 5 });
     }
