@@ -4,3 +4,5 @@ export const REPO_ROOT: string;
 export function useDevAddon(): string;
 /** `fn`'s result with AIVE_REMOTION_ADDON unset, then the variable as it was. */
 export function withoutDevAddon<T>(fn: () => T | Promise<T>): Promise<T>;
+/** Choose the Remotion add-on as `dataDir`'s graphics renderer (<dataDir>/addons/renderer.json, as the UI hosts write it); `dataDir`. */
+export function useRemotionRenderer(dataDir: string): string;

@@ -678,9 +678,11 @@ async function graphicsAddon(o: {
     const ins = await post("/api/graphics-addon/install", { acceptedLicenseSha256: terms.sha256 }, headers);
     const rem = await post("/api/graphics-addon/remove", {}, headers);
     const can = await post("/api/graphics-addon/cancel", {}, headers);
+    // MUTATION: serve POST /api/graphics-addon/renderer before the shell-key check in server.cjs → this row fails.
+    const ren = await post("/api/graphics-addon/renderer", { renderer: "remotion" }, headers);
     await sleep(500);
-    check(`GET status and terms, POST install, remove and cancel ${what} → 401; nothing installed or fetched`,
-      [st, tm, ins, rem, can].every((r) => r.status === 401) && registry.hits.size === 0 && !existsSync(join(dataDir, "addons")), [st, tm, ins, rem, can].map((r) => r.status).join());
+    check(`GET status and terms, POST install, remove, cancel and renderer ${what} → 401; nothing installed, fetched or written`,
+      [st, tm, ins, rem, can, ren].every((r) => r.status === 401) && registry.hits.size === 0 && !existsSync(join(dataDir, "addons")), [st, tm, ins, rem, can, ren].map((r) => r.status).join());
   }
   const st = await request(port, "/api/graphics-addon/status", { headers: shellAuth });
   check("GET status with the shell key → not installed", st.status === 200 && json(st).state === "not-installed" && json(st).version === "4.0.481", st.body.slice(0, 200));
@@ -830,6 +832,24 @@ async function graphicsAddon(o: {
     await button("Remove").click();
     check("Remove of a damaged copy → not installed, its folder gone",
       await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)));
+    await closeDialog();
+
+    // The graphics renderer setting (MOTION-PLAN D7): ZabsReel's by default; a click on "Remotion add-on" in the
+    // dialog makes the shell write renderer.json (behind its shell key; GET is 405).
+    // MUTATION: make POST /api/graphics-addon/renderer do nothing in server.cjs → the click row fails.
+    const rendererFile = join(dataDir, "addons", "renderer.json");
+    const radio = (name: RegExp) => dlg.getByRole("radio", { name });
+    check("GET renderer → 405", (await request(port, "/api/graphics-addon/renderer", { headers: shellAuth })).status === 405);
+    const badRenderer = await post("/api/graphics-addon/renderer", { renderer: "chrome" }, shellAuth);
+    check("POST renderer with another value → 400, nothing written", badRenderer.status === 400 && !existsSync(rendererFile), `${badRenderer.status} ${badRenderer.body.slice(0, 100)}`);
+    await openDialog();
+    check("the dialog's Graphics renderer: ZabsReel's (the default) is chosen, no renderer.json",
+      (await radio(/^ZabsReel/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile));
+    await radio(/^Remotion add-on/).click();
+    const chose = await waitFor("renderer.json", async () => existsSync(rendererFile) && JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "remotion" && (await radio(/^Remotion add-on/).isChecked()), 5000);
+    const gs = await request(corePort, "/rpc", { method: "POST", headers: { "x-aive-token": token, "content-type": "application/json" }, body: JSON.stringify({ method: "get_state", params: {} }) });
+    check("a click on \"Remotion add-on\": the shell writes renderer.json, get_state says graphicsRenderer \"remotion\"",
+      chose && json(gs).result?.graphicsRenderer === "remotion", `${json(gs).result?.graphicsRenderer} ${json(gs).result?.graphics}`);
     await closeDialog();
 
     // The agent's add_graphic with no add-on: refused, and the banner offers the dialog.

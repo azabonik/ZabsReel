@@ -3,7 +3,9 @@
 // by Electron main (IPC graphics-addon:*) and the web shell (/api behind its
 // shell key). Only these hosts install, remove or recover the add-on, and an
 // install starts only from the add-on dialog's button; the core's RPC reports
-// the state and nothing else.
+// the state and nothing else. They also write the graphics renderer setting
+// (<dataDir>/addons/renderer.json, MOTION-PLAN D7), only on a click in that
+// dialog: no RPC method or MCP tool can.
 //
 // AIVE_ADDON_TEST_PIN (a JSON pin file, honoured only in a source checkout,
 // like AIVE_ADDON_REGISTRY) gives the UI smokes their fixture add-on.
@@ -85,6 +87,7 @@ function createGraphicsAddonHost({ via, fetch, dataDir, log }) {
     const terms = platform ? a.graphicsAddonTerms(platform) : null;
     return {
       state: got.state,
+      renderer: a.readGraphicsRenderer(dir),
       version: a.ADDON_REMOTION_VERSION,
       unsupported: platform ? null : a.unsupportedMessage(),
       installedAt: typeof got.installedAt === "string" ? got.installedAt : null,
@@ -173,7 +176,20 @@ function createGraphicsAddonHost({ via, fetch, dataDir, log }) {
     }
   }
 
-  return { status, terms, install, remove, cancel, recover };
+  /** The user's click on a renderer in the dialog: "zabsreel" or "remotion" into renderer.json. Resolves with { ok, error? }. */
+  async function setRenderer(renderer) {
+    try {
+      const a = await addon();
+      if (!a.GRAPHICS_RENDERERS.includes(renderer)) return { ok: false, error: "Not a graphics renderer." };
+      await a.writeGraphicsRenderer(dataDir(), renderer);
+      return { ok: true };
+    } catch (err) {
+      log(`graphics renderer setting failed: ${errText(err)}`);
+      return { ok: false, error: `The graphics renderer setting couldn't be saved: ${errText(err)}` };
+    }
+  }
+
+  return { status, terms, install, remove, cancel, recover, setRenderer };
 }
 
 module.exports = { createGraphicsAddonHost };

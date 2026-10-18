@@ -190,6 +190,7 @@ import { ADDON_CLOSURE, ADDON_LOCK_SHA256, ADDON_ONLY, ADDON_PLATFORM_LISTS, ADD
 import { loadRemotion } from "../src/motion/remotionload.js";
 import { ADDON_CHANGED, graphicRemotion, refuseBrowserDownload, renderGraphic, type GraphicRemotion } from "../src/motion/render.js";
 import { basePkgs, buildPin, CFT_EXE, fixtureRegistry, fixtureZip, makeTar, makeZip, pkgJson, RAN, reg, sha256hex, type Fixture, type TarIn, type ZipIn } from "./addon-fixture.js";
+import { useRemotionRenderer } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -695,7 +696,7 @@ async function serve(engine: EditorEngine, dataDir: string) {
   await new Promise((r, j) => (ws.once("open", r), ws.once("error", j)));
   const rpc = async (method: string, params: unknown = {}) => {
     const res = await fetch(`http://127.0.0.1:${PORT}/rpc`, { method: "POST", headers: { "content-type": "application/json", "x-aive-token": token }, body: JSON.stringify({ method, params }) });
-    return { status: res.status, body: (await res.json()) as { ok: boolean; result?: any; error?: string; code?: string } };
+    return { status: res.status, body: (await res.json()) as { ok: boolean; result?: any; error?: string; code?: string; reason?: string } };
   };
   /** The signals sent since the last call, after the WS has caught up. */
   const take = async () => {
@@ -756,6 +757,8 @@ async function c2c3() {
     for (const [state, setup] of setups) {
       if (!PLATFORM && state !== "not-installed" && state !== "unsupported") continue;
       rmSync(join(dataDir, "addons"), { recursive: true, force: true });
+      // The add-on path: the Remotion add-on is the user's renderer setting (ZabsReel's own is the default).
+      useRemotionRenderer(dataDir);
       setup();
       const before = listing();
       const r = await s.rpc("add_graphic", { template: "title", durationSeconds: 1 });
@@ -774,6 +777,7 @@ async function c2c3() {
     if (PLATFORM) {
       engine.graphicsAddon = () => resolveGraphicsAddon(dataDir);
       rmSync(join(dataDir, "addons"), { recursive: true, force: true });
+      useRemotionRenderer(dataDir);
       const dir = installFixture(dataDir);
       const st = await s.rpc("get_state");
       check(st.body.result?.graphics === "ready", `a complete add-on: get_state graphics "${st.body.result?.graphics}"`);
@@ -792,6 +796,19 @@ async function c2c3() {
     const ok = await s.rpc("add_graphic", { template: "title", durationSeconds: 1 });
     const quiet = await s.take();
     check(ok.status === 200 && !!ok.body.result?.clipId && quiet.length === 0, `a successful add_graphic: ${ok.status}, no graphics-addon message (${ok.body.error ?? JSON.stringify(quiet)})`);
+
+    // ZabsReel's own renderer (no setting: the default) needs no add-on: none of the add-on's refusals or signals,
+    // and its own state (here with no renderer binary, so nothing starts).
+    // MUTATION: check the add-on before the renderer setting in addGraphic (engine.ts) → this row gets graphics_addon_missing.
+    rmSync(join(dataDir, "addons"), { recursive: true, force: true });
+    engine.graphicsAddon = () => resolveGraphicsAddon(dataDir);
+    engine.motionRenderer.binary = () => ({ ok: false, reason: "no-binary", detail: "smoke: no renderer here" });
+    const z = await s.rpc("add_graphic", { template: "title", durationSeconds: 1 });
+    const zSignals = await s.take();
+    const zState = await s.rpc("get_state");
+    check(z.status === 409 && z.body.code === "graphic_renderer_unavailable" && z.body.reason === "no-binary" && zSignals.length === 0
+      && zState.body.result?.graphicsRenderer === "zabsreel" && zState.body.result?.graphics === "renderer-unavailable" && zState.body.result?.graphicsReason === "no-binary",
+      `ZabsReel's renderer (the default), no add-on: no graphics_addon_* refusal or signal, its own state (${z.status} ${z.body.code} ${z.body.reason}; ${JSON.stringify(zSignals)}; ${zState.body.result?.graphics})`);
   } finally {
     await s.stop();
   }
@@ -945,7 +962,7 @@ async function c6() {
   }
   // MUTATION: drop the catch in EditorEngine.graphicsState → get_state and timeline_summary throw.
   // A typo in the variable takes away add_graphic only; the state tools still answer.
-  const engine = newEngine(freshData());
+  const engine = newEngine(useRemotionRenderer(freshData()));
   process.env.AIVE_REMOTION_ADDON = "node_modules";
   try {
     const answers: unknown[] = [];

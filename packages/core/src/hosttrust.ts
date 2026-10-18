@@ -160,9 +160,9 @@ export function hasDotDot(p: string): boolean {
 
 /** Store file names (and their temp, .bad-* and break-claim files), refused on any network path. */
 const STORE_NAME = /^hosts\.(?:key|json|lock)(?:\..*)?$/i;
-/** The add-on folder's names: `addons`, then `remotion` or a name the installer owns there. */
+/** The add-on folder's names: `addons`, then `remotion`, the renderer setting (renderer.json and its temp files) or a name the installer owns there. */
 const ADDONS_NAME = /^addons$/i;
-const ADDON_NAME = /^(?:remotion$|\.(?:install\.lock|staging-|old-|removed-))/i;
+const ADDON_NAME = /^(?:remotion$|renderer\.json|\.(?:install\.lock|staging-|old-|removed-))/i;
 
 /** A path segment as the name rule compares it: NFKC, without a `:` stream suffix or trailing dots and spaces. */
 const nameForm = (s: string) => s.normalize("NFKC").replace(/:.*$/, "").replace(/[. ]+$/, "");
@@ -496,10 +496,10 @@ export class HostTrust {
    * and a segment that is then empty (only dots or spaces) is skipped, as
    * Windows and SMB do. It has two parts: the trust folder when the last
    * segment is a store file; the add-on folder when a segment `addons` is
-   * followed by `remotion` or by a name the installer owns there (anywhere,
-   * so the folders themselves too). It covers a server that gives no file id,
-   * and another name of this computer or of the data folder's server, which
-   * is never contacted.
+   * followed by `remotion`, `renderer.json` or a name the installer owns
+   * there (anywhere, so the folders themselves too). It covers a server that
+   * gives no file id, and another name of this computer or of the data
+   * folder's server, which is never contacted.
    */
   private nameRule(p: string): Area | null {
     const names = p.split(/[\\/]/).map(nameForm).filter((s) => s !== "");
@@ -637,7 +637,7 @@ export class HostTrust {
    * resolves it: the caller passes the full path instead. Local: the
    * real-path form ({@link realCheck}: links, 8.3 names, trailing dots and
    * case on Windows). Network: the name rule's two parts (the trust store's
-   * file names, and `addons` followed by `remotion` or an installer name),
+   * file names, and `addons` followed by `remotion`, `renderer.json` or an installer name),
    * plus the identity check on the data folder's own server; no other server
    * is contacted. A refused form passes (safepath's assertPathUsable refuses
    * it with its own message).

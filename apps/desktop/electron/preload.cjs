@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld("aive", {
     install: (acceptedLicenseSha256) => ipcRenderer.invoke("graphics-addon:install", acceptedLicenseSha256),
     cancel: () => ipcRenderer.invoke("graphics-addon:cancel"),
     remove: () => ipcRenderer.invoke("graphics-addon:remove"),
+    /** The graphics renderer setting ("zabsreel" or "remotion"), from the dialog's radio buttons; resolves with { ok, error? }. */
+    setRenderer: (renderer) => ipcRenderer.invoke("graphics-addon:renderer", renderer),
     /** `cb({ done, total })` during an install; returns the unsubscribe. */
     onProgress: (cb) => {
       const fn = (_e, p) => cb(p);

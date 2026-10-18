@@ -51,8 +51,10 @@ declare module "playwright-core" {
     click(options?: { position?: { x: number; y: number } }): Promise<void>;
     isEnabled(): Promise<boolean>;
     isDisabled(): Promise<boolean>;
+    isChecked(): Promise<boolean>;
     boundingBox(): Promise<Box | null>;
     getByRole(role: string, options?: RoleOptions): Locator;
+    getByText(text: string | RegExp, options?: { exact?: boolean }): Locator;
     evaluate<R>(pageFunction: (element: Element) => R | Promise<R>): Promise<R>;
     dispatchEvent(type: string, eventInit?: Record<string, unknown>): Promise<void>;
   }

@@ -1,4 +1,7 @@
-// Help → Graphics add-on… (ADDON-PLAN D4): graphics render with Remotion, which
+// Help → Graphics add-on… (ADDON-PLAN D4, MOTION-PLAN D7): the graphics
+// renderer setting first, ZabsReel's own renderer (the default) or the
+// Remotion add-on; only a click on its radio buttons changes it, and the host
+// writes it (the agent can't). Then the add-on: Remotion, which
 // the user installs as an add-on under Remotion's own licence. The dialog shows
 // the notice and the licence exactly as the UI host gives them (core
 // addon/terms.ts), and only its Accept button installs: the host (Electron
@@ -13,7 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { PRODUCT_NAME } from "@aive/core/brand";
 import type { CoreApi, GraphicsAddonRefusal } from "./api";
-import type { GraphicsAddonStatus, GraphicsAddonTerms, JobInfo } from "./types";
+import type { GraphicsAddonStatus, GraphicsAddonTerms, GraphicsRenderer, JobInfo } from "./types";
 import { applyJobEvent, listedJobs } from "./jobstate";
 import { platform } from "./platform";
 import { fmtBytes } from "./storagedialog";
@@ -87,6 +90,48 @@ function day(iso: string | null): string {
  * once when it opens again, and not on every later open.
  */
 const shownJob: { id: number | null } = { id: null };
+
+/**
+ * Where the two renderers differ (MOTION-PLAN D7): what ZabsReel's renderer
+ * takes from Remotion's newer documentation that the add-on's Remotion
+ * lacks or treats differently (the clean-room runtime's NOTES.md section 9),
+ * and ZabsReel's own rules. The agent's guide and SKILL.md carry the same list.
+ */
+const RENDERER_DIFFERENCES = [
+  "loop on a Sequence (and Loop.useLoop inside one)",
+  "the timing props of AbsoluteFill",
+  "trimBefore and playbackRate on Sequence, Series and Loop",
+  "interpolate's perceptual-scale output, and interpolating strings, colours and true/false values",
+  "Easing.spring's allowTail and durationRestThreshold",
+  "the crop props of Sequence",
+  "lab() and lch() colours in interpolateColors",
+];
+
+/** The graphics renderer setting: two radio buttons, and what each one means. */
+function RendererSetting(props: { renderer: GraphicsRenderer; version: string; saving: boolean; onChoose: (r: GraphicsRenderer) => void }) {
+  const { renderer, version, saving, onChoose } = props;
+  return (
+    <fieldset className="ga-renderer">
+      <legend>Graphics renderer</legend>
+      <label className="ga-choice">
+        <input type="radio" name="ga-renderer" checked={renderer === "zabsreel"} disabled={saving} onChange={() => onChoose("zabsreel")} />
+        <span>{PRODUCT_NAME} <span className="muted">(built in)</span></span>
+      </label>
+      <p className="ga-help">Nothing to install. Graphics can use the project's own video, images and sound; an overlay's sound becomes a linked audio clip. No network and no packages.</p>
+      <label className="ga-choice">
+        <input type="radio" name="ga-renderer" checked={renderer === "remotion"} disabled={saving} onChange={() => onChoose("remotion")} />
+        <span>Remotion add-on</span>
+      </label>
+      <p className="ga-help">{`Remotion ${version}, installed below under Remotion's own licence. Graphics can't use the project's media there.`}</p>
+      <details className="ga-differ">
+        <summary>Where the two renderers differ</summary>
+        <p className="ga-help">{`Only ${PRODUCT_NAME}'s renderer has these (from Remotion's newer documentation); the add-on's Remotion ${version} lacks them or treats them differently:`}</p>
+        <ul>{RENDERER_DIFFERENCES.map((d) => <li key={d}>{d}</li>)}</ul>
+        <p className="ga-help">{`${PRODUCT_NAME}'s own rules: media only by its library id (asset("…")), no staticFile, no remote URLs.`}</p>
+      </details>
+    </fieldset>
+  );
+}
 
 const INSTALL_FAILED = "The graphics add-on couldn't be installed.";
 const REMOVE_FAILED = "The graphics add-on couldn't be removed.";
@@ -179,6 +224,24 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
     }
   };
 
+  const [savingRenderer, setSavingRenderer] = useState(false);
+  const chooseRenderer = async (renderer: GraphicsRenderer) => {
+    setError(null);
+    pollFailed.current = false;
+    setDone(null);
+    setSavingRenderer(true);
+    try {
+      const r = await platform.graphicsAddon.setRenderer(renderer);
+      if (r.ok) setDone(renderer === "zabsreel" ? `Graphics render with ${PRODUCT_NAME}'s renderer.` : "Graphics render with the Remotion add-on.");
+      else setError(r.error ?? "The graphics renderer setting couldn't be saved.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingRenderer(false);
+      await refresh();
+    }
+  };
+
   const remove = async () => {
     setError(null);
     pollFailed.current = false;
@@ -223,6 +286,7 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
           {available && !status && !error && <p className="muted">Loading…</p>}
           {status && (
             <>
+              <RendererSetting renderer={status.renderer} version={status.version} saving={savingRenderer} onChoose={(r) => void chooseRenderer(r)} />
               {installing && (
                 <div className="ga-progress" role="status">
                   <span>{shown && shown.total > 0 ? `Installing… ${mb(shown.done)} of ${mb(shown.total)}` : "Installing…"}</span>

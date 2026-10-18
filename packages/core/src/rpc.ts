@@ -3,6 +3,7 @@ import type { EditorEngine } from "./engine.js";
 import { PRODUCT_NAME } from "./brand.js";
 import { MediaOfflineError, MediaServerNotApprovedError } from "./hosttrust.js";
 import { GraphicsAddonError, type GraphicsAddonCode } from "./addon/resolve.js";
+import { MotionRenderError } from "./motion/motionerror.js";
 import { TRANSITION_TYPES, clipDurationFrames, clipEndFrame, type Clip } from "./types.js";
 import { WHISPER_MODELS } from "./whisper/setup.js";
 import { GRAPHIC_TEMPLATES, GRAPHIC_TEMPLATE_NAMES } from "./motion/templates.js";
@@ -212,13 +213,24 @@ function summarizeTimeline(engine: EditorEngine) {
     trackCount: project.tracks.length,
     // The human↔AI annotation channel: named markers with notes.
     markers: project.markers ?? [],
-    // Whether add_graphic can render now (the graphics add-on's state).
-    graphics: engine.graphicsState(),
+    // Whether add_graphic can render now, and with which renderer (the user's setting).
+    ...graphicsFields(engine),
     tracks,
     ...(offlineClips.size || music
       ? { offlineMedia: { count: offlineClips.size, servers: [...servers], ...(music ? { music: music.text } : {}) } }
       : {}),
   };
+}
+
+/**
+ * get_state's and timeline_summary's graphics fields (MOTION-PLAN D7):
+ * `graphics` (can add_graphic render now), `graphicsReason` when ZabsReel's
+ * renderer is unavailable, and `graphicsRenderer`, the user's setting. Read
+ * from cached values; never starts a process.
+ */
+function graphicsFields(engine: EditorEngine): { graphics: string; graphicsReason?: string; graphicsRenderer: string } {
+  const reason = engine.graphicsReason();
+  return { graphics: engine.graphicsState(), ...(reason ? { graphicsReason: reason } : {}), graphicsRenderer: engine.graphicsRenderer() };
 }
 
 const clipPlacement = {
@@ -231,9 +243,9 @@ const clipPlacement = {
 export const methods = {
   get_state: {
     description:
-      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers), and `graphics`: whether add_graphic can render (\"ready\", or \"not-installed\", \"update-needed\", \"broken\", \"unsupported\": the user manages the Remotion add-on in the app). An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
+      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers), `graphicsRenderer` (the user's graphics renderer setting: \"zabsreel\", ZabsReel's own, the default, or \"remotion\", the Remotion add-on; only the user changes it, in the app) and `graphics`: whether add_graphic can render. With \"zabsreel\": \"ready\", or \"renderer-unavailable\" with `graphicsReason` (\"no-binary\", \"no-display\", \"sandbox-unavailable\" or \"start-failed\"). With \"remotion\": \"ready\", or \"not-installed\", \"update-needed\", \"broken\", \"unsupported\": the user manages the Remotion add-on in the app. An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
     schema: empty,
-    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers(), graphics: engine.graphicsState() }),
+    handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers(), ...graphicsFields(engine) }),
   },
 
   timeline_summary: {
@@ -1020,7 +1032,8 @@ export const methods = {
   add_graphic: {
     description:
       "Add an animated motion graphic (title card, lower-third, callout, or a whole motion-graphics clip): an AI-authored Remotion React component rendered headlessly to an alpha video. Provide EITHER `code` (a TSX module default-exporting a component using Remotion's useCurrentFrame/useVideoConfig/interpolate/spring/AbsoluteFill) OR `template` (a built-in, e.g. 'title'). PLACEMENT: pass `clipId` to OVERLAY on that clip within a frame window (keep the component background transparent); set standalone=true to insert it as its OWN clip after that one; OR OMIT clipId to add it as a standalone clip (a pure motion-graphics clip — give the component a `background` prop and use durationSeconds). startFrame/endFrame are frames from the clip's start. Rendered at the project canvas size/fps. " +
-      `Needs the Remotion graphics add-on, which only the user installs in the ${PRODUCT_NAME} window (Help → Graphics add-on): without it this refuses with a graphics_addon_* message saying what to ask the user, and no tool can install it.`,
+      `RENDERER: only the user's setting decides (get_state's graphicsRenderer; no tool changes it). On ${PRODUCT_NAME}'s own renderer ("zabsreel", the default) the component may also use the project library's video, images and audio by asset id (asset("<id>") as the src of Img, OffthreadVideo, Video or Audio, all imported from 'remotion'), still with no network and no packages, and an overlay's audio becomes a linked audio clip; when that renderer can't run here this refuses with graphic_renderer_unavailable and its reason (get_state's graphicsReason). On the Remotion add-on ("remotion") library media stays refused, and asset(), loadFont() or an @aive/motion import is refused naming the setting. ` +
+      `Needs the Remotion graphics add-on, which only the user installs in the ${PRODUCT_NAME} window (Help → Graphics add-on), when the setting is "remotion": without it this refuses with a graphics_addon_* message saying what to ask the user, and no tool can install it.`,
     schema: z
       .object({
         clipId: z.string().optional(),
@@ -1661,9 +1674,9 @@ export type MethodName = keyof typeof methods;
 export class RpcError extends Error {
   constructor(
     message: string,
-    readonly code: "unknown_method" | "invalid_params" | "handler_error" | "media_server_not_approved" | "media_offline" | GraphicsAddonCode,
-    /** For media_server_not_approved: the server's key, and whether it is outside or the store is unread; for media_offline: the servers. */
-    readonly details: { host?: string; outside?: boolean; unread?: boolean; hosts?: string[] } = {},
+    readonly code: "unknown_method" | "invalid_params" | "handler_error" | "media_server_not_approved" | "media_offline" | GraphicsAddonCode | "graphic_renderer_unavailable",
+    /** For media_server_not_approved: the server's key, and whether it is outside or the store is unread; for media_offline: the servers; for graphic_renderer_unavailable: why (D7). */
+    readonly details: { host?: string; outside?: boolean; unread?: boolean; hosts?: string[]; reason?: string } = {},
   ) {
     super(message);
     this.name = "RpcError";
@@ -1690,6 +1703,11 @@ export async function dispatch(engine: EditorEngine, method: string, params: unk
     if (err instanceof MediaOfflineError) throw new RpcError(err.message, "media_offline", { hosts: err.hosts });
     // D5.3: no ready graphics add-on, by its state.
     if (err instanceof GraphicsAddonError) throw new RpcError(err.message, err.code);
+    // D7: ZabsReel's own graphics renderer can't run here, with its reason.
+    if (err instanceof MotionRenderError && err.code === "graphic_renderer_unavailable") {
+      const reason = (err as { reason?: unknown }).reason;
+      throw new RpcError(err.message, err.code, typeof reason === "string" ? { reason } : {});
+    }
     throw err;
   }
 }

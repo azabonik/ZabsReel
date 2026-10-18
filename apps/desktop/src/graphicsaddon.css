@@ -9,6 +9,14 @@
   background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-md);
   font: 11.5px/1.5 var(--mono); color: var(--ink-3); white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.ga-renderer { margin: 0 0 12px; padding: 8px 12px 10px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.ga-renderer legend { padding: 0 4px; font-weight: 600; color: var(--ink); }
+.ga-choice { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--ink); }
+.ga-help { margin: 2px 0 4px 24px; line-height: 1.45; color: var(--ink-3); }
+.ga-differ { margin: 8px 0 0 24px; }
+.ga-differ summary { cursor: pointer; color: var(--ink-2); }
+.ga-differ .ga-help { margin-left: 0; }
+.ga-differ ul { margin: 4px 0; padding-left: 18px; line-height: 1.45; }
 .ga-progress { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .ga-progress .prog-bar { flex: none; }
 

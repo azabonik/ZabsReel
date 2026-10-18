@@ -154,7 +154,7 @@ import { HostTrust } from "../src/hosttrust.js";
 import { StorageJanitor, storageUsage } from "../src/storage.js";
 import { dispatch, methods, RpcError, RPC_PATH_PARAMS } from "../src/rpc.js";
 import { isOffline, type Project } from "../src/types.js";
-import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
+import { useDevAddon, useRemotionRenderer, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -2486,6 +2486,8 @@ async function main() {
   console.log("20. no graphics add-on: add_graphic refuses with graphics_addon_missing...");
   {
     useDevAddon();
+    // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+    useRemotionRenderer(engine.dataDir);
     const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));
     const code = e instanceof RpcError ? e.code : e?.message;
     check(code === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing (${code})`);

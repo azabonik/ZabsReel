@@ -416,7 +416,8 @@ async function mediaServersPost(route, body, core, browsed) {
 // ---- the graphics add-on (@aive/core/addon, electron/graphics-addon.cjs) -----
 // As in electron/main.cjs: the page's add-on dialog shows the terms this
 // shell reads from the core's licence file, and its Accept button posts their
-// hash here, behind the shell key. The downloads use Node's fetch, which
+// hash here, behind the shell key, as its renderer buttons post the graphics
+// renderer setting (MOTION-PLAN D7). The downloads use Node's fetch, which
 // honours HTTPS_PROXY only with NODE_USE_ENV_PROXY=1. An install runs in the
 // background; the page follows it through GET status.
 
@@ -435,6 +436,11 @@ async function graphicsAddonPost(route, body) {
     return { id };
   }
   if (route === "cancel") return { cancelled: graphicsAddon.cancel() };
+  if (route === "renderer") {
+    const r = await graphicsAddon.setRenderer(body.renderer);
+    if (!r.ok) throw new HttpError(400, r.error);
+    return {};
+  }
   if (route === "remove") {
     const r = await graphicsAddon.remove().result;
     if (!r.ok) throw new HttpError(409, r.error);
@@ -444,7 +450,7 @@ async function graphicsAddonPost(route, body) {
 }
 
 const POST_ROUTES = new Set(["/api/media-servers/approve", "/api/media-servers/revoke", "/api/media-servers/picked"]);
-const ADDON_POST_ROUTES = new Set(["/api/graphics-addon/install", "/api/graphics-addon/cancel", "/api/graphics-addon/remove"]);
+const ADDON_POST_ROUTES = new Set(["/api/graphics-addon/install", "/api/graphics-addon/cancel", "/api/graphics-addon/remove", "/api/graphics-addon/renderer"]);
 
 async function handleApi(req, url, res, core, browsed) {
   if (POST_ROUTES.has(url.pathname) || ADDON_POST_ROUTES.has(url.pathname)) {

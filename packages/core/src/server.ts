@@ -77,7 +77,7 @@ async function isHlsPlaylist(path: string, size: number, mtimeMs: number): Promi
   return answer;
 }
 
-/** The rpc error codes the body carries: G1e's network refusals (403), and the graphics add-on's states (409). */
+/** The rpc error codes the body carries: G1e's network refusals (403), the graphics add-on's states and ZabsReel's graphics renderer unavailable (409, with its reason). */
 const FORWARDED_CODES: ReadonlyMap<string, number> = new Map([
   ["media_server_not_approved", 403],
   ["media_offline", 403],
@@ -85,6 +85,7 @@ const FORWARDED_CODES: ReadonlyMap<string, number> = new Map([
   ["graphics_addon_update", 409],
   ["graphics_addon_broken", 409],
   ["graphics_addon_unsupported", 409],
+  ["graphic_renderer_unavailable", 409],
 ]);
 
 /** The fields an rpc error carries besides its message: its code and, for G1e, its server(s) (rpc.ts). */

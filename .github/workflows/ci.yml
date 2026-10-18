@@ -217,5 +217,19 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-motion-audio.ts
 
+      # add_graphic switched over to ZabsReel's own renderer (MOTION-PLAN D7):
+      # the renderer setting (renderer.json, which only the UI hosts write; no
+      # agent tool can), renderer-unavailable with its reason (no binary, no
+      # display, no usable sandbox) in get_state and add_graphic's refusal,
+      # get_state starting nothing, the probe at most once a minute, the title
+      # template and the parity set through add_graphic, the refusals on the
+      # add-on path, and the project library and an overlay's sound. The
+      # Remotion add-on's rows need the pinned headless shell, so they skip
+      # here (with a printed reason).
+      - name: Smoke — motion renderer switch-over (Electron offscreen, no network)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          npx tsx packages/motion/scripts/smoke-motion-switch.ts
+
       - name: Smoke — desktop window request guard and CSP (pure logic)
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts

@@ -178,6 +178,74 @@ export function graphicImportRefusal(source: string, exportNames: ReadonlySet<st
   return null;
 }
 
+/** The names only ZabsReel's own renderer gives a graphic (the clean-room runtime's asset and loadFont). */
+const MOTION_ONLY_NAMES: ReadonlySet<string> = new Set(["asset", "loadFont"]);
+
+/**
+ * What in `source` only ZabsReel's own renderer has (MOTION-PLAN D7), for
+ * add_graphic's refusal on the Remotion add-on path: an import of
+ * @aive/motion (an import, an `export … from` or a require("…") call), or
+ * asset or loadFont taken from remotion (a named import, or read off a
+ * namespace or default import of it). Null when there is none, or when
+ * sucrase can't parse the source (Remotion's bundle then reports it).
+ */
+export function motionOnlyUse(source: string): string | null {
+  const { parse, tt, kw } = sucraseParser();
+  let toks: Token[];
+  try {
+    toks = parse(source, true, true, false).tokens;
+  } catch {
+    return null;
+  }
+  const raw = (t: Token | undefined) => (t ? source.slice(t.start, t.end) : "");
+  const is = (t: Token | undefined, type: number, ck?: number) => !!t && t.type === type && (ck === undefined || t.contextualKeyword === ck);
+  const str = (t: Token) => raw(t).slice(1, -1);
+  /** Local names of remotion's namespace and default imports: `R.asset(…)` uses asset too. */
+  const namespaces = new Set<string>();
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (is(t, tt.name) && raw(t) === "require" && is(toks[i + 1], tt.parenL) && is(toks[i + 2], tt.string) && str(toks[i + 2]) === "@aive/motion") return "@aive/motion";
+    if (is(t, tt._export)) {
+      // `export … from "@aive/motion"`.
+      let k = i + 1;
+      while (k < toks.length && !is(toks[k], tt.semi) && !is(toks[k], tt.eof) && !is(toks[k], tt.name, kw._from)) k++;
+      if (is(toks[k], tt.name, kw._from) && is(toks[k + 1], tt.string) && str(toks[k + 1]) === "@aive/motion") return "@aive/motion";
+      continue;
+    }
+    if (!is(t, tt._import) || is(toks[i + 1], tt.parenL) || is(toks[i + 1], tt.dot)) continue;
+    let j = i + 1;
+    if (is(toks[j], tt.name, kw._type) && !is(toks[j + 1], tt.name, kw._from) && !is(toks[j + 1], tt.comma)) continue; // `import type …`: erased
+    const named: string[] = [];
+    const locals: string[] = [];
+    let braces = false;
+    let first = true;
+    for (; j < toks.length && !is(toks[j], tt.string) && !is(toks[j], tt.semi) && !is(toks[j], tt.eof) && !is(toks[j], tt.eq); j++) {
+      const c = toks[j];
+      if (is(c, tt.braceL)) braces = first = true;
+      else if (is(c, tt.braceR)) braces = false;
+      else if (braces && is(c, tt.comma)) first = true;
+      else if (braces && first) {
+        first = false;
+        if (!c.isType) named.push(/^["']/.test(raw(c)) ? str(c) : raw(c));
+      } else if (!braces && is(c, tt.star) && is(toks[j + 2], tt.name)) {
+        locals.push(raw(toks[j + 2]));
+        j += 2;
+      } else if (!braces && is(c, tt.name) && !is(c, tt.name, kw._from)) locals.push(raw(c));
+    }
+    if (!is(toks[j], tt.string)) continue;
+    const spec = str(toks[j]);
+    if (spec === "@aive/motion") return "@aive/motion";
+    if (spec !== "remotion") continue;
+    const name = named.find((n) => MOTION_ONLY_NAMES.has(n));
+    if (name) return name;
+    for (const l of locals) namespaces.add(l);
+  }
+  for (let i = 0; i + 2 < toks.length; i++) {
+    if (is(toks[i], tt.name) && namespaces.has(raw(toks[i])) && (is(toks[i + 1], tt.dot) || is(toks[i + 1], tt.questionDot)) && MOTION_ONLY_NAMES.has(raw(toks[i + 2]))) return raw(toks[i + 2]);
+  }
+  return null;
+}
+
 /**
  * module.js for `source` (TSX that default-exports a React component) with
  * `start`, or the problem that refuses it. `exportNames` is the runtime's

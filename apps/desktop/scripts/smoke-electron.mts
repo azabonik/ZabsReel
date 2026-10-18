@@ -79,13 +79,19 @@
 //      add-on another ZabsReel version installed shows Update and Remove
 //      (both wait for a graphic), and Remove deletes it; with no add-on, an
 //      add_graphic sent over the core's HTTP RPC (as the MCP server sends it)
-//      is refused (409 graphics_addon_missing) and the window shows the
-//      banner, whose Set up… opens the dialog. Needs a source checkout: it is
-//      skipped with AIVE_APP.
+//      on the Remotion add-on is refused (409 graphics_addon_missing) and the
+//      window shows the banner, whose Set up… opens the dialog. The dialog's
+//      Graphics renderer (MOTION-PLAN D7): ZabsReel's (the default) is chosen
+//      with no renderer.json, its help lists where the two renderers differ,
+//      a click on "Remotion add-on" makes main write renderer.json (get_state
+//      says graphicsRenderer "remotion"), and a click back on ZabsReel's makes
+//      the next add_graphic render with ZabsReel's renderer, no add-on
+//      needed. Needs a source checkout: it is skipped with AIVE_APP.
 //  11. The packed app (a 6th run; ADDON-PLAN D8.5): the `--dir` build
 //      (AIVE_APP, else apps/desktop/build/dist/linux-unpacked when it exists)
 //      with AIVE_REMOTION_ADDON, AIVE_ADDON_REGISTRY and AIVE_ADDON_TEST_PIN
-//      set: a packaged core is no source checkout, so graphics stay
+//      set, and the Remotion add-on as its renderer setting: a packaged core
+//      is no source checkout, so graphics stay
 //      "not-installed"; Accept and install asks main's add-on session (a stub
 //      that records each URL and fails it, so nothing leaves the machine) for
 //      the real pin's registry.npmjs.org tarballs, never the override or the
@@ -1304,6 +1310,29 @@ async function graphicsAddon(pw: PW, work: string) {
       `update-needed: Remove → not installed, its folder gone (${state()})`);
     await closeDialog();
 
+    // The graphics renderer setting (MOTION-PLAN D7): only a click in the dialog changes it, and main writes it.
+    // MUTATION: make graphics-addon:renderer do nothing in main.cjs → the click row fails. Report no `renderer`
+    // from graphics-addon.cjs status() → the default row fails.
+    const rendererFile = join(dataDir, "addons", "renderer.json");
+    const radio = (name: RegExp) => dlg.getByRole("radio", { name });
+    const coreRpc = async (method: string, params: unknown = {}) => {
+      const res = await fetch(`http://127.0.0.1:${info.port}/rpc`, { method: "POST", headers: { "content-type": "application/json", "x-aive-token": info.token }, body: JSON.stringify({ method, params }) });
+      return { status: res.status, body: (await res.json()) as { result?: Record<string, unknown>; code?: string; error?: string } };
+    };
+    await openDialog();
+    check((await radio(/^ZabsReel/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile) && (await dlg.locator("legend").innerText()) === "Graphics renderer",
+      "the dialog's Graphics renderer: ZabsReel's (the default) is chosen, and there is no renderer.json");
+    await dlg.getByText("Where the two renderers differ", { exact: true }).click();
+    const differ = await dlg.locator(".ga-differ li").allTextContents();
+    check(differ.length === 7 && differ.some((d) => d.includes("loop on a Sequence")) && differ.some((d) => d.includes("lab() and lch()")) && (await dlg.innerText()).includes("no staticFile, no remote URLs"),
+      `…and its help lists where the two renderers differ (${differ.length} items)`);
+    await radio(/^Remotion add-on/).click();
+    const chose = await waitFor("renderer.json", async () => existsSync(rendererFile) && JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "remotion" && (await radio(/^Remotion add-on/).isChecked()), 5000);
+    const st = await coreRpc("get_state");
+    check(chose && (await dlg.innerText()).includes("Graphics render with the Remotion add-on.") && st.body.result?.graphicsRenderer === "remotion" && st.body.result?.graphics === "not-installed",
+      `a click on "Remotion add-on": main writes renderer.json, and get_state says graphicsRenderer "${st.body.result?.graphicsRenderer}", graphics "${st.body.result?.graphics}"`);
+    await closeDialog();
+
     // The agent's add_graphic with no add-on: refused, and the banner offers the dialog.
     // MUTATION: drop the "graphics-addon" case from api.ts → the banner row fails.
     const res = await fetch(`http://127.0.0.1:${info.port}/rpc`, {
@@ -1318,7 +1347,15 @@ async function graphicsAddon(pw: PW, work: string) {
       `the window shows the banner ("${(await banner.innerText().catch(() => "")).replace(/\s+/g, " ")}")`);
     await banner.getByRole("button", { name: "Set up…" }).click();
     check(await waitFor("dialog from banner", async () => (await button("Accept and install").count()) === 1, 10000) && (await banner.count()) === 0, "Set up… opens the dialog (and the banner goes)");
+
+    // Back to ZabsReel's renderer: the next add_graphic renders with it, no add-on needed.
+    // MUTATION: make addGraphic take the add-on path whatever the setting (engine.ts) → this row gets 409 graphics_addon_missing.
+    await radio(/^ZabsReel/).click();
+    const back = await waitFor("renderer.json back", () => JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "zabsreel", 5000);
     await closeDialog();
+    const z = await coreRpc("add_graphic", { template: "title", durationSeconds: 1 });
+    check(back && z.status === 200 && typeof z.body.result?.clipId === "string" && (await banner.count()) === 0,
+      `a click on ZabsReel's: renderer.json says zabsreel, and add_graphic renders with ZabsReel's renderer (${z.status} ${z.body.code ?? ""} ${z.body.error?.slice(0, 120) ?? ""})`);
 
     const closed = new Promise<void>((res) => app.once("close", () => res()));
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
@@ -1359,6 +1396,9 @@ async function packedAddon(pw: PW, work: string) {
   const cwd = join(work, "cwd6");
   mkdirSync(cwd);
   const dataDir = join(work, "data-packed");
+  // The add-on path (the user's renderer setting; ZabsReel's own renderer is the default and needs no add-on).
+  mkdirSync(join(dataDir, "addons"), { recursive: true });
+  writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "remotion" })}\n`);
   const repo = resolve(APP_DIR, "..", "..");
   try {
     const r = await launch(pw, cwd, dataDir, { AIVE_REMOTION_ADDON: repo, AIVE_ADDON_REGISTRY: registry.url, AIVE_ADDON_TEST_PIN: pinFile }, exe);

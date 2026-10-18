@@ -104,7 +104,7 @@ import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import type { ResolvedGraphicsAddon } from "../src/addon/resolve.js";
 import { EditorEngine } from "../src/engine.js";
 import { dispatch, RpcError } from "../src/rpc.js";
-import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
+import { useDevAddon, useRemotionRenderer, withoutDevAddon } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -828,7 +828,8 @@ async function m6b() {
 // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
 async function m8(work: string) {
   console.log("M8. no add-on: add_graphic refuses with graphics_addon_missing...");
-  const dataDir = mkdtempSync(join(work, "m8-data-"));
+  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  const dataDir = useRemotionRenderer(mkdtempSync(join(work, "m8-data-")));
   const engine = new EditorEngine(dataDir);
   const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));
   const code = e instanceof RpcError ? e.code : e?.message;

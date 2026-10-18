@@ -55,6 +55,25 @@ export { GRAPHIC_CODES, MotionRenderError, type GraphicCode, type MotionErrorCod
 /** Why the renderer can't run (D7); "start-failed" is any other failed start. */
 export type RendererUnavailableReason = "no-binary" | "no-display" | "sandbox-unavailable" | "start-failed";
 
+/**
+ * What add_graphic says when ZabsReel's renderer can't run here (D7):
+ * `reason` is get_state's graphicsReason, and what the agent can do.
+ */
+export function rendererUnavailableMessage(reason: RendererUnavailableReason, detail: string): string {
+  return `${PRODUCT_NAME}'s graphics renderer can't start here (${reason}: ${detail}). Graphics can't be made with it on this computer now; tell the user. They can choose the Remotion add-on as the graphics renderer in the ${PRODUCT_NAME} window (Help → Graphics add-on…).`;
+}
+
+/** graphic_renderer_unavailable with its reason (D7): the renderer has no binary, or could not start. */
+export class RendererUnavailableError extends MotionRenderError {
+  constructor(
+    readonly reason: RendererUnavailableReason,
+    readonly detail: string,
+  ) {
+    super("graphic_renderer_unavailable", rendererUnavailableMessage(reason, detail));
+    this.name = "RendererUnavailableError";
+  }
+}
+
 /** The renderer's limits (D2); tests pass shorter ones. */
 export interface MotionLimits {
   /** One frame, and the page's first load. */
@@ -430,7 +449,7 @@ function exited(child: Spawned): Promise<void> {
   });
 }
 
-const startFailed = (err: Error) => new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (start-failed: ${err.message}).`);
+const startFailed = (err: Error) => new RendererUnavailableError("start-failed", err.message);
 
 /** Start the renderer for the binary rule's command, with only the allowlisted environment and five pipes. */
 function spawnRenderer(bin: Extract<RendererBinary, { ok: true }>, args: string[], scratch: string, env?: NodeJS.ProcessEnv): Spawned {
@@ -470,7 +489,7 @@ function writeReply(out: Writable, id: number, reply: MediaReply): void {
  */
 async function renderFrames(o: RenderMotionOptions, encoded: string, module: string, limits: MotionLimits, media: MotionMedia, audio: GraphicAudio): Promise<number> {
   const bin = o.binary ?? rendererBinary();
-  if (!bin.ok) throw new MotionRenderError("graphic_renderer_unavailable", `${PRODUCT_NAME}'s graphics renderer can't start here (${bin.reason}: ${bin.detail}).`);
+  if (!bin.ok) throw new RendererUnavailableError(bin.reason, bin.detail);
   const order = o.frames ?? Array.from({ length: o.durationInFrames }, (_, n) => n);
   const frameSize = o.width * o.height * 4;
   const total = frameSize * order.length;
@@ -587,6 +606,9 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
       const r = reported as RendererMessage | null;
       const why = r ? `${String(r.code)}: ${String(r.message)}` : `exit ${code ?? signal}; ${stderr().trim().split("\n").slice(-3).join(" | ")}`;
       const outOfMemory = /\boom\b/.test(String(r?.message)) || /V8 javascript OOM|Reached heap limit/.test(stderr());
+      // A renderer that never got its page up because Chromium can't run here (D7): the reason its stderr names.
+      const reason = ready ? "start-failed" : unavailableReason(stderr());
+      if (reason !== "start-failed") return failWith(new RendererUnavailableError(reason, why));
       failWith(
         new MotionRenderError(
           "graphic_render_crashed",

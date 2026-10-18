@@ -106,16 +106,43 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
   words: cheap, instant, keyframe x/y/opacity with easing. drawtext expressions
   are auto-handled; keyframes are CLIP-LOCAL frames.
 - **Coded graphics** (`add_graphic`, Remotion TSX) for anything designed: badges,
-  brand pops, end cards, count-ups, 3D. They need the **Remotion add-on**, which
-  the user installs in the ZabsReel window (Help → Graphics add-on) under
-  Remotion's own license; `get_state`'s `graphics` says whether it is ready.
-  Without it `add_graphic` writes nothing and refuses with
-  `graphics_addon_missing`, `graphics_addon_update`, `graphics_addon_broken` or
-  `graphics_addon_unsupported`, and the message says what to ask the user. Ask
-  them, then try again. Never try to install, update or repair the add-on
-  yourself (no npm, no downloads, no edits in ZabsReel's data folder): only the
-  user can, and no tool does. Native text needs no add-on. Rules that make
-  coded graphics look professional:
+  brand pops, end cards, count-ups, 3D. Only the user's **graphics renderer
+  setting** decides how they render (`get_state`'s `graphicsRenderer`; no tool
+  changes it):
+  - `zabsreel`, ZabsReel's own renderer (the default, nothing to install): a
+    graphic may also use the library's video, images and audio by asset id
+    (`asset("<id>")` as the src of `Img`, `OffthreadVideo`, `Video` or
+    `Audio`) and installed fonts by family name; still no network and no
+    packages, no `staticFile`, no paths or URLs. An overlay graphic's audio
+    appears as a linked audio clip. When it can't run, `get_state`'s
+    `graphics` is `renderer-unavailable` with `graphicsReason`, and
+    `add_graphic` refuses with `graphic_renderer_unavailable` and the same
+    reason: tell the user.
+  - `remotion`, the **Remotion add-on**, which the user installs in the
+    ZabsReel window (Help → Graphics add-on) under Remotion's own license; no
+    library media there, and `asset()`, `loadFont()` or an `@aive/motion`
+    import is refused naming the setting. `get_state`'s `graphics` says
+    whether it is ready. Without it `add_graphic` writes nothing and refuses
+    with `graphics_addon_missing`, `graphics_addon_update`,
+    `graphics_addon_broken` or `graphics_addon_unsupported`, and the message
+    says what to ask the user. Ask them, then try again.
+    Never try to install, update or repair the add-on yourself (no npm, no
+    downloads, no edits in ZabsReel's data folder): only the user can, and no
+    tool does.
+  - Where the two renderers differ: only ZabsReel's renderer has these (from
+    Remotion's newer documentation; the add-on's 4.0.481 lacks them or treats
+    them differently): loop on a Sequence (and Loop.useLoop inside one); the
+    timing props of AbsoluteFill; trimBefore and playbackRate on Sequence,
+    Series and Loop; interpolate's perceptual-scale output, and interpolating
+    strings, colours and true/false values; Easing.spring's allowTail and
+    durationRestThreshold; the crop props of Sequence; lab() and lch()
+    colours in interpolateColors. A component that needs an API ZabsReel's
+    renderer lacks fails naming it: tell the user it needs the Remotion
+    add-on setting.
+  - Changing the setting re-renders nothing: baked graphics keep playing and
+    exporting their files; an overlay keeps its code and props for a later
+    `add_graphic`, a standalone graphic keeps none.
+  Native text needs no add-on. Rules that make coded graphics look professional:
   - Spring entrances (`spring({damping:11–13, stiffness:140–170})`), explicit
     exit fades in the last 10–14 frames of the window. Nothing pops in/out raw.
   - Transparent background for overlays; `standalone:true` + `background` for

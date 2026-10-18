@@ -378,9 +378,14 @@ export interface MediaServers {
 /** The graphics add-on's state (core addon/state.ts, ADDON-PLAN D1). */
 export type GraphicsAddonState = "ready" | "not-installed" | "update-needed" | "broken" | "unsupported";
 
+/** The graphics renderer setting (core addon/renderer.ts, MOTION-PLAN D7): ZabsReel's own, or the Remotion add-on. */
+export type GraphicsRenderer = "zabsreel" | "remotion";
+
 /** What a UI host says of the add-on (electron/graphics-addon.cjs status()). */
 export interface GraphicsAddonStatus {
   state: GraphicsAddonState;
+  /** The graphics renderer setting. */
+  renderer: GraphicsRenderer;
   /** Remotion's version (the pin). */
   version: string;
   /** The D2 message where the add-on isn't offered. */
@@ -432,6 +437,7 @@ declare global {
         install: (acceptedLicenseSha256: string) => Promise<GraphicsAddonResult>;
         cancel: () => Promise<boolean>;
         remove: () => Promise<GraphicsAddonResult>;
+        setRenderer: (renderer: GraphicsRenderer) => Promise<GraphicsAddonResult>;
         onProgress: (cb: (p: { done: number; total: number }) => void) => () => void;
       };
     };

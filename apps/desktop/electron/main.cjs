@@ -343,6 +343,8 @@ ipcMain.handle("graphics-addon:install", (e, acceptedLicenseSha256) => {
 });
 ipcMain.handle("graphics-addon:cancel", () => graphicsAddon.cancel());
 ipcMain.handle("graphics-addon:remove", () => graphicsAddon.remove().result);
+// The graphics renderer setting (MOTION-PLAN D7): the dialog's radio buttons only.
+ipcMain.handle("graphics-addon:renderer", (_e, renderer) => graphicsAddon.setRenderer(renderer));
 
 ipcMain.handle("dialog:openFiles", async () => {
   const result = await dialog.showOpenDialog({

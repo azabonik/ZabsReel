@@ -7,10 +7,15 @@
  * and really gated*: the white title text pushes peak luma high while the
  * graphic is visible, and the frame returns to the dark background colour before
  * and after the window. A no-op composite (or broken alpha) would fail this.
- * The baked graphic has no audio stream (renderGraphic renders muted).
- * Remotion comes from AIVE_REMOTION_ADDON (graphics-addon-env.mjs: the repo
- * root when unset); without it and without an installed add-on, add_graphic
- * refuses with graphics_addon_missing.
+ * The baked graphic has no audio stream (renderGraphic renders muted;
+ * ZabsReel's renderer writes none for a graphic without sound).
+ *
+ * It runs on both graphics renderers (MOTION-PLAN D7): the Remotion add-on,
+ * chosen as the user's setting (useRemotionRenderer), and ZabsReel's own
+ * renderer, the default. Remotion comes from AIVE_REMOTION_ADDON
+ * (graphics-addon-env.mjs: the repo root when unset); without it and without
+ * an installed add-on, add_graphic refuses with graphics_addon_missing on the
+ * add-on, and renders on ZabsReel's renderer, which needs no add-on.
  *
  * Run: npx tsx packages/core/scripts/smoke-motion.ts
  *
@@ -19,7 +24,7 @@
  */
 import { EditorEngine } from "../src/engine.js";
 import { dispatch, RpcError } from "../src/rpc.js";
-import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
+import { useDevAddon, useRemotionRenderer, withoutDevAddon } from "./graphics-addon-env.mjs";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { runFfmpeg, FFMPEG_BIN } from "../src/ffmpeg/executor.js";
 import { GRAPHIC_TEMPLATES } from "../src/motion/templates.js";
@@ -41,9 +46,25 @@ async function maxLuma(file: string, t: number): Promise<number> {
   return max;
 }
 
+type Renderer = "remotion" | "zabsreel";
+
+/** The user's renderer setting for a new data folder: the Remotion add-on, or ZabsReel's renderer (no file: the default). */
+const dataFor = (renderer: Renderer, prefix: string) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  return renderer === "remotion" ? useRemotionRenderer(dir) : dir;
+};
+
 async function main() {
   useDevAddon();
-  const dataDir = mkdtempSync(join(tmpdir(), "aive-motion-"));
+  for (const renderer of ["remotion", "zabsreel"] as const) {
+    console.log(`\n== ${renderer === "remotion" ? "the Remotion add-on" : "ZabsReel's renderer"} ==`);
+    await run(renderer);
+  }
+  console.log("\nMOTION GRAPHICS SMOKE TEST PASSED");
+}
+
+async function run(renderer: Renderer) {
+  const dataDir = dataFor(renderer, "aive-motion-");
   const engine = new EditorEngine(dataDir);
 
   console.log("0. synthesize a 4s solid dark-green clip (1280x720) as footage...");
@@ -60,8 +81,8 @@ async function main() {
   const clip = engine.appendClip(asset.id);
   console.log(`   footage: ${asset.width}x${asset.height} ${asset.duration.toFixed(2)}s`);
 
-  console.log("1. render the animated title card (Remotion) over [1s, 3s]...");
-  console.log("   (first run downloads a headless Chrome — this can take a minute)");
+  console.log(`1. render the animated title card (${renderer}) over [1s, 3s]...`);
+  if (renderer === "remotion") console.log("   (first run downloads a headless Chrome — this can take a minute)");
   const t0 = Date.now();
   const r = await engine.addGraphic(clip.id, {
     code: GRAPHIC_TEMPLATES.title,
@@ -71,6 +92,11 @@ async function main() {
   });
   console.log(`   baked alpha graphic: ${r.asset.name} ${r.asset.duration.toFixed(2)}s  in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   if (!r.graphic) throw new Error("expected an overlay graphic to be created");
+  // MUTATION: render the Remotion path whatever the setting (graphicsRenderer() always "remotion", engine.ts) → the
+  // ZabsReel run fails here (its baked file is Remotion's: no motion renderer started).
+  const job = engine.jobs.list(false).find((j) => j.type === "graphic");
+  if (!job) throw new Error("expected a graphic job");
+  if (renderer === "zabsreel" && !(r.asset.path.endsWith("-graphic.mov") && engine.graphicsRenderer() === "zabsreel" && !r.graphic.audioClipId)) throw new Error("expected ZabsReel's renderer to bake the overlay (no sound: no audio clip)");
   // MUTATION: drop muted: true from renderWith (motion/render.ts) → Remotion adds a silent track and this fails.
   console.log(`   baked graphic streams (ffprobe): video=${r.asset.hasVideo} audio=${r.asset.hasAudio}`);
   if (!r.asset.hasVideo || r.asset.hasAudio) throw new Error("the baked graphic must have a video stream and no audio stream (renderGraphic renders muted)");
@@ -101,14 +127,14 @@ async function main() {
   console.log(`   peak luma during(2.0s) after clear = ${plainDuring} (expect background <130)`);
   if (plainDuring > 130) throw new Error(`graphic still present after clear_graphics (peak luma ${plainDuring})`);
 
-  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this step renders and fails.
-  console.log("5. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic refuses...");
-  const bare = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-motion-bare-")));
+  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → the Remotion
+  // run's step renders and fails. Make ZabsReel's path ask for the add-on (addGraphic, engine.ts) → the ZabsReel run fails.
+  console.log(`5. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic ${renderer === "remotion" ? "refuses" : "renders (no add-on needed)"}...`);
+  const bare = new EditorEngine(dataFor(renderer, "aive-motion-bare-"));
   const refused = await withoutDevAddon(() => dispatch(bare, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
   console.log(`   ${refused}`);
-  if (refused !== "graphics_addon_missing") throw new Error(`expected graphics_addon_missing, got ${refused}`);
-
-  console.log("\nMOTION GRAPHICS SMOKE TEST PASSED");
+  const want = renderer === "remotion" ? "graphics_addon_missing" : "added";
+  if (refused !== want) throw new Error(`expected ${want}, got ${refused}`);
 }
 
 main().catch((err) => {

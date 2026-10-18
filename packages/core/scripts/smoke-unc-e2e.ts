@@ -65,7 +65,7 @@ import { approveHost, revokeHost } from "../src/trusthosts.js";
 import { NETWORK_GATE } from "../src/io/gatedfs.js";
 import { projectToOtio } from "../src/interop/otio.js";
 import type { Project } from "../src/types.js";
-import { useDevAddon } from "./graphics-addon-env.mjs";
+import { useDevAddon, useRemotionRenderer } from "./graphics-addon-env.mjs";
 
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -293,6 +293,8 @@ async function enforcedSteps(): Promise<void> {
 
   // The stub answers ffprobe for a test host with a canned 1 s 64x64 clip: only once its server is allowed (step 5)
   // may anything probe one (step 3 checks that nothing did before).
+  // The graphics rows below test the Remotion add-on's gates: the user's renderer setting (ZabsReel's own is the default).
+  useRemotionRenderer(dataDir);
   const core = await startCore(dataDir, { ZR_STUB_CANNED: "zr-evil" });
   try {
     // ---- 1. load ----------------------------------------------------------------------
@@ -460,15 +462,27 @@ async function enforcedSteps(): Promise<void> {
       `import_otio: both media paths on ${H(5)} are offline placeholders, with the notice (${io.error ?? JSON.stringify(ioAssets.map((a) => [a.path, a.missing, a.awaitingServer]))})`);
     // Graphics never import a network file (G9), standalone so no clip is needed.
     const G9 = /graphics can't open network paths or ZabsReel's private files/;
-    for (const code of [
+    const networkImports = [
       // Each import is used: the TypeScript loader drops an unused one before webpack resolves it.
       `import x from "//${H(6)}/s/x";\nexport default () => String(x);`,
       `const ctx = require.context("//${H(6)}/s", false, /x/);\nexport default () => String(ctx);`,
       `import x from "file://${H(6)}/s/x.png";\nexport default () => String(x);`,
-    ]) {
+    ];
+    for (const code of networkImports) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       check(!r.ok && G9.test(r.error ?? ""), `add_graphic importing a network file fails with the G9 message (${(r.error ?? r.text).split("\n")[0].slice(0, 200)})`);
     }
+    // The same graphics on ZabsReel's own renderer (the setting, read on every call): its import check refuses the
+    // imports before a renderer starts, and require.context does not exist in its page (step 3 checks nothing was touched).
+    // MUTATION: drop the specifier check from graphicImportRefusal (motion/graphicmodule.ts) → the import rows fail.
+    useRemotionRenderer(dataDir);
+    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zabsreel" })}\n`);
+    for (const [i, code] of networkImports.entries()) {
+      const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
+      const refused = i === 1 || /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "(?:\/\/|file:\/\/)zr-evil-6\.invalid/.test(r.error ?? "");
+      check(!r.ok && refused, `on ZabsReel's renderer, add_graphic importing a network file fails${i === 1 ? "" : " with the import check's message"} (${(r.error ?? r.text).split("\n")[0].slice(0, 200)})`);
+    }
+    useRemotionRenderer(dataDir);
 
     // ---- 3. nothing reached a test host ----------------------------------------------------
     // MUTATION: any gate removed above → a trace or stub-log line names zr-evil.
@@ -560,11 +574,20 @@ async function enforcedSteps(): Promise<void> {
       rmSync(keyLink);
       rmSync(subLink);
     }
-    for (const code of [`import k from ${JSON.stringify(join(trustDir, "hosts.key"))};\nexport default () => k;`, `import k from "../../trust/hosts.key";\nexport default () => k;`]) {
+    const keyImports = [`import k from ${JSON.stringify(join(trustDir, "hosts.key"))};\nexport default () => k;`, `import k from "../../trust/hosts.key";\nexport default () => k;`];
+    for (const code of keyImports) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       responses.push(r.text);
       check(!r.ok && /graphics can only import 'react' and 'remotion': /.test(r.error ?? ""), `add_graphic importing the key fails with the I9 message, before it is resolved (${r.error?.slice(0, 120)})`);
     }
+    // On ZabsReel's own renderer: its import check refuses them (no file is resolved; the responses hold no key).
+    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zabsreel" })}\n`);
+    for (const code of keyImports) {
+      const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
+      responses.push(r.text);
+      check(!r.ok && /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "/.test(r.error ?? ""), `on ZabsReel's renderer, add_graphic importing the key fails with the import check's message (${r.error?.slice(0, 120)})`);
+    }
+    useRemotionRenderer(dataDir);
     const fontKey = projectFile("fontkey.aive", {
       assets: [asset("asset_l", local)],
       tracks: [{ id: "track_v", kind: "video", index: 0, clips: [clip("clip_l", "asset_l", 0, { overlays: [{ id: "text_t", text: "t", font: join(trustDir, "hosts.key") }] })] }],
@@ -826,7 +849,8 @@ async function enforcedSteps(): Promise<void> {
 // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
 async function noAddon() {
   console.log("8. no graphics add-on: add_graphic answers 409 graphics_addon_missing...");
-  const core = await startCore(mkdtempSync(join(root, "data-noaddon-")), { AIVE_REMOTION_ADDON: "" });
+  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  const core = await startCore(useRemotionRenderer(mkdtempSync(join(root, "data-noaddon-"))), { AIVE_REMOTION_ADDON: "" });
   try {
     const r = await rpc(core, "add_graphic", { template: "title", durationSeconds: 1 });
     check(!r.ok && r.status === 409 && r.code === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: ${r.status} ${r.code} (${r.error?.slice(0, 100)})`);

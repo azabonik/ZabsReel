@@ -46,7 +46,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EditorEngine } from "../src/engine.js";
 import { dispatch, RpcError } from "../src/rpc.js";
-import { useDevAddon, withoutDevAddon } from "./graphics-addon-env.mjs";
+import { useDevAddon, useRemotionRenderer, withoutDevAddon } from "./graphics-addon-env.mjs";
 import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { detectKeyColor } from "../src/media/keycolor.js";
 import { graphicPreviewProxy, tagGraphicColor } from "../src/motion/render.js";
@@ -502,7 +502,8 @@ async function main() {
   console.log("8. no graphics add-on: add_graphic refuses...");
   {
     useDevAddon();
-    const engine = new EditorEngine(mkdtempSync(join(dir, "data-")));
+    // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+    const engine = new EditorEngine(useRemotionRenderer(mkdtempSync(join(dir, "data-"))));
     const refused = await withoutDevAddon(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
     check(refused === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing (${refused})`);
   }

@@ -9,7 +9,7 @@
 
 import { PRODUCT_NAME } from "@aive/core/brand";
 import { approvalDialogFor, bareFileName, classifyPath, normalizeHost } from "@aive/core/unc";
-import type { ApproveContext, GraphicsAddonResult, GraphicsAddonStatus, GraphicsAddonTerms, MediaServers } from "./types";
+import type { ApproveContext, GraphicsAddonResult, GraphicsAddonStatus, GraphicsAddonTerms, GraphicsRenderer, MediaServers } from "./types";
 import { UNREAD_DIALOG, allowDialogText, keepDialogText, userContextPath, type ApprovalText } from "./mediaservers";
 
 export type McpConfig = { available: boolean; packaged: boolean; mcpEntry: string | null; json: string };
@@ -265,6 +265,19 @@ const graphicsAddon = {
     const h = await host();
     if (h === "electron" && window.aive!.graphicsAddon) await window.aive!.graphicsAddon.cancel();
     else if (h === "web") await api("/api/graphics-addon/cancel", {});
+  },
+
+  /** The graphics renderer setting, from the dialog's radio buttons (the host writes it; MOTION-PLAN D7). */
+  async setRenderer(renderer: GraphicsRenderer): Promise<GraphicsAddonResult> {
+    const h = await host();
+    if (h === "electron" && window.aive!.graphicsAddon) return window.aive!.graphicsAddon.setRenderer(renderer);
+    if (h !== "web") throw new Error(NO_ADDON_HOST);
+    try {
+      await api("/api/graphics-addon/renderer", { renderer });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   },
 
   async remove(): Promise<GraphicsAddonResult> {

@@ -51,6 +51,11 @@ import { matteVideo, type MatteStats } from "./matting/rvm.js";
 import { bakeReversed, bakeSmoothSlow, grabFrame, probeFrameClock, probeVideoFormat } from "./ffmpeg/timefx.js";
 import { alphaProxyArgs, cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
 import { graphicPreviewProxy, renderGraphic, tagGraphicColor, type GraphicRemotion } from "./motion/render.js";
+import { motionOnlyUse } from "./motion/graphicmodule.js";
+import { requireOnline, type MotionAsset } from "./motion/motionmedia.js";
+import { MotionRenderError, probeMotionRenderer, RendererUnavailableError, renderMotion, type ProbeResult, type RendererUnavailableReason } from "./motion/rendermotion.js";
+import { rendererBinary, type RendererBinary } from "./motion/rendererbinary.js";
+import { readGraphicsRenderer, type GraphicsRenderer } from "./addon/renderer.js";
 import { GraphicsAddonError, resolveGraphicsAddon, type GraphicsAddonRefusal, type GraphicsAddonResolution, type ResolvedGraphicsAddon } from "./addon/resolve.js";
 import type { GraphicsAddonState } from "./addon/state.js";
 import { findProfanity } from "./audio/profanity.js";
@@ -366,6 +371,17 @@ function speedKey(fx: ClipEffects | undefined): string {
 
 const MAX_HISTORY = 100;
 
+/** add_graphic's graphic: its TSX and props, and where it goes (frames). */
+export interface GraphicOptions {
+  code: string;
+  props?: Record<string, unknown>;
+  durationSeconds?: number;
+  startFrame?: number;
+  endFrame?: number;
+  opacity?: number;
+  standalone?: boolean;
+}
+
 /** Options for {@link EditorEngine.bleepWords}. */
 export interface BleepOptions {
   /** Clips to censor (default: every clip whose asset has audio). */
@@ -554,6 +570,22 @@ export class EditorEngine extends EventEmitter {
   graphicsAddon: () => GraphicsAddonResolution = () => resolveGraphicsAddon(this.dataDir);
   /** Test seam: a stand-in for the Remotion add_graphic loads from the add-on. */
   graphicRemotion?: GraphicRemotion;
+  /**
+   * ZabsReel's own motion renderer (MOTION-PLAN D7): the binary rule, the
+   * probe, the renderer's environment and the clock; tests replace them.
+   */
+  motionRenderer: {
+    binary: () => RendererBinary;
+    probe: (dataDir: string, opts: { binary: RendererBinary; env?: NodeJS.ProcessEnv }) => Promise<ProbeResult>;
+    env?: NodeJS.ProcessEnv;
+    now: () => number;
+  } = { binary: () => rendererBinary(), probe: (dataDir, opts) => probeMotionRenderer(dataDir, opts), now: () => Date.now() };
+  /**
+   * What is known of ZabsReel's renderer here: the binary rule's answer, the
+   * running probe, when the last one started (or a render failed to start),
+   * and why it can't run, if it can't (graphicsState reads it, D7).
+   */
+  private motion: { binary?: RendererBinary; probe?: Promise<void>; checkedAt?: number; unavailable?: { reason: RendererUnavailableReason; detail: string } } = {};
   /**
    * A loaded LUT or font path on the data folder's server whose folder could
    * not be checked (path → error code, or "private" once a re-check found it
@@ -6450,13 +6482,26 @@ export class EditorEngine extends EventEmitter {
     return { clip: updated, asset: baked, frames: outFrames, linked };
   }
 
-  // ---- motion graphics (Remotion) -------------------------------------------
+  // ---- motion graphics ------------------------------------------------------
   /**
-   * The graphics add-on's state for get_state and timeline_summary, read when
-   * asked (never per broadcast). A malformed AIVE_REMOTION_ADDON (source
-   * checkouts only) reads as "broken" here; add_graphic gives its message.
+   * Which renderer add_graphic uses: the user's setting in
+   * <dataDir>/addons/renderer.json (addon/renderer.ts), read on every call;
+   * only the UI hosts write it (D7, I7).
    */
-  graphicsState(): GraphicsAddonState {
+  graphicsRenderer(): GraphicsRenderer {
+    return readGraphicsRenderer(this.dataDir);
+  }
+
+  /**
+   * Whether add_graphic can render now, for get_state and timeline_summary,
+   * read when asked (never per broadcast) and never starting a process. On
+   * ZabsReel's renderer: "ready" or "renderer-unavailable" (with
+   * {@link graphicsReason}), from the cached probe (D7). On the Remotion
+   * add-on: the add-on's state; a malformed AIVE_REMOTION_ADDON (source
+   * checkouts only) reads as "broken" here, and add_graphic gives its message.
+   */
+  graphicsState(): GraphicsAddonState | "renderer-unavailable" {
+    if (this.graphicsRenderer() === "zabsreel") return this.motionUnavailable() ? "renderer-unavailable" : "ready";
     try {
       const r = this.graphicsAddon();
       return r.ok ? "ready" : r.state;
@@ -6465,26 +6510,95 @@ export class EditorEngine extends EventEmitter {
     }
   }
 
+  /** Why ZabsReel's renderer can't run here, when it is the setting and can't (get_state's graphicsReason). */
+  graphicsReason(): RendererUnavailableReason | undefined {
+    return this.graphicsRenderer() === "zabsreel" ? this.motionUnavailable()?.reason : undefined;
+  }
+
   /**
-   * Render an AI-authored Remotion component (TSX) to a baked alpha video and
-   * attach it to a clip as a motion-graphic overlay, OR (standalone / no clip)
-   * insert it as its own clip. Frame windows are in project frames. Without a
-   * ready graphics add-on it refuses before anything is written (a
-   * GraphicsAddonError); that, and a render that finds the add-on broken, tell
-   * the UI clients ("graphics-addon").
+   * Why ZabsReel's renderer can't run, from what is cached: the probe's (or a
+   * failed render start's) answer; before any probe has ended, the binary
+   * rule's (no-binary, or nothing: "ready" until the probe says otherwise).
+   */
+  private motionUnavailable(): { reason: RendererUnavailableReason; detail: string } | undefined {
+    if (this.motion.unavailable) return this.motion.unavailable;
+    const bin = (this.motion.binary ??= this.motionRenderer.binary());
+    return bin.ok ? undefined : { reason: bin.reason, detail: bin.detail };
+  }
+
+  /**
+   * D7's start probe, in the background: the renderer started by the binary
+   * rule renders one 16x16 frame. Its answer sets the cached state. The core's
+   * start (cli.ts) runs it once; add_graphic runs it when none has run, and
+   * again while the renderer is unavailable, at most once a minute. A probe
+   * already running is joined. Never throws.
+   */
+  startGraphicsProbe(): Promise<void> {
+    if (this.motion.probe) return this.motion.probe;
+    this.motion.checkedAt = this.motionRenderer.now();
+    const binary = (this.motion.binary = this.motionRenderer.binary());
+    const run = async () => {
+      try {
+        const r = await this.motionRenderer.probe(this.dataDir, { binary, env: this.motionRenderer.env });
+        this.motion.unavailable = r.ok ? undefined : { reason: r.reason, detail: r.detail };
+      } catch (err) {
+        this.motion.unavailable = { reason: "start-failed", detail: (err as Error).message };
+      }
+    };
+    const probe: Promise<void> = run().finally(() => {
+      if (this.motion.probe === probe) this.motion.probe = undefined;
+    });
+    this.motion.probe = probe;
+    return probe;
+  }
+
+  /** How often add_graphic probes ZabsReel's renderer again while it is unavailable (D7). */
+  static readonly MOTION_PROBE_INTERVAL_MS = 60_000;
+
+  /**
+   * Before a render on ZabsReel's renderer: wait for the running probe (or
+   * run the first one), probe again when it has been unavailable for a
+   * minute, then refuse with graphic_renderer_unavailable and the reason
+   * while it still is. Returns the binary to render with.
+   */
+  private async motionReady(): Promise<RendererBinary> {
+    const since = this.motion.checkedAt === undefined ? Infinity : this.motionRenderer.now() - this.motion.checkedAt;
+    if (this.motion.probe) await this.motion.probe;
+    else if (this.motion.checkedAt === undefined || (this.motion.unavailable && since >= EditorEngine.MOTION_PROBE_INTERVAL_MS)) await this.startGraphicsProbe();
+    const why = this.motionUnavailable();
+    if (why) throw new RendererUnavailableError(why.reason, why.detail);
+    return this.motion.binary!;
+  }
+
+  /**
+   * Render an AI-authored motion graphic (TSX that default-exports a React
+   * component) and attach it to a clip as an overlay, OR (standalone / no
+   * clip) insert it as its own clip. Frame windows are in project frames.
+   * The renderer is the user's setting ({@link graphicsRenderer}): ZabsReel's
+   * own (D7: the project library as its asset table, an overlay's sound as a
+   * linked audio clip) or the Remotion add-on, exactly as before it. Either
+   * refuses before anything is written when it can't render: ZabsReel's
+   * renderer unavailable (graphic_renderer_unavailable, its reason), or no
+   * ready add-on (a GraphicsAddonError, which, like a render that finds the
+   * add-on broken, tells the UI clients: "graphics-addon"), or a graphic
+   * that needs ZabsReel's renderer on the add-on path.
    */
   async addGraphic(
     clipId: string | undefined,
-    opts: {
-      code: string;
-      props?: Record<string, unknown>;
-      durationSeconds?: number;
-      startFrame?: number;
-      endFrame?: number;
-      opacity?: number;
-      standalone?: boolean;
-    },
-  ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset }> {
+    opts: GraphicOptions,
+  ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset; audioClip?: Clip }> {
+    if (this.graphicsRenderer() === "zabsreel") {
+      const binary = await this.motionReady();
+      const { promise } = this.jobs.start("graphic", "Render motion graphic", (signal, onProgress) => this.addMotionGraphicRun(clipId, opts, binary, signal, onProgress));
+      return promise;
+    }
+    const uses = motionOnlyUse(opts.code);
+    if (uses) {
+      throw new MotionRenderError(
+        "graphic_api_unsupported",
+        `This graphic uses ${uses === "@aive/motion" ? "@aive/motion" : `${uses}()`}, which only ${PRODUCT_NAME}'s own graphics renderer has, and the user's graphics renderer setting is "Remotion add-on". Write the graphic without it, or ask the user to choose ${PRODUCT_NAME}'s renderer in the ${PRODUCT_NAME} window (Help → Graphics add-on…, Graphics renderer).`,
+      );
+    }
     const told = (err: unknown): never => {
       if (err instanceof GraphicsAddonError) this.emit("graphics-addon", { state: err.state });
       throw err;
@@ -6497,20 +6611,8 @@ export class EditorEngine extends EventEmitter {
     return promise.catch(told);
   }
 
-  private async addGraphicRun(
-    clipId: string | undefined,
-    opts: {
-      code: string;
-      props?: Record<string, unknown>;
-      durationSeconds?: number;
-      startFrame?: number;
-      endFrame?: number;
-      opacity?: number;
-      standalone?: boolean;
-    },
-    addon: ResolvedGraphicsAddon,
-    signal: AbortSignal,
-  ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset }> {
+  /** Where and how long a new graphic is, and its files' names (both renderers). */
+  private async graphicPlan(clipId: string | undefined, opts: GraphicOptions) {
     const clip = clipId ? this.findClip(clipId).clip : undefined;
     const asNewClip = !clipId || !!opts.standalone;
 
@@ -6535,6 +6637,86 @@ export class EditorEngine extends EventEmitter {
     await mkdir(bakedDir, { recursive: true });
     const outPath = join(bakedDir, `${id}-graphic.${asNewClip ? "mp4" : "mov"}`);
     const workDir = join(this.dataDir, "motion", id);
+    return { asNewClip, fps, width, height, startFrame, durationInFrames, endFrame, id, bakedDir, outPath, workDir };
+  }
+
+  /** A standalone graphic's baked file as its own clip: after `clipId` on its track, or placed as add_clip would. */
+  private placeGraphicClip(clipId: string | undefined, baked: MediaAsset): { clip: Clip; asset: MediaAsset } {
+    return this.mutate(() => {
+      this.project.assets.push(baked);
+      const bakedFrames = Math.max(MIN_CLIP_FRAMES, Math.round(baked.duration * this.project.fps));
+      if (clipId) {
+        // Insert right after the target clip on its track.
+        const { track, clip: target } = this.findClip(clipId);
+        const gclip = this.makeClip(baked.id, clipEndFrame(target, this.project.fps), 0, bakedFrames);
+        track.clips.push(gclip);
+        EditorEngine.sortTrack(track);
+        return { clip: gclip, asset: baked };
+      }
+      const gclip = this.placeClip(baked.id, { sourceInFrame: 0, sourceOutFrame: bakedFrames });
+      return { clip: gclip, asset: baked };
+    });
+  }
+
+  /**
+   * add_graphic on ZabsReel's own renderer (D7): renderMotion with the
+   * project library as the graphic's asset table (the page sees only opaque
+   * handles, motionmedia.ts) and the engine's own offline check, then the
+   * baked file as a clip, or as an overlay with its sound (if it has any) as
+   * a linked audio clip (attachGraphic). A renderer that fails to start sets
+   * the cached state (graphicsState) to unavailable with its reason.
+   */
+  private async addMotionGraphicRun(
+    clipId: string | undefined,
+    opts: GraphicOptions,
+    binary: RendererBinary,
+    signal: AbortSignal,
+    onProgress: (fraction: number) => void,
+  ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset; audioClip?: Clip }> {
+    const g = await this.graphicPlan(clipId, opts);
+    let r: Awaited<ReturnType<typeof renderMotion>>;
+    try {
+      r = await renderMotion({
+        graphic: { source: opts.code, props: opts.props },
+        width: g.width,
+        height: g.height,
+        fps: g.fps,
+        durationInFrames: g.durationInFrames,
+        alpha: !g.asNewClip,
+        workDir: g.workDir,
+        outPath: g.outPath,
+        previewPath: g.asNewClip ? undefined : join(g.bakedDir, `${g.id}-graphic.webm`),
+        assets: Object.fromEntries(this.project.assets.map((a) => [a.id, a])),
+        requireMedia: (a: MotionAsset) => ("kind" in a ? requireOnline(a) : void this.requireMedia(a)),
+        binary,
+        env: this.motionRenderer.env,
+        signal,
+        onProgress,
+      });
+    } catch (err) {
+      if (err instanceof RendererUnavailableError) {
+        this.motion.unavailable = { reason: err.reason, detail: err.detail };
+        this.motion.checkedAt = this.motionRenderer.now();
+      }
+      throw err;
+    }
+    const baked = await probeAsset(r.outPath);
+    baked.name = `Motion graphic (${g.width}x${g.height})`;
+    if (r.previewPath) baked.previewPath = r.previewPath;
+    if (g.asNewClip) return this.placeGraphicClip(clipId, baked);
+    const sound = r.audioPath ? await probeAsset(r.audioPath) : undefined;
+    if (sound) sound.name = "Motion graphic sound";
+    return this.attachGraphic(clipId!, { id: g.id, assetId: baked.id, startFrame: g.startFrame, endFrame: g.endFrame, opacity: opts.opacity, code: opts.code, props: opts.props }, baked, sound);
+  }
+
+  /** add_graphic on the Remotion add-on, as before ZabsReel's renderer (F2's refusals stay). */
+  private async addGraphicRun(
+    clipId: string | undefined,
+    opts: GraphicOptions,
+    addon: ResolvedGraphicsAddon,
+    signal: AbortSignal,
+  ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset }> {
+    const { asNewClip, fps, width, height, startFrame, durationInFrames, endFrame, id, bakedDir, outPath, workDir } = await this.graphicPlan(clipId, opts);
 
     await renderGraphic(
       {
@@ -6573,21 +6755,9 @@ export class EditorEngine extends EventEmitter {
       }
     }
 
+    if (asNewClip) return this.placeGraphicClip(clipId, baked);
     return this.mutate(() => {
       this.project.assets.push(baked);
-      if (asNewClip) {
-        const bakedFrames = Math.max(MIN_CLIP_FRAMES, Math.round(baked.duration * fps));
-        if (clipId) {
-          // Insert right after the target clip on its track.
-          const { track, clip: target } = this.findClip(clipId);
-          const gclip = this.makeClip(baked.id, clipEndFrame(target, this.project.fps), 0, bakedFrames);
-          track.clips.push(gclip);
-          EditorEngine.sortTrack(track);
-          return { clip: gclip, asset: baked };
-        }
-        const gclip = this.placeClip(baked.id, { sourceInFrame: 0, sourceOutFrame: bakedFrames });
-        return { clip: gclip, asset: baked };
-      }
       const { clip: target } = this.findClip(clipId!);
       const graphic: GraphicOverlay = {
         id,
