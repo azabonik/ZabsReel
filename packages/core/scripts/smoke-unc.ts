@@ -425,6 +425,7 @@ async function main() {
     ["set_text_style font", () => engine.setTextStyle("clip_none", undefined, { font: `${bad(5)}.ttf` })],
     ["generate_captions font", () => engine.generateCaptions("clip_none", { style: { font: `${bad(5)}.ttf` } })],
     ["set_caption_style font", () => engine.setCaptionStyle("clip_none", { font: `${bad(5)}.ttf` })],
+    ["add_graphic fonts", () => engine.addGraphic(undefined, { code: "x", fonts: { f1: `${bad(5)}.ttf` } })],
   ];
   for (const [name, fn] of rpcRows) {
     const e = await errOf(fn);
@@ -1091,6 +1092,7 @@ async function main() {
         ["import_video", () => engine.importVideo(p)],
         ["apply_lut", () => engine.setClipEffects("clip_none", { lut: p })],
         ["add_text font", () => engine.addTextOverlay("clip_none", { text: "t", font: p })],
+        ["add_graphic fonts", () => engine.addGraphic(undefined, { code: "x", fonts: { f1: p } })],
       ] as const) {
         const e = await errOf(fn);
         errors.push(e);
@@ -1170,6 +1172,7 @@ async function main() {
           ["load_project", () => engine.load(p)], ["import_otio", () => engine.importOtio(p)], ["import_captions", () => engine.importCaptions("clip_none", p)],
           ["import_video", () => engine.importVideo(p)], ["apply_lut", () => engine.setClipEffects("clip_none", { lut: p })],
           ["add_text font", () => engine.addTextOverlay("clip_none", { text: "t", font: p })],
+          ["add_graphic fonts", () => engine.addGraphic(undefined, { code: "x", fonts: { f1: p } })],
           ["save", () => engine.save(p)], ["export_otio", () => engine.exportOtio(p)], ["export_captions", () => engine.exportCaptions(p)], ["export_video", () => engine.startExportJob(p)],
         ] as const) {
           const e = await errOf(fn);
@@ -1948,7 +1951,9 @@ async function main() {
       for (const [m, ps] of Object.entries(RPC_PATH_PARAMS)) {
         for (const p of ps) {
           const evil = `//zr-evil-7.invalid/s/${m}.x`;
-          const params = { ...minimal(methods[m as keyof typeof methods].schema), [p.replace("[]", "")]: p.endsWith("[]") ? [evil] : evil };
+          // A list ("paths[]") or a map ("fonts{}") holds the path; add_graphic needs code or a template before its fonts are read.
+          const value = p.endsWith("[]") ? [evil] : p.endsWith("{}") ? { f1: evil } : evil;
+          const params = { ...minimal(methods[m as keyof typeof methods].schema), ...(m === "add_graphic" ? { template: "title" } : {}), [p.replace(/\[\]$|\{\}$/, "")]: value };
           if (m === "remember_projects") {
             const r = (await dispatch(engine, m, params)) as { skipped: { reason: string }[] };
             check(r.skipped.length === 1 && /network computer you haven't allowed/.test(r.skipped[0].reason), `remember_projects skips it (${JSON.stringify(r.skipped)})`);

@@ -113,15 +113,18 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
     graphic may also use the library's video, images and audio by asset id
     (`asset("<id>")` as the src of `Img`, `OffthreadVideo`, `Video` or
     `Audio`) and installed fonts by family name; still no network and no
-    packages, no `staticFile`, no paths or URLs. An overlay graphic's audio
+    packages, no `staticFile`, no paths or URLs. A font file goes in through
+    `add_graphic`'s `fonts` (`{"<id>": "<absolute .ttf/.otf/.woff path>"}`,
+    at most 16, each 32 MB or less) and the graphic calls
+    `loadFont(asset("<id>"))`. An overlay graphic's audio
     appears as a linked audio clip. When it can't run, `get_state`'s
     `graphics` is `renderer-unavailable` with `graphicsReason`, and
     `add_graphic` refuses with `graphic_renderer_unavailable` and the same
     reason: tell the user.
   - `remotion`, the **Remotion add-on**, which the user installs in the
     ZabsReel window (Help → Graphics add-on) under Remotion's own license; no
-    library media there, and `asset()`, `loadFont()` or an `@aive/motion`
-    import is refused naming the setting. `get_state`'s `graphics` says
+    library media there, and `asset()`, `loadFont()`, `fonts` or an
+    `@aive/motion` import is refused naming the setting. `get_state`'s `graphics` says
     whether it is ready. Without it `add_graphic` writes nothing and refuses
     with `graphics_addon_missing`, `graphics_addon_update`,
     `graphics_addon_broken` or `graphics_addon_unsupported`, and the message
@@ -140,7 +143,7 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
     renderer lacks fails naming it: tell the user it needs the Remotion
     add-on setting.
   - Changing the setting re-renders nothing: baked graphics keep playing and
-    exporting their files; an overlay keeps its code and props for a later
+    exporting their files; an overlay keeps its code, props and fonts for a later
     `add_graphic`, a standalone graphic keeps none.
   Native text needs no add-on. Rules that make coded graphics look professional:
   - Spring entrances (`spring({damping:11–13, stiffness:140–170})`), explicit

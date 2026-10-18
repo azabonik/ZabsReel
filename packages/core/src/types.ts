@@ -439,6 +439,12 @@ export interface GraphicOverlay {
   /** Props passed to the component when it was rendered. */
   props?: Record<string, unknown>;
   /**
+   * add_graphic's `fonts` when it was rendered (ZabsReel's motion renderer):
+   * id -> an installed family name or a font file path. Kept with the code
+   * for a later add_graphic; nothing reads or opens them by itself.
+   */
+  fonts?: Record<string, string>;
+  /**
    * The graphic's own sound (ZabsReel's motion renderer, MOTION-PLAN D4 E3):
    * the id of the one audio clip that plays it, over the graphic's window and
    * linked to this clip. It follows the graphic: removing the graphic removes

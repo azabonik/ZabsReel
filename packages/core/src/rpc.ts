@@ -39,6 +39,7 @@ export const RPC_PATH_PARAMS: Readonly<Record<string, readonly string[]>> = {
   import_otio: ["path"],
   import_captions: ["path"],
   apply_lut: ["path"],
+  add_graphic: ["fonts{}"],
   add_text: ["font"],
   set_text_style: ["font"],
   generate_captions: ["font"],
@@ -1032,7 +1033,7 @@ export const methods = {
   add_graphic: {
     description:
       "Add an animated motion graphic (title card, lower-third, callout, or a whole motion-graphics clip): an AI-authored Remotion React component rendered headlessly to an alpha video. Provide EITHER `code` (a TSX module default-exporting a component using Remotion's useCurrentFrame/useVideoConfig/interpolate/spring/AbsoluteFill) OR `template` (a built-in, e.g. 'title'). PLACEMENT: pass `clipId` to OVERLAY on that clip within a frame window (keep the component background transparent); set standalone=true to insert it as its OWN clip after that one; OR OMIT clipId to add it as a standalone clip (a pure motion-graphics clip — give the component a `background` prop and use durationSeconds). startFrame/endFrame are frames from the clip's start. Rendered at the project canvas size/fps. " +
-      `RENDERER: only the user's setting decides (get_state's graphicsRenderer; no tool changes it). On ${PRODUCT_NAME}'s own renderer ("zabsreel", the default) the component may also use the project library's video, images and audio by asset id (asset("<id>") as the src of Img, OffthreadVideo, Video or Audio, all imported from 'remotion'), still with no network and no packages, and an overlay's audio becomes a linked audio clip; when that renderer can't run here this refuses with graphic_renderer_unavailable and its reason (get_state's graphicsReason). On the Remotion add-on ("remotion") library media stays refused, and asset(), loadFont() or an @aive/motion import is refused naming the setting. ` +
+      `RENDERER: only the user's setting decides (get_state's graphicsRenderer; no tool changes it). On ${PRODUCT_NAME}'s own renderer ("zabsreel", the default) the component may also use the project library's video, images and audio by asset id (asset("<id>") as the src of Img, OffthreadVideo, Video or Audio, all imported from 'remotion'), still with no network and no packages, and an overlay's audio becomes a linked audio clip; when that renderer can't run here this refuses with graphic_renderer_unavailable and its reason (get_state's graphicsReason). FONTS (that renderer only): \`fonts\` maps an id to an installed family name or the absolute path of a .ttf/.otf/.ttc/.woff/.woff2 file (at most 16, each file at most 32 MB, checked like add_text's font; an id may not be a library asset id), and the component loads it with loadFont(asset("<id>")), using the fontFamily it returns; an installed family can also simply be named in CSS with no fonts entry. On the Remotion add-on ("remotion") library media stays refused, and asset(), loadFont(), \`fonts\` or an @aive/motion import is refused naming the setting. ` +
       `Needs the Remotion graphics add-on, which only the user installs in the ${PRODUCT_NAME} window (Help → Graphics add-on), when the setting is "remotion": without it this refuses with a graphics_addon_* message saying what to ask the user, and no tool can install it.`,
     schema: z
       .object({
@@ -1045,6 +1046,7 @@ export const methods = {
         durationSeconds: z.number().positive().max(600).optional(),
         opacity: z.number().min(0).max(1).optional(),
         standalone: z.boolean().optional(),
+        fonts: z.record(z.string()).optional(),
       })
       .strict(),
     handler: async (engine, p) => {
@@ -1064,6 +1066,7 @@ export const methods = {
         durationSeconds: p.durationSeconds,
         opacity: p.opacity,
         standalone: p.standalone,
+        fonts: p.fonts,
       });
       return {
         graphicId: r.graphic?.id,

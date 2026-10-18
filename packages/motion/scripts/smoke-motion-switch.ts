@@ -81,8 +81,23 @@
  *                    add_graphic's description say graphics may use library
  *                    media by asset id on ZabsReel's renderer, still no
  *                    network or packages, that an overlay's audio becomes a
- *                    linked audio clip, and that only the user's setting
- *                    decides the renderer.
+ *                    linked audio clip, that only the user's setting
+ *                    decides the renderer, and how a font file goes in
+ *                    (add_graphic's fonts, loadFont(asset("<id>"))).
+ *  S11. fonts     — add_graphic's `fonts` (slice 5b): an overlay that loads a
+ *                    .ttf path with loadFont(asset("f1")) draws glyphs that
+ *                    differ from the fallback font's; the page's start data
+ *                    holds only the font's handle and kind (no path, file
+ *                    name or folder anywhere in the start line); the overlay
+ *                    keeps its fonts. 16 fonts pass (loadFont("f16") draws
+ *                    the 16th); 17 are graphic_font_cap. Refused before any renderer, job or
+ *                    file, as add_text's font is: a relative path, a server
+ *                    not allowed (both spellings), a file that is no font
+ *                    file, a file over 32 MB (graphic_font_cap), an id of a
+ *                    library asset, an id that is no plain token, a family
+ *                    that is not installed; on the Remotion add-on `fonts`
+ *                    is refused naming the setting (an empty map is not).
+ *                    No file call or command names a zr-evil host.
  *
  * Linux only beyond S1, S2, S4 and S10 (it runs Linux's Electron). Needs `npm run
  * build` (dist/zr-runtime.js) and FFmpeg. Ports: 5034 (S3's HTTP row).
@@ -90,7 +105,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -126,6 +141,8 @@ const ADDON_REFUSES = new Set(["interpolate-strings.tsx", "sequence-edge-fractio
 const touched: string[] = [];
 /** The commands the core started: [file, ...args]. */
 const spawned: string[][] = [];
+/** Each render's start line (its page table, motion-renderer.cjs) as the core wrote it to the renderer's stdin. */
+const startLines: string[] = [];
 {
   const load = createRequire(import.meta.url);
   const wrap = (mod: Record<string, unknown>, names: string[]) => {
@@ -148,8 +165,18 @@ const spawned: string[][] = [];
   for (const name of ["spawn", "spawnSync", "execFile", "execFileSync", "fork", "exec", "execSync"]) {
     const real = cp[name];
     cp[name] = function (this: unknown, ...args: unknown[]) {
-      spawned.push([String(args[0]), ...(Array.isArray(args[1]) ? (args[1] as unknown[]).map(String) : [])]);
-      return real.apply(this, args);
+      const cmd = [String(args[0]), ...(Array.isArray(args[1]) ? (args[1] as unknown[]).map(String) : [])];
+      spawned.push(cmd);
+      const child = real.apply(this, args) as { stdin?: { write: (...a: unknown[]) => boolean } | null };
+      if (name === "spawn" && cmd.includes(RENDERER_FLAG) && !cmd.includes("--probe") && child.stdin) {
+        const stdin = child.stdin;
+        const write = stdin.write.bind(stdin);
+        stdin.write = (...a: unknown[]) => {
+          if (typeof a[0] === "string" && a[0].startsWith('{"type":"start"')) startLines.push(a[0]);
+          return write(...a);
+        };
+      }
+      return child;
     };
   }
   syncBuiltinESMExports();
@@ -312,10 +339,12 @@ async function s2(work: string) {
   try {
     for (const [m, ps] of Object.entries(RPC_PATH_PARAMS)) {
       for (const p of ps) {
-        const key = p.replace("[]", "");
+        const key = p.replace(/\[\]$|\{\}$/, "");
         for (const path of [...local, ...network]) {
           rows++;
-          const params = { ...minimal(methods[m as keyof typeof methods].schema), [key]: p.endsWith("[]") ? [path] : path };
+          // A list ("paths[]") or a map ("fonts{}") holds the path; add_graphic needs code or a template before its fonts are read.
+          const value = p.endsWith("[]") ? [path] : p.endsWith("{}") ? { f1: path } : path;
+          const params = { ...minimal(methods[m as keyof typeof methods].schema), ...(m === "add_graphic" ? { template: "title" } : {}), [key]: value };
           if (m === "remember_projects") {
             const r = (await dispatch(engine, m, params)) as { added: unknown[]; skipped: { reason: string }[] };
             if (r.added.length === 0 && r.skipped.length === 1 && /graphics add-on folder/.test(r.skipped[0].reason)) refused++;
@@ -758,15 +787,151 @@ function s10() {
   check(dialog.length === 7 && JSON.stringify(dialog) === JSON.stringify(guide) && dialog.every((d) => skill.includes(d)),
     `the dialog's help and the guide list the same ${dialog.length} differences, and SKILL.md names each (${JSON.stringify(dialog.filter((d) => !skill.includes(d) || !guide.includes(d)))})`);
   const instructions = flat(guideSrc.slice(guideSrc.indexOf("export const PLATFORM_INSTRUCTIONS"), guideSrc.indexOf("export const EDITING_GUIDE")));
+  // MUTATION: drop the font-file sentence from the guide's instructions (or SKILL.md, or add_graphic's description) → its row fails.
   const wants: [string, string, string[]][] = [
-    ["the MCP instructions", instructions, ["ONLY THE USER'S SETTING decides", 'asset("<id>")', "Still no network and no packages", "An OVERLAY graphic's audio appears as a linked audio clip", "graphic_renderer_unavailable", "${RENDERER_DIFFERENCES}", "nothing re-renders by itself"]],
-    ["SKILL.md", skill, ["Only the user's **graphics renderer setting** decides", 'asset("<id>")', "still no network and no packages", "An overlay graphic's audio appears as a linked audio clip", "`graphic_renderer_unavailable`", "Changing the setting re-renders nothing"]],
-    ["add_graphic's description", methods.add_graphic.description, ["only the user's setting decides", 'asset("<id>")', "still with no network and no packages", "an overlay's audio becomes a linked audio clip", "graphic_renderer_unavailable"]],
+    ["the MCP instructions", instructions, ["ONLY THE USER'S SETTING decides", 'asset("<id>")', "Still no network and no packages", "An OVERLAY graphic's audio appears as a linked audio clip", "graphic_renderer_unavailable", "${RENDERER_DIFFERENCES}", "nothing re-renders by itself",
+      "installed fonts work by CSS family name", "A font file goes in through add_graphic's", 'loadFont(asset("<id>"))', "add_graphic's fonts or an @aive/motion import is refused"]],
+    ["SKILL.md", skill, ["Only the user's **graphics renderer setting** decides", 'asset("<id>")', "still no network and no packages", "An overlay graphic's audio appears as a linked audio clip", "`graphic_renderer_unavailable`", "Changing the setting re-renders nothing",
+      "A font file goes in through `add_graphic`'s `fonts`", 'loadFont(asset("<id>"))', "`fonts` or an `@aive/motion` import is refused"]],
+    ["add_graphic's description", methods.add_graphic.description, ["only the user's setting decides", 'asset("<id>")', "still with no network and no packages", "an overlay's audio becomes a linked audio clip", "graphic_renderer_unavailable",
+      "`fonts` maps an id to an installed family name or the absolute path of a .ttf/.otf/.ttc/.woff/.woff2 file", 'loadFont(asset("<id>"))', "an installed family can also simply be named in CSS", "`fonts` or an @aive/motion import is refused naming the setting"]],
   ];
   for (const [what, text, phrases] of wants) {
     const missing = phrases.filter((p) => !text.includes(p));
-    check(missing.length === 0, `${what}: library media by asset id, no network or packages, the linked audio clip, the setting decides (${JSON.stringify(missing)})`);
+    check(missing.length === 0, `${what}: library media by asset id, no network or packages, the linked audio clip, the setting decides, fonts (${JSON.stringify(missing)})`);
   }
+}
+
+// ---- S11: fonts ---------------------------------------------------------------------------------
+
+/** Two lines of the same text: the top one in loadFont(<ref>)'s family, the one below in the fallback font. */
+const FONT_TSX = (ref: string) => `import { AbsoluteFill, asset, loadFont } from "remotion";
+const { fontFamily } = loadFont(${ref});
+const line = { position: "absolute", left: 4, fontSize: 40, color: "#fff", whiteSpace: "nowrap" };
+export default function G() {
+  return (
+    <AbsoluteFill style={{ background: "#000" }}>
+      <div style={{ ...line, top: 0, fontFamily }}>Wil 1 g</div>
+      <div style={{ ...line, top: 90 }}>Wil 1 g</div>
+    </AbsoluteFill>
+  );
+}`;
+
+/** Inked pixels of the top line, and how many of them differ from the line below (the fallback font), in a 320x180 frame. */
+function glyphs(file: string): { ink: number; differ: number } {
+  const px = frameRgb(file, 0, 320, 180);
+  let ink = 0;
+  let differ = 0;
+  for (let y = 0; px.length === 320 * 180 * 3 && y < 60; y++) {
+    for (let x = 0; x < 320; x++) {
+      const a = px[(y * 320 + x) * 3 + 1];
+      const b = px[((y + 90) * 320 + x) * 3 + 1];
+      if (a > 128) ink++;
+      if (Math.abs(a - b) > 64) differ++;
+    }
+  }
+  return { ink, differ };
+}
+
+// MUTATION: leave the fonts out of renderMotion's assets (addMotionGraphicRun, engine.ts) → the glyph row fails
+// (graphic_asset_unknown). Give the page a font's path (pageAsset, motionmedia.ts) → the start-data row fails. Drop
+// `kept` (the overlay's fonts) → the stored row fails. Count the cap as > 17 → the 17 row fails; as >= 16 → the 16
+// row fails. Drop each refusal in checkGraphicFonts or graphicFontAssets → its row fails. Drop the fonts branch of
+// the add-on refusal → the add-on row fails; refuse an empty map → its row fails. Stat a font before its checks →
+// the trace row fails.
+async function s11(work: string, fx: { host: string }) {
+  console.log("S11. add_graphic's fonts for loadFont(asset(id))...");
+  const installed = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"].find((p) => existsSync(p));
+  if (!installed) return check(false, "a monospace font for S11 is installed");
+  const x = fresh(work, "s11");
+  const fontDir = join(x.dir, "zr-font-fixtures");
+  mkdirSync(fontDir);
+  const mono = join(fontDir, "zrfont-mono.ttf");
+  writeFileSync(mono, readFileSync(installed));
+  const engine = engineFor(x);
+  const host = await engine.importVideo(fx.host);
+  const clip = engine.appendClip(host.id);
+  touched.length = 0;
+  const spawnedBefore = spawned.length;
+
+  // A font file, by path: its glyphs, the page's start data, the overlay keeps the fonts.
+  const fonts = { f1: mono };
+  startLines.length = 0;
+  let r: { graphicId?: string; assetId?: string } = {};
+  const e = await thrown(async () => (r = (await dispatch(engine, "add_graphic", { clipId: clip.id, code: FONT_TSX('asset("f1")'), startFrame: 0, endFrame: 3, fonts })) as { graphicId: string; assetId: string }));
+  const baked = r.assetId ? engine.getProject().assets.find((a) => a.id === r.assetId)?.path : undefined;
+  const g1 = baked ? glyphs(baked) : { ink: 0, differ: 0 };
+  check(!e && g1.ink > 200 && g1.differ > 200, `loadFont(asset("f1")) of a .ttf path: its glyphs differ from the fallback font's (${e?.message.slice(0, 120) ?? `${g1.ink} inked pixels, ${g1.differ} differ`})`);
+  const line = startLines[0] ?? "";
+  let page: unknown = null;
+  let decoded = "";
+  try {
+    const table = (JSON.parse(line) as { table: { path: string; body: string }[] }).table;
+    decoded = table.map((t) => Buffer.from(t.body, "base64").toString("utf8")).join("\n");
+    const module = Buffer.from(table.find((t) => t.path === "module.js")!.body, "base64").toString("utf8");
+    page = JSON.parse(/__zrMotionGraphic\((\{[\s\S]*?\}), function \(require, exports, module\)/.exec(module)![1]);
+  } catch {
+    /* page stays null */
+  }
+  const f1 = (page as { assets?: Record<string, { handle?: string; kind?: string }> } | null)?.assets?.f1;
+  const leaks = [mono, "zrfont-mono", "zr-font-fixtures", fontDir].filter((s) => line.includes(s) || decoded.includes(s));
+  check(startLines.length === 1 && !!f1 && JSON.stringify(Object.keys(f1)) === '["handle","kind"]' && f1.kind === "font" && /^[0-9a-f]{32}$/.test(f1.handle ?? "") && leaks.length === 0,
+    `the page's start data holds only the font's handle and kind, and no path, file name or folder is in the start line (${JSON.stringify(f1)}; leaks ${JSON.stringify(leaks)})`);
+  const stored = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)?.graphics?.find((g) => g.id === r.graphicId);
+  check(JSON.stringify(stored?.fonts) === JSON.stringify(fonts) && stored?.code === FONT_TSX('asset("f1")'), `the overlay keeps its fonts with its code (${JSON.stringify(stored?.fonts)})`);
+
+  // 16 fonts pass (the 16th loads, by its plain id); 17 are graphic_font_cap.
+  const sixteen: Record<string, string> = {};
+  for (let i = 1; i <= 16; i++) sixteen[`f${i}`] = mono;
+  let card: { assetId?: string } = {};
+  const e16 = await thrown(async () => (card = (await dispatch(engine, "add_graphic", { code: FONT_TSX('"f16"'), durationSeconds: 0.1, fonts: sixteen })) as { assetId: string }));
+  const cardFile = card.assetId ? engine.getProject().assets.find((a) => a.id === card.assetId)?.path : undefined;
+  const g16 = cardFile ? glyphs(cardFile) : { ink: 0, differ: 0 };
+  check(!e16 && g16.ink > 200 && g16.differ > 200, `16 fonts pass, and loadFont("f16") draws the 16th: its glyphs differ from the fallback's (${e16?.message.slice(0, 120) ?? `${g16.ink} inked, ${g16.differ} differ`})`);
+
+  // The refusals: before any renderer, job or file.
+  const huge = join(fontDir, "huge.ttf");
+  writeFileSync(huge, "");
+  truncateSync(huge, 32 * 1024 * 1024 + 1);
+  const notFont = join(fontDir, "notes.txt");
+  writeFileSync(notFont, "not a font");
+  const seventeen = { ...sixteen, f17: mono };
+  const refusals: [string, Record<string, string>, (e: Error | null) => boolean][] = [
+    ["17 fonts", seventeen, (e) => (e as { code?: string } | null)?.code === "graphic_font_cap" && /at most 16 fonts/.test(e!.message)],
+    ["a relative path", { f1: "fonts/zrfont-mono.ttf" }, (e) => /fonts\.f1 "fonts\/zrfont-mono\.ttf" is not an absolute local path/.test(e?.message ?? "")],
+    ["a bare file name", { f1: "zrfont-mono.ttf" }, (e) => /is not an absolute local path/.test(e?.message ?? "")],
+    ["a server not allowed (\\\\host\\share)", { f1: `\\\\${EVIL}-1.invalid\\s\\a.ttf` }, (e) => errCode(e) === "media_server_not_approved" && (e as RpcError).details.host === `${EVIL}-1.invalid`],
+    ["a server not allowed (//host/share)", { f1: `//${EVIL}-2.invalid/s/a.ttf` }, (e) => errCode(e) === "media_server_not_approved" && (e as RpcError).details.host === `${EVIL}-2.invalid`],
+    ["a file that is no font file", { f1: notFont }, (e) => /is not a font file: use a \.ttf, \.otf, \.ttc, \.woff or \.woff2 file/.test(e?.message ?? "")],
+    ["a font file over 32 MB", { f1: huge }, (e) => (e as { code?: string } | null)?.code === "graphic_font_cap" && /is 32\.0 MB; a graphic's font file may be at most 32 MB/.test(e!.message)],
+    ["an id of a library asset", { [host.id]: mono }, (e) => new RegExp(`fonts id "${host.id}" is already an asset id in the project library`).test(e?.message ?? "")],
+    ["an id that is no plain token", { "f 1": mono }, (e) => /fonts id "f 1" is not a valid id/.test(e?.message ?? "")],
+    ["a family that is not installed", { f1: "Zr No Such Family" }, (e) => /fonts\.f1: no installed font named "Zr No Such Family" was found/.test(e?.message ?? "")],
+  ];
+  for (const [what, f, ok] of refusals) {
+    const mark = spawned.length;
+    const bakedBefore = filesUnder(join(x.data, "baked")).length;
+    const jobsBefore = graphicJobs(engine);
+    const err = await thrown(() => dispatch(engine, "add_graphic", { code: FONT_TSX('asset("f1")'), durationSeconds: 0.1, fonts: f }));
+    check(ok(err) && rendererStarts(spawned.slice(mark)) === 0 && graphicJobs(engine) === jobsBefore && filesUnder(join(x.data, "baked")).length === bakedBefore && filesUnder(join(x.data, "motion")).length === 0,
+      `${what}: refused before any renderer, job or file (${errCode(err)}: ${err?.message.slice(0, 110)})`);
+  }
+
+  // The Remotion add-on: fonts refused naming the setting; an empty map is no fonts.
+  await writeGraphicsRenderer(x.data, "remotion");
+  engine.graphicsAddon = () => ({ ok: true, root: join(x.dir, "no-remotion") });
+  engine.graphicRemotion = remotionPathStub();
+  const jobsBefore = graphicJobs(engine);
+  const ea = await thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 0.2, fonts }));
+  const msg = ea?.message ?? "";
+  check((ea as { code?: string } | null)?.code === "graphic_api_unsupported" && msg.includes("This graphic uses add_graphic's fonts") && msg.includes('the user\'s graphics renderer setting is "Remotion add-on"') && msg.includes("Help → Graphics add-on…")
+    && !msg.includes(REMOTION_PATH) && graphicJobs(engine) === jobsBefore, `on the Remotion add-on, fonts is refused naming the setting, before Remotion, no job (${msg.slice(0, 120)})`);
+  const empty = await thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 0.2, fonts: {} }));
+  check(empty?.message === REMOTION_PATH, `an empty fonts map is no fonts: it reaches Remotion (${empty?.message.slice(0, 100)})`);
+  await writeGraphicsRenderer(x.data, "zabsreel");
+
+  const evilCmds = spawned.slice(spawnedBefore).filter((c) => c.some((a) => a.includes(EVIL)));
+  check(touched.length === 0 && evilCmds.length === 0, `no file call or command named a ${EVIL} host (${JSON.stringify(touched)}; ${JSON.stringify(evilCmds)})`);
 }
 
 // ---- main -----------------------------------------------------------------------------------------
@@ -784,20 +949,21 @@ async function main() {
     if (part("S4")) await s4(work);
     if (part("S10")) s10();
     if (!LINUX) {
-      console.log("  skip S3 and S5-S9: they run Linux's Electron");
+      console.log("  skip S3, S5-S9 and S11: they run Linux's Electron");
     } else {
       if (part("S3")) await s3(work);
       if (part("S5")) await s5(work);
       if (part("S6")) await s6(work);
       if (part("S7")) await s7(work);
       const fx = { host: join(work, "host.mp4"), red: join(work, "red.png"), tone: join(work, "tone.wav") };
-      if (part("S8") || part("S9")) {
+      if (part("S8") || part("S9") || part("S11")) {
         ffmpeg(["-f", "lavfi", "-i", "color=c=0x103018:s=320x180:r=30:d=4", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", fx.host]);
         ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-frames:v", "1", fx.red]);
         ffmpeg(["-f", "lavfi", "-i", "sine=frequency=440:duration=3:sample_rate=48000", "-af", "volume=0.2", "-ac", "2", "-c:a", "pcm_s16le", fx.tone]);
       }
       if (part("S8")) await s8(work, fx.host);
       if (part("S9")) await s9(work, fx);
+      if (part("S11")) await s11(work, fx);
     }
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5 });

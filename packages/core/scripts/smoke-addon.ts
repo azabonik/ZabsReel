@@ -1029,9 +1029,11 @@ async function c7() {
   const paths = [join(graphicsAddonDir(dataDir), "x.aive"), join(dataDir, "addons", "x.aive"), join(dataDir, "addons"), ...(WIN32 ? [] : [join(link, "remotion", "x.aive")])];
   for (const [m, ps] of Object.entries(RPC_PATH_PARAMS)) {
     for (const p of ps) {
-      const key = p.replace("[]", "");
+      const key = p.replace(/\[\]$|\{\}$/, "");
       for (const path of paths) {
-        const params = { ...minimal(methods[m as keyof typeof methods].schema), [key]: p.endsWith("[]") ? [path] : path };
+        // A list ("paths[]") or a map ("fonts{}") holds the path; add_graphic needs code or a template before its fonts are read.
+        const value = p.endsWith("[]") ? [path] : p.endsWith("{}") ? { f1: path } : path;
+        const params = { ...minimal(methods[m as keyof typeof methods].schema), ...(m === "add_graphic" ? { template: "title" } : {}), [key]: value };
         if (m === "remember_projects") {
           const r = (await dispatch(engine, m, params)) as { added: unknown[]; skipped: { reason: string }[] };
           check(r.added.length === 0 && r.skipped.length === 1 && r.skipped[0].reason === "in ZabsReel's graphics add-on folder", `remember_projects skips ${path} (${JSON.stringify(r.skipped)})`);

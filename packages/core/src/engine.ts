@@ -5,7 +5,7 @@ import { join, dirname, basename, extname, isAbsolute, relative, resolve, sep, w
 import { randomBytes } from "node:crypto";
 import { newId } from "./ids.js";
 import { PRODUCT_NAME } from "./brand.js";
-import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, assertPathUsable, isProtocolLike } from "./safepath.js";
+import { safeFileStem, sanitizeProjectIds, coerceProjectNumbers, coerceProjectValues, assertProjectMediaLocal, assertLocalMediaPath, assertPathUsable, isPlainToken, isProtocolLike, looksLikeProtocol } from "./safepath.js";
 import { JobManager, type Job } from "./jobs.js";
 import { pruneDataDir } from "./gc.js";
 import { StorageJanitor } from "./storage.js";
@@ -52,7 +52,7 @@ import { bakeReversed, bakeSmoothSlow, grabFrame, probeFrameClock, probeVideoFor
 import { alphaProxyArgs, cutoutColorInputArgs, cutoutMergeFilter, type CutoutMerge } from "./ffmpeg/cutout.js";
 import { graphicPreviewProxy, renderGraphic, tagGraphicColor, type GraphicRemotion } from "./motion/render.js";
 import { motionOnlyUse } from "./motion/graphicmodule.js";
-import { requireOnline, type MotionAsset } from "./motion/motionmedia.js";
+import { MEDIA_CAPS, type MotionAsset, type MotionFontAsset } from "./motion/motionmedia.js";
 import { MotionRenderError, probeMotionRenderer, RendererUnavailableError, renderMotion, type ProbeResult, type RendererUnavailableReason } from "./motion/rendermotion.js";
 import { rendererBinary, type RendererBinary } from "./motion/rendererbinary.js";
 import { readGraphicsRenderer, type GraphicsRenderer } from "./addon/renderer.js";
@@ -380,7 +380,15 @@ export interface GraphicOptions {
   endFrame?: number;
   opacity?: number;
   standalone?: boolean;
+  /**
+   * Fonts the graphic loads with loadFont(asset("<id>")) (ZabsReel's renderer
+   * only): id -> an installed family name or the path of a font file.
+   */
+  fonts?: Record<string, string>;
 }
+
+/** The font files add_graphic's `fonts` may name. */
+const GRAPHIC_FONT_FILE = /\.(ttf|otf|ttc|woff2?)$/i;
 
 /** Options for {@link EditorEngine.bleepWords}. */
 export interface BleepOptions {
@@ -4722,11 +4730,7 @@ export class EditorEngine extends EventEmitter {
       // Backstop for G5: a font on a server not allowed, in a refused form or
       // in a folder that could not be checked is never opened, and never
       // silently replaced by the default font either.
-      const offline = this.sidePathOffline(s);
-      if (offline) {
-        const why = offline.refused ? `is a path ${PRODUCT_NAME} never opens` : offline.code ? `is in a folder that couldn't be checked (${offline.code})` : `is on \\\\${offline.host}, which hasn't been allowed`;
-        throw new MediaOfflineError(`Font ${JSON.stringify(s)} ${why}.`, offline.host ? [offline.host] : []);
-      }
+      this.requireFontOnline(s);
       if (isAbsolute(s) && (await fileExists(s))) srcPath = s;
       else srcPath = await findSystemFont(s);
     }
@@ -4744,6 +4748,14 @@ export class EditorEngine extends EventEmitter {
       cache.set(key, defaultBare);
       return defaultBare;
     }
+  }
+
+  /** G5 for a font file: a MediaOfflineError when it is on a server not allowed, in a refused form or in a folder that could not be checked. */
+  private requireFontOnline(s: string): void {
+    const offline = this.sidePathOffline(s);
+    if (!offline) return;
+    const why = offline.refused ? `is a path ${PRODUCT_NAME} never opens` : offline.code ? `is in a folder that couldn't be checked (${offline.code})` : `is on \\\\${offline.host}, which hasn't been allowed`;
+    throw new MediaOfflineError(`Font ${JSON.stringify(s)} ${why}.`, offline.host ? [offline.host] : []);
   }
 
   /** Copy a usable font into the render dir as font.ttf. */
@@ -4849,11 +4861,11 @@ export class EditorEngine extends EventEmitter {
   }
 
   /** G2 for a style.font that names a file (resolveFont opens an absolute path; a family name is looked up, never opened). */
-  private assertFontNotPrivate(font: unknown): void {
+  private assertFontNotPrivate(font: unknown, field = "style.font"): void {
     if (typeof font !== "string") return;
     const f = font.trim();
-    this.trust.requirePath(f, "style.font");
-    if (isAbsolute(f) || classifyPath(f).kind === "network") this.trust.assertNotPrivate(f, "style.font");
+    this.trust.requirePath(f, field);
+    if (isAbsolute(f) || classifyPath(f).kind === "network") this.trust.assertNotPrivate(f, field);
   }
 
   /** Add a burned-in text overlay (title / lower-third) to a clip. */
@@ -6581,22 +6593,26 @@ export class EditorEngine extends EventEmitter {
    * renderer unavailable (graphic_renderer_unavailable, its reason), or no
    * ready add-on (a GraphicsAddonError, which, like a render that finds the
    * add-on broken, tells the UI clients: "graphics-addon"), or a graphic
-   * that needs ZabsReel's renderer on the add-on path.
+   * that needs ZabsReel's renderer on the add-on path (its `fonts` too).
+   * `fonts` is checked first, on either path (checkGraphicFonts).
    */
   async addGraphic(
     clipId: string | undefined,
     opts: GraphicOptions,
   ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset; audioClip?: Clip }> {
+    const fonts = this.checkGraphicFonts(opts.fonts);
     if (this.graphicsRenderer() === "zabsreel") {
+      const fontAssets = await this.graphicFontAssets(fonts);
       const binary = await this.motionReady();
-      const { promise } = this.jobs.start("graphic", "Render motion graphic", (signal, onProgress) => this.addMotionGraphicRun(clipId, opts, binary, signal, onProgress));
+      const { promise } = this.jobs.start("graphic", "Render motion graphic", (signal, onProgress) => this.addMotionGraphicRun(clipId, opts, fontAssets, binary, signal, onProgress));
       return promise;
     }
-    const uses = motionOnlyUse(opts.code);
+    const uses = fonts.length > 0 ? "fonts" : motionOnlyUse(opts.code);
     if (uses) {
+      const what = uses === "fonts" ? "add_graphic's fonts" : uses === "@aive/motion" ? "@aive/motion" : `${uses}()`;
       throw new MotionRenderError(
         "graphic_api_unsupported",
-        `This graphic uses ${uses === "@aive/motion" ? "@aive/motion" : `${uses}()`}, which only ${PRODUCT_NAME}'s own graphics renderer has, and the user's graphics renderer setting is "Remotion add-on". Write the graphic without it, or ask the user to choose ${PRODUCT_NAME}'s renderer in the ${PRODUCT_NAME} window (Help → Graphics add-on…, Graphics renderer).`,
+        `This graphic uses ${what}, which only ${PRODUCT_NAME}'s own graphics renderer has, and the user's graphics renderer setting is "Remotion add-on". Write the graphic without it, or ask the user to choose ${PRODUCT_NAME}'s renderer in the ${PRODUCT_NAME} window (Help → Graphics add-on…, Graphics renderer).`,
       );
     }
     const told = (err: unknown): never => {
@@ -6609,6 +6625,65 @@ export class EditorEngine extends EventEmitter {
       this.addGraphicRun(clipId, opts, addon, signal),
     );
     return promise.catch(told);
+  }
+
+  /**
+   * add_graphic's `fonts`, before anything is opened: at most 16 (D4's
+   * graphic_font_cap); each id a plain token (as asset ids are) that names
+   * no library asset; each value through add_text's font rules (unc.ts's
+   * refusals, a server not allowed, the private folders). A value that looks
+   * like a file (a slash or backslash, a drive letter, a URL, a font file's
+   * extension) is a font file: an absolute local path to a .ttf, .otf, .ttc,
+   * .woff or .woff2; anything else is an installed family name.
+   */
+  private checkGraphicFonts(fonts: Record<string, string> | undefined): { id: string; file?: string; family?: string }[] {
+    const entries = Object.entries(fonts ?? {});
+    const cap = MEDIA_CAPS.fonts;
+    if (entries.length > cap) throw new MotionRenderError("graphic_font_cap", `add_graphic's fonts has ${entries.length} entries; a graphic may load at most ${cap} fonts.`);
+    return entries.map(([id, raw]) => {
+      const field = `fonts.${id}`;
+      if (!isPlainToken(id) || id === "__proto__") throw new Error(`fonts id ${JSON.stringify(id)} is not a valid id: use letters, digits, "_" and "-" (at most 64), as asset ids are.`);
+      if (this.project.assets.some((a) => a.id === id)) throw new Error(`fonts id "${id}" is already an asset id in the project library, so asset("${id}") would be ambiguous. Use another id.`);
+      const v = typeof raw === "string" ? raw.trim() : "";
+      if (!v) throw new Error(`${field} is empty: give an installed font family name or the absolute path of a font file.`);
+      assertPathUsable(v, field);
+      this.assertFontNotPrivate(v, field);
+      if (!/[\\/]/.test(v) && !/^[A-Za-z]:/.test(v) && !looksLikeProtocol(v) && !GRAPHIC_FONT_FILE.test(v)) return { id, family: v };
+      assertLocalMediaPath(v, field);
+      if (!GRAPHIC_FONT_FILE.test(v)) throw new Error(`${field} "${v}" is not a font file: use a .ttf, .otf, .ttc, .woff or .woff2 file.`);
+      return { id, file: v };
+    });
+  }
+
+  /**
+   * The checked fonts as the render's font assets (motionmedia.ts; the page
+   * learns only a handle for each): a family name resolved to its installed
+   * file, as add_text resolves one (none found is refused, never replaced),
+   * each file online (G5), a file, and at most 32 MB (graphic_font_cap).
+   */
+  private async graphicFontAssets(fonts: { id: string; file?: string; family?: string }[]): Promise<Record<string, MotionFontAsset>> {
+    const out: Record<string, MotionFontAsset> = {};
+    const max = MEDIA_CAPS.fontBytes;
+    for (const { id, file, family } of fonts) {
+      const path = file ?? (await findSystemFont(family!));
+      if (!path) {
+        throw new Error(`fonts.${id}: no installed font named "${family}" was found. Give the path of its font file, or use an installed family by name in the graphic's CSS (fontFamily) without fonts.`);
+      }
+      this.requireFontOnline(path);
+      let size: number;
+      try {
+        const st = await stat(path);
+        if (!st.isFile()) throw Object.assign(new Error("not a file"), { code: "EISDIR" });
+        size = st.size;
+      } catch (err) {
+        throw new Error(`fonts.${id} "${path}" can't be read (${(err as NodeJS.ErrnoException).code ?? (err as Error).message}). Check the path.`);
+      }
+      if (size > max) {
+        throw new MotionRenderError("graphic_font_cap", `The font "${id}" is ${(size / 1024 / 1024).toFixed(1)} MB; a graphic's font file may be at most ${max / 1024 / 1024} MB. Use a smaller font file (one weight, or a subset).`);
+      }
+      out[id] = { kind: "font", path, name: id };
+    }
+    return out;
   }
 
   /** Where and how long a new graphic is, and its files' names (both renderers). */
@@ -6660,15 +6735,17 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * add_graphic on ZabsReel's own renderer (D7): renderMotion with the
-   * project library as the graphic's asset table (the page sees only opaque
-   * handles, motionmedia.ts) and the engine's own offline check, then the
-   * baked file as a clip, or as an overlay with its sound (if it has any) as
-   * a linked audio clip (attachGraphic). A renderer that fails to start sets
-   * the cached state (graphicsState) to unavailable with its reason.
+   * project library and the graphic's `fonts` as its asset table (the page
+   * sees only opaque handles, motionmedia.ts) and the engine's own offline
+   * checks, then the baked file as a clip, or as an overlay with its sound
+   * (if it has any) as a linked audio clip (attachGraphic). A renderer that
+   * fails to start sets the cached state (graphicsState) to unavailable with
+   * its reason.
    */
   private async addMotionGraphicRun(
     clipId: string | undefined,
     opts: GraphicOptions,
+    fonts: Record<string, MotionFontAsset>,
     binary: RendererBinary,
     signal: AbortSignal,
     onProgress: (fraction: number) => void,
@@ -6686,8 +6763,8 @@ export class EditorEngine extends EventEmitter {
         workDir: g.workDir,
         outPath: g.outPath,
         previewPath: g.asNewClip ? undefined : join(g.bakedDir, `${g.id}-graphic.webm`),
-        assets: Object.fromEntries(this.project.assets.map((a) => [a.id, a])),
-        requireMedia: (a: MotionAsset) => ("kind" in a ? requireOnline(a) : void this.requireMedia(a)),
+        assets: { ...Object.fromEntries(this.project.assets.map((a) => [a.id, a])), ...fonts },
+        requireMedia: (a: MotionAsset) => ("kind" in a ? this.requireFontOnline(a.path) : void this.requireMedia(a)),
         binary,
         env: this.motionRenderer.env,
         signal,
@@ -6706,7 +6783,8 @@ export class EditorEngine extends EventEmitter {
     if (g.asNewClip) return this.placeGraphicClip(clipId, baked);
     const sound = r.audioPath ? await probeAsset(r.audioPath) : undefined;
     if (sound) sound.name = "Motion graphic sound";
-    return this.attachGraphic(clipId!, { id: g.id, assetId: baked.id, startFrame: g.startFrame, endFrame: g.endFrame, opacity: opts.opacity, code: opts.code, props: opts.props }, baked, sound);
+    const kept = Object.keys(fonts).length > 0 ? { fonts: opts.fonts } : {};
+    return this.attachGraphic(clipId!, { id: g.id, assetId: baked.id, startFrame: g.startFrame, endFrame: g.endFrame, opacity: opts.opacity, code: opts.code, props: opts.props, ...kept }, baked, sound);
   }
 
   /** add_graphic on the Remotion add-on, as before ZabsReel's renderer (F2's refusals stay). */
