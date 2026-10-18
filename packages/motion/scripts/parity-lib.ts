@@ -8,6 +8,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEADLESS_SHELL } from "../../core/src/motion/addonlock.js";
@@ -230,15 +231,23 @@ export function versions() {
   return { remotion: REMOTION_VERSION, headlessShell: { pinned: HEADLESS_SHELL.version, installed: shell, path: SHELL }, electron, ffmpeg };
 }
 
+/** This process runs in the harness's private network namespace: NETNS is set and loopback is the only interface (`nics`: the interfaces' names). */
+export function offline(nics = Object.keys(networkInterfaces())): boolean {
+  return process.env[NETNS] === "1" && nics.join() === "lo";
+}
+
 /**
  * Linux only. Re-executes `script` with `args` in a private network namespace
  * (loopback only) when unshare allows it, so nothing it starts can reach a real
  * host, and returns that run's exit code; null when this process already runs
- * in one, or (without --require-netns) when unshare fails.
+ * in one (offline(): NETNS alone is not enough), or (without --require-netns)
+ * when unshare fails. NETNS set with other interfaces than loopback throws under
+ * --require-netns.
  */
-export function inPrivateNetns(script: string, args: string[]): number | null {
+export function inPrivateNetns(script: string, args: string[], nics = Object.keys(networkInterfaces())): number | null {
   if (process.platform !== "linux") throw new Error("the parity harness runs on Linux only");
-  if (process.env[NETNS]) return null;
+  if (offline(nics)) return null;
+  if (process.env[NETNS] && args.includes("--require-netns")) throw new Error(`--require-netns: ${NETNS} is set but the interfaces are ${nics.join(", ")}, not loopback only`);
   const ns = ["--user", "--map-current-user", "--net", "--keep-caps", "sh", "-c"];
   if (spawnSync("unshare", [...ns, "ip link set lo up"], { stdio: "ignore" }).status === 0) {
     const r = spawnSync("unshare", [...ns, 'ip link set lo up && exec setpriv --inh-caps=-all --ambient-caps=-all "$0" "$@"', process.execPath, ...process.execArgv, script, ...args], {

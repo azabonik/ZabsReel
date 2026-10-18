@@ -56,7 +56,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
+import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, offline, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
 
 const SELF = fileURLToPath(import.meta.url);
 const CASES = join(REPO, "packages", "motion", "parity", "compositions");
@@ -374,7 +374,7 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   writeFileSync(throws, ["// size: 64x48", "// fps: 30", "// durationInFrames: 2", "// frames: 0, 1", "// spec: self-test", "// why: a composition both pipelines refuse", "export default function Throws(): never {", '  throw new Error("parity self-test");', "}", ""].join("\n"));
   const refOut = join(out, "refused");
   const refRun: Run = { out: refOut, scratch, sides: { reference: "reference", zabsreel: "zabsreel" } };
-  const code = await parity(refRun, scratch, ["throws.tsx"], process.env[NETNS] === "1");
+  const code = await parity(refRun, scratch, ["throws.tsx"], offline());
   const mis4 = readRows(join(refOut, "render-mismatches.jsonl"));
   const summary4 = JSON.parse(readFileSync(join(refOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; cases: CaseResult[] };
   check(code === 2, `the run exits 2 (it exited ${code})`);
@@ -388,7 +388,7 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   writeFileSync(join(driftDir, "drift.tsx"), ["// size: 64x48", "// fps: 30", "// durationInFrames: 2", "// frames: 0, 1", "// spec: self-test", "// why: a composition only the reference side refuses", 'import React from "react";', "export default function Drift() {", '  return <div style={{ position: "absolute", inset: 0, backgroundColor: "#204060" }} />;', "}", ""].join("\n"));
   const driftOut = join(out, "drift");
   const driftRun: Run = { ...refRun, out: driftOut, sourceA: (tsx) => tsx.replace("  return <div", '  throw new Error("parity self-test drift");\n  return <div') };
-  const code4b = await parity(driftRun, driftDir, undefined, process.env[NETNS] === "1");
+  const code4b = await parity(driftRun, driftDir, undefined, offline());
   const mis4b = readRows(join(driftOut, "render-mismatches.jsonl"));
   const summary4b = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zabsreelFailed: string[]; cases: CaseResult[] };
   check(code4b === 2, `the run exits 2 (it exited ${code4b})`);
@@ -423,7 +423,7 @@ async function main(): Promise<number> {
   try {
     if (args.includes("--self-test")) return await selfTest(resolve(out), scratch);
     const only = arg("only")?.split(",");
-    return await parity({ out: resolve(out), scratch, sides: { reference: "reference", zabsreel: "zabsreel" } }, resolve(arg("cases") ?? CASES), only, process.env[NETNS] === "1");
+    return await parity({ out: resolve(out), scratch, sides: { reference: "reference", zabsreel: "zabsreel" } }, resolve(arg("cases") ?? CASES), only, offline());
   } finally {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
   }

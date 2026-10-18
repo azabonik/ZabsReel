@@ -32,7 +32,11 @@
  *    started through a wrapper that adds --mute-audio; its server takes a
  *    port in 5030-5039; the render keeps its sound (not Remotion's muted).
  *  - zabsreel: renderMotion with the graphic {source, props: {}} and the
- *    fixtures as the project library describes them (probeAsset), keyed by id.
+ *    fixtures as the project library describes them (probeAsset), keyed by id;
+ *    rendered twice (the repeat: the same job in its own child), because its
+ *    frames of library media are not always the same from one render to the
+ *    next (finding ZR-MEDIA-SETTLE: a frame captured before the requested
+ *    source frame is painted, blank or a neighbouring source frame).
  * Both render every frame as an overlay (ProRes 4444 with alpha). Frames: the
  * header's frames, compared as parity-render.ts does (D8: pct_within_4 >= 99.5
  * and max_diff <= 32). Audio, for `audio: yes`: the reference's sound track and
@@ -54,36 +58,50 @@
  *  under a third of a frame at 60 fps (16.7 ms) and a sixth at 30 fps, so a
  *  whole-frame timing difference always fails, while encoder delays the
  *  decoders remove and resampler delays (under 1 ms) pass.
+ * Repeatability: each frame of ZabsReel's render is compared with the same
+ * frame of its repeat, and its sound with the repeat's. A frame that is not
+ * pixel-identical (or a sound that is not 0/0) is "zabsreel nondeterministic":
+ * its row carries exactly that actual whatever the reference shows, since one
+ * sample of a random output says nothing about a behaviour difference.
  *
  * Writes to --out: render-all.jsonl / render-mismatches.jsonl (frame rows) and
  * audio-all.jsonl / audio-mismatches.jsonl (one audio row per composition and
  * size), each row exactly {case, function, size, input, metric, expected,
  * actual, spec, why} (R-PARITY-SCHEMA: never the reference's error text; a
  * composition the reference fails to render is "reference refused (drift
- * candidate)" in its frame and audio rows); images/<case>/<size>/ with the two
- * decoded frames and a heatmap of each failing frame, and audio.json with both
- * sides' window levels and edges (for the orchestrator only); render-summary.json
- * with every metric, the fixtures (sha256 and probe), the media baseline
+ * candidate)" in its frame and audio rows; a "zabsreel nondeterministic" row is
+ * in the -all file only, never in a -mismatches file, so it never reaches a
+ * feedback round); images/<case>/<size>/ with the two decoded frames and a
+ * heatmap of each failing or nondeterministic frame (and the repeat's frame of
+ * the latter), and audio.json with each side's window levels and edges (for the
+ * orchestrator only); render-summary.json with every metric (each frame's and
+ * sound's repeat metric too), zabsreelRepeat (the ZabsReel-against-ZabsReel
+ * noise floor and every nondeterministic frame and sound), the fixtures (sha256 and probe), the media baseline
  * (offthread-plain, video-plain, img-sizes: plain mapping and sizing, so their
  * numbers show how far the two decodes of the same pictures differ), timing,
  * the error texts and the versions.
  *
  * Exit: 0 every frame and audio row passes; 2 a pipeline could not render a
  * composition (named on stderr; the other rows are still written); 3 every
- * composition rendered and some rows fail; 1 the harness itself failed.
+ * composition rendered and some rows fail or are nondeterministic; 1 the harness
+ * itself failed.
  *
- * --self-test (to --out): the run is offline (only loopback); referenceSource
+ * --self-test (to --out): the run is offline (only loopback; the NETNS variable
+ * alone is not taken for it); referenceSource
  * rewrites; compareAudio() on known signals; the fixtures are generated twice
  * with equal sha256 and probe as FIXTURES.md lists them (img_c with alpha), with every frame
  * distinct from its neighbours and the beeps where they belong; no sound file
  * or no sound track is silence; a self-test
  * composition (video, image, beeps) rendered through ZabsReel on both sides
- * passes with 100/0 frames and 0/0 audio; with a brighter background and half
- * the volume on the second side only, every frame and the audio row fail, each
- * side's image shows its own background and each side's level is its own; the
+ * passes with 100/0 frames and 0/0 audio, its repeat identical; with a brighter
+ * background and half the volume on the second side (and its repeat) only,
+ * every frame and the audio row fail, nothing is nondeterministic, each side's
+ * image shows its own background and each side's level is its own; the
  * same composition through the real reference has the beeps where they belong,
  * and its browser ran with --mute-audio; one only the reference side refuses is
- * exactly "reference refused (drift candidate)" in every row.
+ * exactly "reference refused (drift candidate)" in every row; one whose repeat
+ * alone differs is "zabsreel nondeterministic" in every row, in no mismatches
+ * file, listed in the summary, and exits 3.
  *
  * Linux only; the whole run re-executes itself in a private network namespace
  * (loopback only). Needs `npm run build` (dist/zr-runtime.js) and FFmpeg with
@@ -103,12 +121,16 @@ import { fileURLToPath } from "node:url";
 import type { bundle as Bundle } from "@remotion/bundler";
 import type { renderMedia as RenderMedia } from "@remotion/renderer";
 import type { MediaAsset } from "../../core/src/types.js";
-import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
+import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, type Metrics, NETNS, offline, type Outcome, parseHeader, REPO, RULE, runPipeline, SHELL, versions, writePng } from "./parity-lib.js";
 
 const SELF = fileURLToPath(import.meta.url);
 const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
 /** Cases of plain mapping and sizing, reported apart as the media baseline. */
 const BASELINE = ["offthread-plain.tsx", "video-plain.tsx", "img-sizes.tsx"];
+/** A row whose ZabsReel frame or sound differs between two renders of the same job. */
+export const NONDET = "zabsreel nondeterministic";
+/** The finding behind NONDET, as the summary names it. */
+const SETTLE = "ZR-MEDIA-SETTLE: ZabsReel's renderer sometimes captures a frame of library media (OffthreadVideo/Video; frame 0 most often) before the requested source frame is painted: a blank frame or a neighbouring source frame, different from one render to the next. For the renderer/media slice that settles frames (MOTION-PLAN D4: the delayRender handle held until the frame is painted).";
 
 type Pipeline = "reference" | "zabsreel";
 
@@ -491,8 +513,11 @@ interface SizeResult {
   size: string;
   reference: Side;
   zabsreel: Side;
-  frames: ({ frame: number } & Metrics)[];
-  audio?: Omit<AudioMetrics, "pass"> & { pass: boolean };
+  /** ZabsReel's second render of the same job. */
+  repeat: Side;
+  /** repeat: this frame against the repeat's; nondeterministic: they differ at all. */
+  frames: ({ frame: number; repeat: Metrics; nondeterministic: boolean } & Metrics)[];
+  audio?: AudioMetrics & { repeat: AudioMetrics; nondeterministic: boolean };
   /** A decode failure after both rendered. */
   error?: string;
 }
@@ -502,7 +527,7 @@ interface CaseResult {
   spec: string;
   why: string;
   audio: boolean;
-  status: "pass" | "mismatch" | typeof DRIFT | "zabsreel failed" | "harness error";
+  status: "pass" | typeof NONDET | "mismatch" | typeof DRIFT | "zabsreel failed" | "harness error";
   sizes: SizeResult[];
 }
 
@@ -516,6 +541,8 @@ interface Run {
   /** Self-test: change one side's composition before it renders (the header is read from the original). */
   sourceA?: (tsx: string) => string;
   sourceB?: (tsx: string) => string;
+  /** Self-test: change the repeat's source (after sourceB) before it renders. */
+  sourceRepeat?: (tsx: string) => string;
 }
 
 const FILES = ["render-all.jsonl", "render-mismatches.jsonl", "audio-all.jsonl", "audio-mismatches.jsonl"];
@@ -544,49 +571,61 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
     const size = `${w}x${h}`;
     const job = { source, width: w, height: h, fps: header.fps, durationInFrames: header.durationInFrames, fixtures: run.fixtures, library: run.library };
     const tag = `${name.replace(/\.tsx$/, "")}-${size}`;
-    const [a, b] = await Promise.all([
+    const sourceB = run.sourceB?.(source) ?? source;
+    const [a, b, c] = await Promise.all([
       runPipeline(SELF, run.scratch, `${tag}-a`, { ...job, source: run.sourceA?.(source) ?? source, pipeline: run.sides.reference }),
-      runPipeline(SELF, run.scratch, `${tag}-b`, { ...job, source: run.sourceB?.(source) ?? source, pipeline: run.sides.zabsreel }),
+      runPipeline(SELF, run.scratch, `${tag}-b`, { ...job, source: sourceB, pipeline: run.sides.zabsreel }),
+      runPipeline(SELF, run.scratch, `${tag}-c`, { ...job, source: run.sourceRepeat?.(sourceB) ?? sourceB, pipeline: run.sides.zabsreel }),
     ]);
     const reference: Side = { ...a, browserArgs: browserArgs(a) };
     const zabsreel: Side = { ...b, browserArgs: browserArgs(b) };
-    const sized: SizeResult = { size, reference, zabsreel, frames: [] };
+    const sized: SizeResult = { size, reference, zabsreel, repeat: { ...c, browserArgs: browserArgs(c) }, frames: [] };
     result.sizes.push(sized);
     const row = (n: number, actual: string): Row => ({ case: name, function: "render", size, input: `frame ${n}`, metric: "pct_within_4/max_diff", expected: `D8: >=${RULE.pct} / <=${RULE.max}`, actual, spec: header.spec, why: header.why });
     const audioRow = (actual: string): Row => ({ case: name, function: "audio", size, input: `audio 0-${header.durationInFrames - 1}`, metric: "rms_db_max_diff/onset_ms_max_diff", expected: AUDIO_EXPECTED, actual, spec: header.spec, why: header.why });
     let failed: string | undefined;
-    if (!a.ok) failed = b.ok ? DRIFT : `${DRIFT}; zabsreel failed: ${b.code ?? "error"}`;
-    else if (!b.ok) failed = `zabsreel failed: ${b.code ?? "error"}`;
+    // Either ZabsReel render failing is a ZabsReel failure (the summary's zabsreel and repeat say which).
+    const zf = !b.ok ? b : !c.ok ? c : undefined;
+    if (!a.ok) failed = zf ? `${DRIFT}; zabsreel failed: ${zf.code ?? "error"}` : DRIFT;
+    else if (zf) failed = `zabsreel failed: ${zf.code ?? "error"}`;
     const dir = join(run.out, "images", name.replace(/\.tsx$/, ""), size);
-    if (!failed && a.ok && b.ok) {
+    if (!failed && a.ok && b.ok && c.ok) {
       try {
         const fa = decodeFrames(a.mov, w, h, header.frames);
         const fb = decodeFrames(b.mov, w, h, header.frames);
+        const fc = decodeFrames(c.mov, w, h, header.frames);
         for (const n of header.frames) {
           const m = compare(fa.get(n)!, fb.get(n)!);
-          sized.frames.push({ frame: n, ...m });
-          const r = row(n, fmt(m));
+          const again = compare(fb.get(n)!, fc.get(n)!);
+          const nondeterministic = again.max_diff > 0;
+          sized.frames.push({ frame: n, ...m, repeat: again, nondeterministic });
+          const r = row(n, nondeterministic ? NONDET : fmt(m));
           rows.push(r);
-          if (!m.pass) {
-            mismatches.push(r);
+          if (!m.pass && !nondeterministic) mismatches.push(r);
+          if (!m.pass || nondeterministic) {
             writePng(join(dir, `frame-${n}-reference.png`), fa.get(n)!, w, h);
             writePng(join(dir, `frame-${n}-zabsreel.png`), fb.get(n)!, w, h);
             writePng(join(dir, `frame-${n}-diff.png`), heatmap(fa.get(n)!, fb.get(n)!), w, h);
           }
+          if (nondeterministic) writePng(join(dir, `frame-${n}-zabsreel-repeat.png`), fc.get(n)!, w, h);
         }
         if (header.audio) {
           const samples = Math.round((header.durationInFrames / header.fps) * AUDIO_RULE.rate);
           const sa = decodeAudio(a.audio, samples);
           const sb = decodeAudio(b.audio, samples);
+          const sc = decodeAudio(c.audio, samples);
           reference.channels = sa.channels;
           zabsreel.channels = sb.channels;
+          sized.repeat.channels = sc.channels;
           const m = compareAudio(sa.pcm, sb.pcm);
-          sized.audio = m;
-          const r = audioRow(fmtAudio(m));
+          const again = compareAudio(sb.pcm, sc.pcm);
+          const nondeterministic = !(again.rms_db_max_diff === 0 && again.onset_ms_max_diff === 0);
+          sized.audio = { ...m, repeat: again, nondeterministic };
+          const r = audioRow(nondeterministic ? NONDET : fmtAudio(m));
           audioRows.push(r);
-          if (!m.pass) audioMismatches.push(r);
+          if (!m.pass && !nondeterministic) audioMismatches.push(r);
           mkdirSync(dir, { recursive: true });
-          writeFileSync(join(dir, "audio.json"), JSON.stringify({ windowMs: AUDIO_RULE.windowMs, metrics: m, reference: sa.pcm.map(levels), zabsreel: sb.pcm.map(levels) }) + "\n");
+          writeFileSync(join(dir, "audio.json"), JSON.stringify({ windowMs: AUDIO_RULE.windowMs, metrics: sized.audio, reference: sa.pcm.map(levels), zabsreel: sb.pcm.map(levels), repeat: sc.pcm.map(levels) }) + "\n");
         }
       } catch (err) {
         sized.error = (err as Error).message;
@@ -605,14 +644,16 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
         audioMismatches.push(r);
       }
     }
-    for (const o of [a, b]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
-    const allPass = sized.frames.every((f) => f.pass) && (!sized.audio || sized.audio.pass);
-    const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zabsreel failed" : allPass ? "pass" : "mismatch";
-    const rank = ["pass", "mismatch", "zabsreel failed", DRIFT, "harness error"];
+    for (const o of [a, b, c]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
+    const random = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].filter((x) => x.nondeterministic);
+    const differ = [...sized.frames, ...(sized.audio ? [sized.audio] : [])].some((x) => !x.pass && !x.nondeterministic);
+    const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zabsreel failed" : differ ? "mismatch" : random.length ? NONDET : "pass";
+    const rank = ["pass", NONDET, "mismatch", "zabsreel failed", DRIFT, "harness error"];
     if (rank.indexOf(status) > rank.indexOf(result.status)) result.status = status;
     const worst = sized.frames.length ? `min pct ${Math.min(...sized.frames.map((f) => f.pct_within_4))}, max diff ${Math.max(...sized.frames.map((f) => f.max_diff))}` : failed;
     const sound = sized.audio ? `; audio ${fmtAudio(sized.audio)}` : "";
-    console.log(`  ${name} ${size}: ${worst}${sound} (${run.sides.reference} ${(a.ms / 1000).toFixed(1)} s, ${run.sides.zabsreel} ${(b.ms / 1000).toFixed(1)} s)`);
+    const nd = random.length ? `; ${random.length} ${NONDET}` : "";
+    console.log(`  ${name} ${size}: ${worst}${sound}${nd} (${run.sides.reference} ${(a.ms / 1000).toFixed(1)} s, ${run.sides.zabsreel} ${(b.ms / 1000).toFixed(1)} s and ${(c.ms / 1000).toFixed(1)} s)`);
   }
   rowsFile(run, "render-all.jsonl", rows);
   rowsFile(run, "render-mismatches.jsonl", mismatches);
@@ -669,6 +710,9 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
   const count = (s: CaseResult["status"]) => results.filter((r) => r.status === s).map((r) => r.case);
   const frames = results.flatMap((r) => r.sizes.flatMap((s) => s.frames));
   const sounds = results.flatMap((r) => r.sizes.flatMap((s) => (s.audio ? [s.audio] : [])));
+  const random = results.flatMap((r) =>
+    r.sizes.filter((s) => s.frames.some((f) => f.nondeterministic) || s.audio?.nondeterministic).map((s) => ({ case: r.case, size: s.size, frames: s.frames.filter((f) => f.nondeterministic).map((f) => f.frame), audio: !!s.audio?.nondeterministic })),
+  );
   const summary = {
     rule: `D8: pct_within_4 >= ${RULE.pct} and max_diff <= ${RULE.max} (per pixel and channel, RGBA 8-bit, both ProRes 4444 files decoded by the same FFmpeg)`,
     audioRule: `${AUDIO_EXPECTED}; both sides decoded by the same FFmpeg to ${AUDIO_RULE.rate} Hz stereo; a start or end of sound: a sample above ${AUDIO_RULE.threshold} after or before ${AUDIO_RULE.gapMs} ms below it; windows at and next to one are left out of the level metric. Why: 1 dB is about the smallest audible level difference; 5 ms is under a third of a frame at 60 fps, so a whole-frame timing difference always fails.`,
@@ -678,14 +722,26 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     fixtures: run.fixtures.map((f) => ({ id: f.id, file: basename(f.file), sha256: f.sha256, bytes: f.bytes, probe: run.library[f.id] && { ...run.library[f.id], path: undefined, id: undefined, addedAt: undefined } })),
     seconds: Math.round((Date.now() - t0) / 1000),
     mediaBaseline: baseline(results),
+    // ZabsReel against its own repeat: the noise floor of its side (each frame's and sound's repeat metric is in cases).
+    zabsreelRepeat: {
+      finding: SETTLE,
+      framesCompared: frames.length,
+      framesIdentical: frames.filter((f) => !f.nondeterministic).length,
+      audioCompared: sounds.length,
+      audioIdentical: sounds.filter((s) => !s.nondeterministic).length,
+      nondeterministic: random,
+    },
     counts: {
       cases: results.length,
       frames: frames.length,
-      framesPassing: frames.filter((f) => f.pass).length,
+      framesPassing: frames.filter((f) => f.pass && !f.nondeterministic).length,
+      framesNondeterministic: frames.filter((f) => f.nondeterministic).length,
       audioRows: sounds.length,
-      audioPassing: sounds.filter((s) => s.pass).length,
+      audioPassing: sounds.filter((s) => s.pass && !s.nondeterministic).length,
+      audioNondeterministic: sounds.filter((s) => s.nondeterministic).length,
     },
     passing: count("pass"),
+    nondeterministic: count(NONDET),
     mismatching: count("mismatch"),
     referenceRefused: count(DRIFT),
     zabsreelFailed: count("zabsreel failed"),
@@ -695,7 +751,7 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
   };
   writeFileSync(join(run.out, "render-summary.json"), JSON.stringify(summary, null, 2) + "\n");
   console.log(
-    `\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8, ${summary.counts.audioPassing}/${summary.counts.audioRows} audio rows pass; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`,
+    `\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8 (${summary.counts.framesNondeterministic} ${NONDET}), ${summary.counts.audioPassing}/${summary.counts.audioRows} audio rows pass (${summary.counts.audioNondeterministic} ${NONDET}); pass ${summary.passing.length}, ${NONDET} ${summary.nondeterministic.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`,
   );
   if (leftovers.length) console.log(`killed ${leftovers.reduce((t, l) => t + l.pids.length, 0)} leftover process(es): ${JSON.stringify(leftovers)}`);
   const unrendered = results.filter((r) => r.status === DRIFT || r.status === "zabsreel failed" || r.status === "harness error");
@@ -703,7 +759,7 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     for (const r of unrendered) console.error(`NOT RENDERED: ${r.case} (${r.status})`);
     return 2;
   }
-  return summary.mismatching.length ? 3 : 0;
+  return summary.mismatching.length || summary.nondeterministic.length ? 3 : 0;
 }
 
 async function prepare(scratch: string): Promise<Pick<Run, "fixtures" | "library">> {
@@ -740,8 +796,10 @@ function beeps(onsets: number[], level: number, seconds = 2, right = 1): Pcm {
   return pcm;
 }
 
-// Frame 0 is not compared: ZabsReel's first frame of a library video is not always painted
-// when it is captured (seen in this self-test: the video missing on one side only).
+// Frame 0 is not compared: ZabsReel's renderer does not always paint a library video's frame
+// before it is captured, frame 0 most often (finding ZR-MEDIA-SETTLE, SETTLE above; seen here as
+// the video missing on one side only). S4 needs the same frames on both sides; the full run marks
+// such frames "zabsreel nondeterministic" from the repeat instead.
 const SELF_TSX = [
   "// size: 320x180",
   "// fps: 30",
@@ -768,7 +826,14 @@ const SELF_TSX = [
 async function selfTest(out: string, scratch: string): Promise<number> {
   console.log("S0. the run is offline...");
   const nics = Object.keys(networkInterfaces());
-  check(process.env[NETNS] === "1" && nics.join() === "lo", `a private network namespace with loopback only (${nics.join(", ")})`);
+  check(process.env[NETNS] === "1" && nics.join() === "lo" && offline(), `a private network namespace with loopback only (${nics.join(", ")})`);
+  let notOffline = "";
+  try {
+    inPrivateNetns(SELF, ["--require-netns"], ["lo", "eth0"]);
+  } catch (err) {
+    notOffline = (err as Error).message;
+  }
+  check(!offline(["lo", "eth0"]) && notOffline.includes("lo, eth0"), `${NETNS} set with another interface is not offline, and --require-netns throws (${notOffline})`);
 
   console.log("S1. referenceSource() rewrites asset() to staticFile() on the reference side...");
   const ext = { vid_a: "mp4", img_c: "png" };
@@ -855,6 +920,10 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   check(!!a4 && a4.pass && a4.rms_db_max_diff === 0 && a4.onset_ms_max_diff === 0 && a4.edges[0].length === 4, `the sound is equal, with both beeps (${a4 && fmtAudio(a4)}, ${a4?.edges[0]})`);
   check(audio4.length === 1 && Object.keys(audio4[0]).join() === KEYS && audio4[0].function === "audio" && audio4[0].actual === "0/0", `audio-all.jsonl: one row, keys ${KEYS}, actual 0/0 (${JSON.stringify(audio4.map((r) => r.actual))})`);
   check(["render-mismatches.jsonl", "audio-mismatches.jsonl"].every((f) => readFileSync(join(both.out, f), "utf8") === ""), "render-mismatches.jsonl and audio-mismatches.jsonl are empty");
+  check(
+    r4.sizes[0].repeat.ok && frames4.every((f) => !f.nondeterministic && f.repeat.max_diff === 0) && !!a4 && !a4.nondeterministic && a4.repeat.rms_db_max_diff === 0 && a4.repeat.onset_ms_max_diff === 0,
+    `the repeat is identical: frames ${frames4.map((f) => fmt(f.repeat)).join(", ")}, audio ${a4 && fmtAudio(a4.repeat)}, nothing nondeterministic`,
+  );
 
   console.log("S5. a brighter background and half the volume on the second side only: every row fails, each side shows its own...");
   const altered: Run = {
@@ -875,9 +944,10 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   const a5 = r5.sizes[0].audio;
   check(!!a5 && !a5.pass && Math.abs(a5.rms_db_max_diff - 6.02) < 0.5 && a5.onset_ms_max_diff !== null && a5.onset_ms_max_diff <= AUDIO_RULE.onsetMs, `the audio row fails on level, about 6 dB, the beeps in place (${a5 && fmtAudio(a5)})`);
   check(amis5.length === 1 && amis5[0].function === "audio" && Object.keys(amis5[0]).join() === KEYS, "audio-mismatches.jsonl holds its row");
+  check(frames5.every((f) => !f.nondeterministic) && !!a5 && !a5.nondeterministic, "the repeat renders the second side's source: nothing is nondeterministic");
   // compare() and compareAudio() are symmetric: only the images and the levels show which side was decoded as which.
-  const pixel = (side: Pipeline) => {
-    const png = join(altered.out, "images", "self", "320x180", `frame-${listed.frames[0]}-${side}.png`);
+  const pixel = (side: string, at = altered.out) => {
+    const png = join(at, "images", "self", "320x180", `frame-${listed.frames[0]}-${side}.png`);
     if (!existsSync(png)) return null;
     const px = decodeFrames(png, 320, 180, [0]).get(0)!;
     const i = (170 * 320 + 160) * 4;
@@ -906,7 +976,7 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   console.log("S7. a composition only the reference side refuses (its source made to throw) is exactly a drift candidate...");
   const driftOut = join(out, "drift");
   const drift: Run = { ...real, out: driftOut, sourceA: (tsx) => tsx.replace("  return (", '  throw new Error("media parity self-test drift");\n  return (') };
-  const code7 = await parity(drift, selfDir, undefined, process.env[NETNS] === "1");
+  const code7 = await parity(drift, selfDir, undefined, offline());
   const mis7 = readRows(join(driftOut, "render-mismatches.jsonl"));
   const amis7 = readRows(join(driftOut, "audio-mismatches.jsonl"));
   const summary7 = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zabsreelFailed: string[]; cases: CaseResult[] };
@@ -915,6 +985,31 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   const sized7 = summary7.cases[0].sizes[0];
   check(summary7.referenceRefused.join() === "self.tsx" && !summary7.zabsreelFailed.length && !sized7.reference.ok && sized7.zabsreel.ok, "the summary lists it as refused by the reference only, ZabsReel rendered it");
   check(![...mis7, ...amis7].some((r) => r.actual.includes("self-test drift")), "no row carries the error text");
+
+  console.log(`S8. ZabsReel's repeat alone differs (a brighter background and half the volume): every row is exactly "${NONDET}", in no mismatches file...`);
+  const randomOut = join(out, "repeat");
+  const random: Run = { ...both, out: randomOut, sourceRepeat: altered.sourceB };
+  const code8 = await parity(random, selfDir, undefined, offline());
+  const all8 = readRows(join(randomOut, "render-all.jsonl"));
+  const audio8 = readRows(join(randomOut, "audio-all.jsonl"));
+  const summary8 = JSON.parse(readFileSync(join(randomOut, "render-summary.json"), "utf8")) as {
+    counts: { framesPassing: number; framesNondeterministic: number; audioNondeterministic: number };
+    zabsreelRepeat: { finding: string; nondeterministic: { case: string; size: string; frames: number[]; audio: boolean }[] };
+    nondeterministic: string[];
+    mismatching: string[];
+  };
+  check(code8 === 3, `the run exits 3 (it exited ${code8})`);
+  check(all8.length === listed.frames.length && all8.every((r) => r.actual === NONDET && Object.keys(r).join() === KEYS), `every frame row says exactly "${NONDET}" (${JSON.stringify(all8.map((r) => r.actual))})`);
+  check(audio8.length === 1 && audio8[0].actual === NONDET, `the audio row says exactly "${NONDET}" (${JSON.stringify(audio8.map((r) => r.actual))})`);
+  check(["render-mismatches.jsonl", "audio-mismatches.jsonl"].every((f) => readFileSync(join(randomOut, f), "utf8") === ""), "render-mismatches.jsonl and audio-mismatches.jsonl are empty");
+  const listed8 = summary8.zabsreelRepeat.nondeterministic;
+  check(
+    summary8.nondeterministic.join() === "self.tsx" && !summary8.mismatching.length && listed8.length === 1 && listed8[0].case === "self.tsx" && listed8[0].size === "320x180" && listed8[0].frames.join() === listed.frames.join() && listed8[0].audio && summary8.zabsreelRepeat.finding.startsWith("ZR-MEDIA-SETTLE"),
+    `the summary lists the case, its frames and its sound as nondeterministic, not as a mismatch (${JSON.stringify(listed8)})`,
+  );
+  check(summary8.counts.framesPassing === 0 && summary8.counts.framesNondeterministic === listed.frames.length && summary8.counts.audioNondeterministic === 1, `counts: 0 frames passing, ${listed.frames.length} frames and 1 sound nondeterministic (${JSON.stringify(summary8.counts)})`);
+  const p8 = pixel("zabsreel-repeat", randomOut);
+  check(!!p8 && near(p8, [0x48, 0x58, 0x68], 4), `the repeat's own frame is saved, background #485868 (${p8})`);
 
   console.log(failures === 0 ? "\nMEDIA PARITY HARNESS SELF-TEST PASSED" : `\n${failures} CHECK(S) FAILED`);
   return failures === 0 ? 0 : 1;
@@ -943,7 +1038,7 @@ async function main(): Promise<number> {
     if (args.includes("--self-test")) return await selfTest(resolve(out), scratch);
     const only = arg("only")?.split(",");
     const sides = { reference: "reference", zabsreel: "zabsreel" } as const;
-    return await parity({ out: resolve(out), scratch, sides, ...(await prepare(scratch)) }, resolve(arg("cases") ?? CASES), only, process.env[NETNS] === "1");
+    return await parity({ out: resolve(out), scratch, sides, ...(await prepare(scratch)) }, resolve(arg("cases") ?? CASES), only, offline());
   } finally {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
   }
