@@ -50,7 +50,7 @@ import { fileURLToPath } from "node:url";
 import { probeAsset } from "../../core/src/ffmpeg/ffprobe.js";
 import { renderMotion } from "../../core/src/motion/rendermotion.js";
 import type { MediaAsset } from "../../core/src/types.js";
-import { type Fixture, generateFixtures, parseHeader, REPO } from "./parity-lib.js";
+import { FIXTURES, type Fixture, generateFixtures, parseHeader, REPO } from "./parity-lib.js";
 import { check, failureCount, fresh, gone, LINUX, reexecInNetns } from "./smoke-lib.js";
 
 const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
@@ -87,22 +87,29 @@ interface Case {
 }
 
 const hex = (s: string): Rgb => [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16)) as Rgb;
+/** Every settle case runs at this composition rate (prepared() checks the headers). */
+const FPS = 30;
+/** The source frame the runtime shows of video `id` at media-local frame f (NOTES.md 5.5): the nearest to f / FPS seconds on the source's own grid, ties up, clamped to its frames. */
+function nearest(id: string, f: number): number {
+  const v = FIXTURES.find((x) => x.id === id)!;
+  return Math.min(Math.max(Math.floor((f / FPS) * v.fps! + 0.5 + 1e-9), 0), v.fps! * v.seconds! - 1);
+}
 
-/** Where each case draws library media (its source sets the boxes; insets keep the areas clear of edges, rings and other layers). */
+/** Where each case draws library media (its source sets the boxes; insets keep the areas clear of edges, rings and other layers). Video frames are contained in their box unless the case sets objectFit (NOTES.md 5.6). */
 const SETTLE_CASES: Case[] = [
   // <Video> of vid_a (1920x1080, 30 fps) at its own size over the whole canvas: source frame n.
-  { file: "video-plain.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => n, background: () => hex("#1b2836") }] },
+  { file: "video-plain.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => nearest("vid_a", n), background: () => hex("#1b2836") }] },
   // endAt 75: source frame n on frames 0..74, the background from 75.
-  { file: "offthread-endat.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => (n < 75 ? n : hex("#2b1b36")), background: () => hex("#2b1b36") }] },
-  // vid_c (640x360, 60 fps) stretched over the canvas: source frame 2n, its last (179) once it ends at frame 90.
-  { file: "offthread-60fps.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "scale=1920:1080:flags=bilinear", asset: "vid_c", at: (n) => Math.min(2 * n, 179), background: () => hex("#1b2836") }] },
+  { file: "offthread-endat.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "", asset: "vid_a", at: (n) => (n < 75 ? nearest("vid_a", n) : hex("#2b1b36")), background: () => hex("#2b1b36") }] },
+  // vid_c (640x360, 60 fps) at the canvas's own shape: source frame 2n, its last (179) once it ends at frame 90.
+  { file: "offthread-60fps.tsx", areas: [{ name: "video", x: 0, y: 0, w: 1920, h: 1080, draw: "scale=1920:1080:flags=bilinear", asset: "vid_c", at: (n) => nearest("vid_c", n), background: () => hex("#1b2836") }] },
   {
     file: "offthread-style.tsx",
     areas: [
-      // vid_a filling an 800x800 box at (60,140), inside its 10 px ring and rounded corners.
-      { name: "ring box", x: 80, y: 160, w: 760, h: 760, draw: "scale=800:800:flags=bilinear,crop=760:760:20:20", asset: "vid_a", at: (n) => n, background: () => hex("#ff2d6f") },
-      // vid_c contained in an 800x800 box at (1000,140): 800x450 from y 315, grey.
-      { name: "grey box", x: 1000, y: 320, w: 800, h: 440, draw: `scale=800:450:flags=bilinear,crop=800:440:0:5,${GREY}`, asset: "vid_c", at: (n) => 2 * n, background: () => hex("#3355ff") },
+      // vid_a contained (the default fit) in an 800x800 box at (60,140): 800x450 from y 315, inside its 10 px ring; source frame n.
+      { name: "ring box", x: 80, y: 320, w: 760, h: 440, draw: "scale=800:450:flags=bilinear,crop=760:440:20:5", asset: "vid_a", at: (n) => nearest("vid_a", n), background: () => hex("#ff2d6f") },
+      // vid_c contained (objectFit: contain) in an 800x800 box at (1000,140): 800x450 from y 315, grey; source frame 2n.
+      { name: "grey box", x: 1000, y: 320, w: 800, h: 440, draw: `scale=800:450:flags=bilinear,crop=800:440:0:5,${GREY}`, asset: "vid_c", at: (n) => nearest("vid_c", n), background: () => hex("#3355ff") },
     ],
   },
   // img_a (800x600) drawn 533x400 at (1040,610) over the animated panel, left of where img_c passes.
@@ -283,6 +290,7 @@ function where(sums: Uint32Array[], cw: number): string {
 function prepared(c: Case, fixtures: Fixture[]) {
   const source = readFileSync(join(CASES, c.file), "utf8");
   const h = parseHeader(source);
+  if (h.fps !== FPS) throw new Error(`${c.file} runs at ${h.fps} fps, not ${FPS}`);
   const pictures = c.areas.map((a) => sourceBlocks(fixtures.find((x) => x.id === a.asset)!.file, a));
   const judgeFrame = (frame: Buffer, n: number) => c.areas.map((a, i) => judge(a, pictures[i], blocks(frame, a.x, a.y, a.w, a.h, h.sizes[0].w), n)).filter(Boolean);
   return { source, h, judgeFrame };

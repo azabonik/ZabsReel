@@ -268,6 +268,7 @@ jobs:
   # multi-line run block when a native command fails.
   windows-packaged-render:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       # The checkout keeps the repository's bytes (pinned hashes: React's UMD
       # builds, CLEANROOM.lock), so no CRLF conversion.
@@ -290,8 +291,10 @@ jobs:
         run: |
           $exe = Get-ChildItem C:\ProgramData\chocolatey\lib\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $exe) { throw "no ffmpeg.exe under C:\ProgramData\chocolatey\lib\ffmpeg" }
+          $probe = Join-Path $exe.DirectoryName 'ffprobe.exe'
+          if (-not (Test-Path -PathType Leaf $probe)) { throw "no ffprobe.exe next to $($exe.FullName)" }
           Add-Content -Path $env:GITHUB_ENV -Value "AIVE_FFMPEG=$($exe.FullName)"
-          Add-Content -Path $env:GITHUB_ENV -Value "AIVE_FFPROBE=$(Join-Path $exe.DirectoryName 'ffprobe.exe')"
+          Add-Content -Path $env:GITHUB_ENV -Value "AIVE_FFPROBE=$probe"
 
       - name: Install dependencies
         run: npm ci
