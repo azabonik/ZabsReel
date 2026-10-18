@@ -56,7 +56,11 @@
  *                     (injected EXDEV), a copy whose source can't be removed
  *                     leave baked/ as it was; the core killed mid-render leaves no renderer
  *                     process within 2 s, and the next core start (the built
- *                     core) removes its motion/<id>; without --zr-scratch the
+ *                     core) removes its motion/<id>; a render writes
+ *                     owner.json before tmp/, and the sweep also removes a
+ *                     folder with no usable owner.json holding nothing, an
+ *                     empty tmp/ or a torn owner.json, never one holding
+ *                     anything else (the Remotion path's); without --zr-scratch the
  *                     renderer exits 2 and writes nothing, with it the profile
  *                     and temp files land under that folder.
  *  R6. launch       — the D7 probe through the core's own binary rule:
@@ -106,7 +110,11 @@
  *                     the render with its code (a component's own throw:
  *                     graphic_component_error) and leaves nothing; an unknown
  *                     import, a syntax error and props over 256 KB are refused
- *                     before any renderer starts.
+ *                     before any renderer starts; so is a render past its
+ *                     bounds (36,001 frames, 0 or 1.5; fps above 240, 0 or
+ *                     NaN; 8193 or 0 pixels on a side; a frames list out of
+ *                     range), while each bound itself is accepted and a
+ *                     36,000-frame render renders its last frame.
  *  R10. packed render — (Linux and Windows) the packed `--dir` build (AIVE_APP,
  *                     else apps/desktop/build/dist/linux-unpacked or
  *                     win-unpacked; skipped with a printed reason when there
@@ -156,11 +164,14 @@ import { graphicImportRefusal, unsupportedNameMessage } from "../../core/src/mot
 import type { MediaStats } from "../../core/src/motion/motionmedia.js";
 import { TITLE_CARD_TSX } from "../../core/src/motion/templates.js";
 import {
+  checkOptions,
+  MAX_MOTION_FRAMES,
   MotionRenderError,
   probeMotionRenderer,
   rendererArgs,
   rendererEnv,
   renderMotion,
+  sweepMotionScratch,
   type RendererMessage,
   type RenderMotionOptions,
 } from "../../core/src/motion/rendermotion.js";
@@ -172,6 +183,7 @@ import {
   filesUnder,
   fresh,
   gone,
+  leftNothing,
   LINUX,
   NETNS,
   reexecInNetns,
@@ -207,11 +219,11 @@ const DESKTOP_MODULES = /[\\/](core-launcher|media-servers|graphics-addon)\.cjs$
  */
 const WIN_SPAWN_ENV = new Set(["HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME"]);
 
-/** A fault to inject into the core's rename, copyFile and rm (gatedfs looks each fs/promises function up per call): the error to throw, or null. */
+/** A fault to inject into the core's rename, copyFile, rm, mkdir and writeFile (gatedfs looks each fs/promises function up per call): the error to throw, or null. */
 let fsFault: ((name: string, args: unknown[]) => NodeJS.ErrnoException | null) | null = null;
 {
   const fsp = createRequire(import.meta.url)("node:fs/promises") as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  for (const name of ["rename", "copyFile", "rm"]) {
+  for (const name of ["rename", "copyFile", "rm", "mkdir", "writeFile"]) {
     const real = fsp[name];
     fsp[name] = async (...args: unknown[]) => {
       const e = fsFault?.(name, args);
@@ -396,13 +408,6 @@ async function render(f: Fresh, id: string, o: Partial<RenderMotionOptions> & ({
   const watched = (tree as ReturnType<typeof watchTree> | null)?.stop();
   if (watched) run.pids.push(...watched.seen.keys());
   return run;
-}
-
-/** After a render: its renderer and that renderer's children are gone, motion/<id> is gone. */
-async function leftNothing(run: Run, f: Fresh, id: string, what: string, ms = 2000) {
-  const left = LINUX ? await gone(run.pids, ms) : [];
-  check(run.pids.length > 0 && left.length === 0, `${what}: no renderer process left (${run.pids.length} watched, left ${JSON.stringify(left)})`);
-  check(!existsSync(join(f.data, "motion", id)), `${what}: motion/${id} is removed`);
 }
 
 const logs = (run: Run) => run.messages.filter((m) => m.type === "log").map((m) => String(m.text));
@@ -852,7 +857,7 @@ async function r5(work: string) {
   const e1 = aborted.error as MotionRenderError | undefined;
   check(e1?.code === "graphic_render_canceled" && frames < 8, `abort mid-render: graphic_render_canceled after frame ${frames} (${e1?.code}: ${e1?.message})`);
   check(aborted.exit?.signal === "SIGKILL", `the renderer was killed by its PID (exit ${JSON.stringify(aborted.exit)})`);
-  await leftNothing(aborted, f, "abort", "abort", 1000);
+  await leftNothing(aborted, f, "abort", "abort", { ms: 1000 });
 
   // libx264 refuses an odd width: the encode fails after the frames.
   const odd = await render(f, "odd", { module: PATTERN, alpha: false, width: 63 });
@@ -866,8 +871,9 @@ async function r5(work: string) {
   check(!!move.error, `a failed later move into baked/ fails the render (${move.error?.message.slice(0, 120)})`);
   check(same(readdirSync(join(f.data, "baked")), ["move-graphic.webm"]) && same(readdirSync(blocker), ["in-the-way"]),
     `baked/ is as it was: the moved .mov is taken back out (${JSON.stringify(readdirSync(join(f.data, "baked")))})`);
-  await leftNothing(move, f, "move", "later move");
+  // The blocker is this row's own (named after the render): out of the way before leftNothing looks at baked/.
   rmSync(blocker, { recursive: true, force: true });
+  await leftNothing(move, f, "move", "later move");
   check(readdirSync(join(f.data, "baked")).length === 0, `baked/ is empty after abort, FFmpeg failure and the failed move (${JSON.stringify(readdirSync(join(f.data, "baked")))})`);
 
   // baked/ on another disk: rename says EXDEV, so the .mov is copied in; then removing it from motion/<id> fails. The copy goes back out.
@@ -952,6 +958,56 @@ async function r5(work: string) {
     const coreLeft = await gone([core.pid!], 10_000);
     if (coreLeft.length) core.kill("SIGKILL");
     check(coreLeft.length === 0, `the core started here stopped (pid ${core.pid})`);
+  }
+
+  // A render writes owner.json into motion/<id> before anything else goes in (tmp/ after it), so a core killed
+  // before that leaves an empty folder; the sweep removes a folder with no usable owner.json only when it holds
+  // nothing, an empty tmp/ or an owner.json that does not parse. Any other owner-less folder (the Remotion path's
+  // work folders hold Graphic.tsx from their start) and a live core's folder stay.
+  // MUTATION: renderMotion making tmp/ before owner.json → the order row fails. The sweep without its owner-less
+  // branch → the empty, tmp/-only and torn-owner rows fail; removing every owner-less folder → the Remotion rows fail.
+  {
+    const o = fresh(work, "order");
+    const workDir = join(o.data, "motion", "order");
+    const calls: string[] = [];
+    fsFault = (name, args) => {
+      const at = String(args[0]);
+      if ((name === "mkdir" || name === "writeFile") && at.startsWith(workDir)) calls.push(`${name} ${at.slice(workDir.length).split("\\").join("/") || "/"}`);
+      return null;
+    };
+    const run = await render(o, "order", { module: PATTERN, durationInFrames: 2 }).finally(() => (fsFault = null));
+    const owner = calls.indexOf("writeFile /owner.json");
+    check(!run.error && owner >= 0 && calls.slice(0, owner).every((c) => c === "mkdir /") && owner < calls.indexOf("mkdir /tmp"),
+      `a render writes motion/<id>/owner.json before it makes tmp/ or writes anything else there (${JSON.stringify(calls.slice(0, 4))})`);
+    await leftNothing(run, o, "order", "owner.json first");
+
+    const sw = fresh(work, "sweep");
+    const m = (...p: string[]) => join(sw.data, "motion", ...p);
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    mkdirSync(m("empty"), { recursive: true });
+    mkdirSync(m("tmp-only", "tmp"), { recursive: true });
+    touch(m("torn-owner", "owner.json"), '{"pid":');
+    mkdirSync(m("torn-owner", "tmp"), { recursive: true });
+    touch(m("empty-owner", "owner.json"));
+    touch(m("dead", "owner.json"), JSON.stringify({ pid: dead }));
+    touch(m("dead", "out.mov"), "x");
+    touch(m("remotion", "Graphic.tsx"), "export default () => null;");
+    touch(m("remotion-tmp", "Graphic.tsx"), "export default () => null;");
+    mkdirSync(m("remotion-tmp", "tmp"), { recursive: true });
+    touch(m("full-tmp", "tmp", "frame.raw"), "x");
+    touch(m("torn-owner-and-file", "owner.json"), "{");
+    touch(m("torn-owner-and-file", "Graphic.tsx"), "x");
+    touch(m("owner-dir", "owner.json", "x"), "x");
+    touch(m("live", "owner.json"), JSON.stringify({ pid: process.pid }));
+    mkdirSync(m("live", "tmp"), { recursive: true });
+    touch(m("live-other", "owner.json"), JSON.stringify({ pid: process.ppid }));
+    touch(m("a-file"), "x");
+    const swept = (await sweepMotionScratch(sw.data)).map((d) => d.slice(m().length + 1)).sort();
+    const want = ["dead", "empty", "empty-owner", "tmp-only", "torn-owner"];
+    const kept = readdirSync(m()).sort();
+    check(same(swept, want) && want.every((d) => !existsSync(m(d))), `the sweep removes the empty, tmp/-only, torn-owner and dead-core folders (${JSON.stringify(swept)})`);
+    check(same(kept, ["a-file", "full-tmp", "live", "live-other", "owner-dir", "remotion", "remotion-tmp", "torn-owner-and-file"]),
+      `…and keeps the Remotion path's folders, a non-empty tmp/, a torn owner.json beside a file, a live core's folders and a plain file (${JSON.stringify(kept)})`);
   }
 
   // The scratch folder: without it, exit 2 and nothing written; with it, everything under it.
@@ -1812,6 +1868,70 @@ async function r9(work: string) {
     const run = await render(f, `refused-${i}`, { ...o, durationInFrames: 2 });
     check(ok(run.error) && run.pids.length === 0 && !existsSync(join(f.data, "motion")) && readdirSync(join(f.data, "baked")).length === 0,
       `${what} is refused before the renderer starts, with nothing written (${run.error ? `${(run.error as MotionRenderError).code ?? run.error.name}: ${run.error.message.slice(0, 160)}` : "it rendered"}; ${run.pids.length} process(es))`);
+  }
+
+  // The input bounds (checkOptions; D2, F10: 600 s at 60 fps): each at its bound is accepted, just past it refused
+  // with a RangeError before any renderer starts and with nothing written. add_graphic caps a graphic at 600 s, not
+  // the project's fps, so these are the only check on a long, fast or huge render.
+  // MUTATION (one per bound, in checkOptions): MAX_MOTION_FRAMES + 1 as the frame limit, fps <= 241, fps >= 0,
+  // 8193 as the width or the height limit, a size of 0 allowed, the frames list unchecked → its row fails.
+  const D = MAX_MOTION_FRAMES;
+  const bounds: [string, Partial<RenderMotionOptions>, boolean][] = [
+    [`${D} frames`, { durationInFrames: D }, true],
+    [`${D + 1} frames`, { durationInFrames: D + 1 }, false],
+    ["0 frames", { durationInFrames: 0 }, false],
+    ["1.5 frames", { durationInFrames: 1.5 }, false],
+    ["240 fps", { fps: 240 }, true],
+    ["240.001 fps", { fps: 240.001 }, false],
+    ["0 fps", { fps: 0 }, false],
+    ["NaN fps", { fps: NaN }, false],
+    ["8192 wide", { width: 8192 }, true],
+    ["8193 wide", { width: 8193 }, false],
+    ["0 wide", { width: 0 }, false],
+    ["8192 high", { height: 8192 }, true],
+    ["8193 high", { height: 8193 }, false],
+    ["0 high", { height: 0 }, false],
+    [`frames [${D - 1}] of ${D}`, { durationInFrames: D, frames: [D - 1] }, true],
+    [`frames [${D}] of ${D}`, { durationInFrames: D, frames: [D] }, false],
+    ["frames [-1]", { frames: [-1] }, false],
+    ["frames []", { frames: [] }, false],
+  ];
+  for (const [i, [what, patch, ok]] of bounds.entries()) {
+    const f = fresh(work, `bound-${i}`);
+    const pids: number[] = [];
+    const o: RenderMotionOptions = {
+      module: PATTERN,
+      width: W,
+      height: H,
+      fps: 30,
+      durationInFrames: 2,
+      alpha: true,
+      workDir: join(f.data, "motion", `bound-${i}`),
+      outPath: join(f.data, "baked", `bound-${i}-graphic.mov`),
+      env: f.env,
+      onSpawn: (pid) => pids.push(pid),
+      ...patch,
+    };
+    let direct: unknown = null;
+    try {
+      checkOptions(o);
+    } catch (err) {
+      direct = err;
+    }
+    if (ok) {
+      check(direct === null, `${what}: accepted (${direct instanceof Error ? direct.message : "no error"})`);
+      continue;
+    }
+    const thrown = await renderMotion(o).then(() => null, (err: unknown) => err);
+    check(direct instanceof RangeError && thrown instanceof RangeError && pids.length === 0 && !existsSync(join(f.data, "motion")) && readdirSync(join(f.data, "baked")).length === 0,
+      `${what}: refused with a RangeError before the renderer starts, nothing written (${thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : "it rendered"}; ${pids.length} process(es))`);
+  }
+  // One render at the frame limit, through the renderer (its own start check agrees): the last frame only.
+  {
+    const f = fresh(work, "bound-max");
+    const run = await render(f, "max", { module: PATTERN, durationInFrames: D, frames: [D - 1] });
+    check(!run.error && run.frames.length === 1 && existsSync(join(f.data, "baked", "max-graphic.mov")), `${D} frames through the renderer: frame ${D - 1} renders (${run.error?.message.slice(0, 160) ?? `${run.frames.length} frame(s)`})`);
+    await leftNothing(run, f, "max", `${D} frames`);
   }
 }
 

@@ -255,7 +255,8 @@ export function encodeArgs(o: Pick<RenderMotionOptions, "width" | "height" | "fp
   return ["-hide_banner", "-loglevel", "error", "-y", ...input, ...codec, "-an", out];
 }
 
-function checkOptions(o: RenderMotionOptions): void {
+/** renderMotion's input bounds (D2, F10), checked before anything is started or written; exported for the smoke's boundary rows. */
+export function checkOptions(o: RenderMotionOptions): void {
   const int = (v: number, max: number) => Number.isInteger(v) && v >= 1 && v <= max;
   if (!int(o.width, 8192) || !int(o.height, 8192)) throw new RangeError(`A graphic is 1 to 8192 pixels on each side (${o.width}x${o.height}).`);
   if (!int(o.durationInFrames, MAX_MOTION_FRAMES)) throw new RangeError(`A graphic is 1 to ${MAX_MOTION_FRAMES} frames long (${o.durationInFrames}).`);
@@ -319,8 +320,10 @@ export async function renderMotion(o: RenderMotionOptions): Promise<RenderMotion
   const preview = join(o.workDir, "graphic.webm");
   const audioPath = o.audioPath ?? `${o.outPath.replace(/\.[^./\\]*$/, "")}-audio.wav`;
   try {
-    await mkdir(join(o.workDir, "tmp"), { recursive: true });
+    // owner.json before anything else goes in: a core killed before it leaves an empty folder (sweepMotionScratch).
+    await mkdir(o.workDir, { recursive: true });
     await writeFile(join(o.workDir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
+    await mkdir(join(o.workDir, "tmp"), { recursive: true });
     const framesMs = await renderFrames(o, encoded, module, limits, media, audio);
     if (!o.alpha) await tagGraphicColor(encoded, o.signal);
     // The sound (D4 E3): mixed inside workDir; a standalone card's goes into its .mp4, an overlay's stays a .wav.
@@ -710,8 +713,9 @@ export async function probeMotionRenderer(
   if (!bin.ok) return { ok: false, reason: bin.reason, detail: bin.detail };
   const dir = join(dataDir, "motion", `probe-${process.pid}`);
   try {
-    await mkdir(join(dir, "tmp"), { recursive: true });
+    await mkdir(dir, { recursive: true });
     await writeFile(join(dir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
+    await mkdir(join(dir, "tmp"), { recursive: true });
     const child = spawnRenderer(bin, rendererArgs(dir, 16, 16, ["--probe"]), dir, opts.env);
     if (child.pid !== undefined) opts.onSpawn?.(child.pid);
     const stderr = tail(child.stderr);
@@ -759,18 +763,27 @@ function alive(pid: number): boolean {
 
 /**
  * At core start: remove every <dataDir>/motion/<id> whose owner.json names a
- * core that is no longer running (a render or probe cut short by a crash).
- * Folders without owner.json (the Remotion path's) are left alone.
+ * core that is no longer running (a render or probe cut short by a crash),
+ * and every folder with no usable owner.json that holds nothing else than an
+ * empty tmp/ or an owner.json that does not parse (a core killed before or
+ * while it wrote owner.json). Any other folder without owner.json is left
+ * alone: the Remotion path's work folders have none, and hold its files.
  */
 export async function sweepMotionScratch(dataDir: string): Promise<string[]> {
   const root = join(dataDir, "motion");
   const removed: string[] = [];
   for (const name of await readdir(root).catch(() => [] as string[])) {
     const dir = join(root, name);
+    let text: string | undefined;
     let pid: unknown;
     try {
-      pid = (JSON.parse(await readFile(join(dir, OWNER), "utf8")) as { pid?: unknown }).pid;
+      text = await readFile(join(dir, OWNER), "utf8");
+      pid = (JSON.parse(text) as { pid?: unknown }).pid;
     } catch {
+      if (await onlyStartedRender(dir, text !== undefined)) {
+        await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+        removed.push(dir);
+      }
       continue;
     }
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid || alive(pid)) continue;
@@ -778,4 +791,18 @@ export async function sweepMotionScratch(dataDir: string): Promise<string[]> {
     removed.push(dir);
   }
   return removed;
+}
+
+/** `dir` (no usable owner.json) holds at most an empty tmp/ and, when `ownerRead` (it was read but did not parse), owner.json. */
+async function onlyStartedRender(dir: string, ownerRead: boolean): Promise<boolean> {
+  try {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name === OWNER && ownerRead && entry.isFile()) continue;
+      if (entry.name === "tmp" && entry.isDirectory() && (await readdir(join(dir, "tmp"))).length === 0) continue;
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }

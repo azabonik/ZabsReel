@@ -1596,9 +1596,7 @@ export class EditorEngine extends EventEmitter {
     this.getAsset(assetId);
     this.mutate(() => {
       this.project.assets = this.project.assets.filter((a) => a.id !== assetId);
-      for (const track of this.project.tracks) {
-        track.clips = track.clips.filter((c) => c.assetId !== assetId);
-      }
+      this.removeClipsWhere((c) => c.assetId === assetId);
       if (this.project.music?.assetId === assetId) delete this.project.music;
     });
     // The cache entry is deliberately KEPT: it lives outside the undo history,
@@ -1731,8 +1729,37 @@ export class EditorEngine extends EventEmitter {
       if (track.kind === "video" && this.videoTracks().length <= 1) {
         throw new Error("Cannot remove the last video track");
       }
+      this.removeClipsWhere((_, t) => t === track);
       this.project.tracks = this.project.tracks.filter((t) => t.id !== track.id);
     });
+  }
+
+  /**
+   * Take the clips `gone` picks off the timeline (remove_track, remove_asset)
+   * with what follows them: the audio clip of a graphic on one of them goes
+   * too, wherever it is, and a graphic whose audio clip is among them names
+   * none any more (its clip is unlinked when the group is left with it
+   * alone, as dropGraphicAudioClip does). Inside a mutate.
+   */
+  private removeClipsWhere(gone: (clip: Clip, track: Track) => boolean): void {
+    const ids = new Set(this.allClips().filter(({ clip, track }) => gone(clip, track)).map(({ clip }) => clip.id));
+    for (const { clip } of this.allClips()) {
+      if (ids.has(clip.id)) for (const g of clip.graphics ?? []) if (g.audioClipId) ids.add(g.audioClipId);
+    }
+    const unlinked: Clip[] = [];
+    for (const { clip } of this.allClips()) {
+      if (ids.has(clip.id)) continue;
+      for (const g of clip.graphics ?? []) {
+        if (g.audioClipId && ids.has(g.audioClipId)) {
+          delete g.audioClipId;
+          unlinked.push(clip);
+        }
+      }
+    }
+    for (const track of this.project.tracks) track.clips = track.clips.filter((c) => !ids.has(c.id));
+    for (const clip of unlinked) {
+      if (clip.linkGroupId && !this.allClips().some(({ clip: c }) => c !== clip && c.linkGroupId === clip.linkGroupId)) delete clip.linkGroupId;
+    }
   }
 
   /** Change a track's stacking index (z-order). Other tracks shift to make room. */
@@ -6777,14 +6804,36 @@ export class EditorEngine extends EventEmitter {
       }
       throw err;
     }
-    const baked = await probeAsset(r.outPath);
-    baked.name = `Motion graphic (${g.width}x${g.height})`;
-    if (r.previewPath) baked.previewPath = r.previewPath;
-    if (g.asNewClip) return this.placeGraphicClip(clipId, baked);
-    const sound = r.audioPath ? await probeAsset(r.audioPath) : undefined;
-    if (sound) sound.name = "Motion graphic sound";
-    const kept = Object.keys(fonts).length > 0 ? { fonts: opts.fonts } : {};
-    return this.attachGraphic(clipId!, { id: g.id, assetId: baked.id, startFrame: g.startFrame, endFrame: g.endFrame, opacity: opts.opacity, code: opts.code, props: opts.props, ...kept }, baked, sound);
+    // The files are in baked/ now: from here to the project change it is all or none too. A failed probe, a
+    // cancel, or a clip changed while the graphic rendered removes this render's files and changes nothing.
+    try {
+      const canceled = () => {
+        if (signal.aborted) throw new MotionRenderError("graphic_render_canceled", "Motion-graphic render canceled");
+      };
+      canceled();
+      if (clipId) this.graphicHostStill(clipId);
+      const baked = await probeAsset(r.outPath);
+      baked.name = `Motion graphic (${g.width}x${g.height})`;
+      if (r.previewPath) baked.previewPath = r.previewPath;
+      const sound = !g.asNewClip && r.audioPath ? await probeAsset(r.audioPath) : undefined;
+      if (sound) sound.name = "Motion graphic sound";
+      canceled();
+      if (clipId) this.graphicHostStill(clipId);
+      if (g.asNewClip) return this.placeGraphicClip(clipId, baked);
+      const kept = Object.keys(fonts).length > 0 ? { fonts: opts.fonts } : {};
+      return this.attachGraphic(clipId!, { id: g.id, assetId: baked.id, startFrame: g.startFrame, endFrame: g.endFrame, opacity: opts.opacity, code: opts.code, props: opts.props, ...kept }, baked, sound);
+    } catch (err) {
+      for (const file of [r.outPath, r.previewPath, r.audioPath]) if (file) await rm(file, { force: true }).catch(() => {});
+      throw err;
+    }
+  }
+
+  /** The clip a graphic was rendered for is still on the timeline; else the error says it changed during the render. */
+  private graphicHostStill(clipId: string): void {
+    if (this.allClips().some(({ clip }) => clip.id === clipId)) return;
+    throw new Error(
+      `Clip "${clipId}" was split, removed or replaced while its motion graphic rendered, so the graphic was not added and nothing changed. Run add_graphic again on the clip that is there now.`,
+    );
   }
 
   /** add_graphic on the Remotion add-on, as before ZabsReel's renderer (F2's refusals stay). */

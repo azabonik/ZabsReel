@@ -97,7 +97,7 @@ import type { GraphicStart } from "../../core/src/motion/graphicmodule.js";
 import { MAX_ASSET_FPS, MEDIA_CAPS, MotionMedia, requireOnline, SEARCH_PASSES, type MediaStats, type MotionAsset } from "../../core/src/motion/motionmedia.js";
 import { renderMotion, type RendererMessage, type RenderMotionOptions } from "../../core/src/motion/rendermotion.js";
 import type { MediaAsset } from "../../core/src/types.js";
-import { check, failureCount, fresh, gone, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
+import { check, failureCount, fresh, gone, leftNothing, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
 
 const EVIL = "zr-evil";
 
@@ -284,17 +284,6 @@ async function render(
   const all = Buffer.concat(chunks);
   for (let i = 0; i + size <= all.length; i += size) run.frames.push(all.subarray(i, i + size));
   return run;
-}
-
-/** After a render: its renderer is gone and motion/<id> is gone; after a failure, baked/ holds nothing of it either. */
-async function leftNothing(run: Run, f: Fresh, id: string, what: string) {
-  const left = await gone(run.pids, 2000);
-  check(run.pids.length > 0 && left.length === 0, `${what}: no renderer process left (${run.pids.length} watched, left ${JSON.stringify(left)})`);
-  check(!existsSync(join(f.data, "motion", id)), `${what}: motion/${id} is removed`);
-  if (run.error) {
-    const baked = readdirSync(join(f.data, "baked")).filter((n) => n.startsWith(`${id}-`));
-    check(baked.length === 0, `${what}: nothing of it in baked/ (${JSON.stringify(baked)})`);
-  }
 }
 
 /** The render failed with `code`. */

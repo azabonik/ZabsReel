@@ -1361,6 +1361,9 @@ async function graphicsAddon(pw: PW, work: string) {
     check(back && z.status === 200 && typeof z.body.result?.clipId === "string" && (await banner.count()) === 0,
       `a click on ZabsReel's: renderer.json says zabsreel, and add_graphic renders with ZabsReel's renderer (${z.status} ${z.body.code ?? ""} ${z.body.error?.slice(0, 120) ?? ""})`);
 
+    // That graphic is an unsaved edit: once main has heard so (how soon varies), closing asks "Save changes before
+    // closing?" with a modal dialog nothing here answers, and the close never returns. Answer it "Don't Save".
+    await stub(app, "showMessageBoxSync", [1]);
     const closed = new Promise<void>((res) => app.once("close", () => res()));
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
     check(await Promise.race([closed.then(() => true), sleep(30000).then(() => false)]), "closed");

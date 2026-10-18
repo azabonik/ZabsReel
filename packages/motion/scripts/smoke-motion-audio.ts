@@ -66,6 +66,10 @@
  *                  clip leaves the clip alone and ends it with the window;
  *                  tighten_talk ends it with the first piece and leaves the
  *                  rest of its track alone. A muted audio track is not free.
+ *                  remove_track and remove_asset on the clip's track or asset
+ *                  remove its sound too; on the sound's track or asset they
+ *                  leave the graphic naming no sound and the clip unlinked;
+ *                  undo, redo and a save and load keep both sides agreeing.
  *  A5. failures  — graphic_mix_timeout (a 1 ms limit) for an overlay and a
  *                  card, and a failed move of the .wav into baked/, each leave
  *                  baked/ as it was (the project changes only after a render
@@ -73,6 +77,12 @@
  *                  source cap breach end the render; an audio file on a
  *                  server not allowed is media_offline before any FFmpeg
  *                  opens it, and nothing the core did named that host.
+ *                  After the move into baked/ (add_graphic on ZabsReel's
+ *                  renderer): a failed probe of the moved .wav, a cancel_job
+ *                  then, and the clip split during the render each end the
+ *                  job (canceled for the cancel, else an error naming the
+ *                  split clip), remove the .mov, .webm and .wav and leave
+ *                  the project as it was.
  *  A6. pieces    — 200 ranges: the mix's long filter graph is written inside
  *                  motion/<id>, the render writes nothing outside it but its
  *                  outputs, and the mix plays every piece.
@@ -82,7 +92,7 @@
  * Run: npx tsx packages/motion/scripts/smoke-motion-audio.ts [--only=A1,A4]
  */
 import { spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,10 +104,11 @@ import { buildRenderCommand, EXPORT_PROFILE } from "../../core/src/ffmpeg/graph.
 import type { GraphicStart } from "../../core/src/motion/graphicmodule.js";
 import { AUDIO_CAPS, GraphicAudio, mixArgs, mixLimitMs, type AudioCaps, type AudioRange } from "../../core/src/motion/motionaudio.js";
 import type { MotionAsset, PageAsset } from "../../core/src/motion/motionmedia.js";
+import { RENDERER_FLAG } from "../../core/src/motion/rendererbinary.js";
 import { renderMotion, type RenderMotionOptions, type RenderMotionResult } from "../../core/src/motion/rendermotion.js";
 import { dispatch } from "../../core/src/rpc.js";
 import { clipEndFrame, type Canvas, type Clip, type GraphicOverlay, type MediaAsset, type ResolvedRenderClip } from "../../core/src/types.js";
-import { check, failureCount, filesUnder, fresh, gone, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
+import { check, failureCount, filesUnder, fresh, leftNothing, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
 
 const RATE = 48_000;
 const EVIL = "zr-evil";
@@ -108,6 +119,8 @@ const EVIL = "zr-evil";
 const touched: string[] = [];
 /** The commands the core started: [file, ...args]. */
 const spawned: string[][] = [];
+/** A5's hook on each command the core starts: may act (cancel a job, split a clip) or return other args for it (a fault). */
+let spawnHook: ((file: string, args: string[]) => string[] | void) | null = null;
 {
   const load = createRequire(import.meta.url);
   const fsp = load("node:fs/promises") as Record<string, unknown>;
@@ -124,7 +137,7 @@ const spawned: string[][] = [];
   const realSpawn = cp.spawn;
   cp.spawn = (file, args = [], opts = {}) => {
     spawned.push([file, ...args]);
-    return realSpawn(file, args, opts);
+    return realSpawn(file, spawnHook?.(file, args) ?? args, opts);
   };
   syncBuiltinESMExports();
 }
@@ -235,17 +248,6 @@ async function render(
     run.error = err as Run["error"];
   }
   return run;
-}
-
-/** After a render: no renderer left, motion/<id> gone; after a failure, nothing of it in baked/. */
-async function leftNothing(run: Run, f: Fresh, id: string, what: string) {
-  const left = await gone(run.pids, 2000);
-  check(run.pids.length > 0 && left.length === 0, `${what}: no renderer process left (${run.pids.length} watched, left ${JSON.stringify(left)})`);
-  check(!existsSync(join(f.data, "motion", id)), `${what}: motion/${id} is removed`);
-  if (run.error) {
-    const baked = readdirSync(join(f.data, "baked")).filter((n) => n.startsWith(`${id}-`));
-    check(baked.length === 0, `${what}: nothing of it in baked/ (${JSON.stringify(baked)})`);
-  }
 }
 
 /** A step the rows after it build on (not a check of this slice's behaviour): stop the smoke when it does not hold. */
@@ -505,6 +507,8 @@ type Staging = { stageRender(canvas: Canvas, opts?: object): Promise<{ clips: Re
 async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   console.log("A4. an overlay's sound: the .wav, the linked audio clip, export and D-SPLIT...");
   const f = fresh(work, "overlay");
+  /** The engines the save-and-load rows open (disposed with the others at the end). */
+  const loadedEngines: EditorEngine[] = [];
   const ov = await render(f, "ov", {
     alpha: true,
     graphic: { source: TSX(`<Sequence from={15} durationInFrames={30}><Audio src={asset("tone")} /></Sequence>`) },
@@ -774,6 +778,58 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   engine.undo();
   setup(clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60 && !clipOf(acId)?.effects?.speed, "undo restores the audio clip");
 
+  // remove_track and remove_asset follow the graphic's sound both ways: the clip's track or asset takes its sound with
+  // it; the sound's track or asset leaves the graphic naming no clip (and the group it made unlinked). Undo, redo, and
+  // a save and load keep the two sides consistent.
+  // The first save names an untitled project (an undo step of its own): done here, so the rows' undo steps are theirs.
+  await engine.save(join(f.dir, "named.aive"));
+  const extraVideo = engine.addTrack("video");
+  const soundTrackIndex = trackOf(acId)?.index ?? -1;
+  const both = () => graphicOn(host.id)?.audioClipId === acId && !!clipOf(acId) && clipOf(acId)?.linkGroupId === clipOf(host.id)?.linkGroupId && !!clipOf(host.id)?.linkGroupId;
+  const reloaded = async (name: string) => {
+    const file = join(f.dir, `${name}.aive`);
+    await engine.save(file);
+    const other = new EditorEngine(fresh(work, name).data);
+    await other.load(file);
+    loadedEngines.push(other);
+    return other.getProject();
+  };
+  for (const [what, edit] of [
+    ["remove_track on the clip's track", () => dispatch(engine, "remove_track", { trackIndex: hostTrack })],
+    ["remove_asset on the clip's asset", () => dispatch(engine, "remove_asset", { assetId: hostAsset.id })],
+  ] as const) {
+    await edit();
+    // MUTATION: removeTrack / removeAsset not following the graphic's audio clip (removeClipsWhere's first loop gone) → the sound stays.
+    check(!clipOf(host.id) && soundClips().length === 0, `${what}: the clip goes and so does its graphic's sound (${soundClips().length} clip(s) of the sound)`);
+    const saved = await reloaded(what.startsWith("remove_track") ? "rt-host" : "ra-host");
+    check(saved.tracks.flatMap((t) => t.clips).every((c) => c.assetId !== sound.id && c.id !== host.id), `${what}, saved and loaded: neither the clip nor the sound is there`);
+    engine.undo();
+    check(both(), `${what}, undone: the graphic names its sound again and both are linked`);
+    engine.redo();
+    check(!clipOf(host.id) && soundClips().length === 0, `${what}, redone: both go again`);
+    engine.undo();
+  }
+  for (const [what, edit] of [
+    ["remove_track on the sound's track", () => dispatch(engine, "remove_track", { trackIndex: soundTrackIndex })],
+    ["remove_asset on the sound's asset", () => dispatch(engine, "remove_asset", { assetId: sound.id })],
+  ] as const) {
+    await edit();
+    // MUTATION: removeClipsWhere not clearing audioClipId → the graphic names a clip that is gone.
+    // MUTATION: the group the sound made not unlinked → the clip keeps a group of one.
+    check(soundClips().length === 0 && !!graphicOn(host.id) && graphicOn(host.id)?.audioClipId === undefined && clipOf(host.id)?.linkGroupId === undefined,
+      `${what}: the graphic stays, names no sound, and its clip is unlinked again (${JSON.stringify(graphicOn(host.id)?.audioClipId)}, ${JSON.stringify(clipOf(host.id)?.linkGroupId)})`);
+    const saved = await reloaded(what.startsWith("remove_track") ? "rt-sound" : "ra-sound");
+    const savedHost = saved.tracks.flatMap((t) => t.clips).find((c) => c.id === host.id);
+    check(!!savedHost?.graphics?.[0] && savedHost.graphics[0].audioClipId === undefined && saved.tracks.flatMap((t) => t.clips).every((c) => c.assetId !== sound.id), `${what}, saved and loaded: the graphic names no sound and no clip of it is there`);
+    engine.undo();
+    check(both(), `${what}, undone: the graphic names its sound again and both are linked`);
+    engine.redo();
+    check(soundClips().length === 0 && graphicOn(host.id)?.audioClipId === undefined, `${what}, redone: the graphic names no sound again`);
+    engine.undo();
+  }
+  engine.undo();
+  setup(both() && !engine.getProject().tracks.some((t) => t.id === extraVideo.id) && clipOf(acId)?.startFrame === 60 && clipOf(acId)?.sourceOutFrame === 60, "undo restores the clip, its sound and the tracks");
+
   // tighten_talk on a clip with words: a pause cut inside the window ends the sound with the first piece; the rest of the
   // sound's track (a clip of another file there) is not cut for it.
   const t = fresh(work, "tighten");
@@ -807,7 +863,7 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   check(teSound().length === 0, `tighten_talk, then remove_graphic on the first piece: no clip of the sound is left (${teSound().length})`);
   // Both engines' timed writes (the run file's heartbeat, the crash-recovery autosave 30 s after the first edit) would
   // otherwise land in A6's watch of every write, now that renders wait for each drawn frame and take longer.
-  for (const e of [engine, te]) {
+  for (const e of [engine, te, ...loadedEngines]) {
     await e.storage.dispose();
     const pending = (e as unknown as { recoveryTimer: NodeJS.Timeout | null }).recoveryTimer;
     if (pending) clearTimeout(pending);
@@ -816,7 +872,7 @@ async function a4(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
 
 // ---- A5: failures ------------------------------------------------------------------
 
-async function a5(work: string, lib: Record<string, MediaAsset>) {
+async function a5(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   console.log("A5. failures: the mix's limit, a failed move, caps, an offline file...");
   const f = fresh(work, "fail");
   const bakedBefore = () => filesUnder(join(f.data, "baked")).sort().join(",");
@@ -858,6 +914,91 @@ async function a5(work: string, lib: Record<string, MediaAsset>) {
   const named = [...touched.slice(t0), ...spawned.slice(s0).map((c) => c.join(" "))].filter((x) => x.includes(EVIL));
   check(named.length === 0, `no file call or command of the core named the zr-evil host (${JSON.stringify(named.slice(0, 3))})`);
   await leftNothing(off, f, "off", "offline audio");
+
+  await afterTheMove(work, fx);
+}
+
+/**
+ * add_graphic on ZabsReel's renderer after renderMotion has moved the
+ * overlay's .mov, .webm and -audio.wav into baked/ (engine.ts
+ * addMotionGraphicRun): a failed probe of a moved file, a cancel_job that
+ * lands then, and the clip split while the graphic rendered each end the
+ * job, remove exactly those three files and leave the project as it was.
+ */
+async function afterTheMove(work: string, fx: Fixtures) {
+  const f = fresh(work, "aftermove");
+  const e = new EditorEngine(f.data);
+  e.motionRenderer.env = f.env;
+  e.setProjectSettings({ width: 160, height: 90, fps: 30 });
+  const hostAsset = await e.importVideo(fx.host);
+  const toneAsset = await e.importVideo(fx.tone);
+  const clip = e.addClip(hostAsset.id, { trackIndex: 0, startFrame: 0, sourceInFrame: 0, sourceOutFrame: 90 });
+  const code = TSX(`<Audio src={asset("${toneAsset.id}")} />`);
+  const baked = () => filesUnder(join(f.data, "baked")).sort();
+  const allClips = () => e.getProject().tracks.flatMap((t) => t.clips);
+  const graphicJob = () => e.jobs.list(false).find((j) => j.type === "graphic");
+  const isProbeOf = (file: string, args: string[], suffix: string) => /ffprobe(\.exe)?$/.test(file) && args.some((a) => a.startsWith(join(f.data, "baked")) && a.endsWith(suffix));
+  const attempt = async (what: string, hook: (file: string, args: string[]) => string[] | void, want: { code?: string; message: RegExp; status: string }, revisionAfter: () => number) => {
+    const before = baked();
+    const assets = e.getProject().assets.length;
+    spawnHook = hook;
+    let err: (Error & { code?: string }) | null = null;
+    try {
+      await e.addGraphic(allClips().find((c) => c.assetId === hostAsset.id)!.id, { code, startFrame: 0, endFrame: 30 });
+    } catch (x) {
+      err = x as Error & { code?: string };
+    } finally {
+      spawnHook = null;
+    }
+    const job = graphicJob();
+    check(!!err && (!want.code || err.code === want.code) && want.message.test(err.message) && job?.status === want.status,
+      `${what}: add_graphic fails (${err ? `${err.code ?? ""}: ${err.message.slice(0, 160)}` : "it attached"}), the job is ${job?.status}`);
+    check(JSON.stringify(baked()) === JSON.stringify(before) && filesUnder(join(f.data, "motion")).length === 0, `${what}: baked/ is exactly as before and motion/ is empty (${JSON.stringify(baked())})`);
+    check(e.getProject().revision === revisionAfter() && e.getProject().assets.length === assets && allClips().every((c) => !c.graphics && c.assetId !== undefined && !c.linkGroupId) && allClips().length === allClips().filter((c) => c.assetId === hostAsset.id).length,
+      `${what}: the project is unchanged (no graphic, no sound clip, no new asset; revision ${e.getProject().revision})`);
+  };
+
+  // A failed probe of the moved -audio.wav (the last file probed): the .mov, .webm and .wav all go.
+  const injected: string[] = [];
+  let rev = e.getProject().revision;
+  // MUTATION: no clean-up in addMotionGraphicRun's catch → the three files stay in baked/.
+  await attempt("a failed probe of the moved .wav", (file, args) => {
+    if (!isProbeOf(file, args, "-graphic-audio.wav")) return;
+    injected.push("probe");
+    return args.map((a) => (a.endsWith("-graphic-audio.wav") ? join(f.dir, "no-such-file.wav") : a));
+  }, { message: /ffprobe|no such file|not media|could not|can't/i, status: "error" }, () => rev);
+  check(injected.length === 1, `the probe of the moved .wav was the one that failed (${injected.length} injected)`);
+
+  // cancel_job once the files are in baked/ (as the first probe of them starts): the job is canceled, nothing is attached.
+  rev = e.getProject().revision;
+  let canceled = false;
+  // MUTATION: no abort check before the project change → the graphic and its sound are attached to a canceled job.
+  await attempt("cancel_job after the move", (file, args) => {
+    if (!isProbeOf(file, args, "-graphic.mov") || canceled) return;
+    const job = e.jobs.list(true).find((j) => j.type === "graphic");
+    canceled = !!job && e.jobs.cancel(job.id);
+  }, { code: "graphic_render_canceled", message: /canceled/, status: "canceled" }, () => rev);
+  check(canceled, `cancel_job reached the running job after the move`);
+
+  // The clip split while the graphic renders (as the renderer starts): its id is gone, so the job ends with that reason.
+  let split = false;
+  // MUTATION: no host check in addMotionGraphicRun → attachGraphic's "No clip with id" instead of the named reason.
+  await attempt("the clip split during the render", (_file, args) => {
+    if (split || !args.includes(RENDERER_FLAG) || args.includes("--probe")) return;
+    e.splitClip(clip.id, 45);
+    split = true;
+    rev = e.getProject().revision;
+  }, { message: /was split, removed or replaced while its motion graphic rendered/, status: "error" }, () => rev);
+  check(split && !allClips().some((c) => c.id === clip.id), `the clip was split while its graphic rendered`);
+
+  // With nothing in the way the same add_graphic attaches the graphic and its sound: three files in baked/.
+  const before = baked().length;
+  const r = await e.addGraphic(allClips().find((c) => c.assetId === hostAsset.id)!.id, { code, startFrame: 0, endFrame: 30 });
+  check(!!r.graphic?.audioClipId && baked().length === before + 3 && ["-graphic.mov", "-graphic.webm", "-graphic-audio.wav"].every((x) => baked().some((n) => n.endsWith(x))),
+    `with no fault the graphic and its sound are attached, and baked/ gains its .mov, .webm and .wav (${JSON.stringify(baked())})`);
+  await e.storage.dispose();
+  const pending = (e as unknown as { recoveryTimer: NodeJS.Timeout | null }).recoveryTimer;
+  if (pending) clearTimeout(pending);
 }
 
 // ---- A6: many pieces ---------------------------------------------------------------
@@ -913,7 +1054,7 @@ async function main() {
       if (part("A2")) await a2(work, lib);
       if (part("A3")) await a3(work, lib);
       if (part("A4")) await a4(work, fx, lib);
-      if (part("A5")) await a5(work, lib);
+      if (part("A5")) await a5(work, fx, lib);
       if (part("A6")) await a6(work, lib);
     } finally {
       rmSync(work, { recursive: true, force: true, maxRetries: 5 });

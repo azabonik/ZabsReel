@@ -1,8 +1,9 @@
 /**
  * What the motion renderer's smokes share (smoke-renderer.ts,
- * smoke-motion-media.ts): the check counter, fresh HOME and data folders,
- * Linux's process table and listening ports, and the private network
- * namespace a run re-executes itself in.
+ * smoke-motion-media.ts, smoke-motion-audio.ts and the others): the check
+ * counter, fresh HOME and data folders, Linux's process table and listening
+ * ports, the private network namespace a run re-executes itself in, and the
+ * after-a-render check (leftNothing).
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -120,6 +121,23 @@ export async function gone(pids: number[], ms: number): Promise<number[]> {
     const left = pids.filter((p) => table.has(p));
     if (left.length === 0 || Date.now() > deadline) return left;
     await sleep(50);
+  }
+}
+
+/**
+ * After a render with id `id` in `f`: its renderer processes are gone
+ * (within `ms`; Linux only, the process table is /proc's), motion/<id> is
+ * gone and, after a failure, baked/ holds nothing named after it. A row
+ * whose own setup leaves a file named after the render in baked/ passes
+ * `baked: false` and checks baked/ itself.
+ */
+export async function leftNothing(run: { pids: number[]; error?: unknown }, f: Fresh, id: string, what: string, opts: { ms?: number; baked?: boolean } = {}): Promise<void> {
+  const left = LINUX ? await gone(run.pids, opts.ms ?? 2000) : [];
+  check(run.pids.length > 0 && left.length === 0, `${what}: no renderer process left (${run.pids.length} watched, left ${JSON.stringify(left)})`);
+  check(!existsSync(join(f.data, "motion", id)), `${what}: motion/${id} is removed`);
+  if (run.error && (opts.baked ?? true)) {
+    const baked = readdirSync(join(f.data, "baked")).filter((n) => n.startsWith(`${id}-`));
+    check(baked.length === 0, `${what}: nothing of it in baked/ (${JSON.stringify(baked)})`);
   }
 }
 
