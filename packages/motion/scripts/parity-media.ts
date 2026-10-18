@@ -65,9 +65,10 @@
  * verdicts (one passes the rule, the other fails), the row's actual is exactly
  * "zabsreel nondeterministic": the two samples disagree on whether there is a
  * behaviour difference. Where both fail, the row is a mismatch with the first
- * render's metric, since both samples show the difference. The count of
- * identical frames is a lower bound on the noise only, not a noise floor: a
- * frame both renders get wrong the same way is not detected by the repeat.
+ * render's metric, since both samples show the difference. The frames that
+ * differ are a lower bound on the renderer's nondeterminism, not its full
+ * extent, and the identical ones are not a noise floor: a frame both renders
+ * get wrong the same way counts as identical.
  *
  * Writes to --out: render-all.jsonl / render-mismatches.jsonl (frame rows) and
  * audio-all.jsonl / audio-mismatches.jsonl (one audio row per composition and
@@ -750,9 +751,10 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     fixtures: run.fixtures.map((f) => ({ id: f.id, file: basename(f.file), sha256: f.sha256, bytes: f.bytes, probe: run.library[f.id] && { ...run.library[f.id], path: undefined, id: undefined, addedAt: undefined } })),
     seconds: Math.round((Date.now() - t0) / 1000),
     mediaBaseline: baseline(results),
-    // ZabsReel against its own repeat (each frame's and sound's repeat metrics are in cases). Identical
-    // is a lower bound on its noise, not a noise floor: a frame both renders get wrong the same way is
-    // not seen here. Differing ones: split (NONDET rows), both fail (mismatch rows) or both pass.
+    // ZabsReel against its own repeat (each frame's and sound's repeat metrics are in cases). The
+    // differing ones are a lower bound on its nondeterminism and framesIdentical is not a noise floor:
+    // a frame both renders get wrong the same way counts as identical. Differing ones: split (NONDET
+    // rows), both fail (mismatch rows) or both pass.
     zabsreelRepeat: {
       finding: SETTLE,
       framesCompared: frames.length,
