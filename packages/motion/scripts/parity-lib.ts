@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type FfmpegVersion, parseFfmpegVersion, passthroughFlag } from "../../core/src/ffmpeg/version.js";
 import { HEADLESS_SHELL } from "../../core/src/motion/addonlock.js";
 import { REMOTION_VERSION } from "../../core/src/motion/remotionload.js";
 
@@ -113,12 +114,45 @@ export const fmt = (m: Metrics) => `${m.pct_within_4}/${m.max_diff}`;
 
 // ---- FFmpeg ----------------------------------------------------------------------------
 
+let pathFfmpeg: FfmpegVersion | undefined;
+
+/**
+ * The output option that sets how the FFmpeg on PATH (the one that makes the
+ * fixtures and the reference decodes) times video frames, with `mode`
+ * (passthrough: each decoded frame once, as -vsync 0; vfr): -vsync before
+ * FFmpeg 6, -fps_mode from 6 (9.0 has no -vsync), as the core picks it
+ * (version.ts passthroughFlag). Runs `ffmpeg -version` once, at the first call.
+ */
+export function fpsMode(mode: "passthrough" | "vfr"): string[] {
+  pathFfmpeg ??= parseFfmpegVersion(spawnSync("ffmpeg", ["-version"], { encoding: "utf8" }).stdout ?? "");
+  return [passthroughFlag(pathFfmpeg)[0], mode];
+}
+
+/**
+ * A select filter that passes frames `sorted` (ascending, distinct) and no
+ * other: one between() for each run of consecutive frames, eq() for a frame
+ * alone. FFmpeg 7.1.5, 8.1.3 and 9.0.2 refuse an expression of more than 100
+ * terms ("Error while parsing expression", measured; 4.4, 6.1 and 8.0.1 take
+ * any number), so more runs than that throw here.
+ */
+export function selectFrames(sorted: number[]): string {
+  const terms: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    terms.push(j === i ? `eq(n\\,${sorted[i]})` : `between(n\\,${sorted[i]}\\,${sorted[j]})`);
+    i = j + 1;
+  }
+  if (terms.length > 100) throw new Error(`select: ${terms.length} runs of frames, and FFmpeg 7.1.5+ parses at most 100 terms`);
+  return `select=${terms.join("+")}`;
+}
+
 /** The listed frames of `file` (in ascending order), decoded by FFmpeg to RGBA; throws when fewer come out. */
 export function decodeFrames(file: string, w: number, h: number, frames: number[]): Map<number, Buffer> {
   const sorted = [...new Set(frames)].sort((x, y) => x - y);
-  const select = `select=${sorted.map((n) => `eq(n\\,${n})`).join("+")}`;
+  const select = selectFrames(sorted);
   const size = w * h * 4;
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-vf", select, "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"], {
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-vf", select, ...fpsMode("passthrough"), "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"], {
     maxBuffer: size * sorted.length + (1 << 20),
   });
   if (r.status !== 0) throw new Error(`FFmpeg could not decode ${basename(file)}: ${String(r.stderr).trim().split("\n").pop()}`);

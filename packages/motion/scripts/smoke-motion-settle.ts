@@ -53,7 +53,7 @@ import { fileURLToPath } from "node:url";
 import { probeAsset } from "../../core/src/ffmpeg/ffprobe.js";
 import { renderMotion } from "../../core/src/motion/rendermotion.js";
 import type { MediaAsset } from "../../core/src/types.js";
-import { FIXTURES, type Fixture, generateFixtures, parseHeader, REPO } from "./parity-lib.js";
+import { FIXTURES, type Fixture, fpsMode, generateFixtures, parseHeader, REPO } from "./parity-lib.js";
 import { check, failureCount, fresh, gone, LINUX, reexecInNetns } from "./smoke-lib.js";
 
 const CASES = join(REPO, "packages", "motion", "parity", "media", "compositions");
@@ -166,7 +166,7 @@ function mad(a: Uint8Array, b: Uint8Array): number {
 /** FFmpeg's decode of every frame of `file` (or its one picture), read as the core reads it and drawn as `draw` says, in block means (FFmpeg's area scaling by BLOCK). */
 function sourceBlocks(file: string, area: Area): Uint8Array[] {
   const vf = [READ, area.draw, `scale=${area.w / BLOCK}:${area.h / BLOCK}:flags=area`, "format=rgb24"].filter(Boolean).join(",");
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", vf, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", vf, ...fpsMode("passthrough"), "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
   const size = (area.w / BLOCK) * (area.h / BLOCK) * 3;
   if (r.status !== 0 || r.stdout.length === 0 || r.stdout.length % size !== 0) throw new Error(`FFmpeg could not decode ${file} for ${area.name}: ${String(r.stderr).trim()}`);
   const out: Uint8Array[] = [];

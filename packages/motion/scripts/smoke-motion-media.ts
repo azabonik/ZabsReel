@@ -97,6 +97,7 @@ import type { GraphicStart } from "../../core/src/motion/graphicmodule.js";
 import { MAX_ASSET_FPS, MEDIA_CAPS, MotionMedia, requireOnline, SEARCH_PASSES, type MediaStats, type MotionAsset } from "../../core/src/motion/motionmedia.js";
 import { renderMotion, type RendererMessage, type RenderMotionOptions } from "../../core/src/motion/rendermotion.js";
 import type { MediaAsset } from "../../core/src/types.js";
+import { fpsMode, selectFrames } from "./parity-lib.js";
 import { check, failureCount, fresh, gone, leftNothing, LINUX, reexecInNetns, type Fresh } from "./smoke-lib.js";
 
 const EVIL = "zr-evil";
@@ -205,7 +206,7 @@ function fixtures(work: string): Fixtures {
   longAudio(4, 5, "tail.mp4");
   longAudio(2, 12, "gap.mp4");
   longAudio(40, 60, "slow.mp4", 0.1);
-  ffmpeg([...src("160x90"), "-vf", "select='lt(n,60)+not(mod(n,6))'", "-vsync", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", at("vfr.mp4")]);
+  ffmpeg([...src("160x90"), "-vf", "select='lt(n,60)+not(mod(n,6))'", ...fpsMode("vfr"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", at("vfr.mp4")]);
   ffmpeg(["-itsoffset", "0.5", ...src("160x90", 3), "-f", "lavfi", "-i", "sine=duration=4", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", at("late.mkv")]);
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=400x200", "-frames:v", "1", at("big.png")]);
   ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=16x16", "-frames:v", "1", at("red.png")]);
@@ -294,8 +295,8 @@ function failedWith(run: Run, code: string, what: string, msg?: RegExp) {
 /** FFmpeg's own RGBA decode of `file`'s frames `which` (in that order), read with `vf` before format=rgba; `pre` (an fps filter) numbers the frames. */
 function reference(file: string, which: number[], w: number, h: number, vf: string, pre = ""): Map<number, Buffer> {
   const sorted = [...new Set(which)].sort((a, b) => a - b);
-  const select = `select=${sorted.map((n) => `eq(n\\,${n})`).join("+")}`;
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", `${pre ? `${pre},` : ""}${select},${vf},format=rgba`, "-vsync", "0", "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
+  const select = selectFrames(sorted);
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", file, "-an", "-vf", `${pre ? `${pre},` : ""}${select},${vf},format=rgba`, ...fpsMode("passthrough"), "-f", "rawvideo", "pipe:1"], { maxBuffer: 1 << 30 });
   const out = new Map<number, Buffer>();
   sorted.forEach((n, i) => out.set(n, r.stdout.subarray(i * w * h * 4, (i + 1) * w * h * 4)));
   return out;
@@ -501,9 +502,14 @@ async function m2(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   await played("vfr", vfrCount, "a video whose frame rate changes");
   await jumped("vfr", vfrCount, [74, 69, 66, 61, 58, 50, 45, 37, 33, 23, 10, 5, 1], "a video whose frame rate changes");
   // 0.5 s late (plus the audio encoder's delay): its first picture until it starts, then its 90 pictures. Its real
-  // frame count is its last picture's end at its fps (106 here); the table's count is its 4 s of audio's.
+  // frame count is its last picture's end at its fps, from the file's start (106 here; 105 with FFmpeg 8.1+); the
+  // table's count is its 4 s of audio's. From the file's start, as the core's decode (-copyts -start_at_zero) and the
+  // fps filter over the whole file count: FFmpeg 6.1 - 8.0 write the AAC audio from -0.023 s and start the file there,
+  // so packet times are not times from the file's start. 4.4 writes the audio from 0 (and the video from 0.523 s);
+  // 8.1+ start the file at 0.
   const packets = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", fx.late], { encoding: "utf8" });
-  const lateEnd = Math.max(...packets.stdout.trim().split("\n").map((l) => l.split(",").map(Number)).map(([pts, d]) => pts + d));
+  const fileStart = Number(spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", fx.late], { encoding: "utf8" }).stdout.trim());
+  const lateEnd = Math.max(...packets.stdout.trim().split("\n").map((l) => l.split(",").map(Number)).map(([pts, d]) => pts + d)) - fileStart;
   const lateReal = Math.round(lateEnd * lib.late.fps);
   const lateCount = Math.round(lib.late.duration * lib.late.fps);
   check(lateReal > 90 && lateCount > lateReal, `the video that starts 0.5 s after its file: ${lateReal} frames from its 90 pictures, and a frame count past them (${lateCount})`);
