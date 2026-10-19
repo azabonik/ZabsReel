@@ -158,7 +158,7 @@ From a checkout of this repo (without npm):
 
 ## Install (packaged app)
 
-The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe, whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, auto-reframe and motion graphics all work on first launch with **no downloads**. Only the optional Remotion graphics add-on is a download (see [Motion graphics](#motion-graphics)).
+The Windows installer is **offline-first**: it bundles FFmpeg + ffprobe (9.0.2), whisper.cpp with the `base.en` model, the YuNet face-detection model, and an open-source font, so import/edit/export, captions, auto-reframe and motion graphics all work on first launch with **no downloads**. Only the optional Remotion graphics add-on is a download (see [Motion graphics](#motion-graphics)).
 
 1. Run **`ZabsReel-<version>.exe`** and follow the installer.
 2. Because the build is **unsigned**, Windows SmartScreen may warn ("Windows protected your PC"). Click **More info → Run anyway**. (We can drop in an Authenticode certificate later — the config has a hook for it.)
@@ -336,7 +336,7 @@ ZabsReel runs FFmpeg as a separate program, so the version matters. The full tes
 | 7.1 | tested | |
 | 8.0 | tested | |
 | 8.1 | tested | |
-| 9.0 | tested | Its `anlmdn` filter crashes, so *Reduce noise* with *Extra pass* runs the second spectral pass only. |
+| 9.0 | tested | The Windows installer bundles 9.0.2. Its `anlmdn` filter crashes, so *Reduce noise* with *Extra pass* runs the second spectral pass only. |
 | 5.x, 6.0, git builds | not tested | Expected to work; the core prints a warning at startup for 5.x and git builds. |
 
 The core adapts to the differences it knows about (for example, `-filter_complex_script` no longer exists in 9.0, from 8.1 FFmpeg tracks premultiplied alpha, and the noise reduction filter changed in 5.0), so the same project exports the same picture on each tested version within a level or two of rounding, and the audio effects are tuned to match 4.4 within about 2 dB. The startup warning goes by major version: the core logs one for 5.x and for git builds, but 6.0 and 7.0 run without a warning (the desktop bundle still refuses to ship them). To use a specific build, set `AIVE_FFMPEG` and `AIVE_FFPROBE` to its binaries. `docs/TESTING.md` has the per-version test results and how to run the tests against another build.

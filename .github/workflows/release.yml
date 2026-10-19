@@ -85,8 +85,11 @@ jobs:
           AIVE_REMOTION_ADDON: ${{ github.workspace }}
         run: npx tsx packages/core/scripts/smoke-graphicimports.ts
 
+      # Pinned: the installer bundles the FFmpeg installed here (prepare-bundle
+      # copies it in and still refuses a version not on TESTED_FFMPEG_VERSIONS).
+      # Chocolatey's ffmpeg 9.0.2 is gyan.dev's essentials build.
       - name: Install FFmpeg (staging source; not shipped from here — prepare-bundle copies it in)
-        run: choco install ffmpeg -y --no-progress
+        run: choco install ffmpeg --version 9.0.2 -y --no-progress
 
       # The network-path gate on a real Windows host, before anything is
       # packaged (docs/RELEASING.md). Test servers are under .invalid, so a

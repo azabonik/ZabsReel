@@ -27,7 +27,10 @@ redistribution. Packaged installers include a copy of this file, `LICENSE` and `
 - **Role:** all media decoding, filtering, encoding. Invoked as an external
   subprocess — it is **never linked** into our code. Its GPL license is in any
   case compatible with this project's GPL-3.0 license.
-- **Build shipped:** a static GPL build (e.g. gyan.dev or BtbN). Because the
+- **Build shipped:** a static GPL build. The release installer bundles FFmpeg
+  9.0.2, gyan.dev's essentials build (Chocolatey's `ffmpeg` package, pinned in
+  `.github/workflows/release.yml`); an installer you build yourself bundles the
+  tested build you stage (e.g. gyan.dev or BtbN). Because the
   binary is a GPL build, distributing it carries GPL obligations **for the binary
   itself**: you must offer the corresponding source.
 - **License:** GPLv3 (the build); FFmpeg itself is LGPL/GPL.
