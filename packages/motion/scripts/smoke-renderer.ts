@@ -294,7 +294,8 @@ function r1(work: string) {
     touch(join(root, "repo", "apps", "desktop", "electron", "main.cjs"));
     const sexe = touch(join(root, s.unpacked, ...s.exe));
     const fake = touch(join(root, "repo", "node_modules", "electron", "dist", "electron"));
-    const desktop = realpathSync(join(root, "repo", "apps", "desktop"));
+    // .native, as rendererBinary's realpathNative: Windows' TEMP can hold 8.3 short names (RUNNER~1), which only it expands.
+    const desktop = realpathSync.native(join(root, "repo", "apps", "desktop"));
     check(isSourceCheckout(sfrom), `${s.os} source: isSourceCheckout() reads the fixture as a source checkout`);
     const asked: string[] = [];
     const viaExec = rendererBinary({ from: sfrom, execPath: sexe, electronVersion: version, requireElectron: () => fake });
@@ -509,6 +510,46 @@ async function r2(work: string) {
   check(cardDecoded.length === FRAMES && cardDecoded.every((d, n) => near(px(d, 16, 16), [...colour(n), 255], 4)), `the BT.601 colour patch decodes to each frame's colour within 4 levels (${JSON.stringify(cardDecoded[2] && px(cardDecoded[2], 16, 16))} vs ${JSON.stringify(colour(2))})`);
   check(readdirSync(join(s.data, "baked")).join() === "card-graphic.mp4", `baked/ holds only the .mp4 (${JSON.stringify(readdirSync(join(s.data, "baked")))})`);
   await leftNothing(card, s, "card", "standalone");
+
+  // Graphics smaller than a window can be (Windows keeps one at least 32x31): drawn in the
+  // top-left of a MIN_WINDOW window and captured from there, so each frame is exactly the graphic.
+  for (const [w, h] of SMALL_SIZES) {
+    const id = `small-${w}x${h}`;
+    const sf = fresh(work, id);
+    const small = await render(sf, id, { module: SMALL(w, h), width: w, height: h, durationInFrames: 3 });
+    const off = small.frames.map((b, n) => (b.equals(smallFrame(w, h, n)) ? -1 : n)).filter((n) => n >= 0);
+    check(!small.error && small.frames.length === 3 && off.length === 0,
+      `a ${w}x${h} graphic: 3 frames of exactly ${w}*${h}*4 bytes, each pixel its own colour (${small.error?.message ?? `frames ${small.frames.map((b) => b.length).join("/")}, off ${JSON.stringify(off)}`})`);
+    await leftNothing(small, sf, id, `${w}x${h} graphic`);
+  }
+}
+
+// MUTATION: motion-renderer.cjs's capture() without the rect (the whole window) → every
+// small-graphic row fails (a frame of the MIN_WINDOW window's size). renderWindow without the
+// MIN_WINDOW floor → the rows fail on Windows (32x31 frames) and still pass on Linux.
+const SMALL_SIZES: [number, number][] = [[2, 2], [8, 180], [1920, 8], [62, 30]];
+
+/** A w x h page: every pixel its own colour on frame n (x, y and n in the bytes), so a frame of the wrong size, place or time fails. */
+const SMALL = (w: number, h: number) => `
+const c = document.createElement("canvas");
+c.width = ${w}; c.height = ${h}; c.style.display = "block";
+document.getElementById("root").appendChild(c);
+const g = c.getContext("2d");
+zrMotion.onFrame((n) => {
+  const img = g.createImageData(${w}, ${h});
+  for (let y = 0; y < ${h}; y++) for (let x = 0; x < ${w}; x++) {
+    const i = (y * ${w} + x) * 4;
+    img.data[i] = (x * 7 + n * 13) % 256; img.data[i + 1] = (y * 11 + n * 5) % 256; img.data[i + 2] = (x + y + 101) % 256; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+});
+`;
+
+/** SMALL's frame n as the pipe carries it: B,G,R,A. */
+function smallFrame(w: number, h: number, n: number): Buffer {
+  const buf = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) buf.set([(x + y + 101) % 256, (y * 11 + n * 5) % 256, (x * 7 + n * 13) % 256, 255], (y * w + x) * 4);
+  return buf;
 }
 
 // ---- R3: network ---------------------------------------------------------------------
@@ -1026,7 +1067,7 @@ async function r5(work: string) {
   const p = fresh(work, "scratch");
   const scratch = join(p.data, "motion", "probe-test");
   mkdirSync(join(scratch, "tmp"), { recursive: true });
-  const r2 = await runRenderer(bin, rendererArgs(scratch, 16, 16, ["--probe"]), rendererEnv(scratch, p.env));
+  const r2 = await runRenderer(bin, rendererArgs(scratch, 64, 64, ["--probe"]), rendererEnv(scratch, p.env));
   const inHome = filesUnder(p.home);
   const inScratch = filesUnder(scratch);
   const probed = r2.code === 0 && /"probe":"ok"/.test(r2.stdout);

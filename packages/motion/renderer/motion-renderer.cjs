@@ -6,7 +6,7 @@
 // Arguments (after the flag): --zr-parent-pid=<core pid>, --zr-scratch=<the
 // render's motion/<id> folder, absolute> (its profile and temp folder only;
 // the page never learns it), optionally --zr-heap-mb=<n> (the page's V8 heap,
-// at most 2048) and --probe (D7: render one 16x16 frame, print
+// at most 2048) and --probe (D7: render one 64x64 frame, print
 // {"probe":"ok",...} and exit).
 //
 // Pipes with the core:
@@ -65,6 +65,14 @@ const CSP = [
 /** Nothing listens there: a request that got past the session's filter has no route out (loopback included). */
 const DEAD_PROXY = { proxyRules: "socks5://127.0.0.1:9", proxyBypassRules: "<-loopback>" };
 const MAX_HEAP_MB = 2048;
+/**
+ * The smallest window, on every platform: Windows keeps these windows at least 32x31 (measured),
+ * so a smaller graphic is drawn in the top-left corner of a window this big and captured from
+ * there (capture()). The page's root has the graphic's size in px (host.js), not the window's.
+ */
+const MIN_WINDOW = 64;
+/** The probe's frame size; rendermotion.ts gives Linux the same screen. */
+const PROBE_SIZE = 64;
 /** The core's media handles (motionmedia.ts: 16 random bytes in hex). */
 const HANDLE = /^[0-9a-f]{32}$/;
 /** A query number as the core reads it (it refuses a source time that is not a whole number, 0 or more). */
@@ -129,9 +137,20 @@ function fail(code, message) {
   exit(1);
 }
 
-// Lifecycle: stdin's EOF, or the core gone, ends the render.
-process.stdin.on("end", () => exit(0));
-process.stdin.on("error", () => exit(0));
+// The core's control lines come on fd 0, opened here as a socket like fds 3 and 4 below. Not
+// process.stdin: in Electron's main process on Windows (a GUI program) Node makes that a dummy
+// stream that ends at once, which ended the packed Windows app before its probe.
+let control;
+try {
+  control = new net.Socket({ fd: 0, readable: true, writable: false });
+} catch (err) {
+  process.stderr.write(`[motion-renderer] fd 0 must be the core's pipe (${err.code ?? err.message})\n`);
+  process.exit(2);
+}
+
+// Lifecycle: the control pipe's EOF, or the core gone, ends the render.
+control.on("end", () => exit(0));
+control.on("error", () => exit(0));
 setInterval(() => {
   try {
     process.kill(parentPid, 0);
@@ -256,8 +275,8 @@ function lockDownContents(wc) {
 function renderWindow(ses, width, height, opaque) {
   return new BrowserWindow({
     show: false,
-    width,
-    height,
+    width: Math.max(width, MIN_WINDOW),
+    height: Math.max(height, MIN_WINDOW),
     useContentSize: true,
     frame: false,
     enableLargerThanScreen: true,
@@ -275,6 +294,11 @@ function renderWindow(ses, width, height, opaque) {
       preload: path.join(__dirname, "preload.cjs"),
     },
   });
+}
+
+/** The graphic's own rectangle of `win`: the top-left width x height, whatever the window's size (MIN_WINDOW). */
+function capture(win, width, height) {
+  return win.webContents.capturePage({ x: 0, y: 0, width, height });
 }
 
 let swapRB = null;
@@ -307,14 +331,14 @@ function frameBytes(img, width, height) {
   return bytes;
 }
 
-/** D7's start probe: one 16x16 frame in a session locked down like a render's, then one line. */
+/** D7's start probe: one PROBE_SIZE square frame in a session locked down like a render's, then one line. */
 async function runProbe() {
   const body = Buffer.from('<!doctype html><html><body style="margin:0;background:#000"></body></html>');
   const ses = await renderSession(new Map([["page.html", { type: "text/html; charset=utf-8", body }]]));
-  const win = renderWindow(ses, 16, 16, true);
+  const win = renderWindow(ses, PROBE_SIZE, PROBE_SIZE, true);
   await win.loadURL(PAGE_URL);
-  const bytes = frameBytes(await win.webContents.capturePage(), 16, 16);
-  if (bytes.length !== 16 * 16 * 4 || bytes[3] !== 255) throw new Error("the probe frame is wrong");
+  const bytes = frameBytes(await capture(win, PROBE_SIZE, PROBE_SIZE), PROBE_SIZE, PROBE_SIZE);
+  if (bytes.length !== PROBE_SIZE * PROBE_SIZE * 4 || bytes[3] !== 255) throw new Error("the probe frame is wrong");
   send({
     probe: "ok",
     visibleWindows: BrowserWindow.getAllWindows().filter((w) => w.isVisible()).length,
@@ -402,7 +426,7 @@ async function renderFrame(n) {
     render.win.webContents.executeJavaScript(`typeof __zrMotionRender === "function" && __zrMotionRender(${n}, ${render.o.fps})`).catch(() => {});
   });
   await drawn();
-  const bytes = frameBytes(await render.win.webContents.capturePage(), render.o.width, render.o.height);
+  const bytes = frameBytes(await capture(render.win, render.o.width, render.o.height), render.o.width, render.o.height);
   await new Promise((resolve, reject) => render.frames.write(bytes, (err) => (err ? reject(err) : resolve())));
   send({ type: "frame", n, cues });
 }
@@ -422,8 +446,8 @@ function onMessage(line) {
 }
 
 let buf = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
+control.setEncoding("utf8");
+control.on("data", (chunk) => {
   if (probe) return;
   buf += chunk;
   let nl;

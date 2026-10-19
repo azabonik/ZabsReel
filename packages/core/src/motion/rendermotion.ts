@@ -175,6 +175,12 @@ export interface RenderMotionResult {
   audio: AudioStats;
 }
 
+/**
+ * motion-renderer.cjs's MIN_WINDOW: its window is never smaller (Windows keeps one at least
+ * 32x31), and a smaller graphic is captured from the window's top-left corner.
+ */
+export const RENDERER_MIN_WINDOW = 64;
+
 /** The renderer's environment for a render in `scratch` (see {@link RENDERER_ENV}). */
 export function rendererEnv(scratch: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
@@ -192,10 +198,12 @@ export function rendererEnv(scratch: string, env: NodeJS.ProcessEnv = process.en
  * The renderer's arguments after the binary rule's: the core's PID, the
  * render's folder, the heap, and on Linux Chromium's headless platform (no
  * display needed; slice 1 measured X11 failing without one) with a screen
- * large enough for the page.
+ * large enough for the page's window: at least RENDERER_MIN_WINDOW a side,
+ * since the headless screen also bounds the window.
  */
 export function rendererArgs(scratch: string, width: number, height: number, extra: string[] = []): string[] {
-  const linux = process.platform === "linux" ? ["--ozone-platform=headless", `--ozone-override-screen-size=${width},${height}`] : [];
+  const screen = `${Math.max(width, RENDERER_MIN_WINDOW)},${Math.max(height, RENDERER_MIN_WINDOW)}`;
+  const linux = process.platform === "linux" ? ["--ozone-platform=headless", `--ozone-override-screen-size=${screen}`] : [];
   return [`--zr-parent-pid=${process.pid}`, `--zr-scratch=${scratch}`, "--mute-audio", ...linux, ...extra];
 }
 
@@ -700,7 +708,7 @@ export function unavailableReason(stderr: string): RendererUnavailableReason {
 
 /**
  * D7's start probe: the renderer, started as a render's is, opens its
- * offscreen window, renders one 16x16 frame and prints {"probe":"ok",...}
+ * offscreen window, renders one 64x64 frame and prints {"probe":"ok",...}
  * (with the process's own report: visible windows, loaded modules, its
  * environment's names). Runs in <dataDir>/motion/probe-<core pid>, removed
  * afterwards.
@@ -716,7 +724,8 @@ export async function probeMotionRenderer(
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, OWNER), JSON.stringify({ pid: process.pid }), "utf8");
     await mkdir(join(dir, "tmp"), { recursive: true });
-    const child = spawnRenderer(bin, rendererArgs(dir, 16, 16, ["--probe"]), dir, opts.env);
+    // 64x64: motion-renderer.cjs's PROBE_SIZE (Windows keeps a window at least 32x31).
+    const child = spawnRenderer(bin, rendererArgs(dir, 64, 64, ["--probe"]), dir, opts.env);
     if (child.pid !== undefined) opts.onSpawn?.(child.pid);
     const stderr = tail(child.stderr);
     let report: RendererMessage | null = null;
