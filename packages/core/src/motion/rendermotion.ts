@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { PRODUCT_NAME } from "../brand.js";
 import { adaptFfmpegArgs, FfmpegError, ffmpegStderrDetail, runTool, spawnFfmpegStream } from "../ffmpeg/executor.js";
-import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "../io/gatedfs.js";
+import { copyFile, existsSync, mkdir, readdir, readFile, rename, rm, writeFile } from "../io/gatedfs.js";
 import { graphicModule, type GraphicStart } from "./graphicmodule.js";
 import { AUDIO_CAPS, GraphicAudio, mixGraphicAudio, mixLimitMs, type AudioCaps, type AudioStats } from "./motionaudio.js";
 import { GRAPHIC_CODES, MotionRenderError, type GraphicCode } from "./motionerror.js";
@@ -462,9 +462,24 @@ function exited(child: Spawned): Promise<void> {
 
 const startFailed = (err: Error) => new RendererUnavailableError("start-failed", err.message);
 
+/**
+ * Linux: the renderer's processes leave no core dump. Where the system pipes core dumps to a
+ * handler (apport, systemd-coredump, WSL's crash capture), a crashed renderer cannot exit until its
+ * dump is written, and a Chromium process's dump is huge: a page past its heap waited for the frame
+ * timeout instead of reporting that it ran out of memory (smoke-renderer R4). The kernel skips a
+ * piped dump for a core limit of 1 byte (and a file dump for any limit under a page); prlimit sets it
+ * and then executes the renderer in its place (same PID), and Chromium's child processes inherit it.
+ * Without /usr/bin/prlimit the renderer starts as before.
+ */
+const PRLIMIT = "/usr/bin/prlimit";
+export function withoutCoreDumps(command: string, args: string[], platform: NodeJS.Platform = process.platform): [string, string[]] {
+  return platform === "linux" && existsSync(PRLIMIT) ? [PRLIMIT, ["--core=1", "--", command, ...args]] : [command, args];
+}
+
 /** Start the renderer for the binary rule's command, with only the allowlisted environment and five pipes. */
 function spawnRenderer(bin: Extract<RendererBinary, { ok: true }>, args: string[], scratch: string, env?: NodeJS.ProcessEnv): Spawned {
-  return runTool(bin.command, [...bin.args, ...args], {
+  const [command, argv] = withoutCoreDumps(bin.command, [...bin.args, ...args]);
+  return runTool(command, argv, {
     env: rendererEnv(scratch, env),
     extendEnv: false,
     stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
@@ -616,6 +631,8 @@ async function renderFrames(o: RenderMotionOptions, encoded: string, module: str
     void stderrEnd.then(() => {
       const r = reported as RendererMessage | null;
       const why = r ? `${String(r.code)}: ${String(r.message)}` : `exit ${code ?? signal}; ${stderr().trim().split("\n").slice(-3).join(" | ")}`;
+      // prlimit (withoutCoreDumps) could not execute the renderer: the start failure a direct spawn reports as "error".
+      if (!r && /^prlimit: failed to execute /m.test(stderr())) return failWith(startFailed(new Error(why)));
       const outOfMemory = /\boom\b/.test(String(r?.message)) || /V8 javascript OOM|Reached heap limit/.test(stderr());
       // A renderer that never got its page up because Chromium can't run here (D7): the reason its stderr names.
       const reason = ready ? "start-failed" : unavailableReason(stderr());

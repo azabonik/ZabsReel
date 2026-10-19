@@ -172,6 +172,7 @@ import {
   rendererEnv,
   renderMotion,
   sweepMotionScratch,
+  withoutCoreDumps,
   type RendererMessage,
   type RenderMotionOptions,
 } from "../../core/src/motion/rendermotion.js";
@@ -805,6 +806,46 @@ async function r4(work: string) {
   check(e3?.code === "graphic_render_crashed" && /out of memory/.test(e3.message), `a page past its heap: graphic_render_crashed, out of memory (${e3?.code}: ${e3?.message})`);
   await leftNothing(heap, f, "heap", "heap limit");
   check(readdirSync(join(f.data, "baked")).length === 0, `baked/ is empty after the three failures (${JSON.stringify(readdirSync(join(f.data, "baked")))})`);
+
+  // No core dumps from the renderer (rendermotion.ts withoutCoreDumps): where the system pipes them
+  // (apport, systemd-coredump, WSL's crash capture) a crashed page could not exit until its dump was
+  // written, and the heap row above timed out instead of reporting out of memory.
+  check(same(withoutCoreDumps("/r", ["a"], "win32"), ["/r", ["a"]]) && same(withoutCoreDumps("/r", ["a"], "darwin"), ["/r", ["a"]]),
+    "Windows and macOS start the renderer as the binary rule says (no prlimit)");
+  if (LINUX && existsSync("/usr/bin/prlimit")) {
+    check(same(withoutCoreDumps("/r", ["a"], "linux"), ["/usr/bin/prlimit", ["--core=1", "--", "/r", "a"]]), "Linux starts the renderer through /usr/bin/prlimit --core=1");
+    const limits = new Map<number, string>();
+    const coreLimit = (pid: number) => {
+      try {
+        const m = /^Max core file size\s+(\S+)\s+(\S+)/m.exec(readFileSync(`/proc/${pid}/limits`, "utf8"));
+        return m ? `${m[1]}:${m[2]}` : "?";
+      } catch {
+        return null;
+      }
+    };
+    const sampler = setInterval(() => {
+      for (const p of descendants(process.pid)) {
+        let cmd = "";
+        try {
+          cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
+        } catch {
+          continue;
+        }
+        // The renderer itself (its flag and this render's folder), then its process tree; not the core's FFmpeg.
+        if (!cmd.includes("--zr-motion-renderer") || !cmd.includes(join("motion", "core-limit"))) continue;
+        for (const q of [p, ...descendants(p)]) {
+          const l = coreLimit(q);
+          if (l) limits.set(q, l);
+        }
+      }
+    }, 150);
+    const slow = await render(f, "core-limit", { module: withHead("await new Promise((r) => setTimeout(r, 300));"), durationInFrames: 6 });
+    clearInterval(sampler);
+    const values = [...new Set(limits.values())];
+    check(!slow.error && limits.size >= 3 && values.length === 1 && values[0] === "1:1",
+      `every process of a render has a 1-byte core limit (${limits.size} processes, limits ${JSON.stringify(values)}${slow.error ? `; ${slow.error.message}` : ""})`);
+    await leftNothing(slow, f, "core-limit", "core limit");
+  }
 }
 
 // ---- R5: lifecycle -------------------------------------------------------------------
