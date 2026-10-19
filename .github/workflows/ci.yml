@@ -210,6 +210,8 @@ jobs:
         working-directory: apps/desktop
         run: npx electron-builder --linux --dir -c.electronDist=../../node_modules/electron/dist
 
+      # The motion smokes after this step run even when only this one failed
+      # (if: on each), so one failing row here does not hide theirs.
       # ZabsReel's own motion renderer (packages/motion): the binary rule on
       # fixture trees, frames from hand-written pages through the offscreen
       # Electron renderer into FFmpeg, every network route refused (a private
@@ -224,6 +226,7 @@ jobs:
       # which Ubuntu 24.04's AppArmor restricts by default. With CI=true a
       # missing namespace fails the network part (R3) instead of skipping it.
       - name: Smoke — motion renderer host and runtime (Electron offscreen, no network)
+        id: motion_host
         env:
           AIVE_APP: ${{ github.workspace }}/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop
         run: |
@@ -237,6 +240,7 @@ jobs:
       # file written outside the render's folder, library fonts, and a 60 s
       # 1080p video graphic within the caps. Fixtures are made with lavfi.
       - name: Smoke — motion renderer media and fonts (Electron offscreen, no network)
+        if: success() || steps.motion_host.outcome == 'failure'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends strace)
@@ -249,6 +253,7 @@ jobs:
       # showing FFmpeg's own decode of its source frame; and 300 first frames
       # per case the same way. Fixtures are made with lavfi.
       - name: Smoke — motion renderer settled media frames (Electron offscreen, no network)
+        if: success() || steps.motion_host.outcome == 'failure'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-motion-settle.ts
@@ -260,6 +265,7 @@ jobs:
       # rule, and every failure (the mix's limit, a failed move, an offline
       # file) leaving baked/ as it was. Fixtures are made with lavfi.
       - name: Smoke — motion renderer audio (Electron offscreen, no network)
+        if: success() || steps.motion_host.outcome == 'failure'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-motion-audio.ts
@@ -274,11 +280,13 @@ jobs:
       # Remotion add-on's rows need the pinned headless shell, so they skip
       # here (with a printed reason).
       - name: Smoke — motion renderer switch-over (Electron offscreen, no network)
+        if: success() || steps.motion_host.outcome == 'failure'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-motion-switch.ts
 
       - name: Smoke — desktop window request guard and CSP (pure logic)
+        if: success() || steps.motion_host.outcome == 'failure'
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts
 
   # The packed Windows app renders (MOTION-PLAN D8 "Launch" row (c) on the build
