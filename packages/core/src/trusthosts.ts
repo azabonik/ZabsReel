@@ -303,8 +303,12 @@ function createExclusive(p: string, text: string): boolean {
   return true;
 }
 
-/** What Windows answers a rename over a file another process has open (a reader of the list, an antivirus scan) until it is closed. */
-const RENAME_RETRIED = new Set(["EPERM", "EACCES", "EBUSY"]);
+/**
+ * What Windows answers while another process has a file open (a reader of the list, an antivirus
+ * scan) or its name is still being deleted: a rename over it, or creating a file of that name,
+ * fails until the last handle closes. Retried there, never final.
+ */
+const WIN_IN_USE = new Set(["EPERM", "EACCES", "EBUSY"]);
 /** How long such a rename is retried on win32, as addon/install.ts's renameRetry; from 10 ms, doubling to 1 s. */
 const RENAME_WINDOW_MS = 10_000;
 
@@ -320,7 +324,7 @@ async function writeAtomic(dir: string, name: string, text: string): Promise<voi
         break;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code ?? "";
-        if (process.platform !== "win32" || !RENAME_RETRIED.has(code)) throw err;
+        if (process.platform !== "win32" || !WIN_IN_USE.has(code)) throw err;
         if (Date.now() >= until) throw new TrustStoreError(`Couldn't save the list of approved computers: another program kept ${name} open (${code}). Try again.`);
         await sleep(wait);
       }
@@ -374,14 +378,21 @@ export async function withTrustLock<T>(dataDir: string, fn: () => T | Promise<T>
   const lock = join(dir, LOCK);
   const deadline = Date.now() + WAIT_MS;
   for (;;) {
-    if (createExclusive(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))) break;
+    let busy = false;
+    try {
+      if (createExclusive(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))) break;
+    } catch (err) {
+      // win32: the lock's name stays taken a moment after its holder deletes it (WIN_IN_USE, not EEXIST).
+      if (process.platform !== "win32" || !WIN_IN_USE.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      busy = true;
+    }
     const held = statOrNull(lock);
     if (held && Date.now() - held.mtimeMs > STALE_MS) {
       await opts.onStale?.();
       if (breakStaleLock(dir, Math.floor(held.mtimeMs))) continue;
     }
     if (Date.now() >= deadline) throw new TrustStoreError(`Couldn't save the list of approved computers: another ${PRODUCT_NAME} window is saving it. Try again.`);
-    if (held) await sleep(POLL_MS);
+    if (held || busy) await sleep(POLL_MS);
   }
   try {
     return await fn();
