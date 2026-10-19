@@ -255,7 +255,8 @@ npx tsx packages/motion/scripts/smoke-renderer.ts
 # page shows are FFmpeg's own decode of those source frames (in order, jumps,
 # past the end, a variable-rate source, a video that starts late in its file);
 # a component whose next request depends on loaded media; every cap of D4's
-# table, one row each; an offline asset and a playlist renamed .mp4 refused
+# table, one row each; an offline asset and a playlist (renamed .mp4, and named
+# .m3u8, which FFmpeg's format allowlist itself refuses on every version) refused
 # with nothing they name touched (strace); nothing written outside the render's
 # folder and no decoded frame file; a library font renders; a 60 s 1080p video
 # graphic within the caps; asset records with impossible numbers left out of the
@@ -880,6 +881,7 @@ Differences between the versions, and what the core does about them:
 | `vibrato` reads its delay line before it writes it (leftover memory: clicks, ±inf) | 4.4 – 9.0 | *Underwater* primes the delay line with 10 ms of silence and trims it off. |
 | libvidstab's default camera path ("opt") is now an L1 optimizer that ignores zoom "none" | static builds from mid-2026, any FFmpeg version | Stabilize passes `optalgo=gauss`, which gives the same output as the old default. |
 | ffprobe's file duration is the length the file records, which can be shorter than its pictures run (an MP4 whose track says 3.5 s while its last picture ends at 3.833 s; 4.4 reports 3.834 s) | 6.1+ | Import also reads where the video's last picture ends, from the end of the file only, and keeps the later of the two when it is at least a frame later. Other files keep their duration. |
+| FFmpeg itself declines an HLS playlist whose name does not end in .m3u8, .m3u or .hls ("Not detecting m3u8/hls …"), before the format allowlist sees it, and then fails on it as another format | 6.1+ | That message counts as "not media" too, so the user reads the same "can't open this kind of file" sentence on every version. |
 
 Known differences that remain:
 - swscale's RGB ↔ YUV conversions differ by 1–2 levels between 4.4 and 5.0+.

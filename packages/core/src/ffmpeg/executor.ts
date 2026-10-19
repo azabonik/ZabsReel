@@ -680,7 +680,7 @@ export class FfmpegError extends Error {
 /** What the user is told when FFmpeg refuses an input's format ({@link MEDIA_DEMUXERS}). */
 export const NOT_MEDIA_TEXT = `${PRODUCT_NAME} can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.`;
 
-/** An input FFmpeg refused because its format is not on {@link MEDIA_DEMUXERS}. */
+/** An input FFmpeg refused because its format is not on {@link MEDIA_DEMUXERS}, or a playlist FFmpeg declined itself ({@link notMediaFrom}). */
 export class NotMediaError extends FfmpegError {
   constructor(message: string, command: string, stderr: string) {
     super(message, command, stderr);
@@ -691,10 +691,14 @@ export class NotMediaError extends FfmpegError {
 /**
  * True when FFmpeg's stderr says an input's format is not on the allowlist.
  * The text is the only stable part: FFmpeg 8.1+ prints it under `[in#0 @ …]`
- * and may leave out the list.
+ * and may leave out the list. From 6.1 FFmpeg itself also declines an HLS
+ * playlist whose name does not end in .m3u8, .m3u or .hls, before the
+ * allowlist sees it, and then fails on the file as another format ("moov
+ * atom not found" for a .mp4); its "Not detecting m3u8/hls …" line says the
+ * file is a playlist, so that counts too.
  */
 export function notMediaFrom(stderr: string): boolean {
-  return stderr.includes("Format not on whitelist");
+  return stderr.includes("Format not on whitelist") || stderr.includes("Not detecting m3u8/hls with non standard extension");
 }
 
 /** The {@link NotMediaError} for a refused run: the product sentence, then FFmpeg's line naming the file. */

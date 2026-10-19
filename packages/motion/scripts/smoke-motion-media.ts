@@ -50,10 +50,14 @@
  *                  renderer, no motion/<id> and nothing in baked/.
  *  M5. offline   — an asset on a server not allowed refuses the render with
  *                  media_offline when the page asks for it; a playlist
- *                  renamed .mp4 (forged probe data, naming .invalid hosts) is
- *                  refused by FFmpeg's format allowlist: graphic_media_failed,
- *                  no picture. The core's file calls, the commands it starts
- *                  and FFmpeg's own system calls (strace) name no zr-evil host.
+ *                  (forged probe data, naming .invalid hosts) renamed .mp4 is
+ *                  refused (FFmpeg's format allowlist on 4.4; from 6.1 FFmpeg
+ *                  declines HLS in a file of another name) and named .m3u8 is
+ *                  refused by the allowlist on every version (FFmpeg's stderr
+ *                  says so): graphic_media_failed with the "can't open this
+ *                  kind of file" sentence, no picture. The core's file calls,
+ *                  the commands it starts and FFmpeg's own system calls
+ *                  (strace) name no zr-evil host.
  *  M6. files     — a render with a video, an image and a font writes nothing
  *                  outside motion/<id> but its output (watched folders, the
  *                  core's file calls), and no decoded frame file at all
@@ -115,6 +119,8 @@ let beforeDecode: (() => void) | null = null;
 /** When set, each FFmpeg the core starts runs under strace, logging to `${tracePrefix}.<n>`. */
 let tracePrefix: string | null = null;
 let traced = 0;
+/** When set, what each FFmpeg the core starts writes to stderr is collected here too (the core still reads all of it). */
+let ffmpegStderr: string[] | null = null;
 {
   const load = createRequire(import.meta.url);
   const fsp = load("node:fs/promises") as Record<string, unknown>;
@@ -130,6 +136,12 @@ let traced = 0;
   const cp = load("node:child_process") as { spawn: (file: string, args: string[], opts: Record<string, unknown>) => ChildProcess };
   const realSpawn = cp.spawn;
   cp.spawn = (file, args = [], opts = {}) => {
+    const child = start(file, args, opts);
+    const sink = ffmpegStderr;
+    if (sink && file === FFMPEG_BIN) child.stderr?.on("data", (d: Buffer) => sink.push(String(d)));
+    return child;
+  };
+  const start = (file: string, args: string[], opts: Record<string, unknown>): ChildProcess => {
     spawned.push([file, ...args]);
     if (file === FFMPEG_BIN && args.includes("image2pipe")) beforeDecode?.();
     if (!tracePrefix || file !== FFMPEG_BIN) {
@@ -651,17 +663,30 @@ async function m5(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
   check(run.messages.some((m) => m.type === "media"), "the refusal came when the page asked for it");
   await leftNothing(run, f, "offline", "offline asset");
 
-  const playlist = join(fx.dir, "playlist.mp4");
-  writeFileSync(playlist, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n\\\\zr-evil-1.invalid\\s\\b.ts\n#EXTINF:1,\nhttp://zr-evil-2.invalid/c.ts\n#EXT-X-ENDLIST\n");
-  const forged = { ...lib.small, path: playlist, name: "playlist.mp4" };
-  const trace = join(work, "trace-playlist");
-  tracePrefix = trace;
-  const pl = await render(f, "playlist", { graphic: { source: VIDEO_TSX("pl") }, width: 160, height: 90, assets: { pl: forged } });
-  tracePrefix = null;
-  failedWith(pl, "graphic_media_failed", "a playlist renamed .mp4", /can't open this kind of file/);
-  const lines = traces(trace).flat();
-  check(lines.some((l) => l.includes(playlist)) && !lines.some((l) => l.includes(EVIL)), `FFmpeg opened the playlist and nothing it names (${lines.length} traced calls; ${JSON.stringify(lines.filter((l) => l.includes(EVIL)).slice(0, 3))})`);
-  await leftNothing(pl, f, "playlist", "playlist asset");
+  // A playlist renamed .mp4: FFmpeg 4.4 detects it as HLS and its format allowlist refuses it; from 6.1 FFmpeg
+  // itself declines HLS in a file of another name ("Not detecting m3u8/hls ...") and fails on it as an MP4. Either
+  // way it gets the sentence. Named .m3u8, every FFmpeg detects it as HLS, so the allowlist itself must refuse it.
+  const body = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n\\\\zr-evil-1.invalid\\s\\b.ts\n#EXTINF:1,\nhttp://zr-evil-2.invalid/c.ts\n#EXT-X-ENDLIST\n";
+  for (const [name, what] of [["playlist.mp4", "a playlist renamed .mp4"], ["playlist.m3u8", "a playlist named .m3u8"]] as const) {
+    const playlist = join(fx.dir, name);
+    writeFileSync(playlist, body);
+    const forged = { ...lib.small, path: playlist, name };
+    const id = name.replace(".", "-");
+    const trace = join(work, `trace-${id}`);
+    tracePrefix = trace;
+    const said: string[] = [];
+    ffmpegStderr = said;
+    const pl = await render(f, id, { graphic: { source: VIDEO_TSX("pl") }, width: 160, height: 90, assets: { pl: forged } });
+    ffmpegStderr = null;
+    tracePrefix = null;
+    const stderr = said.join("");
+    const why = /Format not on whitelist/.test(stderr) ? "the format allowlist" : /Not detecting m3u8\/hls/.test(stderr) ? "FFmpeg declined HLS" : "neither";
+    failedWith(pl, "graphic_media_failed", `${what} (${why})`, /can't open this kind of file/);
+    if (name.endsWith(".m3u8")) check(why === "the format allowlist", `${what}: FFmpeg's format allowlist refused it (${JSON.stringify(stderr.trim().split("\n")[0]?.slice(0, 100))})`);
+    const lines = traces(trace).flat();
+    check(lines.some((l) => l.includes(playlist)) && !lines.some((l) => l.includes(EVIL)), `${what}: FFmpeg opened the playlist and nothing it names (${lines.length} traced calls; ${JSON.stringify(lines.filter((l) => l.includes(EVIL)).slice(0, 3))})`);
+    await leftNothing(pl, f, id, `${what}`);
+  }
   const evil = [...touched.slice(t0), ...spawned.slice(s0).map((a) => a.join(" "))].filter((t) => t.includes(EVIL));
   check(evil.length === 0, `no file call or command of the core named a zr-evil host (${JSON.stringify(evil.slice(0, 3))})`);
 }

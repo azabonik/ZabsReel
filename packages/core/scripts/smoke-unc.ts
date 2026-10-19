@@ -2272,9 +2272,10 @@ async function main() {
   // (AIVE_FFMPEG / AIVE_FFPROBE, or PATH). On Linux each FFmpeg runs under strace
   // (and in an empty network namespace when unshare -rn works), and no traced
   // call may name the host. A form this build has a demuxer for must give the
-  // NotMediaError sentence (a renamed playlist that 6.1+ no longer detects as
-  // HLS, a renamed .avs or an IMF package, which only 6.1+ detects, only needs
-  // to be refused).
+  // NotMediaError sentence, and so must the playlist renamed .mp4: 6.1+ no longer
+  // detects it as HLS (the allowlist never sees it), but its "Not detecting
+  // m3u8/hls" line counts as not media (notMediaFrom). A renamed .avs or an IMF
+  // package, which only 6.1+ detects, only needs to be refused.
   // MUTATION: give every input an empty format list (formatWhitelistFor and
   // ffprobeArgsLocalOnly) → the trace shows the .invalid opens (failed openat).
   console.log("16. files that name other files: refused before anything they name is opened...");
@@ -2291,7 +2292,7 @@ async function main() {
     const sdp = "v=0\no=- 0 0 IN IP4 127.0.0.1\ns=x\nc=IN IP4 zr-evil-16.invalid\nt=0 0\nm=video 5034 RTP/AVP 96\na=rtpmap:96 H264/90000\n";
     // [file name, content, the demuxer that would read it (it must then be a NotMediaError), or null (only refused)]
     const fixtures: [string, string, string | null][] = [
-      ["hls.m3u8", hls, "hls"], ["hls-renamed.mp4", hls, null],
+      ["hls.m3u8", hls, "hls"], ["hls-renamed.mp4", hls, "hls"],
       ["dash.mpd", dash, "dash"], ["dash-renamed.mov", dash, "dash"],
       ["list.ffconcat", ffconcat, "concat"], ["list-renamed.mp4", ffconcat, "concat"],
       // (5.1 lists an experimental imf demuxer that never detects a file.)
@@ -2458,8 +2459,9 @@ async function main() {
   {
     check(notMediaFrom("[hls @ 0x55d0c1a2b400] Format not on whitelist 'mov,mp4,matroska'\nx.m3u8: Invalid argument")
       && notMediaFrom("[in#0 @ 0x6524d3c89280] Format not on whitelist\n[in#0 @ 0x6524d3c89280] Error opening input: Invalid argument\nError opening input file x.m3u8.")
+      && notMediaFrom("Not detecting m3u8/hls with non standard extension and non standard mime type\n    Last message repeated 1 times\n[mov,mp4,m4a,3gp,3g2,mj2 @ 0x6132] moov atom not found\nx.mp4: Invalid data found when processing input")
       && !notMediaFrom("[mov,mp4,m4a,3gp,3g2,mj2 @ 0x5c2c] moov atom not found\nx.mp4: Invalid data found when processing input"),
-      "notMediaFrom finds both message shapes (with the list, and 8.1+'s [in#0 @ …] form), and nothing else");
+      "notMediaFrom finds the allowlist's two message shapes (with the list, and 8.1+'s [in#0 @ …] form) and 6.1+'s declined playlist, and nothing else");
     const detail = ffmpegStderrDetail("[in#0 @ 0x1] Format not on whitelist 'mov,mp4,matroska,webm'\n[in#0 @ 0x1] Error opening input: Invalid argument\nError opening input file /m/x.m3u8.");
     check(!detail.includes("whitelist") && detail.includes("Error opening input file /m/x.m3u8."), `ffmpegStderrDetail drops the allowlist line (${detail})`);
     const dir = join(root, "r19");
