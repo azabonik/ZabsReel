@@ -891,6 +891,11 @@ Known differences that remain:
   pass every case.
 - Decoded alpha (ProRes 4444, PNG, FFV1 yuva420p, VP9 alpha) composites
   identically on 4.4, 8.0, 8.1 and 9.0.
+- A video that starts later than its file's audio (an audio encoder's delay
+  puts the audio's first packet a little before 0) is placed one frame
+  earlier in a graphic on 8.1+ than on older versions: 8.1+ start the file's
+  clock at 0, older versions at the audio's first packet. Each version is
+  consistent with itself, and the installer bundles one FFmpeg (9.0.2).
 
 Full offline matrix (every `smoke*.ts`, plus composite, savename, web shell,
 MCP, parity and the ramps baseline), 2026-10-12:

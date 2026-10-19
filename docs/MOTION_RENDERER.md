@@ -88,6 +88,12 @@ capture the main forces a draw of the page as it is now (`drawn()` in
   decodes with ZabsReel's FFmpeg (`ffmpeg/executor.ts`) to a PNG on FFmpeg's
   stdout, and answers on fd 4. No decoded frame is written to a file. Repeated
   requests come from an in-memory LRU.
+- FFmpeg 8.1 and newer place a video that starts later than its file's audio
+  one frame earlier than older FFmpeg does. FFmpeg 8.1 and newer start the
+  file's clock at 0; older versions start it at the audio's first packet,
+  which can be a little before 0 (the audio encoder's delay). The Windows
+  installer bundles one pinned FFmpeg (9.0.2), so its users always see the
+  same placement.
 - `<Video>` and `<Html5Video>` show the same decoded frames as
   `<OffthreadVideo>` (there is no `<video>` element in the page): their
   colours match `<OffthreadVideo>`'s, within about 14 levels of the add-on's
