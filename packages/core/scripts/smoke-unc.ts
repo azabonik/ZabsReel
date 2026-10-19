@@ -898,7 +898,8 @@ async function main() {
   // once instead of taking a claim → the two-waiter rows' counter reaches 2
   // (in-process and across processes). Write hosts.json in place
   // (writeFileSync instead of writeAtomic) → the reader process sees partial
-  // JSON. Keep a corrupt list instead of moving it aside → the .bad-* row fails.
+  // JSON. writeAtomic without its win32 retry → on Windows the 200-writes row
+  // throws EPERM (measured with the reader pausing 50 and 250 ms). Keep a corrupt list instead of moving it aside → the .bad-* row fails.
   // Delete leftover claims only after a write → the writes-nothing claim row fails.
   console.log("3. the approval store: round trip, bad files, atomic writes, the lock...");
   {
@@ -936,11 +937,14 @@ async function main() {
     check(names(r2.approved) === "nas" && r2.outside.length === 0, `a stamped entry whose host was hand-edited to "NAS" is approved as nas; invalid entries are dropped (${JSON.stringify(r2)})`);
   }
   {
-    // A second process reads hosts.json in a loop while 200 writes replace it.
+    // A second process reads hosts.json in a loop while 200 writes replace it. On Windows a
+    // rename over a file that is open fails (EPERM) and writeAtomic retries it; a reader that
+    // never pauses starves it (measured: up to a 10 ms pause starves it, 20 ms does not), and
+    // ZabsReel's readers read once per change, so the reader there pauses 50 ms between reads.
     const d = freshData();
     for (let i = 0; i < 40; i++) await approveHost(d, `bulk-${i}.example`, "prompt");
     const stop = join(trustRoot, `stop-${dataN}`);
-    const reader = child(["reader", listFile(d), stop]);
+    const reader = child(["reader", listFile(d), stop, process.platform === "win32" ? "50" : "0"]);
     for (let t = 0; t < 600 && !existsSync(`${stop}.ready`); t++) await sleep(50);
     for (let i = 0; i < 100; i++) {
       await approveHost(d, "flip", "prompt");

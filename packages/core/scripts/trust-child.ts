@@ -4,8 +4,9 @@
  * same, so the lock file and the atomic rename are tested across processes.
  * It prints one JSON line with its result and exits 0 (1 on an error).
  *
- *   reader <hosts.json> <stop-file>             read and parse until stop-file exists (it writes
- *                                               <stop-file>.ready after its first read): { reads, bad }
+ *   reader <hosts.json> <stop-file> [pause-ms]  read and parse until stop-file exists (it writes
+ *                                               <stop-file>.ready after its first read), pausing
+ *                                               pause-ms between reads: { reads, bad }
  *   soak <dataDir> <prefix> <rounds>            approve <prefix>-i, revoke it again when i is odd
  *   first <baseDir> <name> <other> <rounds>     per round, wait for the other child at a barrier,
  *                                               then approve <name> in a fresh <baseDir>/fw-<i>
@@ -25,7 +26,8 @@ const until = async (path: string) => {
 
 async function run(mode: string, args: string[]): Promise<unknown> {
   if (mode === "reader") {
-    const [list, stop] = args;
+    const [list, stop, pause] = args;
+    const gap = new Int32Array(new SharedArrayBuffer(4));
     let reads = 0;
     let bad = 0;
     while (!existsSync(stop)) {
@@ -36,6 +38,7 @@ async function run(mode: string, args: string[]): Promise<unknown> {
         bad++;
       }
       if (reads === 1) writeFileSync(`${stop}.ready`, "");
+      if (Number(pause) > 0) Atomics.wait(gap, 0, 0, Number(pause));
     }
     return { reads, bad };
   }

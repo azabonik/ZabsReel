@@ -303,12 +303,28 @@ function createExclusive(p: string, text: string): boolean {
   return true;
 }
 
-/** Write `name` in `dir` whole: a temp file (mode 0600), then a rename over it. */
-function writeAtomic(dir: string, name: string, text: string): void {
+/** What Windows answers a rename over a file another process has open (a reader of the list, an antivirus scan) until it is closed. */
+const RENAME_RETRIED = new Set(["EPERM", "EACCES", "EBUSY"]);
+/** How long such a rename is retried on win32, as addon/install.ts's renameRetry; from 10 ms, doubling to 1 s. */
+const RENAME_WINDOW_MS = 10_000;
+
+/** Write `name` in `dir` whole: a temp file (mode 0600), then a rename over it, retried on win32 while the file is open elsewhere. */
+async function writeAtomic(dir: string, name: string, text: string): Promise<void> {
   const tmp = join(dir, `${name}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
   try {
     createExclusive(tmp, text);
-    renameSync(tmp, join(dir, name));
+    const until = Date.now() + RENAME_WINDOW_MS;
+    for (let wait = 10; ; wait = Math.min(wait * 2, 1000)) {
+      try {
+        renameSync(tmp, join(dir, name));
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? "";
+        if (process.platform !== "win32" || !RENAME_RETRIED.has(code)) throw err;
+        if (Date.now() >= until) throw new TrustStoreError(`Couldn't save the list of approved computers: another program kept ${name} open (${code}). Try again.`);
+        await sleep(wait);
+      }
+    }
   } catch (err) {
     unlinkQuiet(tmp);
     throw err;
@@ -405,7 +421,7 @@ async function updateHosts(dataDir: string, change: (s: Sorted, key: Buffer) => 
       if (!key) {
         if (k.kind === "ok") moveAside(dir, KEY);
         const text = randomBytes(32).toString("base64url");
-        writeAtomic(dir, KEY, `${text}\n`);
+        await writeAtomic(dir, KEY, `${text}\n`);
         key = Buffer.from(text, "base64url");
       }
       let list = EMPTY;
@@ -420,7 +436,7 @@ async function updateHosts(dataDir: string, change: (s: Sorted, key: Buffer) => 
       for (const f of readdirSync(dir)) if (f.startsWith(`${LOCK}.break-`)) unlinkQuiet(join(dir, f));
       const servers = change(sorted, key);
       if (!servers) return false;
-      writeAtomic(dir, LIST, `${JSON.stringify({ version: 2, servers }, null, 2)}\n`);
+      await writeAtomic(dir, LIST, `${JSON.stringify({ version: 2, servers }, null, 2)}\n`);
       return true;
     },
     opts,
