@@ -65,6 +65,17 @@ jobs:
       - name: Clean-room runtime tests and typecheck
         run: npm run test:cleanroom
 
+      # Ubuntu 24.04 restricts unprivileged user namespaces (AppArmor), so
+      # Chromium's namespace sandbox cannot start there and it falls back to the
+      # SUID helper, which an npm-installed Electron does not have set up. The
+      # motion renderer runs only sandboxed, so on these default settings its
+      # probe must refuse with sandbox-unavailable (as it does for a user on a
+      # default Ubuntu 24.04), never run unsandboxed, crash or hang. It runs
+      # before any step below allows the namespaces; the step summary says
+      # which outcome this runner gave.
+      - name: Motion renderer on Ubuntu's default settings (refuses, sandbox stays on)
+        run: node packages/core/scripts/check-renderer-sandbox.mjs
+
       # The built core's Remotion guard under Node and under Electron's Node
       # (the app's core child): Remotion loads with the same-as refusal, and the
       # /proxy guard works. Remotion is a devDependency (npm ci installs it), and
@@ -118,9 +129,13 @@ jobs:
       # A real core process (the build above) with every fs and child_process
       # call traced and a logging FFmpeg stub: nothing names a test host, no
       # rpc or MCP tool can allow a server or read the stamp key, and a server
-      # allowed (or revoked) in the app takes effect without a reload.
+      # allowed (or revoked) in the app takes effect without a reload. Its
+      # add_graphic rows run ZabsReel's renderer, so it allows the user
+      # namespaces as the motion steps below do.
       - name: Smoke — network paths end to end (core process, traced)
-        run: npx tsx packages/core/scripts/smoke-unc-e2e.ts
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          npx tsx packages/core/scripts/smoke-unc-e2e.ts
 
       - name: I/O import gate (core fs and child processes go through the network-path gate)
         run: |
