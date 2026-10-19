@@ -161,10 +161,12 @@ function video(id: string, width: number, height: number, fps: number, seconds: 
   return {
     id, kind: "video", ext: "mp4", width, height, fps, seconds, hasAudio: !!sound, channels: sound ? 2 : undefined,
     args: [
-      // One testsrc picture per frame: its counter (seconds at rate 1) reads the frame number.
+      // One testsrc picture per frame: its counter (seconds at rate 1) reads the frame number. fps= states
+      // the new rate on the filter link: from FFmpeg 5 on, -r otherwise converts from testsrc's 1 fps and
+      // repeats and drops pictures (6.1 and 9.0: 89 frames, 55 distinct, for 60). Same bytes on 4.4.
       "-f", "lavfi", "-i", `testsrc=size=${width}x${height}:rate=1:duration=${fps * seconds}`,
       ...(sound ? ["-f", "lavfi", "-i", tone(sound, 2, seconds)] : []),
-      "-vf", `settb=1/${fps},setpts=N,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`, "-r", String(fps),
+      "-vf", `settb=1/${fps},setpts=N,fps=${fps},scale=out_color_matrix=bt709:out_range=tv,format=yuv420p`, "-r", String(fps),
       "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-g", String(fps), "-bf", "0", "-threads", "1",
       "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
       ...(sound ? ["-c:a", "aac", "-b:a", "192k"] : []), "-movflags", "+faststart",
