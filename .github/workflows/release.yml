@@ -32,6 +32,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Electron 42 has no install script: npm ci leaves its binary out, and the
+      # first require('electron') downloads it and prints "Downloading Electron
+      # binary..." in front of the path that the Electron's Node guard step
+      # below reads. install.js downloads it here instead (checked against the
+      # package's checksums.json; it does nothing when the binary is in place).
+      - name: Install the Electron binary
+        run: node node_modules/electron/install.js
+
       # The graphics add-on's pin is in sync with the lock, with every
       # platform's tarball total (the installer's size cap and progress). Tag
       # builds and dry runs alike.

@@ -45,6 +45,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Electron 42 has no install script: npm ci leaves its binary out, and the
+      # first require('electron') downloads it and prints "Downloading Electron
+      # binary..." in front of the path that the Remotion guard step reads.
+      # install.js downloads it here instead (checked against the package's
+      # checksums.json; it does nothing when the binary is in place).
+      - name: Install the Electron binary
+        run: node node_modules/electron/install.js
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -298,6 +306,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Electron 42 has no install script, so npm ci leaves
+      # node_modules\electron\dist empty, and the pack step below uses that
+      # folder as electronDist. install.js downloads the binary (checked
+      # against the package's checksums.json).
+      - name: Install the Electron binary
+        run: node node_modules/electron/install.js
 
       - name: Build
         run: npm run build
