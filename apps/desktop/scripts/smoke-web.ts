@@ -414,11 +414,22 @@ async function networkComputers(o: {
     .filter((t) => JSON.stringify(t.args).includes(host));
 
   console.log("6. network computers: the shell key and the /api/media-servers routes");
+  // The core's start probe runs Chromium with its temp folder in <data>/motion/probe-<pid>/tmp, where fontconfig
+  // renames cache files while this walk runs: a file (or folder) that is gone by the time it is read can't hold the
+  // key, so it is skipped; every file still there is read.
+  const gone = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
   const files: string[] = [];
-  const walk = (d: string) => { for (const e of readdirSync(d, { withFileTypes: true })) (e.isDirectory() ? walk : (f: string) => files.push(f))(join(d, e.name)); };
+  const walk = (d: string) => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch (e) { if (gone(e)) return; throw e; }
+    for (const e of entries) (e.isDirectory() ? walk : (f: string) => files.push(f))(join(d, e.name));
+  };
   walk(dataDir);
-  check("the shell key is in no file of the data folder (server.json included)", files.length > 0 && files.every((f) => statSync(f).size > 1e7 || !readFileSync(f, "utf8").includes(shellKey)),
-    files.filter((f) => readFileSync(f, "utf8").includes(shellKey)).join(", "));
+  const holdsKey = (f: string): boolean => {
+    try { return statSync(f).size <= 1e7 && readFileSync(f, "utf8").includes(shellKey); } catch (e) { if (gone(e)) return false; throw e; }
+  };
+  check("the shell key is in no file of the data folder (server.json included)", files.length > 0 && !files.some(holdsKey),
+    files.filter(holdsKey).join(", "));
   const noKey = await post("/api/media-servers/approve", { host: "zr-evil-2.invalid" }, {});
   check("POST approve without the shell key → 401, nothing stored", noKey.status === 401 && !noKey.body.includes(shellKey) && !listed("zr-evil-2.invalid"), `${noKey.status}`);
   const coreToken = await post("/api/media-servers/approve", { host: "zr-evil-2.invalid" }, { "x-aive-token": token });
