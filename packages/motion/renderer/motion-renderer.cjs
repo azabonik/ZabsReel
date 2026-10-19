@@ -337,6 +337,10 @@ async function runProbe() {
   const ses = await renderSession(new Map([["page.html", { type: "text/html; charset=utf-8", body }]]));
   const win = renderWindow(ses, PROBE_SIZE, PROBE_SIZE, true);
   await win.loadURL(PAGE_URL);
+  // Drawn first, as every frame is: capturing a page not drawn yet failed with UnknownVizError on
+  // Windows (1 probe in 24, 8 at once; the same load's 96 frame captures, each after drawn(), never).
+  win.webContents.debugger.attach("1.3");
+  await drawn(win);
   const bytes = frameBytes(await capture(win, PROBE_SIZE, PROBE_SIZE), PROBE_SIZE, PROBE_SIZE);
   if (bytes.length !== PROBE_SIZE * PROBE_SIZE * 4 || bytes[3] !== 255) throw new Error("the probe frame is wrong");
   send({
@@ -413,8 +417,8 @@ ipcMain.on("zr-motion:log", (e, text) => {
  * screenshot's small JPEG is thrown away. Measured: with it no late frame under load; with a
  * 100 ms wait in its place, many.
  */
-async function drawn() {
-  await render.win.webContents.debugger.sendCommand("Page.captureScreenshot", { format: "jpeg", quality: 1 });
+async function drawn(win) {
+  await win.webContents.debugger.sendCommand("Page.captureScreenshot", { format: "jpeg", quality: 1 });
 }
 
 async function renderFrame(n) {
@@ -425,7 +429,7 @@ async function renderFrame(n) {
     render.frame = n;
     render.win.webContents.executeJavaScript(`typeof __zrMotionRender === "function" && __zrMotionRender(${n}, ${render.o.fps})`).catch(() => {});
   });
-  await drawn();
+  await drawn(render.win);
   const bytes = frameBytes(await capture(render.win, render.o.width, render.o.height), render.o.width, render.o.height);
   await new Promise((resolve, reject) => render.frames.write(bytes, (err) => (err ? reject(err) : resolve())));
   send({ type: "frame", n, cues });
