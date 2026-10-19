@@ -12,6 +12,12 @@
  *     the frame passthrough option),
  *     and this FFmpeg's version; the
  *     version/ffprobe banners are probed once (the authenticated /health reads them);
+ *   - import duration: a file that records a shorter length than its pictures
+ *     run (ffprobe 6.1+ reports the recorded length, 4.4 the pictures' end)
+ *     imports with its last picture's end; a normal video, one with longer
+ *     audio, an MPEG-TS that starts at 1.4 s, audio only, a WebM whose video
+ *     ends less than a frame past its recorded length and a still keep the
+ *     duration they had;
  *   - `ffmpeg -filters` parsing: 3 flag columns up to 7.x, 2 from 8.0 (which
  *     hid rubberband, so pitch effects silently used the fallback);
  *   - a > 128 KiB filtergraph (inline it would fail with E2BIG on Linux) runs
@@ -57,6 +63,7 @@ import { AFFTDN_V2_DELAY, audioEffectFilterSteps } from "../src/effects/audio.js
 import { alphaSafe, effectFilterSteps } from "../src/effects/registry.js";
 import { stabilizeFilters } from "../src/ffmpeg/stabilize.js";
 import { EditorEngine } from "../src/engine.js";
+import { probeAsset } from "../src/ffmpeg/ffprobe.js";
 import { clipFootprintFrames, sourceFrameShownAt } from "../src/speed.js";
 import type { ClipEffects } from "../src/types.js";
 
@@ -304,6 +311,64 @@ async function main(): Promise<void> {
   const t0 = Date.now();
   const [b1, b2] = [await checkBinaries(), await checkBinaries()];
   check(b1 === b2 && b1.ffmpeg === v.banner && /ffprobe version/.test(b1.ffprobe) && Date.now() - t0 < 5000, `checkBinaries is probed once (${b1.ffprobe.slice(0, 40)}…)`);
+
+  // ---- import duration ------------------------------------------------------------
+  // An MP4 can record a shorter length than its pictures run: this variable-rate file's track says 3.5 s, its last
+  // picture ends at 3.833 s. ffprobe 4.4 reports 3.834 s for the file, 6.1+ the recorded 3.5 s, which left the last
+  // pictures out of reach (a graphic's frame count is duration x fps). probeAsset takes the later of the recorded
+  // length and where the last picture ends (read from the end of the file only); other files keep the format
+  // duration, as before: a video with longer audio, an MPEG-TS that starts at 1.4 s, audio only, a WebM whose video
+  // ends less than a frame past its recorded length, a still.
+  // MUTATION: drop videoEnd from probeAsset -> on 6.1+ the variable-rate file imports as 3.5 s.
+  // MUTATION: leave the file's start time in videoEnd -> the MPEG-TS imports 1.4 s too long.
+  // MUTATION: take any end past the recorded length (no one-frame margin) -> on 4.4 the WebM imports as 4.014 s.
+  console.log("import duration (probeAsset)");
+  {
+    const make = async (name: string, args: string[]): Promise<string> => {
+      const p = join(dir, name);
+      await execa(FFMPEG_BIN, ["-hide_banner", "-v", "error", "-y", ...args, p]);
+      return p;
+    };
+    const fmt = async (p: string) => {
+      const f = JSON.parse((await execa(FFPROBE_BIN, ["-v", "error", "-show_entries", "format=duration,start_time", "-of", "json", p])).stdout).format;
+      return { duration: Number(f.duration), start: Number(f.start_time) || 0 };
+    };
+    // Where the last picture ends, from the file's start: every video packet (a full read; the smoke's files are small).
+    const lastPicture = async (p: string, start: number) => {
+      const r = await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", p]);
+      return Math.max(...r.stdout.trim().split("\n").map((l) => l.split(",").map(Number)).map(([pts, d]) => pts + (d || 0))) - start;
+    };
+    const src = (d: number) => ["-f", "lavfi", "-i", `testsrc2=size=160x90:rate=30:duration=${d}`];
+    const h264 = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30"];
+    const vfr = await make("vfr.mp4", [...src(4), "-vf", "select='lt(n,60)+not(mod(n,6))'", passthroughFlag(v)[0], "vfr", ...h264]);
+    const vf = await fmt(vfr);
+    const vEnd = await lastPicture(vfr, vf.start);
+    const va = await probeAsset(vfr);
+    check(va.duration >= vEnd - 1e-6 && va.duration >= vf.duration && Math.abs(va.duration - Math.max(vf.duration, vEnd)) < 1e-3,
+      `a file that records ${vf.duration} s while its last picture ends at ${vEnd.toFixed(6)} s imports as ${va.duration} s: ${Math.round(va.duration * va.fps)} frames at ${va.fps} fps` +
+      `${vf.duration < vEnd - 1e-3 ? " (this ffprobe reports the recorded length)" : ""}`);
+    const files: [string, string, string[]][] = [
+      ["a 4 s video with 4 s of audio", "normal.mp4", [...src(4), "-f", "lavfi", "-i", "sine=duration=4", ...h264, "-c:a", "aac"]],
+      ["a 4 s video with 5 s of audio", "tail.mp4", [...src(4), "-f", "lavfi", "-i", "sine=duration=5", "-map", "0:v", "-map", "1:a", ...h264, "-c:a", "aac"]],
+      ["an MPEG-TS (it starts at 1.4 s)", "normal.ts", [...src(4), "-f", "lavfi", "-i", "sine=duration=4", ...h264, "-c:a", "aac", "-f", "mpegts"]],
+      ["audio only", "tone.m4a", ["-f", "lavfi", "-i", "sine=duration=3", "-c:a", "aac"]],
+      // ffprobe 4.4 starts it at -0.007 s (Opus's delay) and reports the recorded 4.008 s: its video ends 4.014 s from
+      // that start, less than a frame past it.
+      ["a WebM with Opus audio", "opus.webm", [...src(4), "-f", "lavfi", "-i", "sine=duration=4", "-c:v", "libvpx", "-b:v", "200k", "-c:a", "libopus"]],
+    ];
+    for (const [what, name, args] of files) {
+      const p = await make(name, args).catch(() => null);
+      if (!p) {
+        console.log(`  skip ${what}: this FFmpeg can't write it`);
+        continue;
+      }
+      const f = await fmt(p);
+      const a = await probeAsset(p);
+      check(a.duration === f.duration, `${what}: the format's ${f.duration} s, unchanged (${a.duration} s${f.start ? `, starts at ${f.start} s` : ""})`);
+    }
+    const still = await probeAsset(await make("still.png", ["-f", "lavfi", "-i", "testsrc2=size=64x48", "-frames:v", "1"]));
+    check(still.isImage === true && still.duration === 5, `a still: 5 s, unchanged (${still.duration} s)`);
+  }
 
   // ---- -filters -------------------------------------------------------------------
   console.log("filter list");

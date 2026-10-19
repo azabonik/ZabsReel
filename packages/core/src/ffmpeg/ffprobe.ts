@@ -14,6 +14,7 @@ interface FfprobeStream {
   duration?: string;
   side_data_list?: { side_data_type?: string; rotation?: number }[];
   tags?: { rotate?: string };
+  disposition?: { attached_pic?: number };
   color_space?: string;
   color_range?: string;
   color_primaries?: string;
@@ -22,6 +23,7 @@ interface FfprobeStream {
 
 interface FfprobeFormat {
   duration?: string;
+  start_time?: string;
   format_name?: string;
 }
 
@@ -34,6 +36,12 @@ interface FfprobeOutput {
 const IMAGE_CODECS = new Set(["png", "mjpeg", "jpeg", "bmp", "webp", "gif", "tiff", "ppm", "pgm"]);
 /** Default on-timeline length (seconds) given to a still image when imported. */
 const DEFAULT_IMAGE_DURATION = 5;
+/** The end-of-file read starts this many seconds before the recorded end (FFmpeg seeks back to a keyframe from there). */
+const TAIL_SECONDS = 1;
+/** The most video packets the end-of-file read takes: a file with no keyframe near its end is not read to the end. */
+const TAIL_PACKETS = 2000;
+/** The least a video's end must pass the recorded duration by to count, whatever its frame rate claims. */
+const MIN_TAIL = 0.001;
 
 /** Parse an ffmpeg rational like "30000/1001" into a float, or 0 on failure. */
 function parseRate(rate: string | undefined): number {
@@ -71,9 +79,45 @@ export function probedColor(video: FfprobeStream): ProbedColor {
 }
 
 /**
+ * Where the first video stream's last picture ends, in seconds from the file's
+ * start, or 0 when it can't be read. Some files record a shorter length than
+ * their pictures run (an MP4 whose track says 3.5 s while its last picture
+ * ends at 3.833 s): from FFmpeg 6.1 the format duration is that recorded
+ * length, so the pictures after it could not be reached. Only the end of the
+ * file is read: the packets from a keyframe before `duration - TAIL_SECONDS`,
+ * at most {@link TAIL_PACKETS} of them, timestamps only (no decode).
+ * Packet times count from the stream's own zero, so the file's start time
+ * (an MPEG-TS often starts at 1.4 s) is taken off.
+ */
+async function videoEnd(path: string, start: number, duration: number): Promise<number> {
+  try {
+    const from = Math.max(0, start + duration - TAIL_SECONDS);
+    const out = JSON.parse(
+      await runFfprobe([
+        "-v", "error", "-select_streams", "v:0",
+        "-read_intervals", `${from.toFixed(6)}%+#${TAIL_PACKETS}`,
+        "-show_entries", "packet=pts_time,duration_time", "-of", "json", path,
+      ]),
+    ) as { packets?: { pts_time?: string; duration_time?: string }[] };
+    let end = 0;
+    for (const p of out.packets ?? []) {
+      const pts = Number(p.pts_time);
+      if (p.pts_time === undefined || !Number.isFinite(pts)) continue;
+      const d = Number(p.duration_time);
+      end = Math.max(end, pts + (Number.isFinite(d) && d > 0 ? d : 0) - start);
+    }
+    return Math.round(end * 1e6) / 1e6; // ffprobe prints microseconds
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Probe a media file and build a MediaAsset. Throws if the file has no
  * decodable video or audio stream, and a {@link NotMediaError} naming the file
- * when FFmpeg refuses its format (a playlist, manifest or list file).
+ * when FFmpeg refuses its format (a playlist, manifest or list file). A
+ * video's duration is the later of the recorded one and where its last
+ * picture ends ({@link videoEnd}).
  */
 export async function probeAsset(path: string): Promise<MediaAsset> {
   let stdout: string;
@@ -119,6 +163,16 @@ export async function probeAsset(path: string): Promise<MediaAsset> {
   }
 
   const fps = video ? parseRate(video.avg_frame_rate) || parseRate(video.r_frame_rate) || 30 : 30;
+
+  // A video's pictures may run past the recorded length (videoEnd): then its end, never a shorter duration. Not for
+  // a still or an audio file's cover art (one picture, no end of its own). Less than a frame past it is the
+  // container's rounding (an audio codec's delay; a WebM with Opus records 4.008 s for 4.014 s), not a picture
+  // the frame count misses, so the duration stays as it was.
+  if (video && !isImage && video.disposition?.attached_pic !== 1) {
+    const start = Number(data.format?.start_time);
+    const end = await videoEnd(path, Number.isFinite(start) ? start : 0, duration);
+    if (end - duration >= Math.max(MIN_TAIL, 1 / fps)) duration = end;
+  }
 
   // Portrait phone footage stores landscape pixels + a rotation side data entry.
   // Decoders auto-rotate, so swap to display dimensions for 90°/270° streams.

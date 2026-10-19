@@ -489,7 +489,9 @@ npx tsx packages/core/scripts/smoke-voicefx.ts
 
 # FFmpeg version compatibility (self-contained; run it against every build you
 # ship — see "FFmpeg versions" below): version parsing and the startup warning,
-# `-filters` parsing (2 flag columns from 8.0), a 140 KiB filtergraph through a
+# an imported video's duration reaching its last picture where the file records
+# less (ffprobe 6.1+ reports the recorded length) and other files' durations
+# unchanged, `-filters` parsing (2 flag columns from 8.0), a 140 KiB filtergraph through a
 # file with -filter_complex_script / -/filter_complex (9.0 has only the second,
 # 4.4 only the first) and the fallback between them, alpha-mode retagging (8.1+),
 # afftdn latency + strength (rewritten in 5.0), heavy noise reduction (anlmdn
@@ -877,6 +879,7 @@ Differences between the versions, and what the core does about them:
 | A two-input filter (`blend`, `alphamerge`) ends its stream with no end time, so the speed step's `fps` dropped the clip's last frame (two at 0.5x): a black frame at each cut after a clip with a key, colour grade, sharpen, denoise, grain, glow or another alpha-keeping effect, and at the end of the export | 4.4 – 6.1 | Such a clip gets two transparent padding frames before its effects (a speed ramp: copies of its last frame), where the stream's end is still exact, and is cut to its own length. A clip whose video ends before its length keeps that end. Every version gives the same frames. |
 | `vibrato` reads its delay line before it writes it (leftover memory: clicks, ±inf) | 4.4 – 9.0 | *Underwater* primes the delay line with 10 ms of silence and trims it off. |
 | libvidstab's default camera path ("opt") is now an L1 optimizer that ignores zoom "none" | static builds from mid-2026, any FFmpeg version | Stabilize passes `optalgo=gauss`, which gives the same output as the old default. |
+| ffprobe's file duration is the length the file records, which can be shorter than its pictures run (an MP4 whose track says 3.5 s while its last picture ends at 3.833 s; 4.4 reports 3.834 s) | 6.1+ | Import also reads where the video's last picture ends, from the end of the file only, and keeps the later of the two when it is at least a frame later. Other files keep their duration. |
 
 Known differences that remain:
 - swscale's RGB ↔ YUV conversions differ by 1–2 levels between 4.4 and 5.0+.
