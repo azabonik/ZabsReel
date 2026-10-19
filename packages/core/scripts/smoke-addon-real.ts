@@ -37,7 +37,8 @@
  *                      counts the reused bytes; back to the real pin, again
  *                      exactly one tarball.
  *  R7. the render    — a core (packages/core/dist/cli.js, scratch HOME and data
- *                      folder, no AIVE_REMOTION_ADDON) renders a graphic
+ *                      folder, no AIVE_REMOTION_ADDON, the renderer setting on
+ *                      the add-on as the UI writes it) renders a graphic
  *                      through the installed add-on and its own Chrome for
  *                      Testing browser (a spawn trace names it), with the
  *                      system FFmpeg and with the FFmpeg matrix kit's 8.1
@@ -62,6 +63,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 import { addonInstallerForTests, installGraphicsAddon, type InstallProgress } from "../src/addon/install.js";
+import { writeGraphicsRenderer } from "../src/addon/renderer.js";
 import { graphicsAddonDir, readGraphicsAddon, ADDON_PIN, type AddonPin, type GraphicsAddon } from "../src/addon/state.js";
 import { graphicsAddonTerms } from "../src/addon/terms.js";
 import { walkTree } from "../src/addon/tree.js";
@@ -457,6 +459,8 @@ async function stopCore(core: Core) {
 }
 
 async function r7(dataDir: string, ffmpegDir: string | null, label: string) {
+  // The user chose the add-on as the graphics renderer (the UI hosts write renderer.json); ZabsReel's own renderer is the default.
+  await writeGraphicsRenderer(dataDir, "remotion");
   const trace = join(root, `spawns-${label.replace(/\W+/g, "-")}.jsonl`);
   const core = await startCore(dataDir, ffmpegDir, trace);
   try {
