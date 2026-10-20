@@ -665,9 +665,14 @@ async function m5(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
 
   // A playlist renamed .mp4: FFmpeg 4.4 detects it as HLS and its format allowlist refuses it; from 6.1 FFmpeg
   // itself declines HLS in a file of another name ("Not detecting m3u8/hls ...") and fails on it as an MP4. Either
-  // way it gets the sentence. Named .m3u8, every FFmpeg detects it as HLS, so the allowlist itself must refuse it.
+  // way it gets the sentence. Named .m3u8, every FFmpeg detects it as HLS, so the allowlist itself must refuse it
+  // (byAllowlist: a case that expects the allowlist checks it, whatever its file is named).
   const body = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n\\\\zr-evil-1.invalid\\s\\b.ts\n#EXTINF:1,\nhttp://zr-evil-2.invalid/c.ts\n#EXT-X-ENDLIST\n";
-  for (const [name, what] of [["playlist.mp4", "a playlist renamed .mp4"], ["playlist.m3u8", "a playlist named .m3u8"]] as const) {
+  const cases = [
+    { name: "playlist.mp4", what: "a playlist renamed .mp4", byAllowlist: false },
+    { name: "playlist.m3u8", what: "a playlist named .m3u8", byAllowlist: true },
+  ];
+  for (const { name, what, byAllowlist } of cases) {
     const playlist = join(fx.dir, name);
     writeFileSync(playlist, body);
     const forged = { ...lib.small, path: playlist, name };
@@ -682,7 +687,7 @@ async function m5(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
     const stderr = said.join("");
     const why = /Format not on whitelist/.test(stderr) ? "the format allowlist" : /Not detecting m3u8\/hls/.test(stderr) ? "FFmpeg declined HLS" : "neither";
     failedWith(pl, "graphic_media_failed", `${what} (${why})`, /can't open this kind of file/);
-    if (name.endsWith(".m3u8")) check(why === "the format allowlist", `${what}: FFmpeg's format allowlist refused it (${JSON.stringify(stderr.trim().split("\n")[0]?.slice(0, 100))})`);
+    if (byAllowlist) check(why === "the format allowlist", `${what}: FFmpeg's format allowlist refused it (${JSON.stringify(stderr.trim().split("\n")[0]?.slice(0, 100))})`);
     const lines = traces(trace).flat();
     check(lines.some((l) => l.includes(playlist)) && !lines.some((l) => l.includes(EVIL)), `${what}: FFmpeg opened the playlist and nothing it names (${lines.length} traced calls; ${JSON.stringify(lines.filter((l) => l.includes(EVIL)).slice(0, 3))})`);
     await leftNothing(pl, f, id, `${what}`);
