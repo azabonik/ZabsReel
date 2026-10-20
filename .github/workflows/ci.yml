@@ -315,8 +315,10 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Pinned to the build the installer bundles (release.yml), so this job
+      # tests it: Chocolatey's ffmpeg 9.0.2 is gyan.dev's essentials build.
       - name: Install FFmpeg
-        run: choco install ffmpeg -y --no-progress
+        run: choco install ffmpeg --version 9.0.2 -y --no-progress
 
       # choco puts shims on PATH that start the real ffmpeg.exe as their child;
       # the core gets the real binaries, so R10's process row watches them.
