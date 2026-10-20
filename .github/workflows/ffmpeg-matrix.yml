@@ -89,11 +89,8 @@ jobs:
         run: |
           [ "$(git cat-file -t dd38598 2>/dev/null)" = commit ] || { echo "::error::commit dd38598 (RAMPS_BASELINE_REF) is not in the checkout"; exit 1; }
 
-      # Node 24, as the local kit and the packaged app's Electron run it: this
-      # matrix varies FFmpeg, not Node. ci.yml keeps the Node 22 floor covered.
-      # On Node 22 three suites fail here for reasons outside FFmpeg (first
-      # run, PR #3): smoke-cutout's matting worker cannot load its module from
-      # source, and smoke-motion-media and smoke-brand hit teardown races.
+      # Node 24: ZedMix's minimum (package.json engines), what ci.yml and the
+      # packaged app's Electron run, and what the local kit runs.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
