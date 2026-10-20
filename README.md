@@ -34,9 +34,9 @@ The editor exposes itself as an **MCP (Model Context Protocol) server**, so any 
 
 ## Download & install (Windows)
 
-Installers for this fork go on its [**Releases**](https://github.com/azabonik/ZedMix/releases) page. **No installer has been published from this fork yet.** For now, the way in is to [build from source](#build-from-source), or to [run it in your browser](#run-in-your-browser).
+Windows installers are on the [**Releases**](https://github.com/azabonik/ZedMix/releases) page. The latest, [v0.2.0](https://github.com/azabonik/ZedMix/releases/tag/v0.2.0), came out before the rename, so its files still have the old name: `ZabsReel-0.2.0.exe` and `ZabsReel-0.2.0.zip`. There is no macOS or Linux installer yet. On those systems, [build from source](#build-from-source) or [run it in your browser](#run-in-your-browser).
 
-Once a release is out:
+To install on Windows:
 
 1. Open the [**Releases**](https://github.com/azabonik/ZedMix/releases) page and grab the latest build.
 2. Download **one** of:

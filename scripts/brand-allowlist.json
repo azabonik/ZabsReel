@@ -65,13 +65,15 @@
         "this app was called ZabsReel",
         "`zabsreel`",
         "`zabsreel-editor`",
-        "`~/.zabsreel/data`"
+        "`~/.zabsreel/data`",
+        "`ZabsReel-0.2.0.exe`",
+        "`ZabsReel-0.2.0.zip`"
       ],
       "patterns": [
         "zabsreel"
       ],
-      "count": 4,
-      "reason": "Users of 0.2.0: the migrate paragraph (old MCP key and skill) and the data-folder rule's fallback."
+      "count": 6,
+      "reason": "Users of 0.2.0: the migrate paragraph (old MCP key and skill), the data-folder rule's fallback, and the names of the v0.2.0 release files."
     },
     {
       "id": "A8",
