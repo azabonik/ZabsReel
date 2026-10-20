@@ -87,7 +87,10 @@ export function probedColor(video: FfprobeStream): ProbedColor {
  * file is read: the packets from a keyframe before `duration - TAIL_SECONDS`,
  * at most {@link TAIL_PACKETS} of them, timestamps only (no decode).
  * Packet times count from the stream's own zero, so the file's start time
- * (an MPEG-TS often starts at 1.4 s) is taken off.
+ * (an MPEG-TS often starts at 1.4 s) is taken off. A packet the demuxer flags
+ * as discard (D) is not counted: FFmpeg reads it but shows none of its
+ * pictures. An MP4 or MOV whose edit list ends before its last samples (an
+ * end trim made without re-encoding) keeps those samples as discard packets.
  */
 async function videoEnd(path: string, start: number, duration: number): Promise<number> {
   try {
@@ -96,11 +99,12 @@ async function videoEnd(path: string, start: number, duration: number): Promise<
       await runFfprobe([
         "-v", "error", "-select_streams", "v:0",
         "-read_intervals", `${from.toFixed(6)}%+#${TAIL_PACKETS}`,
-        "-show_entries", "packet=pts_time,duration_time", "-of", "json", path,
+        "-show_entries", "packet=pts_time,duration_time,flags", "-of", "json", path,
       ]),
-    ) as { packets?: { pts_time?: string; duration_time?: string }[] };
+    ) as { packets?: { pts_time?: string; duration_time?: string; flags?: string }[] };
     let end = 0;
     for (const p of out.packets ?? []) {
+      if (p.flags?.includes("D")) continue; // discard: "_D" or "KD" on 4.4, "_D_" or "KD_" from 6.1
       const pts = Number(p.pts_time);
       if (p.pts_time === undefined || !Number.isFinite(pts)) continue;
       const d = Number(p.duration_time);

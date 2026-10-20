@@ -16,8 +16,10 @@
  *     run (ffprobe 6.1+ reports the recorded length, 4.4 the pictures' end)
  *     imports with its last picture's end; a normal video, one with longer
  *     audio, an MPEG-TS that starts at 1.4 s, audio only, a WebM whose video
- *     ends less than a frame past its recorded length and a still keep the
- *     duration they had;
+ *     ends less than a frame past its recorded length, an MP4 (with and
+ *     without audio) whose edit list ends at 3 s while its pictures run to
+ *     4 s (an end trim without re-encoding) and a still keep the duration
+ *     they had;
  *   - `ffmpeg -filters` parsing: 3 flag columns up to 7.x, 2 from 8.0 (which
  *     hid rubberband, so pitch effects silently used the fallback);
  *   - a > 128 KiB filtergraph (inline it would fail with E2BIG on Linux) runs
@@ -253,6 +255,47 @@ function vsModel(got: ArrayLike<number>, ref: ArrayLike<number>, from: number, t
   return { residual: 10 * Math.log10(e2 / r2), level: 10 * Math.log10(g2 / r2), maxErr };
 }
 
+/**
+ * Copy the MP4 `src` to `dst` as an end trim made without re-encoding: every track's single edit (elst), the movie
+ * header (mvhd) and the track headers (tkhd) end at `secs`; the samples after it stay in the file. Returns how many
+ * edits it cut.
+ */
+function trimEditList(src: string, dst: string, secs: number): number {
+  const buf = readFileSync(src);
+  let scale = 0;
+  let cut = 0;
+  const walk = (start: number, end: number): void => {
+    for (let o = start; o + 8 <= end;) {
+      let size = buf.readUInt32BE(o);
+      const type = buf.toString("latin1", o + 4, o + 8);
+      let hdr = 8;
+      if (size === 1) {
+        size = Number(buf.readBigUInt64BE(o + 8));
+        hdr = 16;
+      }
+      if (size === 0) size = end - o;
+      if (size < hdr) return;
+      const v1 = buf[o + hdr] === 1; // full box: version, 3 bytes of flags, then the body
+      const body = o + hdr + 4;
+      const put = (at: number, value: number) => (v1 ? buf.writeBigUInt64BE(BigInt(value), at) : buf.writeUInt32BE(value, at));
+      if (type === "mvhd") {
+        scale = buf.readUInt32BE(body + (v1 ? 16 : 8));
+        put(body + (v1 ? 20 : 12), Math.round(secs * scale));
+      } else if (type === "tkhd") {
+        put(body + (v1 ? 24 : 16), Math.round(secs * scale));
+      } else if (type === "elst" && buf.readUInt32BE(body) === 1) {
+        put(body + 4, Math.round(secs * scale)); // segment_duration, in the movie's time scale
+        cut++;
+      }
+      if (type === "moov" || type === "trak" || type === "edts") walk(o + hdr, o + size);
+      o += size;
+    }
+  };
+  walk(0, buf.length);
+  writeFileSync(dst, buf);
+  return cut;
+}
+
 // Real `ffmpeg -version` heads (banner … libavfilter line) of the builds the matrix ran, plus
 // the afftfilt boundary: 5.0 (libavfilter 8.24) has 4.4's afftfilt, 5.1 (8.44) the rewrite, and the
 // acrossfade boundary: 6.0 (9.3) waits for its first input's end, 6.1 (9.12) – 7.x do not (mixed joins);
@@ -318,10 +361,11 @@ async function main(): Promise<void> {
   // pictures out of reach (a graphic's frame count is duration x fps). probeAsset takes the later of the recorded
   // length and where the last picture ends (read from the end of the file only); other files keep the format
   // duration, as before: a video with longer audio, an MPEG-TS that starts at 1.4 s, audio only, a WebM whose video
-  // ends less than a frame past its recorded length, a still.
+  // ends less than a frame past its recorded length, an MP4 whose edit list ends before its last pictures, a still.
   // MUTATION: drop videoEnd from probeAsset -> on 6.1+ the variable-rate file imports as 3.5 s.
   // MUTATION: leave the file's start time in videoEnd -> the MPEG-TS imports 1.4 s too long.
   // MUTATION: take any end past the recorded length (no one-frame margin) -> on 4.4 the WebM imports as 4.014 s.
+  // MUTATION: count discard (D) packets in videoEnd -> both MP4s cut to 3 s by their edit list import as 4 s.
   console.log("import duration (probeAsset)");
   {
     const make = async (name: string, args: string[]): Promise<string> => {
@@ -365,6 +409,23 @@ async function main(): Promise<void> {
       const f = await fmt(p);
       const a = await probeAsset(p);
       check(a.duration === f.duration, `${what}: the format's ${f.duration} s, unchanged (${a.duration} s${f.start ? `, starts at ${f.start} s` : ""})`);
+    }
+    // An end trim made without re-encoding: a 4 s MP4 whose edit lists and headers say 3 s. Its pictures after 3 s are
+    // still in the file, as packets the demuxer flags discard (D); FFmpeg decodes 90 pictures, so the recorded 3 s is
+    // the right length. -bf 2 gives the video track an edit list on every version.
+    const trims: [string, string, string[]][] = [
+      ["with audio", "trim.mp4", [...src(4), "-f", "lavfi", "-i", "sine=duration=4", ...h264, "-bf", "2", "-c:a", "aac"]],
+      ["video only", "trimv.mp4", [...src(4), ...h264, "-bf", "2"]],
+    ];
+    for (const [what, name, args] of trims) {
+      const p = join(dir, name);
+      const cut = trimEditList(await make(`full-${name}`, args), p, 3);
+      const f = await fmt(p);
+      const packets = await lastPicture(p, f.start); // every packet, the discarded ones too
+      const decoded = Number((await execa(FFPROBE_BIN, ["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", p])).stdout.trim());
+      const a = await probeAsset(p);
+      check(cut >= 1 && f.duration === 3 && packets >= 3.9 && decoded === 90 && a.duration === 3,
+        `an MP4 cut to 3 s by its edit list, ${what} (${cut} edit${cut === 1 ? "" : "s"} cut; packets to ${packets.toFixed(3)} s, ${decoded} pictures decoded): the recorded ${f.duration} s (${a.duration} s)`);
     }
     const still = await probeAsset(await make("still.png", ["-f", "lavfi", "-i", "testsrc2=size=64x48", "-frames:v", "1"]));
     check(still.isImage === true && still.duration === 5, `a still: 5 s, unchanged (${still.duration} s)`);
