@@ -1,0 +1,218 @@
+name: FFmpeg matrix
+
+# The full offline regression matrix (the local matrix kit's suite list) on every
+# FFmpeg version ZedMix supports: users run 4.4 to 9.0, the app ships 9.0.2. One
+# job per version, 3 shards each (scripts/ci/matrix-job.sh, scripts/ci/run-matrix.sh).
+# 4.4 is Ubuntu 22.04's apt FFmpeg 4.4.2; 6.1-9.0 are BtbN's static linux64-gpl
+# builds, pinned by sha256 in scripts/ci/ffmpeg-builds.txt (BtbN's 6.1, not
+# Ubuntu 24.04's apt 6.1, so the results match the local kit).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'FFmpeg versions to run, space-separated (any of 4.4 6.1 7.1 8.0 8.1 9.0); empty runs all six'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The job matrix, from scripts/ci/ffmpeg-builds.txt (runner, source and sha256
+  # per version), cut down to the versions a manual run names. A job-level `if:`
+  # cannot do that: it is evaluated before the matrix exists.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Versions to run
+        id: plan
+        env:
+          VERSIONS: ${{ inputs.versions }}
+        run: bash scripts/ci/ffmpeg-build.sh plan
+
+  ffmpeg:
+    name: FFmpeg ${{ matrix.ffmpeg }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    # The local kit takes about 12 min per version (3 shards, JOBS=6 on a
+    # 24-thread machine). A runner has 4 vCPUs: about 3x that for the shards,
+    # plus about 10 min for apt, npm ci, Electron and the build. Each suite is
+    # also capped at 15 min (timeout -k 10 900).
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      FFV: ${{ matrix.ffmpeg }}
+      # Nothing may be downloaded during the matrix: the download suites are
+      # not in the list, CLIP is off (smoke-media then uses the model-free
+      # index) and Whisper is off. The runner has no ~/.aive/whisper, so a
+      # transcription (smoke-media's optional index_transcript step) would
+      # fetch whisper.cpp and the base.en model (~155 MB). With the two paths
+      # below naming files that do not exist, the core refuses instead
+      # ("AIVE_WHISPER_BIN points at a missing file") and smoke-media skips
+      # that step; the local kit runs it with the real home's Whisper.
+      # matrix-job.sh still fails the job on any download it sees (a
+      # "[whisper] downloading" log line or a new file under ~/.aive).
+      AIVE_CLIP_DISABLE: '1'
+      AIVE_WHISPER_BIN: /nonexistent/whisper/whisper-cli
+      AIVE_WHISPER_MODEL: /nonexistent/whisper/ggml-base.en.bin
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+    steps:
+      # Full history: smoke-ramps compares the graph builder with commit dd38598
+      # (RAMPS_BASELINE_REF in run-matrix.sh).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: smoke-ramps baseline commit (dd38598) is in the checkout
+        run: |
+          [ "$(git cat-file -t dd38598 2>/dev/null)" = commit ] || { echo "::error::commit dd38598 (RAMPS_BASELINE_REF) is not in the checkout"; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The suites that synthesize their own media run the ffmpeg on PATH (as in
+      # ci.yml); on ubuntu-22.04 that is also the build under test.
+      # strace: smoke-unc row 16, smoke-chromeguard and smoke-motion-media (M5, M6).
+      - name: Install FFmpeg and strace (apt)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
+
+      - name: FFmpeg under test - the runner's apt build
+        if: matrix.source == 'apt'
+        run: |
+          got="$(ffmpeg -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')"
+          [ "$(command -v ffmpeg)" = /usr/bin/ffmpeg ] || { echo "::error::ffmpeg on PATH is $(command -v ffmpeg), not /usr/bin/ffmpeg"; exit 1; }
+          case "$got" in
+            "$FFV".*) echo "FFmpeg $FFV: $got (/usr/bin)" ;;
+            *) echo "::error::the runner's apt FFmpeg is $got, not $FFV"; exit 1 ;;
+          esac
+
+      # BtbN prunes old autobuild releases, so each verified tarball is cached
+      # (key: version + sha256). It is saved right after the check, not at the
+      # end of the job: a failing suite must not leave the cache empty.
+      - name: FFmpeg build from the cache
+        id: tarball
+        if: matrix.source == 'btbn'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarball
+          key: ffmpeg-btbn-${{ matrix.ffmpeg }}-${{ matrix.sha256 }}
+
+      # On a cache miss the tarball is downloaded into a new, empty folder; on
+      # either path its size and sha256 are checked against the pin. A tarball
+      # that is gone from BtbN fails here with the steps to re-pin it.
+      - name: Download (cache miss) and check the pinned FFmpeg build
+        if: matrix.source == 'btbn'
+        run: bash scripts/ci/ffmpeg-build.sh fetch "$FFV" "$RUNNER_TEMP/ffmpeg-tarball"
+
+      - name: Save the checked FFmpeg build to the cache
+        if: matrix.source == 'btbn' && steps.tarball.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarball
+          key: ffmpeg-btbn-${{ matrix.ffmpeg }}-${{ matrix.sha256 }}
+
+      # Checked again, unpacked into a new, empty folder; nothing in it runs
+      # except `ffmpeg -version`, which must name the pinned build. The core
+      # gets it through AIVE_FFMPEG / AIVE_FFPROBE; PATH keeps apt's ffmpeg
+      # (run-matrix.sh puts this bin first only for the motion smokes).
+      - name: FFmpeg under test - unpack the pinned build
+        if: matrix.source == 'btbn'
+        run: |
+          bin="$(bash scripts/ci/ffmpeg-build.sh unpack "$FFV" "$RUNNER_TEMP/ffmpeg-tarball" "$RUNNER_TEMP/ffmpeg-$FFV")"
+          echo "AIVE_FFMPEG=$bin/ffmpeg" >> "$GITHUB_ENV"
+          echo "AIVE_FFPROBE=$bin/ffprobe" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Electron 42 has no install script: npm ci leaves its binary out.
+      # install.js downloads it (checked against the package's checksums.json;
+      # it does nothing when the binary is in place).
+      - name: Install the Electron binary
+        run: node node_modules/electron/install.js
+
+      # Built once; the shards skip their own build (SKIP_BUILD=1).
+      - name: Build
+        run: npm run build
+
+      # smoke-web, parity-gl and smoke-voicefx drive a headless Chromium through
+      # playwright-core, which is not a dependency of the repo: the local kit
+      # finds it in the npx cache. Here: playwright-core 1.60.0 (the version
+      # the local runs use) in a folder of its own (npm runs there, away from
+      # the checkout's workspaces), no install scripts, and the Google Chrome of
+      # the runner image (no browser download). That Chrome is not pinned: the
+      # local kit uses Playwright's Chrome for Testing 149, and these three
+      # suites also passed locally with playwright-core 1.60.0 and Google
+      # Chrome 153.0.8010.52. Its version goes to the job summary
+      # (BROWSER_INFO, written by matrix-job.sh): when these three fail on
+      # every version after a runner-image update, check the browser first.
+      - name: playwright-core and Chrome for the browser suites
+        run: |
+          mkdir "$RUNNER_TEMP/pw"
+          (cd "$RUNNER_TEMP/pw" && npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts playwright-core@1.60.0)
+          pw="$RUNNER_TEMP/pw/node_modules/playwright-core"
+          [ -f "$pw/index.mjs" ] || { echo "::error::no playwright-core in $pw"; exit 1; }
+          chrome="$(command -v google-chrome || true)"
+          [ -n "$chrome" ] || { echo "::error::no google-chrome on this runner image"; exit 1; }
+          info="$("$chrome" --version) (the runner image's, not pinned), playwright-core $(node -p "require('$pw/package.json').version")"
+          echo "$info"
+          echo "PLAYWRIGHT_CORE=$pw" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_CHROMIUM=$chrome" >> "$GITHUB_ENV"
+          echo "BROWSER_INFO=$info" >> "$GITHUB_ENV"
+
+      # The kit's four clips (a.mp4, b.mp4, c640.mp4, m.mp3), made from lavfi
+      # test sources with the ffmpeg on PATH.
+      - name: Test media
+        run: bash scripts/ci/make-media.sh "$RUNNER_TEMP/media"
+
+      # All three shards run even when one fails; the step fails when any
+      # suite failed or anything was downloaded, and before the shards when
+      # the FFmpeg under test is not this job's version. Each shard's MATRIX
+      # and FAIL lines go to the job summary when it ends, then the
+      # [ffmpeg-guard] count. Ubuntu 24.04 restricts unprivileged user
+      # namespaces (AppArmor), which the motion renderer's sandbox and
+      # smoke-unc-e2e's add_graphic rows need, so they are allowed first, as
+      # ci.yml does before its renderer steps; ubuntu-22.04 has no such
+      # setting (its namespaces are not restricted), so the line runs only
+      # where the key exists.
+      - name: Matrix (3 shards, one after another)
+        env:
+          SKIP_BUILD: '1'
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          JOBS="$(nproc)" bash scripts/ci/matrix-job.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/matrix" "$RUNNER_TEMP/media" "$FFV"
+
+      # Every shard's output, results-<k>.tsv and per-suite logs (not the media
+      # copies), also when the job failed or timed out.
+      - name: Upload logs and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-matrix-${{ matrix.ffmpeg }}
+          path: |
+            ${{ runner.temp }}/matrix
+            !${{ runner.temp }}/matrix/**/media/**
+          if-no-files-found: warn
