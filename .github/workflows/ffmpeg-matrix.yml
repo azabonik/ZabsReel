@@ -86,9 +86,14 @@ jobs:
         run: |
           [ "$(git cat-file -t dd38598 2>/dev/null)" = commit ] || { echo "::error::commit dd38598 (RAMPS_BASELINE_REF) is not in the checkout"; exit 1; }
 
+      # Node 24, as the local kit and the packaged app's Electron run it: this
+      # matrix varies FFmpeg, not Node. ci.yml keeps the Node 22 floor covered.
+      # On Node 22 three suites fail here for reasons outside FFmpeg (first
+      # run, PR #3): smoke-cutout's matting worker cannot load its module from
+      # source, and smoke-motion-media and smoke-brand hit teardown races.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       # The suites that synthesize their own media run the ffmpeg on PATH (as in
