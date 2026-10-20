@@ -3,37 +3,30 @@
 # (unless SKIP_BUILD=1), then the 3 shards one after another; each shard runs even when an earlier one failed.
 # Usage: matrix-job.sh <checkout> <outdir> <media-dir> <version>
 #   The build under test is AIVE_FFMPEG / AIVE_FFPROBE (unset = the ffmpeg on PATH: on ubuntu-22.04, apt's 4.4.2).
-#   <version> must be that build's version: before anything runs, every ffmpeg and ffprobe the suites use (those two,
-#   or else the ones on PATH and in /usr/bin, where run-matrix.sh's motion smokes look) must report a version that
-#   starts with "<version>." or "n<version>." (BtbN's builds), else the job fails (exit 1). <version> also names the
-#   files: <outdir>/m<version>-<k>.log (the shard's output) and <outdir>/m<version>-<k>/ (results-<k>.tsv,
+#   <version> must be that build's version: before anything runs, check-ffmpeg.sh checks every ffmpeg and ffprobe the
+#   suites use against it (and, with FF_SOURCE=apt|btbn, where they are), else the job fails (exit 1). <version> also
+#   names the files: <outdir>/m<version>-<k>.log (the shard's output) and <outdir>/m<version>-<k>/ (results-<k>.tsv,
 #   logs/<suite>.log). JOBS is passed on to run-matrix.sh. BROWSER_INFO, when set, goes to the job summary.
 # Prints each shard's output (its MATRIX and FAIL lines) and the real [ffmpeg-guard] refusal count. Do not grep
 # "guard"+"refus": smoke-safepath prints expected "ok ... refuses" lines, which gives a misleading 46.
 # With GITHUB_STEP_SUMMARY set, each shard's MATRIX and FAIL lines go to the job summary as soon as that shard ends
 # (so a job stopped by its timeout still shows the shards that finished), then the count and any DOWNLOAD lines.
-# Download tripwire (nothing may be fetched during the matrix): a "[whisper] downloading" line in any suite log, or a
-# file that appeared under $HOME/.aive during the run, is reported as a DOWNLOAD line and fails the job.
-# Exit status: 0 when all 3 shards printed a MATRIX line, no suite failed and nothing was downloaded, else 1 (98: the
-# build failed).
+# Download tripwire (nothing may be fetched during the matrix): a "[whisper] downloading" line in any suite log, a
+# file that appeared under $HOME/.aive during the run, or one that appeared under the motion smokes' scratch HOME/.aive
+# or AIVE_DATA_DIR (run-matrix.sh lists those in motion-new-files.txt) is reported as a DOWNLOAD line and fails the job.
+# The suites with a result row are counted across the shards; fewer than the floor in matrix-suites.txt (next to this
+# script) fails the job, and the count goes to the job summary.
+# Exit status: 0 when all 3 shards printed a MATRIX line, no suite failed, at least the floor's number of suites gave a
+# result and nothing was downloaded, else 1 (98: the build failed).
 set -u
 HERE="$(dirname "$(readlink -f "$0")")"
 WT="$1"; MEDIA="$3"; V="$4"
 mkdir -p "$2" && OUT="$(cd "$2" && pwd)" || exit 99
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 # The FFmpeg under test is <version> (a job must not pass on another build).
-[[ "$V" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "matrix-job.sh: <version> is major.minor (e.g. 4.4 or 9.0), not '$V'"; exit 1; }
-if [ -n "${AIVE_FFMPEG:-}" ]; then FFS=("$AIVE_FFMPEG" "${AIVE_FFPROBE:-ffprobe}"); else FFS=(ffmpeg ffprobe /usr/bin/ffmpeg /usr/bin/ffprobe); fi
-for ff in "${FFS[@]}"; do
-  got="$("$ff" -version 2>/dev/null | sed -n '1s/^ff[a-z]* version \([^ ]*\).*/\1/p')"
-  case "$got" in
-    "$V".*|"n$V".*) echo "FFmpeg $V: $ff is $got" ;;
-    *) echo "FFmpeg $V: $ff reports '${got:-no version}', not $V"
-       [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=FFmpeg $V: wrong build::$ff reports '${got:-no version}', not $V"
-       exit 1 ;;
-  esac
-done
-build="$("${FFS[0]}" -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')"
+bash "$HERE/check-ffmpeg.sh" "$V" || exit 1
+FF="${AIVE_FFMPEG:-ffmpeg}"
+build="$("$FF" -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')"
 if [ -z "${SKIP_BUILD:-}" ]; then
   (cd "$WT" && npm run build > "$OUT/build.log" 2>&1) && echo "BUILD OK" || { echo "BUILD FAILED (see $OUT/build.log)"; exit 98; }
 fi
@@ -42,7 +35,7 @@ find "$HOME/.aive" -type f 2>/dev/null | sort > "$OUT/aive-before.txt"
 bad=0
 {
   echo "### FFmpeg $V"
-  echo "Build under test: \`$build\` (${FFS[0]})"
+  echo "Build under test: \`$build\` ($FF)"
   [ -z "${BROWSER_INFO:-}" ] || echo "Browser suites (smoke-web, parity-gl, smoke-voicefx): $BROWSER_INFO"
   echo
 } >> "$SUMMARY"
@@ -56,16 +49,30 @@ for k in 1 2 3; do
   # One closed block per shard: a job stopped later still has a well-formed summary of the shards before.
   { echo '```'; grep -E '^(MATRIX|FAIL )' "$OUT/m$V-$k.log"; echo '```'; } >> "$SUMMARY"
 done
+# Suites with a result row across the shards, against the recorded floor in matrix-suites.txt.
+rows="$(cat "$OUT"/m"$V"-*/results-*.tsv 2>/dev/null | wc -l)"
+floor="$(grep -v '^#' "$HERE/matrix-suites.txt" 2>/dev/null | tr -d '[:space:]')"
+suites="suites $V: $rows with a result (floor $floor)"
+low=""
+if ! [[ "$floor" =~ ^[0-9]+$ ]]; then low="scripts/ci/matrix-suites.txt has no number"
+elif [ "$rows" -lt "$floor" ]; then low="fewer than the $floor in scripts/ci/matrix-suites.txt"; fi
+if [ -n "$low" ]; then
+  bad=1; suites="suites $V: $rows with a result, $low"
+  [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=FFmpeg $V: suites missing::$suites"
+fi
+echo "$suites"
 guard="$(cat "$OUT"/m"$V"-*/logs/*.log 2>/dev/null | grep -c '\[ffmpeg-guard\]')"
 echo "guard lines $V: $guard"
 find "$HOME/.aive" -type f 2>/dev/null | sort > "$OUT/aive-after.txt"
 {
   grep -l '\[whisper\] downloading' "$OUT"/m"$V"-*/logs/*.log 2>/dev/null | sed 's|.*/logs/|DOWNLOAD whisper in |; s|\.log$||'
   comm -13 "$OUT/aive-before.txt" "$OUT/aive-after.txt" | sed 's|^|DOWNLOAD new file |'
+  cat "$OUT"/m"$V"-*/motion-new-files.txt 2>/dev/null | sed 's|^|DOWNLOAD new file in |'
 } > "$OUT/downloads.txt"
 cat "$OUT/downloads.txt"
 {
   echo '```'
+  echo "$suites"
   echo "guard lines $V: $guard"
   cat "$OUT/downloads.txt"
   echo '```'

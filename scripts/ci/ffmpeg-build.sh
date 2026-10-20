@@ -70,10 +70,13 @@ fetch() {
     echo "::error title=FFmpeg $v build gone::$ASSET is no longer in BtbN/FFmpeg-Builds release $TAG (BtbN prunes old autobuild releases), and the cache has no copy (key ffmpeg-btbn-$v-$SHA). Re-pin FFmpeg $v: see this step's log." >&2
     cat >&2 <<EOF
 To re-pin FFmpeg $v in scripts/ci/ffmpeg-builds.txt:
-  1. Find the newest MONTH-END release that still has a linux64-gpl $v build (BtbN keeps the last 14 daily
-     builds and each month's last build for two years, so never pin a daily or "latest"):
-       for t in \$(gh release list -R BtbN/FFmpeg-Builds --limit 60 --json tagName -q '.[].tagName' \\
-                  | grep -E 'autobuild-[0-9]{4}-[0-9]{2}-(28|29|30|31)-'); do
+  1. Find the newest month-end build that still has a linux64-gpl $v asset (BtbN keeps the last 14 daily
+     builds and each month's last build for two years, so never pin a daily or "latest"). A month-end build is
+     the newest autobuild tag of a month that is over, whatever its day: the list is newest first, so the loop
+     skips the current month's tags and keeps the first tag of each earlier month:
+       for t in \$(gh release list -R BtbN/FFmpeg-Builds --limit 100 --json tagName -q '.[].tagName' \\
+                  | grep -E '^autobuild-[0-9]{4}-[0-9]{2}-' | grep -v "^autobuild-\$(date -u +%Y-%m)-" \\
+                  | awk -F- '!seen[\$2 "-" \$3]++'); do
          a=\$(gh release view "\$t" -R BtbN/FFmpeg-Builds --json assets \\
               -q '.assets[].name | select(endswith("linux64-gpl-$v.tar.xz"))')
          [ -n "\$a" ] && { echo "\$t \$a"; break; }

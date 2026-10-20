@@ -15,9 +15,10 @@
 #                                    exceed 10 minutes (e.g. a loaded machine).
 #        REAL_HOME=<dir>             the home whose read-only caches (~/.aive/clip, ~/.aive/whisper) a scratch HOME
 #                                    reuses; default: the user's home in the passwd database, else $HOME
-# Writes <outdir>/results.tsv (exit<TAB>name<TAB>last line) and <outdir>/logs/<name>.log.
-# Exit status: number of failed suites (0 = all green; capped at 95, as 96-99 mean the setup failed). Runs in the
-# foreground; ~5-8 min on a 24-thread machine.
+# Writes <outdir>/results.tsv (exit<TAB>name<TAB>last line), <outdir>/logs/<name>.log and <outdir>/queued-k.txt (the
+# names of the shard's suites).
+# Exit status: number of failed suites, a queued suite with no result row included (0 = all green; capped at 95, as
+# 96-99 mean the setup failed). Runs in the foreground; ~5-8 min on a 24-thread machine.
 # Each suite runs under `timeout -k 10 900`: a hang shows as exit 124/137, not a stalled matrix.
 set -u
 WT="$(cd "$1" && pwd)"; MEDIA="${3:?usage: run-matrix.sh <checkout> <outdir> <media-dir>}"; JOBS="${JOBS:-6}"
@@ -96,6 +97,9 @@ for f in apps/desktop/scripts/smoke-composite.ts apps/desktop/scripts/smoke-save
   [ -f "$f" ] && echo "desktop-$(basename "$f" .ts)|$f" >> "$LIST"
 done
 awk -v k="$SK" -v n="$SN" '((NR-1) % n) == (k-1)' "$LIST" > "$LIST.shard"
+# The names of the suites queued for this shard (the serial ones below add theirs as they start): a queued suite with
+# no row in the results (its run died before it wrote one) counts as a failure.
+QF="$OUT/queued-$SK.txt"; cut -d'|' -f1 "$LIST.shard" > "$QF"
 RES="$OUT/results.tsv"; [ "$SN" -gt 1 ] && RES="$OUT/results-$SK.tsv"
 : > "$RES"
 export RES
@@ -110,11 +114,13 @@ xargs -P "$JOBS" -I{} bash -c 'run_one "$1"' _ {} < "$LIST.shard"
 # Port/browser-bound suites run one at a time (in the last shard).
 if [ "$SK" = "$SN" ]; then
 for short in $PORTBOUND; do
-  f="packages/core/scripts/smoke-$short.ts"; [ -f "$f" ] && run_one "core-smoke-$short|$f $(argsfor "smoke-$short")"
+  f="packages/core/scripts/smoke-$short.ts"
+  [ -f "$f" ] && { echo "core-smoke-$short" >> "$QF"; run_one "core-smoke-$short|$f $(argsfor "smoke-$short")"; }
 done
-run_one "desktop-smoke-web|apps/desktop/scripts/smoke-web.ts"
-run_one "mcp-smoke|packages/mcp/scripts/smoke.ts $M/a.mp4 $M/b.mp4"
-[ -f apps/desktop/scripts/parity-gl.mts ] && run_one "desktop-parity-gl|apps/desktop/scripts/parity-gl.mts"
+echo desktop-smoke-web >> "$QF"; run_one "desktop-smoke-web|apps/desktop/scripts/smoke-web.ts"
+echo mcp-smoke >> "$QF"; run_one "mcp-smoke|packages/mcp/scripts/smoke.ts $M/a.mp4 $M/b.mp4"
+[ -f apps/desktop/scripts/parity-gl.mts ] && { echo desktop-parity-gl >> "$QF"; run_one "desktop-parity-gl|apps/desktop/scripts/parity-gl.mts"; }
+echo core-smoke-ramps-baseline >> "$QF"
 RAMPS_BASELINE_REF=dd38598 bash -c 'run_one "core-smoke-ramps-baseline|packages/core/scripts/smoke-ramps.ts"'
 # The motion renderer's media and settle smokes (Electron, offscreen), one at a time after everything else (settle is
 # load-sensitive). Their fixtures and reference decodes run the `ffmpeg` on PATH, so PATH starts with this version's
@@ -123,19 +129,29 @@ RAMPS_BASELINE_REF=dd38598 bash -c 'run_one "core-smoke-ramps-baseline|packages/
 # (removed after; npm's update notice is off, so the results line is the smoke's last line). Needs strace (media M5,
 # M6).
 FFBIN=/usr/bin; [ -n "${AIVE_FFMPEG:-}" ] && FFBIN="$(dirname "$AIVE_FFMPEG")"
+# Download tripwire for these two (their HOME is not the one matrix-job.sh watches): the files that appeared under the
+# scratch HOME's .aive and the scratch AIVE_DATA_DIR, which start empty, go to <outdir>/motion-new-files.txt before the
+# folder is removed. Not the rest of that HOME: npx writes its own logs in ~/.npm on every call. The renderers and cores
+# the smokes start get fresh folders of their own under TMPDIR, which the smokes remove themselves.
+: > "$OUT/motion-new-files.txt"
 for m in media settle; do
   MS="$(mktemp -d "${TMPDIR:-/tmp}/zr-motion-XXXXXX")"; mkdir -p "$MS/home" "$MS/xdg" "$MS/data" "$MS/tmp"
   pactl set-sink-mute RDPSink 1 >/dev/null 2>&1 || true
+  echo "motion-smoke-motion-$m" >> "$QF"
   PATH="$FFBIN:$PATH" AIVE_FFMPEG="$FFBIN/ffmpeg" AIVE_FFPROBE="$FFBIN/ffprobe" TMPDIR="$MS/tmp" \
     HOME="$MS/home" USERPROFILE="$MS/home" XDG_CONFIG_HOME="$MS/xdg" AIVE_DATA_DIR="$MS/data" NPM_CONFIG_UPDATE_NOTIFIER=false \
     bash -c "run_one 'motion-smoke-motion-$m|packages/motion/scripts/smoke-motion-$m.ts'"
+  find "$MS/home/.aive" "$MS/data" -type f 2>/dev/null | sed "s|^$MS/|motion-smoke-motion-$m: |" >> "$OUT/motion-new-files.txt"
   rm -rf "$MS"
 done
 fi
 sort -k2 "$RES" -o "$RES"
-FAILS=$(awk -F'\t' '$1!=0' "$RES" | wc -l)
-TOTAL=$(wc -l < "$RES")
+# Queued suites without a result row: one FAIL line each, counted with the failed ones; the total is the queued count.
+LOST="$(comm -23 <(sort -u "$QF") <(cut -f2 "$RES" | sort -u))"
+FAILS=$(( $(awk -F'\t' '$1!=0' "$RES" | wc -l) + $(printf '%s' "$LOST" | grep -c .) ))
+TOTAL=$(wc -l < "$QF")
 echo "MATRIX${SHARD:+ shard $SHARD}: $((TOTAL-FAILS))/$TOTAL passed (ffmpeg: $(${AIVE_FFMPEG:-ffmpeg} -version 2>/dev/null | head -1 | cut -d' ' -f3))"
 awk -F'\t' '$1!=0 {print "FAIL " $2 " (exit " $1 "): " $3}' "$RES"
+[ -z "$LOST" ] || printf '%s\n' "$LOST" | sed 's/^/FAIL /; s/$/ (no result row: its run ended before it wrote one)/'
 [ "$FAILS" -le 95 ] || FAILS=95
 exit "$FAILS"

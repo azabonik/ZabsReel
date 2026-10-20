@@ -61,6 +61,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       FFV: ${{ matrix.ffmpeg }}
+      # apt or btbn: scripts/ci/check-ffmpeg.sh checks the build against it.
+      FF_SOURCE: ${{ matrix.source }}
       # Nothing may be downloaded during the matrix: the download suites are
       # not in the list, CLIP is off (smoke-media then uses the model-free
       # index) and Whisper is off. The runner has no ~/.aive/whisper, so a
@@ -70,7 +72,8 @@ jobs:
       # ("AIVE_WHISPER_BIN points at a missing file") and smoke-media skips
       # that step; the local kit runs it with the real home's Whisper.
       # matrix-job.sh still fails the job on any download it sees (a
-      # "[whisper] downloading" log line or a new file under ~/.aive).
+      # "[whisper] downloading" log line, or a new file under ~/.aive or
+      # under the motion smokes' scratch ~/.aive and AIVE_DATA_DIR).
       AIVE_CLIP_DISABLE: '1'
       AIVE_WHISPER_BIN: /nonexistent/whisper/whisper-cli
       AIVE_WHISPER_MODEL: /nonexistent/whisper/ggml-base.en.bin
@@ -101,16 +104,6 @@ jobs:
       # strace: smoke-unc row 16, smoke-chromeguard and smoke-motion-media (M5, M6).
       - name: Install FFmpeg and strace (apt)
         run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
-
-      - name: FFmpeg under test - the runner's apt build
-        if: matrix.source == 'apt'
-        run: |
-          got="$(ffmpeg -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')"
-          [ "$(command -v ffmpeg)" = /usr/bin/ffmpeg ] || { echo "::error::ffmpeg on PATH is $(command -v ffmpeg), not /usr/bin/ffmpeg"; exit 1; }
-          case "$got" in
-            "$FFV".*) echo "FFmpeg $FFV: $got (/usr/bin)" ;;
-            *) echo "::error::the runner's apt FFmpeg is $got, not $FFV"; exit 1 ;;
-          esac
 
       # BtbN prunes old autobuild releases, so each verified tarball is cached
       # (key: version + sha256). It is saved right after the check, not at the
@@ -147,6 +140,13 @@ jobs:
           bin="$(bash scripts/ci/ffmpeg-build.sh unpack "$FFV" "$RUNNER_TEMP/ffmpeg-tarball" "$RUNNER_TEMP/ffmpeg-$FFV")"
           echo "AIVE_FFMPEG=$bin/ffmpeg" >> "$GITHUB_ENV"
           echo "AIVE_FFPROBE=$bin/ffprobe" >> "$GITHUB_ENV"
+
+      # Every row, before npm ci and the build: a wrong build fails here, not
+      # after about 10 min of setup. apt: the runner's /usr/bin FFmpeg is this
+      # version and AIVE_FFMPEG is unset; btbn: AIVE_FFMPEG / AIVE_FFPROBE (set
+      # by the step above) are the pinned build. matrix-job.sh checks again.
+      - name: FFmpeg under test - check the build
+        run: bash scripts/ci/check-ffmpeg.sh "$FFV"
 
       - name: Install dependencies
         run: npm ci
