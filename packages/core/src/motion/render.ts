@@ -182,7 +182,7 @@ export async function graphicRemotion(root: string): Promise<GraphicRemotion> {
 /** Why graphics are off, for each guard reason. */
 function guardRefusal(reason: Exclude<RemotionGuard, { ok: true }>["reason"]): string {
   const why = {
-    node: `graphics need Node.js 22.15 or later, and ${PRODUCT_NAME} is running on Node.js ${process.versions.node}.`,
+    node: `graphics need Node.js 24 or later, and ${PRODUCT_NAME} is running on Node.js ${process.versions.node}.`,
     "loaded-before": `Remotion was loaded before ${PRODUCT_NAME} could guard it. Restart ${PRODUCT_NAME}.`,
     version: `${PRODUCT_NAME} works with Remotion ${REMOTION_VERSION}, and this copy of Remotion is a version it doesn't know.`,
   }[reason];

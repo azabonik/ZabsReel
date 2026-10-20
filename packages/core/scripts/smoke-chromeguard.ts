@@ -346,7 +346,7 @@ async function m3(work: string) {
   const t = child("cjs", "", "tsx");
   check(t.message !== REFUSAL && JSON.stringify(t.guard) === '{"ok":false,"reason":"loaded-before"}', `tsx compiles the CommonJS build past the hook: the guard is not ok (${JSON.stringify(t)})`);
   const n = child("render", "", "no-hooks");
-  check(refusedEarly(n, { ok: false, reason: "node" }, off(`graphics need Node.js 22.15 or later, and ZedMix is running on Node.js ${process.versions.node}.`)),
+  check(refusedEarly(n, { ok: false, reason: "node" }, off(`graphics need Node.js 24 or later, and ZedMix is running on Node.js ${process.versions.node}.`)),
     `Node without module.registerHooks: refused (${JSON.stringify(n)})`);
 }
 
