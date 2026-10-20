@@ -70,11 +70,14 @@ fetch() {
     echo "::error title=FFmpeg $v build gone::$ASSET is no longer in BtbN/FFmpeg-Builds release $TAG (BtbN prunes old autobuild releases), and the cache has no copy (key ffmpeg-btbn-$v-$SHA). Re-pin FFmpeg $v: see this step's log." >&2
     cat >&2 <<EOF
 To re-pin FFmpeg $v in scripts/ci/ffmpeg-builds.txt:
-  1. Find a current linux64-gpl $v build (the release tag, then its asset):
-       gh release view latest -R BtbN/FFmpeg-Builds --json tagName,assets \\
-         -q '.tagName, (.assets[].name | select(endswith("linux64-gpl-$v.tar.xz")))'
-     (gh release view latest shows the tag "latest"; for a dated tag that stays, list the releases with
-      gh release list -R BtbN/FFmpeg-Builds and take the autobuild-YYYY-MM-DD-HH-MM tag that holds the same asset.)
+  1. Find the newest MONTH-END release that still has a linux64-gpl $v build (BtbN keeps the last 14 daily
+     builds and each month's last build for two years, so never pin a daily or "latest"):
+       for t in \$(gh release list -R BtbN/FFmpeg-Builds --limit 60 --json tagName -q '.[].tagName' \\
+                  | grep -E 'autobuild-[0-9]{4}-[0-9]{2}-(28|29|30|31)-'); do
+         a=\$(gh release view "\$t" -R BtbN/FFmpeg-Builds --json assets \\
+              -q '.assets[].name | select(endswith("linux64-gpl-$v.tar.xz"))')
+         [ -n "\$a" ] && { echo "\$t \$a"; break; }
+       done
   2. Download the asset and that release's checksums.sha256 into a new, empty folder and check it:
        gh release download <tag> -R BtbN/FFmpeg-Builds -p <asset> -p checksums.sha256 -D <new folder>
        cd <new folder> && grep " <asset>\$" checksums.sha256 | sha256sum -c -
@@ -101,7 +104,8 @@ unpack() {
   for b in ffmpeg ffprobe; do
     [ -f "$bin/$b" ] && [ ! -L "$bin/$b" ] && [ -x "$bin/$b" ] || die "FFmpeg $v: no executable bin/$b in $ASSET"
   done
-  # The banner's version must be the asset's build (n6.1.2-15-ga6a07eebdf-<date> for ffmpeg-n6.1.2-15-ga6a07eebdf-...).
+  # The banner's version must be the asset's build (n8.1.3-9-g29e619e767-<date> for ffmpeg-n8.1.3-9-g29e619e767-...;
+  # n6.1.3-<date> for ffmpeg-n6.1.3-...).
   want="${ASSET#ffmpeg-}"; want="${want%-linux64-gpl-*}"
   got="$("$bin/ffmpeg" -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')"
   case "$got" in "$want"|"$want"-*) ;; *) die "FFmpeg $v: $bin/ffmpeg reports '$got', not $want";; esac

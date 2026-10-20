@@ -4,16 +4,17 @@
 #
 # source apt:  the runner image's Ubuntu FFmpeg (ubuntu-22.04 ships 4.4.2); the job checks the version it reports.
 # source btbn: a BtbN/FFmpeg-Builds static linux64-gpl build (the builds the local matrix kit tests), the release
-#              asset <asset> of release <tag>, pinned by its sha256 and size. 7.1-9.0 match their release's
-#              checksums.sha256; the 2024-11-30 release (6.1) has no checksums file, so 6.1 is pinned to the sha256
-#              its first download recorded (2026-10-13, re-matched 2026-10-14 and 2026-10-20).
-# BtbN prunes old autobuild releases: the workflow caches each verified tarball (key: version + sha256), and when an
-# asset is gone and the cache is empty, `fetch` fails with the steps to re-pin a version here.
+#              asset <asset> of release <tag>, pinned by its sha256 and size; each matches its release's
+#              checksums.sha256.
+# BtbN keeps the last 14 daily builds and the last build of each month for two years, so every row pins a month-end
+# build; the date in its tag + 2 years is when it disappears (6.1: 2027-08, 7.1: 2028-07, 8.0: 2028-02, 8.1 and 9.0:
+# 2028-09). Re-pin a row before then. The workflow also caches each verified tarball (key: version + sha256), and
+# when an asset is gone and the cache is empty, `fetch` fails with the steps to re-pin a version here.
 #
 # version runner        source tag                         asset                                                  sha256                                                           bytes
 4.4       ubuntu-22.04  apt    -                           -                                                      -                                                                -
-6.1       ubuntu-24.04  btbn   autobuild-2024-11-30-13-12  ffmpeg-n6.1.2-15-ga6a07eebdf-linux64-gpl-6.1.tar.xz    739f30b5a5b41f2640f9b0bf0f4f65f9d46711e18dc0126e7db22885cc2fc33d 106971092
+6.1       ubuntu-24.04  btbn   autobuild-2025-08-31-13-00  ffmpeg-n6.1.3-linux64-gpl-6.1.tar.xz                   400f9ca9d8ea3f812660cf7a00b9bfed944175cd9d6bd0c9b6257cf99376a75c 103573828
 7.1       ubuntu-24.04  btbn   autobuild-2026-07-31-14-10  ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz    c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79 119007364
 8.0       ubuntu-24.04  btbn   autobuild-2026-02-28-12-59  ffmpeg-n8.0.1-66-g27b8d1a017-linux64-gpl-8.0.tar.xz    26d2ecd0cefba99f9d1ea92252a3a4f743a58df4c1c3cf9f8bbaaa40b1fca5b0 140146232
-8.1       ubuntu-24.04  btbn   autobuild-2026-10-12-13-12  ffmpeg-n8.1.3-18-g46d899d7a0-linux64-gpl-8.1.tar.xz    5b9d661315095a781ac8e285f788db059076cd41f17fec8b7d78a7b32afa7bbd 150369040
-9.0       ubuntu-24.04  btbn   autobuild-2026-10-12-13-12  ffmpeg-n9.0.2-27-g7e93014c5b-linux64-gpl-9.0.tar.xz    99ac3849c1910e8a2e0dc16da11bbacb2bd6e8c445b5d180e5540cb57871a8bf 151129904
+8.1       ubuntu-24.04  btbn   autobuild-2026-09-30-13-08  ffmpeg-n8.1.3-9-g29e619e767-linux64-gpl-8.1.tar.xz     97ce978979194b5cf7e06a5e68020dbdaa7a4f3294c5452b6a1bc347100dbb79 150360944
+9.0       ubuntu-24.04  btbn   autobuild-2026-09-30-13-08  ffmpeg-n9.0.2-17-g2a571b6068-linux64-gpl-9.0.tar.xz    68ee646831adaae2495618346f3bba94ff207ff83bbd34d643e7004730d66269 151017172
