@@ -53,7 +53,7 @@ function allowDialog({ key, entry, userPath, pickedPath, platform }) {
   };
 }
 
-/** The Keep dialog for a server added outside ZabsReel (Remove is the default and Esc). */
+/** The Keep dialog for a server added outside ZedMix (Remove is the default and Esc). */
 function keepDialog({ key, entry, platform }) {
   const keepOnly = platform === "win32"
     ? `Keep it only if you added it yourself. When ${PRODUCT_NAME} opens files there, Windows may automatically send your Windows sign-in (a scrambled copy of your password) to that computer.`
@@ -99,7 +99,7 @@ function notSavedBox(message) {
  * native dialog (`via` "picker", `picked` the path). `list` is the store as
  * main read it (readTrustedHosts), and it alone picks the dialog
  * (approvalDialogFor): "unread" shows only the info box and saves nothing;
- * "keep" (added outside ZabsReel) shows Keep / Remove; "allow" shows Allow /
+ * "keep" (added outside ZedMix) shows Keep / Remove; "allow" shows Allow /
  * Keep offline, or nothing for a server allowed already. Only the second
  * button (response 1) saves an approval. Remove or Esc in the Keep dialog
  * removes the entry while it is still outside. Resolves true when the server

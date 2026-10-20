@@ -331,7 +331,7 @@ export function assertProjectMediaLocal(project: Project): void {
  * a file name (previews/preview-<revision>-…mp4 → a path outside the data dir),
  * and string geometry or clip timing would be spliced into filtergraphs. A value
  * that is not a finite number falls back to a safe default. Returns how many
- * fields were coerced (0 for any project ZabsReel wrote).
+ * fields were coerced (0 for any project ZedMix wrote).
  */
 export function coerceProjectNumbers(project: Project): number {
   let fixed = 0;
@@ -375,7 +375,7 @@ type Rec = Record<string, unknown>;
  * unknown transition type becomes "fade". Ranges are not clamped here: the
  * graph builders clamp (effects/registry.ts paramValue …), and a value a
  * valid project holds is never changed. Mutates `project`; returns how many
- * fields were changed (0 for any project ZabsReel wrote).
+ * fields were changed (0 for any project ZedMix wrote).
  */
 export function coerceProjectValues(project: Project): number {
   let fixed = 0;

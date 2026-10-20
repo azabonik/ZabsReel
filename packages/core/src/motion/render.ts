@@ -29,7 +29,7 @@ import { loadRemotion, REMOTION_VERSION, type RemotionGuard } from "./remotionlo
  * from the graphics add-on the user installs (addon/resolve.ts): its pinned
  * shell is passed as browserExecutable everywhere Remotion may start one,
  * with an onBrowserDownload that throws, so no Remotion code path downloads
- * a browser. The browser runs with ZabsReel's network limits
+ * a browser. The browser runs with ZedMix's network limits
  * (chromeguard.ts), and the render downloads no media for the graphic
  * (refuseDownload). Remotion is loaded at render time, through
  * remotionload.ts, so importing this module loads none of it. A second layer
@@ -46,7 +46,7 @@ import { loadRemotion, REMOTION_VERSION, type RemotionGuard } from "./remotionlo
  * they depend only on where the scaffold and the core are.
  *
  * NOTE on licensing: Remotion is source-available under the Remotion License
- * (not OSI open-source); companies of 4+ people need a paid license. ZabsReel
+ * (not OSI open-source); companies of 4+ people need a paid license. ZedMix
  * does not ship it: the user installs it as the graphics add-on, under its own
  * licence. See THIRD_PARTY notes.
  */
@@ -149,7 +149,7 @@ export const RemotionRoot: React.FC = () => {
 /**
  * Remotion's onDownload for every render: refuses every source. Remotion
  * downloads each <OffthreadVideo>, <Video> and <Audio> source (a data: URL
- * too) and hands the file to its own ffprobe and compositor, which ZabsReel's
+ * too) and hands the file to its own ffprobe and compositor, which ZedMix's
  * FFmpeg limits (executor.ts) don't reach: a playlist delivered that way would
  * open the network paths it names. Refused here, nothing is written.
  */
@@ -217,7 +217,7 @@ export const ADDON_CHANGED = "The graphics add-on was changed while this graphic
  * Render an AI-authored Remotion component to an alpha video file, with the
  * Remotion of `addon`. The scaffold is written under `workDir`, bundled,
  * rendered, and then cleaned up. Refuses (fails closed), before writing
- * anything, when the loaded Remotion does not carry ZabsReel's same-as
+ * anything, when the loaded Remotion does not carry ZedMix's same-as
  * refusal (remotionload.ts) or the /proxy guard does not work on this Node
  * (proxyguard.ts), or when its browser did not start through the network
  * limits (chromeguard.ts). When it fails and the installed add-on now has

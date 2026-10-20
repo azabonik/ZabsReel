@@ -3,7 +3,7 @@
 // devDependencies), so AIVE_REMOTION_ADDON defaults to the repo root when it is
 // unset: CI, release.yml's guard steps and the matrix kit need no change. The
 // core honours the variable only in a source checkout (addon/resolve.ts).
-// withoutDevAddon runs a row as a user without the add-on sees it. ZabsReel's
+// withoutDevAddon runs a row as a user without the add-on sees it. ZedMix's
 // own renderer is the default graphics renderer (MOTION-PLAN D7): a row that
 // tests the add-on path chooses the Remotion add-on for its data folder with
 // useRemotionRenderer, as the user's click in the add-on dialog does.

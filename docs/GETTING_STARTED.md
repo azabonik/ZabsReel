@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide gets ZabsReel running on your machine and connected to an AI client.
+This guide gets ZedMix running on your machine and connected to an AI client.
 
 ## 1. Prerequisites
 
@@ -50,7 +50,7 @@ First build the project (`npm run build`) so `packages/mcp/dist/index.js` exists
 1. Open Claude Desktop's config file:
    - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
    - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. Merge in the `zabsreel` server from
+2. Merge in the `zedmix` server from
    [`claude_desktop_config.example.json`](../claude_desktop_config.example.json),
    setting the path to this repo's `packages/mcp/dist/index.js`.
 3. **Fully restart Claude Desktop.**
@@ -61,7 +61,7 @@ This repo already ships a project-scoped [`.mcp.json`](../.mcp.json), so the
 simplest path is:
 
 1. Run Claude Code **from the repo root** (so the relative server path resolves).
-2. Approve the `zabsreel` server when prompted (project-scoped servers
+2. Approve the `zedmix` server when prompted (project-scoped servers
    require a one-time approval), or run `/mcp` to check it's connected.
 
 Prefer an explicit command instead? Register it directly (use the **absolute**
@@ -69,7 +69,7 @@ path to `index.js`):
 
 ```bash
 # default scope = just you, this project
-claude mcp add zabsreel -- node /abs/path/to/packages/mcp/dist/index.js
+claude mcp add zedmix -- node /abs/path/to/packages/mcp/dist/index.js
 
 # or make it available everywhere:  -s user
 # verify / inspect:

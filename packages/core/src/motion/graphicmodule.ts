@@ -5,7 +5,7 @@ import { PRODUCT_NAME } from "../brand.js";
 import type { PageAsset } from "./motionmedia.js";
 
 /**
- * The graphic as ZabsReel's own renderer runs it (MOTION-PLAN D5): the agent's
+ * The graphic as ZedMix's own renderer runs it (MOTION-PLAN D5): the agent's
  * TSX compiled in memory by sucrase (typescript, jsx, imports) into module.js,
  * the render page's last script, which hands host.js the render's start data
  * and the compiled code as one function:
@@ -46,7 +46,7 @@ export type GraphicModule = { ok: true; module: string } | { ok: false; code: "g
  * for word, so the agent reads the same text whichever side refuses it).
  */
 export function unsupportedNameMessage(name: string): string {
-  return `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
+  return `${name} is not available in ZedMix's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
 }
 
 /** The refusal for a specifier outside {@link GRAPHIC_SPECIFIERS} (loader.js throws the same text in the page). */
@@ -178,11 +178,11 @@ export function graphicImportRefusal(source: string, exportNames: ReadonlySet<st
   return null;
 }
 
-/** The names only ZabsReel's own renderer gives a graphic (the clean-room runtime's asset and loadFont). */
+/** The names only ZedMix's own renderer gives a graphic (the clean-room runtime's asset and loadFont). */
 const MOTION_ONLY_NAMES: ReadonlySet<string> = new Set(["asset", "loadFont"]);
 
 /**
- * What in `source` only ZabsReel's own renderer has (MOTION-PLAN D7), for
+ * What in `source` only ZedMix's own renderer has (MOTION-PLAN D7), for
  * add_graphic's refusal on the Remotion add-on path: an import of
  * @aive/motion (an import, an `export … from` or a require("…") call), or
  * asset or loadFont taken from remotion (a named import, or read off a

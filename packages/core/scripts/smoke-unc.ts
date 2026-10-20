@@ -95,7 +95,7 @@
  *                            clip is offline (not found; the unread state).
  *  15. the args builders   — every ffmpeg input gets FFmpeg's own format
  *                            allowlist (MEDIA_DEMUXERS; concat plus the list
- *                            for ZabsReel's -f concat lists; none for its
+ *                            for ZedMix's -f concat lists; none for its
  *                            lavfi graphs and raw pipes), and so does the
  *                            ffprobe input.
  *  16. files that name other files — HLS, DASH, ffconcat, IMF, AviSynth and
@@ -106,7 +106,7 @@
  *  17. G7 input limits     — -enable_drefs, -use_absolute_path and a caller's
  *                            -format_whitelist / -protocol_whitelist are refused.
  *  18. /file and playlists — a file that starts with #EXTM3U answers 415.
- *  19. the probe message   — a refused format reads "ZabsReel can't open this
+ *  19. the probe message   — a refused format reads "ZedMix can't open this
  *                            kind of file…" on import_video and import_otio.
  *  20. no graphics add-on  — without AIVE_REMOTION_ADDON and without an
  *                            installed add-on, add_graphic refuses with
@@ -439,7 +439,7 @@ async function main() {
   writeFixture(aive, JSON.stringify(project(bad(7))));
   const aiveErr = await errOf(() => engine.load(aive));
   check(/names the network computer/.test(aiveErr) && /open the project again\.$/.test(aiveErr), `load of a local .aive naming an @SSL asset is refused (${aiveErr.slice(0, 100)})`);
-  // A foreign OTIO (no ZabsReel metadata): its target_url is never probed.
+  // A foreign OTIO (no ZedMix metadata): its target_url is never probed.
   const rt = (value: number) => ({ OTIO_SCHEMA: "RationalTime.1", rate: 30, value });
   const otio = {
     OTIO_SCHEMA: "Timeline.1",
@@ -711,7 +711,7 @@ async function main() {
   // the read.
   console.log("11. G9: graphic imports and webpack's file system...");
   touched.length = 0;
-  const G9 = /^graphics can't open network paths or ZabsReel's private files: /;
+  const G9 = /^graphics can't open network paths or ZedMix's private files: /;
   for (const r of [
     "//zr-evil-6.invalid/s/x",
     "\\\\zr-evil-6.invalid\\s\\x",
@@ -940,7 +940,7 @@ async function main() {
     // A second process reads hosts.json in a loop while 200 writes replace it. On Windows a
     // rename over a file that is open fails (EPERM) and writeAtomic retries it; a reader that
     // never pauses starves it (measured: up to a 10 ms pause starves it, 20 ms does not), and
-    // ZabsReel's readers read once per change, so the reader there pauses 50 ms between reads.
+    // ZedMix's readers read once per change, so the reader there pauses 50 ms between reads.
     const d = freshData();
     for (let i = 0; i < 40; i++) await approveHost(d, `bulk-${i}.example`, "prompt");
     const stop = join(trustRoot, `stop-${dataN}`);
@@ -1154,7 +1154,7 @@ async function main() {
     // and link load rows load. Give isServablePath the lexical inTrustDir again → the
     // proxies/key-link row is servable. Drop the case-fold step from realCheck → the casefold row passes the path.
     if (process.platform !== "win32") {
-      const DOTDOT = /has a "\.\." segment\. ZabsReel doesn't follow "\.\." in a path .*Pass the full path without "\.\."\.$/;
+      const DOTDOT = /has a "\.\." segment\. ZedMix doesn't follow "\.\." in a path .*Pass the full path without "\.\."\.$/;
       const projects = join(dataDir, "projects");
       mkdirSync(projects, { recursive: true });
       mkdirSync(join(dataDir, "proxies"), { recursive: true });
@@ -1246,7 +1246,7 @@ async function main() {
       check(dotLoad === null && da.pathCheckFailed === "EDOTDOT" && isOffline(da) && !engine.isServablePath(dotAsset) && !engine.isServablePath(dotLut),
         `a loaded asset path and LUT with ".." load offline (pathCheckFailed ${da.pathCheckFailed}), never served (${dotLoad?.message})`);
       const dotThumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
-      check(dotThumb instanceof RpcError && dotThumb.code === "media_offline" && /has a "\.\." segment, which ZabsReel doesn't follow/.test(dotThumb.message) && !leaks(dotThumb.message, keyText),
+      check(dotThumb instanceof RpcError && dotThumb.code === "media_offline" && /has a "\.\." segment, which ZedMix doesn't follow/.test(dotThumb.message) && !leaks(dotThumb.message, keyText),
         `generate_thumbnail refuses it with media_offline and says why (${dotThumb?.message.slice(0, 140)})`);
       const dotRender = await thrown(() => dispatch(engine, "render_preview", {}));
       check(dotRender instanceof RpcError && dotRender.code === "media_offline" && /path has a "\.\." segment/.test(dotRender.message),
@@ -1338,7 +1338,7 @@ async function main() {
   // key (or list) as the last good copy → the missing/corrupt-then-EBUSY rows
   // call nas outside (or give "allow") instead of unread.
   console.log("12. stamps: outside entries, the key, read errors, the unread state, HostTrust...");
-  const stampWith = (k: Buffer, host: string, via: string, added: string) => createHmac("sha256", k).update(`zabsreel-hosts-v2\n${host}\n${via}\n${added}`).digest("base64url");
+  const stampWith = (k: Buffer, host: string, via: string, added: string) => createHmac("sha256", k).update(`zedmix-hosts-v2\n${host}\n${via}\n${added}`).digest("base64url");
   {
     const d = freshData();
     await approveHost(d, "nas", "prompt");
@@ -1561,7 +1561,7 @@ async function main() {
     const box = { decision: true };
     const lines = await logsOf(() => void (box.decision = ht.isAllowed(E3)));
     const decision = box.decision;
-    check(enforced ? decision === false && lines.length === 1 && lines[0].includes(`blocked \\\\${E3} (added outside ZabsReel)`) : decision === true && lines.length === 1 && lines[0].includes(`would block \\\\${E3} (added outside ZabsReel)`),
+    check(enforced ? decision === false && lines.length === 1 && lines[0].includes(`blocked \\\\${E3} (added outside ZedMix)`) : decision === true && lines.length === 1 && lines[0].includes(`would block \\\\${E3} (added outside ZedMix)`),
       `${enforced ? "enforced: refused" : "log mode: let through"} and logged as added outside (${JSON.stringify(lines)})`);
     // The lazy reload: a write the core was not told about counts on the next check of that server.
     await approveHost(d, "zr-evil-2.invalid", "prompt");
@@ -1760,7 +1760,7 @@ async function main() {
         `generate_thumbnail on a1 refuses with media_offline before any I/O (${thumb?.message.slice(0, 120)})`);
       check(!engine.isServablePath("\\\\zr-data.invalid\\video\\c.mp4") && !engine.isServablePath(LUT), "isServablePath is false for a1's file and for the unchecked LUT");
       const render = await thrown(() => dispatch(engine, "render_preview", {}));
-      check(render instanceof RpcError && render.code === "media_offline" && /^Can't render yet: clip clip_c1 uses files on \\\\zr-data\.invalid whose folder ZabsReel couldn't check \(EACCES\)/.test(render.message),
+      check(render instanceof RpcError && render.code === "media_offline" && /^Can't render yet: clip clip_c1 uses files on \\\\zr-data\.invalid whose folder ZedMix couldn't check \(EACCES\)/.test(render.message),
         `render_preview refuses: the clip's file and LUT are in a folder that couldn't be checked (${render?.message.slice(0, 160)})`);
       fake.fail = {};
       engine.recheckOfflineMedia();
@@ -1817,7 +1817,7 @@ async function main() {
     const listing = () => JSON.stringify(readdirSync(root).sort());
     const S = `\\\\${ALIAS}\\share`;
     const refusedPaths = [
-      `${S}\\x\\.zabsreel\\data\\addons\\remotion\\4.0.481\\node_modules\\@remotion\\renderer\\package.json`,
+      `${S}\\x\\.zedmix\\data\\addons\\remotion\\4.0.481\\node_modules\\@remotion\\renderer\\package.json`,
       `${S}\\addons\\remotion`,
       `${S}\\ADDONS\\Remotion\\x.aive`,
       `${S}\\addons.\\remotion \\x.aive`,
@@ -1862,7 +1862,7 @@ async function main() {
     await approveHost(engine.dataDir, ALIAS, "prompt");
     trust.reload();
     touched.length = mark;
-    const AREA = /is in ZabsReel's graphics add-on folder, which tools can't open\.$/;
+    const AREA = /is in ZedMix's graphics add-on folder, which tools can't open\.$/;
     try {
       for (const p of refusedPaths) {
         for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["export_captions", "path"], ["export_otio", "path"], ["load_project", "path"], ["import_video", "path"]] as const) {
@@ -1871,7 +1871,7 @@ async function main() {
         }
         check(trust.loadFieldCheck(p) === "private", `add-on name rule: loadFieldCheck(${JSON.stringify(p)}) is "private"`);
       }
-      const TRUST = /is in ZabsReel's private settings folder, which tools can't open\.$/;
+      const TRUST = /is in ZedMix's private settings folder, which tools can't open\.$/;
       for (const p of trustPaths) {
         for (const [m, key] of [["save_project", "path"], ["export_video", "outputPath"], ["export_captions", "path"], ["export_otio", "path"], ["load_project", "path"], ["import_video", "path"]] as const) {
           const e = await thrown(() => dispatch(engine, m, { [key]: p }));
@@ -1887,12 +1887,12 @@ async function main() {
       check(loadedDots === null && engine.getProject().assets[0].pathCheckFailed === "EDOTDOT",
         `add-on name rule: a project with that asset path loads, the asset offline (pathCheckFailed ${engine.getProject().assets[0].pathCheckFailed}) (${loadedDots?.message})`);
       const r = (await dispatch(engine, "remember_projects", { paths: refusedPaths })) as { added: unknown[]; skipped: { reason: string }[] };
-      check(r.added.length === 0 && r.skipped.length === refusedPaths.length && r.skipped.every((s) => s.reason === "in ZabsReel's graphics add-on folder"),
+      check(r.added.length === 0 && r.skipped.length === refusedPaths.length && r.skipped.every((s) => s.reason === "in ZedMix's graphics add-on folder"),
         `add-on name rule: remember_projects skips each one (${JSON.stringify(r.skipped.map((s) => s.reason))})`);
       const logs = await logsOf(() => thrown(() => dispatch(engine, "save_project", { path: refusedPaths[0] })));
       check(logs.some((l) => /in the private graphics add-on folder \(the name rule\)$/.test(l)), `add-on name rule: the core's log says which rule refused it (${JSON.stringify(logs)})`);
       const loaded = await errOf(() => engine.load(f));
-      check(/^asset "asset_a1" path /.test(loaded) && / is in ZabsReel's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(loaded),
+      check(/^asset "asset_a1" path /.test(loaded) && / is in ZedMix's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(loaded),
         `add-on name rule: a project whose asset path is in the add-on folder on that server does not load (${loaded.slice(-120)})`);
       for (const p of [`${S}\\addons\\other.mp4`, `${S}\\remotion\\x.mp4`, `${S}\\addons\\x\\remotion\\y.mp4`, `${S}\\addons-remotion\\y.mp4`,
         `${S}\\addons\\.hidden.mp4`, `${S}\\x\\remotion\\.staging-1\\y.mp4`, `${S}\\x\\trust\\hosts.mp4`, `${S}\\x\\hosts.json\\a.mp4`, `${S}\\v\\clip.mp4`]) {
@@ -2162,7 +2162,7 @@ async function main() {
     if (enforced) fontRows.push(["a server not allowed", "//zr-evil-9.invalid/s/f.ttf"]);
     for (const [label, font] of fontRows) {
       const e = await thrown(() => resolveFont(join(root, "render"), font, new Map(), "font.ttf"));
-      check(!!e && /^Font ".*" (is a path ZabsReel never opens|is on \\\\zr-evil-9\.invalid, which hasn't been allowed)\.$/.test(e.message), `resolveFont refuses ${label} (${e?.message})`);
+      check(!!e && /^Font ".*" (is a path ZedMix never opens|is on \\\\zr-evil-9\.invalid, which hasn't been allowed)\.$/.test(e.message), `resolveFont refuses ${label} (${e?.message})`);
     }
     // timeline_summary (7.4), in either mode: a clip whose file was not found says so, and offlineMedia counts it.
     // MUTATION: drop the "file not found" case from engine.assetOffline → this row fails.
@@ -2196,7 +2196,7 @@ async function main() {
         `unread at start: the load goes on with the asset offline, nothing approved or outside, no outside origin (${JSON.stringify(servers)})`);
       // MUTATION: drop the unread case from engine.offlineText → the summary row says "waiting for the user to allow".
       const us = (await dispatch(engine, "timeline_summary", {})) as { tracks: { clips: { offline?: string }[] }[]; offlineMedia?: { servers: string[] } };
-      check(us.tracks[0].clips[0].offline === "ZabsReel couldn't read its list of approved computers; retrying" && us.offlineMedia?.servers.join() === "\\\\zr-ok-1.invalid",
+      check(us.tracks[0].clips[0].offline === "ZedMix couldn't read its list of approved computers; retrying" && us.offlineMedia?.servers.join() === "\\\\zr-ok-1.invalid",
         `timeline_summary while unread: the clip's offline text is the unread one (${us.tracks[0].clips[0].offline}; ${JSON.stringify(us.offlineMedia)})`);
       const thumb = await thrown(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }));
       check(thumb instanceof RpcError && thumb.code === "media_offline" && /couldn't read its list of approved computers/.test(thumb.message), `generate_thumbnail refuses with media_offline and the unread wording (${thumb?.message.slice(0, 140)})`);
@@ -2302,7 +2302,7 @@ async function main() {
     ];
     writeFixture(join(dir, "ASSETMAP.xml"), assetmap);
     for (const [f, body] of fixtures) writeFixture(join(dir, f), body);
-    // ZabsReel's own -f concat list whose entry is a local playlist: refused in the nested open.
+    // ZedMix's own -f concat list whose entry is a local playlist: refused in the nested open.
     writeFixture(join(dir, "nested.txt"), "file 'hls.m3u8'\n");
     const realFfmpeg = process.env.AIVE_FFMPEG || "ffmpeg";
     const realFfprobe = process.env.AIVE_FFPROBE || "ffprobe";
@@ -2351,7 +2351,7 @@ async function main() {
         }
       }
       const nested = results.find((r) => r.op === "runFfmpeg -f concat");
-      check(!!nested && nested.refused && nested.notMedia === true && !!nested.message?.startsWith(NOT_MEDIA_TEXT), `ZabsReel's own -f concat list naming a local playlist: refused in the nested open (${nested?.message?.slice(0, 110)})`);
+      check(!!nested && nested.refused && nested.notMedia === true && !!nested.message?.startsWith(NOT_MEDIA_TEXT), `ZedMix's own -f concat list naming a local playlist: refused in the nested open (${nested?.message?.slice(0, 110)})`);
       check(results.length === fixtures.length * 3 + 1, `every fixture ran through probeAsset, runFfprobe and runFfmpeg (${results.length} results)`);
     }
     if (traced) {
@@ -2366,7 +2366,7 @@ async function main() {
   // MUTATION: drop "enable_drefs" from INPUT_LIMIT_OPTIONS → its rows fail.
   console.log("17. G7: -enable_drefs, -use_absolute_path and caller-supplied allowlists are refused...");
   for (const opt of ["-enable_drefs", "-enable_drefs:0", "-use_absolute_path", "-format_whitelist", "-protocol_whitelist"]) {
-    const want = `Refusing ffmpeg option ${opt}: ZabsReel sets FFmpeg's input limits itself.`;
+    const want = `Refusing ffmpeg option ${opt}: ZedMix sets FFmpeg's input limits itself.`;
     const asInput = await errOf(() => ffmpegArgsLocalOnly([opt, "1", "-i", "/m/a.mov", "-f", "null", "-"]));
     const asOutput = await errOf(() => ffmpegArgsLocalOnly(["-i", "/m/a.mov", opt, "1", "/d/o.mp4"]));
     const probe17 = await errOf(() => ffprobeArgsLocalOnly(["-v", "error", opt, "1", "/m/a.mov"]));
@@ -2492,12 +2492,12 @@ async function main() {
   }
 
   // ---- 20. no graphics add-on ------------------------------------------------------------
-  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+  // MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules
   // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
   console.log("20. no graphics add-on: add_graphic refuses with graphics_addon_missing...");
   {
     useDevAddon();
-    // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+    // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
     useRemotionRenderer(engine.dataDir);
     const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));
     const code = e instanceof RpcError ? e.code : e?.message;
@@ -2514,7 +2514,7 @@ async function main() {
 
 /**
  * Row 16's second process (`--ff-child <files JSON> <concat list>`): each file
- * through probeAsset, runFfprobe and a runFfmpeg decode, then ZabsReel's own
+ * through probeAsset, runFfprobe and a runFfmpeg decode, then ZedMix's own
  * `-f concat` shape on the list, with the FFmpeg its environment names (the
  * smoke's traced wrappers). Prints one JSON line.
  */

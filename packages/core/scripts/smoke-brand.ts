@@ -14,8 +14,8 @@
  *  3. The desktop launcher (core-launcher.cjs getDataDir) and the MCP server
  *     (core-client.ts getDataDir) agree: old folder populated and new absent,
  *     then new present but empty, then new populated.
- *  4. A core started from src/cli.ts with AIVE_DATA_DIR=<home>/.synthcut/data
- *     logs that choice; with an empty <home>/.zabsreel/data next to it, an MCP
+ *  4. A core started from src/cli.ts with AIVE_DATA_DIR=<home>/.zabsreel/data
+ *     logs that choice; with an empty <home>/.zedmix/data next to it, an MCP
  *     client started with that HOME and no AIVE_DATA_DIR attaches to that core
  *     (same pid and port as the old server.json) and spawns no second one.
  *  5. A core started with a fresh HOME and no AIVE_DATA_DIR resolves the new
@@ -56,23 +56,23 @@ const launcher = require(join(ROOT, "apps", "desktop", "electron", "core-launche
 
 /** The constants the rename settled on (plan §1-§2); every copy must hold exactly these. */
 const EXPECTED: Record<string, unknown> = {
-  PRODUCT_NAME: "ZabsReel",
-  PRODUCT_ID: "zabsreel",
-  MCP_KEY: "zabsreel",
-  SKILL_NAME: "zabsreel-editor",
-  APP_ID: "io.github.azabonik.zabsreel",
-  APP_ID_DEV: "io.github.azabonik.zabsreel.dev",
-  DESKTOP_PACKAGE: "zabsreel-desktop",
-  GITHUB_REPO: "azabonik/ZabsReel",
-  DATA_DIR_PARTS: [".zabsreel", "data"],
-  BACKUP_DIR_PARTS: [".zabsreel", "backups"],
+  PRODUCT_NAME: "ZedMix",
+  PRODUCT_ID: "zedmix",
+  MCP_KEY: "zedmix",
+  SKILL_NAME: "zedmix-editor",
+  APP_ID: "io.github.azabonik.zedmix",
+  APP_ID_DEV: "io.github.azabonik.zedmix.dev",
+  DESKTOP_PACKAGE: "zedmix-desktop",
+  GITHUB_REPO: "azabonik/ZedMix",
+  DATA_DIR_PARTS: [".zedmix", "data"],
+  BACKUP_DIR_PARTS: [".zedmix", "backups"],
   LEGACY: {
-    productName: "SynthCut",
-    id: "synthcut",
-    mcpKey: "synthcut",
-    skillName: "synthcut-editor",
-    desktopPackage: "synthcut-desktop",
-    dataDirParts: [".synthcut", "data"],
+    productName: "ZabsReel",
+    id: "zabsreel",
+    mcpKey: "zabsreel",
+    skillName: "zabsreel-editor",
+    desktopPackage: "zabsreel-desktop",
+    dataDirParts: [".zabsreel", "data"],
   },
 };
 
@@ -110,7 +110,7 @@ function put(dir: string, name: string) {
 function freshHome(root: string, name: string): { home: string; fresh: string; old: string } {
   const home = join(root, name);
   mkdirSync(home, { recursive: true });
-  return { home, fresh: join(home, ".zabsreel", "data"), old: join(home, ".synthcut", "data") };
+  return { home, fresh: join(home, ".zedmix", "data"), old: join(home, ".zabsreel", "data") };
 }
 
 interface ResolverCase {
@@ -270,7 +270,7 @@ async function main() {
   const packagedAt = process.argv.indexOf("--packaged");
   const packaged = packagedAt >= 0 ? process.argv[packagedAt + 1] : undefined;
   if (packagedAt >= 0 && !packaged) throw new Error("usage: smoke-brand.ts [--packaged <resources/app dir>]");
-  const root = mkdtempSync(join(tmpdir(), "zabsreel-brand-"));
+  const root = mkdtempSync(join(tmpdir(), "zedmix-brand-"));
 
   console.log("1. brand constants in all three copies...");
   checkConstants("brand.ts", brand as unknown as Record<string, unknown>);

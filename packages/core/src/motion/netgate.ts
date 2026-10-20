@@ -46,7 +46,7 @@ const IMPORTS_NAME = "GraphicImportsPlugin";
 export interface GraphicFiles {
   /** The agent's Graphic.tsx, as written and as its real path. */
   graphic: string[];
-  /** ZabsReel's own scaffold files (Root.tsx, index.ts), as written and as their real paths. */
+  /** ZedMix's own scaffold files (Root.tsx, index.ts), as written and as their real paths. */
   scaffold: string[];
   /** The node_modules folders the bundler and the graphic's imports resolve from (absolute). */
   modules: string[];
@@ -218,7 +218,7 @@ export class GateNetworkFsPlugin {
  * The I9 webpack plugin renderGraphic passes to bundle(), after
  * {@link GateNetworkFsPlugin} (so G9's check runs first). A request is held
  * to {@link graphicImportRefusal} when its issuer is the agent's Graphic.tsx,
- * or any module that is neither ZabsReel's own scaffold nor under the
+ * or any module that is neither ZedMix's own scaffold nor under the
  * node_modules folders (none other exists; an issuer path in another spelling
  * stays held). A context module (require.context, an import() or a
  * `new URL(…)` built from an expression) is refused from such an issuer

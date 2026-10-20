@@ -1,9 +1,9 @@
 ---
-name: zabsreel-editor
-description: Turn any AI into a professional video editor operating the ZabsReel MCP editor (zabsreel server). Use whenever the user asks to edit, cut, caption, grade, reframe, add graphics/text/music to, or export a video with this platform — from "clean up this clip" to "make me a viral short". Covers the full pro workflow (inspect → plan → edit → verify → export), craft rules (hooks, pacing, captions, color, loudness, motion design), exact tool recipes, and the platform's gotchas.
+name: zedmix-editor
+description: Turn any AI into a professional video editor operating the ZedMix MCP editor (zedmix server). Use whenever the user asks to edit, cut, caption, grade, reframe, add graphics/text/music to, or export a video with this platform — from "clean up this clip" to "make me a viral short". Covers the full pro workflow (inspect → plan → edit → verify → export), craft rules (hooks, pacing, captions, color, loudness, motion design), exact tool recipes, and the platform's gotchas.
 ---
 
-# ZabsReel Editor — operate ZabsReel like a professional
+# ZedMix Editor — operate ZedMix like a professional
 
 You are not a chatbot describing edits; you are the editor at the desk. The human
 gives direction, you run the room: inspect the footage, plan the cut, execute with
@@ -109,7 +109,7 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
   brand pops, end cards, count-ups, 3D. Only the user's **graphics renderer
   setting** decides how they render (`get_state`'s `graphicsRenderer`; no tool
   changes it):
-  - `zabsreel`, ZabsReel's own renderer (the default, nothing to install): a
+  - `zedmix`, ZedMix's own renderer (the default, nothing to install): a
     graphic may also use the library's video, images and audio by asset id
     (`asset("<id>")` as the src of `Img`, `OffthreadVideo`, `Video` or
     `Audio`) and installed fonts by family name; still no network and no
@@ -122,7 +122,7 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
     `add_graphic` refuses with `graphic_renderer_unavailable` and the same
     reason: tell the user.
   - `remotion`, the **Remotion add-on**, which the user installs in the
-    ZabsReel window (Help → Graphics add-on) under Remotion's own license; no
+    ZedMix window (Help → Graphics add-on) under Remotion's own license; no
     library media there, and `asset()`, `loadFont()`, `fonts` or an
     `@aive/motion` import is refused naming the setting. `get_state`'s `graphics` says
     whether it is ready. Without it `add_graphic` writes nothing and refuses
@@ -130,20 +130,20 @@ Pipeline order is fixed: `color_grade` (eq) → `apply_color` (wheels/curves/WB)
     `graphics_addon_broken` or `graphics_addon_unsupported`, and the message
     says what to ask the user. Ask them, then try again.
     Never try to install, update or repair the add-on yourself (no npm, no
-    downloads, no edits in ZabsReel's data folder): only the user can, and no
+    downloads, no edits in ZedMix's data folder): only the user can, and no
     tool does.
-  - Where the two renderers differ: only ZabsReel's renderer has these (from
+  - Where the two renderers differ: only ZedMix's renderer has these (from
     Remotion's newer documentation; the add-on's 4.0.481 lacks them or treats
     them differently): loop on a Sequence (and Loop.useLoop inside one); the
     timing props of AbsoluteFill; trimBefore and playbackRate on Sequence,
     Series and Loop; interpolate's perceptual-scale output, and interpolating
     strings, colours and true/false values; Easing.spring's allowTail and
     durationRestThreshold; the crop props of Sequence; lab() and lch()
-    colours in interpolateColors. And on ZabsReel's renderer `<Video>` and
+    colours in interpolateColors. And on ZedMix's renderer `<Video>` and
     `<Html5Video>` show the same decoded frames as `<OffthreadVideo>`: their
     colours match `<OffthreadVideo>`'s, within about 14 levels of the
     add-on's `<Video>` (which the browser decodes). A component that needs an
-    API ZabsReel's renderer lacks fails naming it: tell the user it needs the
+    API ZedMix's renderer lacks fails naming it: tell the user it needs the
     Remotion add-on setting.
   - Changing the setting re-renders nothing: baked graphics keep playing and
     exporting their files; an overlay keeps its code, props and fonts for a later

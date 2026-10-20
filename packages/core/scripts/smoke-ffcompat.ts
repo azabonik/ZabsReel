@@ -1,6 +1,6 @@
 /**
  * FFmpeg version-compatibility smoke (no downloads; synthesizes its inputs).
- * ZabsReel supports FFmpeg 4.4 and 6.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
+ * ZedMix supports FFmpeg 4.4 and 6.1 – 9.0 (packages/core/src/ffmpeg/version.ts);
  * run this against every build you ship or test:
  *
  *   npx tsx packages/core/scripts/smoke-ffcompat.ts
@@ -323,7 +323,7 @@ const BANNERS: Array<[string, string, Want]> = [
 ];
 
 async function main(): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-ffcompat-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-ffcompat-"));
   console.log(`work dir ${dir}`);
 
   // ---- version ------------------------------------------------------------------

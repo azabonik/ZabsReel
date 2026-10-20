@@ -102,7 +102,7 @@ export function readManifest(file: string): Record<string, unknown> | undefined 
   }
 }
 
-/** True when another version's folder holds an addon.json (a ZabsReel update moved the pin). */
+/** True when another version's folder holds an addon.json (a ZedMix update moved the pin). */
 function otherVersion(dataDir: string): boolean {
   try {
     return readdirSync(join(dataDir, "addons", "remotion"))

@@ -1640,7 +1640,7 @@ async function jobStatusChecks(): Promise<void> {
   check("LUT gate (log): every LUT loads, as before", lutGateFor(ms({ gate: "log" })) === null && lutGateFor(null) === null);
 
   check("badge: waiting for a server", offlineState(nas, ms())?.label === "Offline: waiting for you to allow \\\\nas" && offlineState(nas, ms())?.action === "review");
-  check("badge: a folder that couldn't be checked → Try again", offlineState(chk, ms())?.label === "Offline: ZabsReel couldn't check this file's folder on \\\\nas2" && offlineState(chk, ms())?.action === "retry");
+  check("badge: a folder that couldn't be checked → Try again", offlineState(chk, ms())?.label === "Offline: ZedMix couldn't check this file's folder on \\\\nas2" && offlineState(chk, ms())?.action === "retry");
   check("badge: unread store → retrying, no Review", offlineState(nas, ms({ unread: ["hosts.key"] }))?.action === null && /couldn't read its list of approved computers; retrying/.test(offlineState(nas, ms({ unread: ["hosts.key"] }))?.label ?? ""));
   check("badge: an online asset has none", offlineState(ok, ms()) === null);
 
@@ -1654,7 +1654,7 @@ async function jobStatusChecks(): Promise<void> {
     pend("a", ["request"], 0, ["//a/x.mp4", "//a/y.mp4"]),
   ] }), null, new Set(["//u/x.aive", "//a/x.mp4"]), new Set()).map(text);
   check("banner: project origin", lines[0] === "This project uses 3 files on the network computer \\\\p. They stay offline until you allow it.", lines[0]);
-  check("banner: added outside ZabsReel wins over the other origins", lines[1] === "This project uses 2 files on \\\\o. It is in your list of allowed network computers, but ZabsReel didn't put it there, so they stay offline until you check it.", lines[1]);
+  check("banner: added outside ZedMix wins over the other origins", lines[1] === "This project uses 2 files on \\\\o. It is in your list of allowed network computers, but ZedMix didn't put it there, so they stay offline until you check it.", lines[1]);
   check("banner: every example sent by this window → \"You tried\"", lines[2] === "You tried to open a file on the network computer \\\\u. Nothing has been opened yet.", lines[2]);
   check("banner: any example this window didn't send → \"The AI assistant asked\"", lines[3] === "The AI assistant asked to open a file on the network computer \\\\a. Nothing has been opened.", lines[3]);
   check("banner: Keep offline hides a server's line", bannerLines(ms({ pending: [pend("p", ["project"], 1, [])] }), null, new Set(), new Set(["p"])).length === 0);
@@ -1663,7 +1663,7 @@ async function jobStatusChecks(): Promise<void> {
     [...own].join() === "//zr-evil-7.invalid/p/a.aive", JSON.stringify([...own]));
   const unchecked = bannerLines(ms(), { ...project, assets: [chk] }, new Set(), new Set());
   check("banner: files whose folder couldn't be checked, with Try again", unchecked.length === 1 && unchecked[0].action === "retry" &&
-    text(unchecked[0]) === "ZabsReel couldn't check the folder of 1 file on \\\\nas2 (EACCES), so it didn't open it. It stays offline until the folder can be read.", text(unchecked[0] ?? { before: "", who: "", after: "" }));
+    text(unchecked[0]) === "ZedMix couldn't check the folder of 1 file on \\\\nas2 (EACCES), so it didn't open it. It stays offline until the folder can be read.", text(unchecked[0] ?? { before: "", who: "", after: "" }));
 }
 
 void jobStatusChecks()

@@ -25,7 +25,7 @@ export const GRAPHICS_CHROME_SWITCHES = [
 ] as const;
 const DROP = ["--host-resolver-rules=", "--auth-server-allowlist=", "--auth-server-whitelist="];
 const guarded = new WeakSet<object>();
-const INSTALLED = Symbol.for("zabsreel.chromeGuard");
+const INSTALLED = Symbol.for("zedmix.chromeGuard");
 
 type Create = (opts: { args: string[] } & Record<string, unknown>) => Promise<object>;
 

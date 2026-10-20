@@ -87,7 +87,7 @@ function buildMenu() {
 // downloads only the changed chunks (via the .blockmap) in the background, then
 // installs on the next restart. Guarded by app.isPackaged so it NEVER runs during
 // a `npm start` dev session. Update source is the `publish` block in package.json
-// (the azabonik/ZabsReel GitHub releases).
+// (the azabonik/ZedMix GitHub releases).
 function setupAutoUpdate() {
   if (!app.isPackaged) return; // dev build — nothing to update against
   let autoUpdater;
@@ -322,7 +322,7 @@ ipcMain.handle("media-servers:revoke", async (_e, host) => {
 // only its own files and the core.
 
 /** The add-on's downloads: a session apart from the window's (in memory). */
-const addonSession = () => session.fromPartition("zabsreel-graphics-addon");
+const addonSession = () => session.fromPartition("zedmix-graphics-addon");
 const graphicsAddon = createGraphicsAddonHost({
   via: "desktop",
   fetch: (url, init) => addonSession().fetch(url, init),

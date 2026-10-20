@@ -439,7 +439,7 @@ function bundleCheck(): void {
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-voicefx-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-voicefx-"));
   try {
     nodeChecks(dir);
     await browserChecks(dir);

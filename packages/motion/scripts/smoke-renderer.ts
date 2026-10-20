@@ -1,5 +1,5 @@
 /**
- * ZabsReel's own motion renderer: the renderer host (slice 1; MOTION-PLAN D2,
+ * ZedMix's own motion renderer: the renderer host (slice 1; MOTION-PLAN D2,
  * D8 "Launch", "Binary rule", "Renderer" and "Lifecycle"), with hand-written
  * pages in R2-R7, and the clean-room runtime wired into the page (slice 3b1;
  * D5, D8 "Code delivery") in R8-R9.
@@ -245,9 +245,9 @@ function skipped(name: string, why: string) {
 // ---- R1: the binary rule over fixture layouts ------------------------------------
 
 const SHAPES = [
-  { os: "win32", unpacked: "win-unpacked", app: ["resources", "app"], exe: ["ZabsReel.exe"] },
-  { os: "darwin", unpacked: "mac", app: ["ZabsReel.app", "Contents", "Resources", "app"], exe: ["ZabsReel.app", "Contents", "MacOS", "ZabsReel"] },
-  { os: "linux", unpacked: "linux-unpacked", app: ["resources", "app"], exe: ["zabsreel-desktop"] },
+  { os: "win32", unpacked: "win-unpacked", app: ["resources", "app"], exe: ["ZedMix.exe"] },
+  { os: "darwin", unpacked: "mac", app: ["ZedMix.app", "Contents", "Resources", "app"], exe: ["ZedMix.app", "Contents", "MacOS", "ZedMix"] },
+  { os: "linux", unpacked: "linux-unpacked", app: ["resources", "app"], exe: ["zedmix-desktop"] },
 ];
 
 function touch(p: string, text = "") {
@@ -1205,7 +1205,7 @@ async function r6(work: string) {
   if (!existsSync(motionDist)) check(false, `the built core is missing (${motionDist}): run npm run build`);
   else await childProbe(work, "(b) dev desktop, core under the dev Electron", ELECTRON, motionDist, { command: realpathSync(ELECTRON), args: [DESKTOP, RENDERER_FLAG] });
   // (c) The packed --dir build.
-  const exe = process.env.AIVE_APP || join(DESKTOP, "build", "dist", "linux-unpacked", "zabsreel-desktop");
+  const exe = process.env.AIVE_APP || join(DESKTOP, "build", "dist", "linux-unpacked", "zedmix-desktop");
   if (!existsSync(exe)) {
     skipped("R6 (c)", `no packed build (${exe}; npx electron-builder --linux --dir in apps/desktop makes one)`);
     return;
@@ -1229,9 +1229,9 @@ async function r6(work: string) {
 
 /** The packed app's executable on this platform (electron-builder --dir's layout). */
 const PACKED_EXE: Record<string, string[]> = {
-  linux: ["linux-unpacked", "zabsreel-desktop"],
-  win32: ["win-unpacked", "ZabsReel.exe"],
-  darwin: ["mac", "ZabsReel.app", "Contents", "MacOS", "ZabsReel"],
+  linux: ["linux-unpacked", "zedmix-desktop"],
+  win32: ["win-unpacked", "ZedMix.exe"],
+  darwin: ["mac", "ZedMix.app", "Contents", "MacOS", "ZedMix"],
 };
 /** resources/app of the packed app whose executable is `exe`. */
 const packedApp = (exe: string) => (process.platform === "darwin" ? join(dirname(exe), "..", "Resources", "app") : join(dirname(exe), "resources", "app"));
@@ -1517,7 +1517,7 @@ const REACT_SHA256: Record<string, string> = {
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
 /** [what, graphic source, the refusal it must get (a RegExp), or null when it must pass]. */
-const NAME_MSG = (name: string) => new RegExp(`^${name} is not available in ZabsReel's built-in graphics renderer`);
+const NAME_MSG = (name: string) => new RegExp(`^${name} is not available in ZedMix's built-in graphics renderer`);
 const IMPORT_CASES: [string, string, RegExp | null][] = [
   ["the title template", TITLE_CARD_TSX, null],
   ["react, its JSX runtimes, remotion and @aive/motion", `import React, { useState } from "react"; import { jsx } from "react/jsx-runtime"; import { jsxDEV } from "react/jsx-dev-runtime"; import { spring } from "remotion"; import { asset, loadFont } from "@aive/motion"; export default () => null;`, null],
@@ -1818,7 +1818,7 @@ async function r9(work: string) {
   for (const [w, h] of [[1920, 1080], [1080, 1920]]) {
     const id = `title-${w}x${h}`;
     const f = fresh(work, id);
-    const run = await render(f, id, { graphic: { source: TITLE_CARD_TSX, props: { title: "ZabsReel", subtitle: "motion runtime" } }, width: w, height: h, durationInFrames: 36, previewPath: undefined });
+    const run = await render(f, id, { graphic: { source: TITLE_CARD_TSX, props: { title: "ZedMix", subtitle: "motion runtime" } }, width: w, height: h, durationInFrames: 36, previewPath: undefined });
     check(!run.error && run.frames.length === 36, `the title template renders at ${w}x${h} (${run.error?.message ?? `${run.frames.length} frames, ${run.ms} ms`})`);
     const ink = run.frames.map(inked);
     check(ink.length === 36 && ink[0] === 0 && [8, 16, 24].every((n) => ink[n] > 2000), `${w}x${h}: frame 0 is faded out, frames 8, 16 and 24 hold the title (${[0, 8, 16, 24].map((n) => ink[n]).join(", ")} inked pixels)`);

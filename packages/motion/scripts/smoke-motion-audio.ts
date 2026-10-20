@@ -1,5 +1,5 @@
 /**
- * ZabsReel's own motion renderer: a graphic's sound (slice 4c; MOTION-PLAN D4
+ * ZedMix's own motion renderer: a graphic's sound (slice 4c; MOTION-PLAN D4
  * E3 with D-SPLIT, the audio rows of its caps table, D8 "Audio"). Every
  * render goes through the real renderer, muted (nothing is ever played: the
  * sound is measured from the files FFmpeg writes), with fresh HOME and data
@@ -77,7 +77,7 @@
  *                  source cap breach end the render; an audio file on a
  *                  server not allowed is media_offline before any FFmpeg
  *                  opens it, and nothing the core did named that host.
- *                  After the move into baked/ (add_graphic on ZabsReel's
+ *                  After the move into baked/ (add_graphic on ZedMix's
  *                  renderer): a failed probe of the moved .wav, a cancel_job
  *                  then, and the clip split during the render each end the
  *                  job (canceled for the cancel, else an error naming the
@@ -919,7 +919,7 @@ async function a5(work: string, fx: Fixtures, lib: Record<string, MediaAsset>) {
 }
 
 /**
- * add_graphic on ZabsReel's renderer after renderMotion has moved the
+ * add_graphic on ZedMix's renderer after renderMotion has moved the
  * overlay's .mov, .webm and -audio.wav into baked/ (engine.ts
  * addMotionGraphicRun): a failed probe of a moved file, a cancel_job that
  * lands then, and the clip split while the graphic rendered each end the

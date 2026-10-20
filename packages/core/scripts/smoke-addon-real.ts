@@ -4,7 +4,7 @@
  *
  * Offline (default), from a loopback registry (port 5032, AIVE_ADDON_REGISTRY)
  * that serves each lock `resolved` from npm's local cache by integrity and each
- * pinned zip from the cached folder (~/.cache/zabsreel-addon/cft-<version>,
+ * pinned zip from the cached folder (~/.cache/zedmix-addon/cft-<version>,
  * ZR_ADDON_ZIPS to override):
  *  R1. the sources   — every tarball of the four platform lists is in npm's
  *                      cache, and each pinned zip is in the folder with its
@@ -23,7 +23,7 @@
  *                      resolves there, and the compositor D2 names, exist (and
  *                      are executable off Windows): no install script needed.
  *  R5. the audit     — the win32 tree under a worst-case data folder
- *                      (C:\Users\<20 characters>\.zabsreel\data\…), in the
+ *                      (C:\Users\<20 characters>\.zedmix\data\…), in the
  *                      longest folder the installer writes it to
  *                      (addons\.staging-<12 hex>\), stays within 259
  *                      characters, and holds no device name, trailing dot
@@ -82,7 +82,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const CLI = join(REPO, "packages", "core", "dist", "cli.js");
 /** The real home (the test runs with a scratch HOME): npm's cache, the zips and the FFmpeg builds are read from there, read-only. */
 const REAL_HOME = userInfo().homedir;
-const ZIPS = process.env.ZR_ADDON_ZIPS ?? join(REAL_HOME, ".cache", "zabsreel-addon", `cft-${HEADLESS_SHELL.version}`);
+const ZIPS = process.env.ZR_ADDON_ZIPS ?? join(REAL_HOME, ".cache", "zedmix-addon", `cft-${HEADLESS_SHELL.version}`);
 /** The matrix kit's FFmpeg 8.1 bin folder (~/.cache/<kit>/ffmpeg-builds/8.1/bin), or ZR_FFMPEG_81. */
 function ffmpeg81(): string | null {
   if (process.env.ZR_FFMPEG_81) return process.env.ZR_FFMPEG_81;
@@ -309,7 +309,7 @@ function r5(trees: Partial<Record<AddonPlatform, string>>) {
     // The tree sits in addons\.staging-<12 hex>\ while an install runs (as long as .removed-<12 hex>), then in
     // addons\remotion\<version>\: the longer of the folders the installer uses.
     const folder = [`.staging-${"0".repeat(12)}`, `remotion\\${ADDON_REMOTION_VERSION}`].sort((a, b) => b.length - a.length)[0];
-    const prefix = `C:\\Users\\${"u".repeat(20)}\\.zabsreel\\data\\addons\\${folder}\\`;
+    const prefix = `C:\\Users\\${"u".repeat(20)}\\.zedmix\\data\\addons\\${folder}\\`;
     const paths = allPaths(win);
     const longest = paths.map((p) => prefix + p.split("/").join("\\")).sort((a, b) => b.length - a.length)[0];
     check(longest.length <= 259, `win32-x64: ${paths.length} paths; the longest with a worst-case prefix (${folder}) is ${longest.length} characters (≤ 259): ${longest}`);
@@ -459,7 +459,7 @@ async function stopCore(core: Core) {
 }
 
 async function r7(dataDir: string, ffmpegDir: string | null, label: string) {
-  // The user chose the add-on as the graphics renderer (the UI hosts write renderer.json); ZabsReel's own renderer is the default.
+  // The user chose the add-on as the graphics renderer (the UI hosts write renderer.json); ZedMix's own renderer is the default.
   await writeGraphicsRenderer(dataDir, "remotion");
   const trace = join(root, `spawns-${label.replace(/\W+/g, "-")}.jsonl`);
   const core = await startCore(dataDir, ffmpegDir, trace);

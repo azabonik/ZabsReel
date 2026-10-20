@@ -6,7 +6,7 @@ import { platformLabel, readGraphicsAddon, type GraphicsAddonState } from "./sta
 
 /**
  * Where graphics load Remotion from (ADDON-PLAN D5.1), and the refusals when
- * there is none. ZabsReel's own folder is never a Remotion root: a dev run
+ * there is none. ZedMix's own folder is never a Remotion root: a dev run
  * behaves like the packaged app unless it opts in.
  */
 

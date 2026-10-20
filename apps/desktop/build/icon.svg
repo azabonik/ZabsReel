@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
   <!--
-    ZabsReel app icon: the UI's Logo glyph (rounded square + play triangle,
+    ZedMix app icon: the UI's Logo glyph (rounded square + play triangle,
     src/icons.tsx) in the accent colour on the editor's dark surface.
     Edges sit on multiples of 16 so the 16/32/48 px renders stay sharp.
     Rendered to icon.ico / icon.png by scripts/make-icon.ts.

@@ -31,7 +31,7 @@ const SELF = new Set(["scripts/check-brand.mjs", "scripts/brand-allowlist.json"]
 
 /** The gate patterns, by the id the allowlist uses. */
 export const PATTERNS = {
-  synthcut: /synthcut/gi,
+  zabsreel: /zabsreel/gi,
   Relo: /\bRelo\b/g,
   "4789": /\b4789\b/g,
   ".aive/data": /\.aive[\\/]+data/g,
@@ -39,8 +39,8 @@ export const PATTERNS = {
   "video-editor-pro": /video-editor-pro/g,
 };
 
-// Only these entries may allow the bare lowercase id `synthcut` (plan section 2:
-// A11, A12, A14, and the counted LEGACY blocks of A13).
+// Only these entries may allow the bare lowercase id `zabsreel`: the migrate code
+// and its test (A11, A12), the counted LEGACY blocks (A13) and smoke-brand (A14).
 const BARE_OK = new Set(["A11", "A12", "A13", "A14"]);
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -64,7 +64,7 @@ export function compileEntries(raw) {
     if (alts.length === 0) throw new Error(`${where}: needs regex or literal text`);
     for (const a of alts) {
       new RegExp(a); // throws on a bad regex
-      const bare = a === "synthcut" || (e.flags === "i" && a.toLowerCase() === "synthcut");
+      const bare = a === "zabsreel" || (e.flags === "i" && a.toLowerCase() === "zabsreel");
       if (bare && !BARE_OK.has(e.id)) throw new Error(`${where}: only ${[...BARE_OK].join(", ")} may allow the bare id "${a}"`);
     }
     alts.sort((a, b) => b.length - a.length);
@@ -190,20 +190,20 @@ function selfTest() {
 
   try {
     const readme = "case/README.md";
-    const legacy = "case/packages/skill-installer/bin/legacy.mjs";
     const brand = "case/packages/core/src/brand.ts";
+    const releasing = "case/docs/RELEASING.md";
 
     run(
       "an allowed phrase passes",
-      { [readme]: "If you used Relo's SynthCut before, your client may have `ai-video-editor`.\n" },
-      [take("A5", readme, 2)],
+      { [readme]: "Up to version 0.2.0 this app was called ZabsReel. It used the key `zabsreel`.\n" },
+      [take("A6", readme, 2)],
       clean,
     );
 
     run(
-      "4789 in legacy.mjs fails, its allowed names do not",
-      { [legacy]: 'const OLD = "ai-video-editor"; // synthcut-by-relo, Relo\nconst PORT = 4789;\n' },
-      [take("A11", legacy, 4)],
+      "4789 in a brand file fails, its allowed names do not",
+      { [brand]: 'const OLD = "zabsreel"; // ZabsReel\nconst PORT = 4789;\n' },
+      [take("A13", brand, 2)],
       (r) => {
         const h = r.hits.map((x) => `${x.line}:${x.pattern}`).join(",");
         return h === "2:4789" && !mismatches(r).length ? null : `hits ${h || "(none)"}`;
@@ -211,36 +211,36 @@ function selfTest() {
     );
 
     run(
-      "a bare synthcut beside Relo's SynthCut on one README line fails",
-      { [readme]: "If you used Relo's SynthCut before, see ~/.synthcut/backups.\n" },
-      [take("A5", readme, 1)],
+      "a bare zabsreel beside an allowed phrase on one README line fails",
+      { [readme]: "Up to version 0.2.0 this app was called ZabsReel, see ~/.zabsreel/backups.\n" },
+      [take("A6", readme, 1)],
       (r) => {
         const h = r.hits.map((x) => `${x.line}:${x.pattern}`).join(",");
-        return h === "1:synthcut" ? null : `hits ${h || "(none)"}`;
+        return h === "1:zabsreel" ? null : `hits ${h || "(none)"}`;
       },
     );
 
     run(
       "a pattern joined to an allowed phrase still fails",
-      { [readme]: "Relo's SynthCut4789 and xRelo's SynthCut\n" },
-      [take("A5", readme, 2)],
+      { [readme]: "this app was called ZabsReel4789 and xthis app was called ZabsReel\n" },
+      [take("A6", readme, 2)],
       (r) => (r.hits.some((x) => x.pattern === "4789") ? null : "4789 was not reported"),
     );
 
     const legacyBlock = [
       "export const LEGACY = {",
-      '  productName: "SynthCut",',
-      '  id: "synthcut",',
-      '  mcpKey: "synthcut",',
-      '  skillName: "synthcut-editor",',
-      '  desktopPackage: "synthcut-desktop",',
-      '  dataDirParts: [".synthcut", "data"],',
+      '  productName: "ZabsReel",',
+      '  id: "zabsreel",',
+      '  mcpKey: "zabsreel",',
+      '  skillName: "zabsreel-editor",',
+      '  desktopPackage: "zabsreel-desktop",',
+      '  dataDirParts: [".zabsreel", "data"],',
       "};",
     ];
     run("the six LEGACY values of an A13 file pass", { [brand]: legacyBlock.join("\n") + "\n" }, [take("A13", brand, 6)], clean);
     run(
       "one extra match of an A13 entry fails",
-      { [brand]: [...legacyBlock, "// the old SynthCut name"].join("\n") + "\n" },
+      { [brand]: [...legacyBlock, "// the old ZabsReel name"].join("\n") + "\n" },
       [take("A13", brand, 6)],
       (r) => {
         const m = mismatches(r);
@@ -251,7 +251,7 @@ function selfTest() {
     run(
       "an entry with no match fails",
       { [readme]: "Nothing old here.\n" },
-      [take("A5", readme, 1)],
+      [take("A6", readme, 1)],
       (r) => {
         const m = mismatches(r);
         return m.length === 1 && m[0].actual === 0 ? null : `mismatches ${JSON.stringify(m)}`;
@@ -261,51 +261,51 @@ function selfTest() {
     run(
       "an entry for a missing file fails",
       { [readme]: "Nothing old here.\n" },
-      [take("A5", "case/no-such-file.md", 1)],
+      [take("A6", "case/no-such-file.md", 1)],
       (r) => (mismatches(r).length === 1 ? null : "the missing file was not reported"),
     );
 
     run(
       "fewer matches than recorded fail",
-      { [readme]: "Relo's SynthCut\n" },
-      [take("A5", readme, 2)],
+      { [readme]: "this app was called ZabsReel\n" },
+      [take("A6", readme, 2)],
       (r) => (mismatches(r).length === 1 && mismatches(r)[0].actual === 1 ? null : "the stale count was not reported"),
     );
 
     run(
       "every pattern fails in a file with no entry; ~/.aive cache paths pass",
       {
-        "case/a.md": "SYNTHCUT\nby Relo\nport 4789\n~/.aive/data\nC:\\Users\\x\\.aive\\data\nai-video-editor\nvideo-editor-pro\n~/.aive/models and ~/.aive/whisper\nrelocate 14789 Reload Relocate\n",
+        "case/a.md": "ZABSREEL\nby Relo\nport 4789\n~/.aive/data\nC:\\Users\\x\\.aive\\data\nai-video-editor\nvideo-editor-pro\n~/.aive/models and ~/.aive/whisper\nrelocate 14789 Reload Relocate\n",
       },
       [],
       (r) => {
         const got = r.hits.map((x) => `${x.line}:${x.pattern}`).join(",");
-        const want = "1:synthcut,2:Relo,3:4789,4:.aive/data,5:.aive/data,6:ai-video-editor,7:video-editor-pro";
+        const want = "1:zabsreel,2:Relo,3:4789,4:.aive/data,5:.aive/data,6:ai-video-editor,7:video-editor-pro";
         return got === want ? null : `hits ${got || "(none)"}`;
       },
     );
 
     run(
       "a binary file is skipped",
-      { "case/blob.bin": Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(" synthcut 4789 Relo ")]) },
+      { "case/blob.bin": Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(" zabsreel 4789 Relo ")]) },
       [],
       clean,
     );
 
     run(
-      "a case-sensitive entry does not allow other spellings (NOTICE: SynthCut, not synthcut)",
-      { "case/NOTICE": "SynthCut by Relo\nthe synthcut id\n" },
-      [take("A2", "case/NOTICE", 2)],
+      "a case-sensitive entry does not allow other spellings (RELEASING: ZabsReel, not zabsreel)",
+      { [releasing]: "Version 0.2.0 shipped as ZabsReel with\nthe zabsreel id\n" },
+      [take("A4", releasing, 1)],
       (r) => {
         const h = r.hits.map((x) => `${x.line}:${x.pattern}`).join(",");
-        return h === "2:synthcut" && !mismatches(r).length ? null : `hits ${h || "(none)"}`;
+        return h === "2:zabsreel" && !mismatches(r).length ? null : `hits ${h || "(none)"}`;
       },
     );
 
     run(
       "allowed text that holds a pattern its entry does not list fails",
-      { [readme]: "Relo's SynthCut\n" },
-      [{ ...take("A5", readme, 1), patterns: ["Relo"] }],
+      { [readme]: "this app was called ZabsReel\n" },
+      [{ ...take("A6", readme, 1), patterns: ["Relo"] }],
       (r) => (r.problems.length === 1 ? null : `problems ${JSON.stringify(r.problems)}`),
     );
 
@@ -328,10 +328,10 @@ function selfTest() {
       console.log(`${threw ? "ok  " : "FAIL"} ${name}`);
       if (!threw) failures++;
     };
-    const base = { id: "A5", file: "README.md", regex: ["Relo's SynthCut"], patterns: ["synthcut", "Relo"], count: 1, reason: "x" };
-    rejects("the bare id synthcut outside A11-A14 is refused", [{ ...base, regex: ["synthcut"] }]);
-    rejects("the bare id in any case outside A11-A14 is refused", [{ ...base, regex: ["SynthCut"], flags: "i" }]);
-    rejects("an unknown pattern id is refused", [{ ...base, patterns: ["SynthCut"] }]);
+    const base = { id: "A6", file: "README.md", literal: ["this app was called ZabsReel"], patterns: ["zabsreel"], count: 1, reason: "x" };
+    rejects("the bare id zabsreel outside A11-A14 is refused", [{ ...base, literal: [], regex: ["zabsreel"] }]);
+    rejects("the bare id in any case outside A11-A14 is refused", [{ ...base, literal: [], regex: ["ZabsReel"], flags: "i" }]);
+    rejects("an unknown pattern id is refused", [{ ...base, patterns: ["ZabsReel"] }]);
     rejects("a zero count is refused", [{ ...base, count: 0 }]);
     rejects("an entry without a reason is refused", [{ ...base, reason: "" }]);
   } finally {

@@ -18,12 +18,12 @@ export interface VideoConfig {
   defaultSampleRate: number;
 }
 
-/** ZabsReel mixes audio at 48 kHz. */
+/** ZedMix mixes audio at 48 kHz. */
 export const DEFAULT_SAMPLE_RATE = 48000;
 
 function outsideApp(what: string): Error {
   return misuse(
-    `${what} can only be used inside a graphic that ZabsReel is rendering. Call it from the graphic's component or its children.`,
+    `${what} can only be used inside a graphic that ZedMix is rendering. Call it from the graphic's component or its children.`,
   );
 }
 

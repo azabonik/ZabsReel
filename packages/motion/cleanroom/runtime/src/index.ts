@@ -55,7 +55,7 @@ export type DelayRenderHandle = number;
 function needsHost(name: string): never {
   throw graphicError(
     "graphic_api_unsupported",
-    `${name} only works inside a graphic that ZabsReel renders: import it from "remotion" in the graphic's code, or use useDelayRender() in a component.`,
+    `${name} only works inside a graphic that ZedMix renders: import it from "remotion" in the graphic's code, or use useDelayRender() in a component.`,
   );
 }
 

@@ -2,7 +2,7 @@
  * Stage the heavy local binaries/models the editor needs into
  * `apps/desktop/build/resources/aive/`, so electron-builder can ship them as
  * `extraResources` and the packaged app runs **fully offline on first launch**
- * (motion graphics too: ZabsReel's own renderer ships in the app).
+ * (motion graphics too: ZedMix's own renderer ships in the app).
  *
  * Bundling strategy = HYBRID (see docs/PROJECT_STATUS.md §5 / the Phase-5 plan):
  *   bundled here  → FFmpeg + ffprobe, whisper-cli (+ DLLs) + base.en model,
@@ -11,7 +11,7 @@
  *                   optional Remotion add-on (Remotion and its headless
  *                   shell), which the user installs from Help → Graphics
  *                   add-on; no installer holds it (the afterPack gate,
- *                   scripts/check-no-remotion.mjs). ZabsReel's own motion
+ *                   scripts/check-no-remotion.mjs). ZedMix's own motion
  *                   renderer ships in the app.
  *
  * The packaged app points the engine's env overrides (AIVE_FFMPEG / AIVE_FFPROBE

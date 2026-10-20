@@ -6,7 +6,7 @@ import { ADDON_PLATFORM_LISTS, ADDON_REMOTION_VERSION, HEADLESS_SHELL, type Addo
 
 /**
  * What the user accepts before the graphics add-on downloads anything
- * (ADDON-PLAN D4.2): ZabsReel's notice and Remotion's LICENSE.md as of the
+ * (ADDON-PLAN D4.2): ZedMix's notice and Remotion's LICENSE.md as of the
  * v4.0.481 tag (the npm tarballs lack it). The add-on dialog shows both, and
  * the installer refuses unless it is given {@link GraphicsAddonTerms.sha256}.
  */
@@ -27,7 +27,7 @@ export function remotionLicenseText(): string {
 
 const mb = (bytes: number) => Math.max(1, Math.round(bytes / 1e6));
 
-/** ZabsReel's notice for `platform`, with that platform's download sizes. */
+/** ZedMix's notice for `platform`, with that platform's download sizes. */
 export function graphicsAddonNotice(platform: AddonPlatform): string {
   const packages = ADDON_PLATFORM_LISTS[platform].bytes ?? 0;
   const shell = HEADLESS_SHELL.platforms[platform].size;

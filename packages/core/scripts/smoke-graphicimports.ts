@@ -64,7 +64,7 @@ const secret = (name: string) => join(SECRETS, name);
 /** What bundle() is stopped with once it has built the bundle. */
 const BUNDLED = "smoke: bundled";
 const I9 = /graphics can only import 'react' and 'remotion': /;
-const G9 = /graphics can't open network paths or ZabsReel's private files: /;
+const G9 = /graphics can't open network paths or ZedMix's private files: /;
 
 // Node's fs, before Remotion (and graceful-fs, which keeps the functions it finds) loads:
 // every open or read of a path in the secrets' folder.
@@ -303,11 +303,11 @@ async function g5() {
 }
 
 // ---- G6 ------------------------------------------------------------------------
-// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules
 // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
 async function g6() {
   console.log("G6. no add-on: add_graphic refuses with graphics_addon_missing...");
-  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
   const dataDir = useRemotionRenderer(mkdtempSync(join(root, "g6-data-")));
   const engine = new EditorEngine(dataDir);
   let code: string | undefined;

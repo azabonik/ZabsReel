@@ -1,5 +1,5 @@
 /**
- * ZabsReel's own motion renderer: library media and fonts on demand (slice
+ * ZedMix's own motion renderer: library media and fonts on demand (slice
  * 4b; MOTION-PLAN D4 E1, E2, E4 and its caps table, D8 "Media"). Every row
  * renders through the real renderer, muted, with fresh HOME and data folders,
  * in a private network namespace; the fixtures are made here with FFmpeg's

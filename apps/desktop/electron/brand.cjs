@@ -11,31 +11,31 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const PRODUCT_NAME = "ZabsReel";
-const PRODUCT_ID = "zabsreel";
+const PRODUCT_NAME = "ZedMix";
+const PRODUCT_ID = "zedmix";
 // The server key written into AI client configs (mcpServers.<key>).
-const MCP_KEY = "zabsreel";
-const SKILL_NAME = "zabsreel-editor";
-// Electron appId and Windows AUMID; frozen after the first release.
-const APP_ID = "io.github.azabonik.zabsreel";
-const APP_ID_DEV = "io.github.azabonik.zabsreel.dev";
+const MCP_KEY = "zedmix";
+const SKILL_NAME = "zedmix-editor";
+// Electron appId and Windows AUMID. Keep it fixed: a new id installs beside the old app instead of upgrading it (this happened once, after 0.2.0).
+const APP_ID = "io.github.azabonik.zedmix";
+const APP_ID_DEV = "io.github.azabonik.zedmix.dev";
 // The desktop workspace's package name (also the Linux executable name).
-const DESKTOP_PACKAGE = "zabsreel-desktop";
-const GITHUB_REPO = "azabonik/ZabsReel";
+const DESKTOP_PACKAGE = "zedmix-desktop";
+const GITHUB_REPO = "azabonik/ZedMix";
 // Default data folder, relative to the home folder.
-const DATA_DIR_PARTS = [".zabsreel", "data"];
+const DATA_DIR_PARTS = [".zedmix", "data"];
 // Where `migrate` keeps its backups, relative to the home folder.
-const BACKUP_DIR_PARTS = [".zabsreel", "backups"];
+const BACKUP_DIR_PARTS = [".zedmix", "backups"];
 
-// The fork's previous identity. Used only to find and rename what it left
+// The previous product identity (ZabsReel, through 0.2.0). Used only to find and rename what it left
 // behind (migrate) and as the data-dir fallback; never written anew.
 const LEGACY = {
-  productName: "SynthCut",
-  id: "synthcut",
-  mcpKey: "synthcut",
-  skillName: "synthcut-editor",
-  desktopPackage: "synthcut-desktop",
-  dataDirParts: [".synthcut", "data"],
+  productName: "ZabsReel",
+  id: "zabsreel",
+  mcpKey: "zabsreel",
+  skillName: "zabsreel-editor",
+  desktopPackage: "zabsreel-desktop",
+  dataDirParts: [".zabsreel", "data"],
 };
 
 // True when <dir>/server.json or <dir>/projects.json exists as a regular file.

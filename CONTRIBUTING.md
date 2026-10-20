@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in ZabsReel! This is an open-source project and
+Thanks for your interest in ZedMix! This is an open-source project and
 contributions are welcome.
 
 ## Project structure
@@ -10,7 +10,7 @@ packages/core    @aive/core  — headless engine: timeline (EDL), FFmpeg pipelin
                                HTTP /rpc + WebSocket server. No UI, no AI.
 packages/mcp     @aive/mcp   — MCP server: exposes core's RPC methods as tools to
                                AI clients; forwards calls to the running core.
-apps/desktop     zabsreel-desktop — Electron + React UI. Connects to core over WS.
+apps/desktop     zedmix-desktop — Electron + React UI. Connects to core over WS.
                                web/server.cjs serves the same UI to a browser tab.
 ```
 
@@ -96,7 +96,7 @@ an administrator, in the release workflow) and is skipped elsewhere.
 
 Distribution is **offline-first**: the installer bundles FFmpeg, whisper.cpp
 (+ `base.en`), the YuNet model, and an OSS font so the app works with no
-downloads on first run, motion graphics included (ZabsReel's own renderer,
+downloads on first run, motion graphics included (ZedMix's own renderer,
 `@aive/motion`). The one exception is the optional graphics add-on (Remotion
 and its headless shell), which the user installs from **Help → Graphics
 add-on** and which no installer may contain (see "Remotion is a devDependency
@@ -106,7 +106,7 @@ only" below).
 node apps/desktop/scripts/prepare-bundle.ts     # stage bundled binaries → apps/desktop/build/resources/aive
 npx tsx packages/core/scripts/smoke-bundled.ts  # verify the staged bundle renders offline
 npm run build
-npm run dist --workspace zabsreel-desktop       # build the NSIS installer
+npm run dist --workspace zedmix-desktop       # build the NSIS installer
 ```
 
 A few non-obvious things if you touch the packaging:
@@ -161,12 +161,12 @@ without the same isolation + a clear reason. Every bundled or downloaded
 component must be listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 The paragraph above comes from the original project and is kept as written.
-For the ZabsReel changes, [`NOTICE`](NOTICE) adds an explicit GNU GPL section 7
+For the ZedMix changes, [`NOTICE`](NOTICE) adds an explicit GNU GPL section 7
 permission to link with Remotion.
 
 ### Remotion is a devDependency only
 
-No installer ZabsReel conveys may contain Remotion. Users install it
+No installer ZedMix conveys may contain Remotion. Users install it
 themselves as the graphics add-on, under Remotion's own license, and the core
 loads it only from there (or, in a source checkout, from `AIVE_REMOTION_ADDON`).
 So:
@@ -194,7 +194,7 @@ So:
 
 ## The clean-room runtime (`packages/motion/cleanroom`)
 
-ZabsReel's motion renderer runs a runtime compatible with Remotion's API that
+ZedMix's motion renderer runs a runtime compatible with Remotion's API that
 was written in a clean room, from Remotion's public documentation only
 ([`docs/MOTION_RENDERER.md`](docs/MOTION_RENDERER.md), "The clean room"). To
 keep it clean:

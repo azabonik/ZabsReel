@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 /**
- * zabsreel — installer for the ZabsReel "zabsreel-editor" AI skill.
+ * zedmix — installer for the ZedMix "zedmix-editor" AI skill.
  *
- *   npx @azabonik/zabsreel                 interactive: pick client + scope
- *   npx @azabonik/zabsreel add --client claude --scope project
- *   npx @azabonik/zabsreel add --client codex  --scope global --force
+ *   npx @azabonik/zedmix                 interactive: pick client + scope
+ *   npx @azabonik/zedmix add --client claude --scope project
+ *   npx @azabonik/zedmix add --client codex  --scope global --force
  *   ("skill" and "install" are accepted aliases for "add")
- *   npx @azabonik/zabsreel migrate         remove what Relo's SynthCut left
- *                                          ("ai-video-editor" server, "video-editor-pro" skill),
- *                                          and rename this app's entries from its old name
- *   npx @azabonik/zabsreel migrate --restore <backup folder>
+ *   npx @azabonik/zedmix migrate         rename this app's entries from its old name
+ *                                        (brand.mjs LEGACY)
+ *   npx @azabonik/zedmix migrate --restore <backup folder>
  *
  * The skill itself is one markdown file (skill/SKILL.md in this package).
  * What differs per AI client is WHERE it lives and what wrapper it needs;
@@ -31,8 +30,6 @@ import {
   newBackupDir,
   readManifest,
   restoreBackup,
-  LEGACY_SERVER,
-  LEGACY_SKILL,
   MARK_START,
   MARK_END,
 } from "./legacy.mjs";
@@ -178,12 +175,12 @@ function install(client, scope, projectDir, force) {
 
 // ---------------------------------------------------------------------- main
 
-const HELP = `zabsreel — install the ${PRODUCT_NAME} ${SKILL_NAME} AI skill
+const HELP = `zedmix — install the ${PRODUCT_NAME} ${SKILL_NAME} AI skill
 
 Usage:
-  zabsreel [add] [--client <name>] [--scope <project|global>] [--dir <path>] [--force]
-  zabsreel migrate [--dir <path>] [--entry <file>] [--from-checkout <old> --to-checkout <new>] [--yes | --dry-run]
-  zabsreel migrate --restore <backup folder> [--yes | --dry-run]
+  zedmix [add] [--client <name>] [--scope <project|global>] [--dir <path>] [--force]
+  zedmix migrate [--dir <path>] [--entry <file>] [--from-checkout <old> --to-checkout <new>] [--yes | --dry-run]
+  zedmix migrate --restore <backup folder> [--yes | --dry-run]
 
 Options:
   --client   ${Object.keys(CLIENTS).join(" | ")}
@@ -192,19 +189,17 @@ Options:
   --force    overwrite an existing skill/rule file
   -h, --help show this help
 
-migrate looks in AI client configs and skill folders for what earlier versions
-left behind, and changes it only after you confirm (or with --yes):
-  - Relo's SynthCut: the MCP server "${LEGACY_SERVER}" (only when it runs an MCP
-    server of that shape) and the skill "${LEGACY_SKILL}" are removed.
-  - ${LEGACY.productName}, this app's old name: the MCP server "${LEGACY.mcpKey}" is renamed to
-    "${MCP_KEY}" when the files next to its entry show it is this app; the skill
-    "${LEGACY.skillName}" is removed and its AGENTS.md / GEMINI.md sections are
-    replaced with "${SKILL_NAME}".
+migrate looks in AI client configs and skill folders for what ${LEGACY.productName},
+this app's old name, left behind, and changes it only after you confirm (or with --yes):
+  - the MCP server "${LEGACY.mcpKey}" is renamed to "${MCP_KEY}" when the files next to
+    its entry show it is this app;
+  - the skill "${LEGACY.skillName}" is removed and its AGENTS.md / GEMINI.md sections
+    are replaced with "${SKILL_NAME}".
   --entry <file>   the JSON from ${PRODUCT_NAME} → Connect AI, saved to a file: replaces
                    a "${LEGACY.mcpKey}" entry that runs an installed ${LEGACY.productName} app
   --from-checkout <old> --to-checkout <new>
                    rewrite entries that point into a checkout folder that moved
-Every file it changes is copied to ~/.zabsreel/backups/<time>/ first;
+Every file it changes is copied to ~/.zedmix/backups/<time>/ first;
 migrate --restore <that folder> puts them back. --dry-run only lists.
 
 Run with no flags for interactive prompts.`;
@@ -212,18 +207,9 @@ Run with no flags for interactive prompts.`;
 const plural = (n, one, many) => (n === 1 ? one : many);
 
 function printLegacy({ found, skipped }) {
-  const groups = [
-    [found.filter((f) => f.gen === "upstream"), "from Relo's SynthCut"],
-    [found.filter((f) => f.gen === "fork"), `from ${LEGACY.productName}, ${PRODUCT_NAME}'s old name`],
-  ];
-  let n = 0;
-  for (const [items, label] of groups) {
-    if (!items.length) continue;
-    console.log(`Found ${items.length} ${plural(items.length, "entry", "entries")} ${label}:`);
-    for (const f of items) {
-      console.log(`  ${++n}. ${f.client}: ${f.what}\n     ${f.file}`);
-      if (f.hasNewKey === false) console.log(`     (this file has no "${MCP_KEY}" entry yet: copy one from Connect AI in the app)`);
-    }
+  if (found.length) {
+    console.log(`Found ${found.length} ${plural(found.length, "entry", "entries")} from ${LEGACY.productName}, ${PRODUCT_NAME}'s old name:`);
+    found.forEach((f, i) => console.log(`  ${i + 1}. ${f.client}: ${f.what}\n     ${f.file}`));
   }
   if (skipped.length) {
     console.log(`Left alone:`);
@@ -282,10 +268,7 @@ async function migrate(args, projectDir) {
 
   const scan = findLegacy({ home, projectDir, entry, move });
   if (!scan.found.length) {
-    console.log(
-      `Nothing to migrate: no entries from Relo's SynthCut ("${LEGACY_SERVER}", "${LEGACY_SKILL}")` +
-        ` or ${LEGACY.productName} ("${LEGACY.mcpKey}", "${LEGACY.skillName}") to change.`,
-    );
+    console.log(`Nothing to migrate: no entries from ${LEGACY.productName} ("${LEGACY.mcpKey}", "${LEGACY.skillName}") to change.`);
     printLegacy(scan);
     return;
   }
@@ -319,12 +302,12 @@ async function migrate(args, projectDir) {
     const verb = r.finding.verb ?? "changed";
     console.log(`${r.ok ? `✔ ${verb}` : "✖ not changed"}: ${r.finding.client}: ${r.finding.what}${r.note ? ` (${r.note})` : ""}\n  ${r.finding.file}`);
   }
-  if (results.some((r) => r.ok && r.finding.kind === "file" && r.finding.gen === "fork")) {
-    console.log(`\nTo install the current skill (${SKILL_NAME}), run: npx @azabonik/zabsreel add`);
+  if (results.some((r) => r.ok && r.finding.kind === "file")) {
+    console.log(`\nTo install the current skill (${SKILL_NAME}), run: npx @azabonik/zedmix add`);
   }
   if (existsSync(backupDir)) {
     console.log(`\nBackups of the changed files: ${backupDir}`);
-    console.log(`To undo: npx @azabonik/zabsreel migrate --restore "${backupDir}"`);
+    console.log(`To undo: npx @azabonik/zedmix migrate --restore "${backupDir}"`);
   }
   console.log("Restart those AI clients to pick up the change.");
   if (results.some((r) => !r.ok)) process.exitCode = 1;
@@ -400,9 +383,9 @@ async function main() {
   const legacy = findLegacy({ home: homedir(), projectDir }).found;
   if (legacy.length) {
     console.log(
-      `\nFound ${legacy.length} ${plural(legacy.length, "entry", "entries")} from an earlier version` +
-        ` (Relo's SynthCut "${LEGACY_SERVER}" / "${LEGACY_SKILL}", or ${LEGACY.productName} "${LEGACY.mcpKey}" / "${LEGACY.skillName}").` +
-        `\nTo review and change ${plural(legacy.length, "it", "them")}, run: npx @azabonik/zabsreel migrate${args.dir ? ` --dir "${projectDir}"` : ""}`,
+      `\nFound ${legacy.length} ${plural(legacy.length, "entry", "entries")} from ${LEGACY.productName}, ${PRODUCT_NAME}'s old name` +
+        ` ("${LEGACY.mcpKey}" / "${LEGACY.skillName}").` +
+        `\nTo review and change ${plural(legacy.length, "it", "them")}, run: npx @azabonik/zedmix migrate${args.dir ? ` --dir "${projectDir}"` : ""}`,
     );
   }
 }

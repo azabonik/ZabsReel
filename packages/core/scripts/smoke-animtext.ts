@@ -85,18 +85,18 @@ async function main() {
   } catch (e) {
     console.log(`   (skipped: ${(e as Error).message.split("\n")[0]})`);
   }
-  // …and on ZabsReel's own renderer (the default), which needs no add-on: not optional. The add-on path would
-  // refuse here (no add-on), so a graphic means ZabsReel's renderer made it.
+  // …and on ZedMix's own renderer (the default), which needs no add-on: not optional. The add-on path would
+  // refuse here (no add-on), so a graphic means ZedMix's renderer made it.
   // MUTATION: render the Remotion path whatever the setting (graphicsRenderer() always "remotion", engine.ts) → 3b fails.
-  writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zabsreel" })}\n`);
+  writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zedmix" })}\n`);
   engine.graphicsAddon = () => ({ ok: false, state: "not-installed" });
-  console.log("3b. coded motion graphic coexisting (ZabsReel's renderer)...");
+  console.log("3b. coded motion graphic coexisting (ZedMix's renderer)...");
   const z = await call<{ graphicId?: string }>("add_graphic", { clipId: base.clip.id, template: "title", props: { title: "Coded", subtitle: "graphic" }, startFrame: 0, endFrame: 90 });
-  check(!!z.graphicId, "coded graphic added alongside the animated title on ZabsReel's renderer");
+  check(!!z.graphicId, "coded graphic added alongside the animated title on ZedMix's renderer");
 
-  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this row fails.
+  // MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules (addon/resolve.ts) → this row fails.
   console.log("4. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic refuses...");
-  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
   const bare = new EditorEngine(useRemotionRenderer(mkdtempSync(join(tmpdir(), "aive-animtext-bare-"))));
   const refused = await withoutDevAddon(() => dispatch(bare, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
   check(refused === "graphics_addon_missing", `add_graphic refuses with graphics_addon_missing (${refused})`);

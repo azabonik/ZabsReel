@@ -1,6 +1,6 @@
 /**
  * FFmpeg's input-format allowlist (executor.ts MEDIA_DEMUXERS) keeps every
- * kind of media ZabsReel reads working: the no-regression check for it.
+ * kind of media ZedMix reads working: the no-regression check for it.
  *
  * With the FFmpeg it is given (AIVE_FFMPEG / AIVE_FFPROBE, or PATH), it makes
  * one small sample per container and still-image format on the list that this

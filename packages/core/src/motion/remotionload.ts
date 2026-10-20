@@ -5,7 +5,7 @@ import type * as Bundler from "@remotion/bundler";
 import type * as Renderer from "@remotion/renderer";
 
 /**
- * The only place that loads Remotion's runtime, and ZabsReel's same-as
+ * The only place that loads Remotion's runtime, and ZedMix's same-as
  * refusal in it.
  *
  * Remotion's `downloadAsset` returns a `same-as` source unchanged, as a bare
@@ -13,7 +13,7 @@ import type * as Renderer from "@remotion/renderer";
  * (Remotion's /proxy reaches it from the page). A load hook (node:module
  * registerHooks, once per process, before Remotion is first loaded) rewrites
  * that early return into a throw, in memory only, in the two builds of
- * @remotion/renderer: the ESM build ZabsReel loads and the CommonJS one.
+ * @remotion/renderer: the ESM build ZedMix loads and the CommonJS one.
  * Nothing on disk is written, so a Remotion installed by the user or without
  * install scripts gets the same refusal. {@link LoadedRemotion.guard} says
  * whether the copy actually loaded carries it; renderGraphic refuses otherwise.
@@ -23,7 +23,7 @@ import type * as Renderer from "@remotion/renderer";
 
 /** The Remotion version whose text the hook knows. */
 export const REMOTION_VERSION = "4.0.481";
-const MARKER = "/* zabsreel: same-as refused */";
+const MARKER = "/* zedmix: same-as refused */";
 
 /** One rewrite: `head`, the early return, `tail`; the early return becomes the marker and `refusal`. */
 function hunk(head: string[], indent: string, refusal: string, tail: string[]) {
@@ -44,7 +44,7 @@ const TARGETS = [
         "    if ((0, compress_assets_1.isAssetCompressed)(src)) {",
       ],
       "        ",
-      "throw new Error('ZabsReel refuses same-as sources');",
+      "throw new Error('ZedMix refuses same-as sources');",
       [
         "    }",
         "    const { downloadDir } = downloadMap;",
@@ -57,7 +57,7 @@ const TARGETS = [
     ...hunk(
       ["  audioStreamIndex", "}) => {", "  if (isAssetCompressed(src)) {"],
       "    ",
-      'throw new Error("ZabsReel refuses same-as sources");',
+      'throw new Error("ZedMix refuses same-as sources");',
       ["  }", "  const { downloadDir } = downloadMap;", "  if (downloadMap.hasBeenDownloadedMap[src]?.[downloadDir]) {"],
     ),
   },
@@ -147,7 +147,7 @@ export interface LoadedRemotion {
 /**
  * Register the hook (once), then load @remotion/renderer's ESM build and
  * @remotion/bundler as resolved from `root` (a folder; node_modules is looked
- * up from it): the graphics add-on (addon/resolve.ts). ZabsReel's own folder
+ * up from it): the graphics add-on (addon/resolve.ts). ZedMix's own folder
  * is never a default, so Remotion loads only from a copy the user installed
  * or a source checkout named.
  */

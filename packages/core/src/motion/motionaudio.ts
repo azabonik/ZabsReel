@@ -4,7 +4,7 @@ import { MotionRenderError } from "./motionerror.js";
 import type { MotionAsset, PageAsset } from "./motionmedia.js";
 
 /**
- * The audio of ZabsReel's own motion graphics (MOTION-PLAN D4 E3; D-AUDIO,
+ * The audio of ZedMix's own motion graphics (MOTION-PLAN D4 E3; D-AUDIO,
  * D-MIXOUT, R3-G2). <Audio> and a library video's sound never play in the
  * page: each frame's report (frameReady(n, cues)) carries one cue per
  * audible source, {sourceKey, handle, sourceTime, volume}. The core checks

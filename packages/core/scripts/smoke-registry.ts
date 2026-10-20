@@ -19,7 +19,7 @@
  *   6. Vignette amounts give different corner luma in the export, matching the
  *      registry's vignetteFactor (the preview's curve); a bypassed vignette
  *      leaves the corner alone.
- *   7. Pre-v4 projects (.aive and ZabsReel OTIO) lose their vignette amounts
+ *   7. Pre-v4 projects (.aive and ZedMix OTIO) lose their vignette amounts
  *      on load — the old export ignored them — so they render the old PI/5;
  *      other effects' amounts and current projects are untouched.
  *
@@ -108,7 +108,7 @@ function alphaAt(buf: Buffer, frame: number, x: number, y: number): number {
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-registry-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-registry-"));
 
   // ---- 1. integrity -----------------------------------------------------------
   console.log("1. registry integrity...");
@@ -407,16 +407,16 @@ async function main() {
     "…so both render the old PI/5 again (amount 0 no longer vanishes)", JSON.stringify(vigAngles(old)));
   check(fxOf(old).find((f) => f.type === "blur")?.amount === 3, "other effects' amounts are untouched (blur 3)");
 
-  // A ZabsReel OTIO written by the old build: the clips ride verbatim in the metadata.
+  // A ZedMix OTIO written by the old build: the clips ride verbatim in the metadata.
   const otioPath = join(dir, "legacy.otio");
   await L.exportOtio(otioPath);
-  const otio = JSON.parse(readFileSync(otioPath, "utf8")) as { metadata: { synthcut: { schemaVersion: number } } };
-  otio.metadata.synthcut.schemaVersion = 3;
+  const otio = JSON.parse(readFileSync(otioPath, "utf8")) as { metadata: { zedmix: { schemaVersion: number } } };
+  otio.metadata.zedmix.schemaVersion = 3;
   writeFileSync(otioPath, JSON.stringify(otio));
   const fromOtio = (await new EditorEngine(join(dir, "legacy-otio")).importOtio(otioPath)).project as unknown as Loaded;
   const otioVig = fxOf(fromOtio).filter((f) => f.type === "vignette");
   check(otioVig.length === 2 && otioVig.every((f) => !("amount" in f)) && fromOtio.schemaVersion === PROJECT_SCHEMA_VERSION,
-    "a v3 ZabsReel OTIO import drops the vignette amounts too", JSON.stringify(otioVig));
+    "a v3 ZedMix OTIO import drops the vignette amounts too", JSON.stringify(otioVig));
   const otioCur = join(dir, "current.otio");
   await L.exportOtio(otioCur);
   const fromCur = (await new EditorEngine(join(dir, "current-otio")).importOtio(otioCur)).project as unknown as Loaded;

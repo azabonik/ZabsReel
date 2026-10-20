@@ -1,18 +1,18 @@
 /**
- * add_graphic switched over to ZabsReel's own renderer (slice 5; MOTION-PLAN
+ * add_graphic switched over to ZedMix's own renderer (slice 5; MOTION-PLAN
  * D7, D8 "State" and "Both renderers"; rulings Q5, D-BOTH, D-STATE,
  * D-STORED, I7). Every renderer runs for real, muted, with fresh HOME and
  * data folders, in a private network namespace; fixtures are made here with
  * FFmpeg's lavfi sources.
  *
  *  S1. setting     — <dataDir>/addons/renderer.json: missing, not JSON, an
- *                    array, another value or another case reads "zabsreel";
+ *                    array, another value or another case reads "zedmix";
  *                    "remotion" reads "remotion"; the hosts' writer
  *                    round-trips, leaves no temp file and refuses another
  *                    value. add_graphic follows it on every call, both ways:
- *                    ZabsReel's renderer renders (and the Remotion path is
+ *                    ZedMix's renderer renders (and the Remotion path is
  *                    not taken), then the Remotion path is taken (and no
- *                    renderer starts), then ZabsReel's renderer again;
+ *                    renderer starts), then ZedMix's renderer again;
  *                    get_state and timeline_summary say graphicsRenderer.
  *  S2. agent tools — every RPC path parameter (so every MCP tool that takes
  *                    a path) refuses renderer.json, its temp names, the add-on
@@ -48,7 +48,7 @@
  *                    probe a minute later makes add_graphic render.
  *  S6. both renderers — the title template and every parity composition
  *                    (packages/motion/parity/compositions, no media) through
- *                    add_graphic on ZabsReel's renderer and on the Remotion
+ *                    add_graphic on ZedMix's renderer and on the Remotion
  *                    add-on (this checkout's Remotion and its pinned headless
  *                    shell; skipped with a printed reason when the shell is
  *                    missing): each renders at the canvas size and its
@@ -61,15 +61,15 @@
  *                    a namespace import) is refused naming the setting, with
  *                    no job, nothing written and Remotion untouched; the same
  *                    words in strings and comments, and a type-only import,
- *                    are not; on ZabsReel's renderer the @aive/motion one
+ *                    are not; on ZedMix's renderer the @aive/motion one
  *                    renders.
  *  S8. stored      — a project saved with Remotion-baked graphics (an
  *                    overlay and a card; skipped without the shell) loads and
- *                    exports after the switch to ZabsReel's renderer: no
+ *                    exports after the switch to ZedMix's renderer: no
  *                    renderer starts, the baked files are byte-identical and
  *                    none is added, the overlay keeps its code and props, and
  *                    the export shows the graphic only in its window.
- *  S9. library     — on ZabsReel's renderer add_graphic hands the project
+ *  S9. library     — on ZedMix's renderer add_graphic hands the project
  *                    library over as the asset table: an <Img> of a library
  *                    image shows it; an overlay with <Audio> of a library
  *                    sound gets one linked audio clip over its window (on
@@ -79,7 +79,7 @@
  *                    the add-on dialog's help and the agent's guide, and
  *                    SKILL.md names every item; the guide, SKILL.md and
  *                    add_graphic's description say graphics may use library
- *                    media by asset id on ZabsReel's renderer, still no
+ *                    media by asset id on ZedMix's renderer, still no
  *                    network or packages, that an overlay's audio becomes a
  *                    linked audio clip, that only the user's setting
  *                    decides the renderer, and how a font file goes in
@@ -252,25 +252,25 @@ const graphicJobs = (engine: EditorEngine) => engine.jobs.list(false).filter((j)
 // ---- S1: the setting ---------------------------------------------------------------
 
 // MUTATION: readGraphicsRenderer returns "remotion" for a missing file (addon/renderer.ts) → the default rows
-// fail. Make graphicsRenderer() always "zabsreel" (engine.ts) → the Remotion-path row fails. Read the setting
+// fail. Make graphicsRenderer() always "zedmix" (engine.ts) → the Remotion-path row fails. Read the setting
 // once at engine start (cache it in graphicsRenderer) → the switch-back rows fail.
 async function s1(work: string) {
   console.log("S1. the renderer setting decides add_graphic's path, both ways...");
   const x = fresh(work, "s1");
   const file = graphicsRendererFile(x.data);
-  check(readGraphicsRenderer(x.data) === "zabsreel", "no renderer.json: zabsreel (the default)");
+  check(readGraphicsRenderer(x.data) === "zedmix", "no renderer.json: zedmix (the default)");
   mkdirSync(dirname(file), { recursive: true });
   for (const [what, text] of [["not JSON", "{"], ["an array", '["remotion"]'], ["another value", '{"renderer":"remotion-addon"}'], ["another case", '{"renderer":"Remotion"}'], ["empty", ""]] as const) {
     writeFileSync(file, text);
-    check(readGraphicsRenderer(x.data) === "zabsreel", `renderer.json ${what}: zabsreel`);
+    check(readGraphicsRenderer(x.data) === "zedmix", `renderer.json ${what}: zedmix`);
   }
   writeFileSync(file, '{"renderer":"remotion"}');
   check(readGraphicsRenderer(x.data) === "remotion", 'renderer.json {"renderer":"remotion"}: remotion');
-  await writeGraphicsRenderer(x.data, "zabsreel");
-  check(readGraphicsRenderer(x.data) === "zabsreel" && JSON.stringify(readdirSync(dirname(file))) === '["renderer.json"]',
-    `the hosts' writer: zabsreel, and no temp file left (${JSON.stringify(readdirSync(dirname(file)))})`);
+  await writeGraphicsRenderer(x.data, "zedmix");
+  check(readGraphicsRenderer(x.data) === "zedmix" && JSON.stringify(readdirSync(dirname(file))) === '["renderer.json"]',
+    `the hosts' writer: zedmix, and no temp file left (${JSON.stringify(readdirSync(dirname(file)))})`);
   const bad = await thrown(() => writeGraphicsRenderer(x.data, "chrome" as never));
-  check(!!bad && readGraphicsRenderer(x.data) === "zabsreel", `the writer refuses another value (${bad?.message})`);
+  check(!!bad && readGraphicsRenderer(x.data) === "zedmix", `the writer refuses another value (${bad?.message})`);
   rmSync(file);
 
   if (!LINUX) return console.log("  skip the add_graphic rows: they run Linux's Electron");
@@ -285,15 +285,15 @@ async function s1(work: string) {
   const state = async () => ((await dispatch(engine, "get_state", {})) as { graphicsRenderer: string }).graphicsRenderer;
   const summary = async () => ((await dispatch(engine, "timeline_summary", {})) as { graphicsRenderer: string }).graphicsRenderer;
   const r1 = await run();
-  check(r1.how === "rendered" && r1.renders === 1 && (await state()) === "zabsreel" && (await summary()) === "zabsreel",
-    `no setting: ZabsReel's renderer renders it, the Remotion path untouched (${JSON.stringify(r1)}; get_state ${await state()})`);
+  check(r1.how === "rendered" && r1.renders === 1 && (await state()) === "zedmix" && (await summary()) === "zedmix",
+    `no setting: ZedMix's renderer renders it, the Remotion path untouched (${JSON.stringify(r1)}; get_state ${await state()})`);
   await writeGraphicsRenderer(x.data, "remotion");
   const r2 = await run();
   check(r2.how === REMOTION_PATH && r2.renders === 0 && (await state()) === "remotion" && (await summary()) === "remotion",
     `"remotion": the next add_graphic takes the Remotion path and starts no renderer (${JSON.stringify(r2)}; get_state ${await state()})`);
-  await writeGraphicsRenderer(x.data, "zabsreel");
+  await writeGraphicsRenderer(x.data, "zedmix");
   const r3 = await run();
-  check(r3.how === "rendered" && r3.renders === 1 && (await state()) === "zabsreel", `"zabsreel" again: ZabsReel's renderer again (${JSON.stringify(r3)})`);
+  check(r3.how === "rendered" && r3.renders === 1 && (await state()) === "zedmix", `"zedmix" again: ZedMix's renderer again (${JSON.stringify(r3)})`);
   writeFileSync(file, '{"renderer":"remotion"}');
   const r4 = await run();
   check(r4.how === REMOTION_PATH && r4.renders === 0, `renderer.json changed on disk between calls: read again (${JSON.stringify(r4)})`);
@@ -314,7 +314,7 @@ async function s2(work: string) {
   const before = { sha: sha(file), names: JSON.stringify(readdirSync(addons).sort()) };
   const link = join(x.dir, "addons-link");
   symlinkSync(addons, link, "dir");
-  const AREA = /is in ZabsReel's graphics add-on folder, which tools can't open\./;
+  const AREA = /is in ZedMix's graphics add-on folder, which tools can't open\./;
   const minimal = (schema: unknown): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries((schema as { shape: Record<string, { isOptional(): boolean; _def: { typeName: string } }> }).shape)) {
@@ -369,7 +369,7 @@ async function s2(work: string) {
   const setters = Object.keys(methods).filter((m) => m.startsWith("set_"));
   const accepted: string[] = [];
   for (const m of setters) {
-    for (const extra of [{ renderer: "zabsreel" }, { graphicsRenderer: "zabsreel" }]) {
+    for (const extra of [{ renderer: "zedmix" }, { graphicsRenderer: "zedmix" }]) {
       const e = await thrown(() => dispatch(engine, m, { ...minimal(methods[m as keyof typeof methods].schema), ...extra }));
       if (!(e instanceof RpcError && e.code === "invalid_params")) accepted.push(`${m} ${Object.keys(extra)[0]}: ${errCode(e)}`);
     }
@@ -429,7 +429,7 @@ async function s3(work: string) {
     engine.motionRenderer.binary = () => bin;
     const early = await stateOf(engine);
     const wantEarly = reason === "no-binary" ? "renderer-unavailable" : "ready";
-    check(early.graphics === wantEarly && early.graphicsRenderer === "zabsreel" && (reason !== "no-binary" || early.graphicsReason === "no-binary"),
+    check(early.graphics === wantEarly && early.graphicsRenderer === "zedmix" && (reason !== "no-binary" || early.graphicsReason === "no-binary"),
       `${reason}: before the probe, get_state says ${wantEarly}${reason === "no-binary" ? " (no-binary: the rule gave no command)" : " (the rule gave a command)"} (${JSON.stringify(early)})`);
     const mark = spawned.length;
     await engine.startGraphicsProbe();
@@ -589,14 +589,14 @@ function cases(): Case[] {
   return out;
 }
 
-// MUTATION: render the Remotion path for ZabsReel's renderer too (graphicsRenderer() always "remotion") → the
-// three compositions the add-on refuses fail the ZabsReel rows. Drop one of ADDON_REFUSES's names → its add-on row
+// MUTATION: render the Remotion path for ZedMix's renderer too (graphicsRenderer() always "remotion") → the
+// three compositions the add-on refuses fail the ZedMix rows. Drop one of ADDON_REFUSES's names → its add-on row
 // fails (the composition does not render there).
 async function s6(work: string) {
   console.log("S6. the title template and the parity set through add_graphic on both renderers...");
   const all = cases();
   check(all.length === 30, `the title template and ${all.length - 1} parity compositions`);
-  const renderers: ["zabsreel" | "remotion", string][] = [["zabsreel", "ZabsReel's renderer"], ["remotion", "the Remotion add-on"]];
+  const renderers: ["zedmix" | "remotion", string][] = [["zedmix", "ZedMix's renderer"], ["remotion", "the Remotion add-on"]];
   for (const [renderer, label] of renderers) {
     if (renderer === "remotion" && !existsSync(SHELL)) {
       console.log(`  skip the Remotion add-on rows: the pinned headless shell is missing (${SHELL})`);
@@ -635,7 +635,7 @@ async function s6(work: string) {
 // MUTATION: drop the motionOnlyUse() refusal from addGraphic (engine.ts) → every refusal row fails. Treat a
 // name token anywhere as a use (scan the raw text) → the control rows fail.
 async function s7(work: string) {
-  console.log("S7. on the Remotion add-on, a graphic that needs ZabsReel's renderer is refused naming the setting...");
+  console.log("S7. on the Remotion add-on, a graphic that needs ZedMix's renderer is refused naming the setting...");
   const x = fresh(work, "s7");
   const engine = engineFor(x);
   await writeGraphicsRenderer(x.data, "remotion");
@@ -665,10 +665,10 @@ async function s7(work: string) {
     const e = await thrown(() => dispatch(engine, "add_graphic", { code, durationSeconds: 0.2 }));
     check(e?.message === REMOTION_PATH, `${what}: not refused, it reaches Remotion (${e?.message.slice(0, 100)})`);
   }
-  if (!LINUX) return console.log("  skip the ZabsReel row: it runs Linux's Electron");
-  await writeGraphicsRenderer(x.data, "zabsreel");
+  if (!LINUX) return console.log("  skip the ZedMix row: it runs Linux's Electron");
+  await writeGraphicsRenderer(x.data, "zedmix");
   const r = await thrown(() => dispatch(engine, "add_graphic", { code: refused[0][1], durationSeconds: 0.2 }));
-  check(r === null, `on ZabsReel's renderer the @aive/motion graphic renders (${r?.message.slice(0, 100)})`);
+  check(r === null, `on ZedMix's renderer the @aive/motion graphic renders (${r?.message.slice(0, 100)})`);
 }
 
 // ---- S8: stored graphics -----------------------------------------------------------------
@@ -676,7 +676,7 @@ async function s7(work: string) {
 // MUTATION: make load() re-render a loaded overlay through add_graphic (engine.ts) → the no-renderer and
 // byte-identical rows fail.
 async function s8(work: string, host: string) {
-  console.log("S8. a project with Remotion-baked graphics after the switch to ZabsReel's renderer...");
+  console.log("S8. a project with Remotion-baked graphics after the switch to ZedMix's renderer...");
   if (!existsSync(SHELL)) return console.log(`  skip: the pinned headless shell is missing (${SHELL})`);
   const x = fresh(work, "s8");
   const engine = engineFor(x);
@@ -697,13 +697,13 @@ async function s8(work: string, host: string) {
   check(Object.keys(before).some((f) => f.endsWith("-graphic.mov")) && Object.keys(before).some((f) => f.endsWith("-graphic.mp4")) && Object.keys(before).some((f) => f.endsWith("-graphic.webm")),
     `Remotion baked an overlay (.mov, .webm preview) and a card (.mp4): ${Object.keys(before).join(", ")}`);
 
-  await writeGraphicsRenderer(x.data, "zabsreel");
+  await writeGraphicsRenderer(x.data, "zedmix");
   const later = engineFor(x);
   const mark = spawned.length;
   await dispatch(later, "load_project", { path: project });
   const loaded = later.getProject().tracks.flatMap((t) => t.clips).flatMap((c: Clip) => c.graphics ?? []) as GraphicOverlay[];
   check(loaded.length === 1 && loaded[0].id === overlay.graphic!.id && loaded[0].code === TITLE_CARD_TSX && JSON.stringify(loaded[0].props) === JSON.stringify(props) && loaded[0].assetId === overlay.asset.id,
-    `loaded on ZabsReel's renderer: the overlay keeps its code, props and baked asset (${JSON.stringify(loaded.map((g) => ({ id: g.id, assetId: g.assetId })))})`);
+    `loaded on ZedMix's renderer: the overlay keeps its code, props and baked asset (${JSON.stringify(loaded.map((g) => ({ id: g.id, assetId: g.assetId })))})`);
   const out = join(x.dir, "out.mp4");
   await later.exportVideo(out);
   const during = maxLuma(out, 2.0);
@@ -721,7 +721,7 @@ async function s8(work: string, host: string) {
 // (graphic_asset_unknown). Pass requireOnline instead of the engine's own check → still media_offline (the engine's
 // adds the server re-check; the row guards the refusal). Call attachGraphic without the sound → the audio row fails.
 async function s9(work: string, fx: { host: string; red: string; tone: string }) {
-  console.log("S9. ZabsReel's renderer takes the project library as the asset table...");
+  console.log("S9. ZedMix's renderer takes the project library as the asset table...");
   const x = fresh(work, "s9");
   const engine = engineFor(x);
   const host = await engine.importVideo(fx.host);
@@ -945,7 +945,7 @@ async function s11(work: string, fx: { host: string }) {
     && !msg.includes(REMOTION_PATH) && graphicJobs(engine) === jobsBefore, `on the Remotion add-on, fonts is refused naming the setting, before Remotion, no job (${msg.slice(0, 120)})`);
   const empty = await thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 0.2, fonts: {} }));
   check(empty?.message === REMOTION_PATH, `an empty fonts map is no fonts: it reaches Remotion (${empty?.message.slice(0, 100)})`);
-  await writeGraphicsRenderer(x.data, "zabsreel");
+  await writeGraphicsRenderer(x.data, "zedmix");
 
   const evilCmds = spawned.slice(spawnedBefore).filter((c) => c.some((a) => a.includes(EVIL)));
   check(touched.length === 0 && evilCmds.length === 0, `no file call or command named a ${EVIL} host (${JSON.stringify(touched)}; ${JSON.stringify(evilCmds)})`);

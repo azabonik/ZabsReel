@@ -1,7 +1,7 @@
 /**
- * The approval store: the network computers the user allowed ZabsReel to open
+ * The approval store: the network computers the user allowed ZedMix to open
  * files on (`<dataDir>/trust/hosts.json`), and the key that stamps each entry
- * ZabsReel writes there (`<dataDir>/trust/hosts.key`).
+ * ZedMix writes there (`<dataDir>/trust/hosts.key`).
  *
  * Only the UI hosts (Electron main and the web shell server) write it, after
  * the user's click in a dialog or a pick in the app's own file dialog. The
@@ -47,7 +47,7 @@ export interface ApprovedHost {
 export interface TrustedHosts {
   /** Servers with a valid stamp. */
   approved: ApprovedHost[];
-  /** Servers in the list without a valid stamp ("added outside ZabsReel"): never used. */
+  /** Servers in the list without a valid stamp ("added outside ZedMix"): never used. */
   outside: { host: string }[];
   /** A file could not be read just now, so its last good copy was used (or there was none): read again soon. */
   stale: boolean;
@@ -89,7 +89,7 @@ const LIST = "hosts.json";
 const KEY = "hosts.key";
 const LOCK = "hosts.lock";
 /** The HMAC input starts with this, so a stamp can't be reused for anything else. */
-const STAMP_LABEL = "zabsreel-hosts-v2";
+const STAMP_LABEL = "zedmix-hosts-v2";
 /** 32 random bytes as base64url. */
 const KEY_TEXT = /^[A-Za-z0-9_-]{43}$/;
 /** A lock older than this was left by a writer that crashed (a write takes a few milliseconds). */

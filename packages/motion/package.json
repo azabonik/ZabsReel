@@ -1,7 +1,7 @@
 {
   "name": "@aive/motion",
   "version": "0.2.0",
-  "description": "ZabsReel's own motion-graphics renderer: one offscreen Electron page per render, with no network, driven frame by frame by the core.",
+  "description": "ZedMix's own motion-graphics renderer: one offscreen Electron page per render, with no network, driven frame by frame by the core.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "files": [

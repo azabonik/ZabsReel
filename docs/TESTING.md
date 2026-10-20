@@ -1,7 +1,7 @@
 # Setup & Testing Guide
 
 A complete, do-it-yourself walkthrough to verify **every** feature of
-ZabsReel before you make it public. It covers three layers:
+ZedMix before you make it public. It covers three layers:
 
 1. **Automated smoke tests** — the fastest way to confirm the whole pipeline
    works (each one does a *real* FFmpeg render). Start here.
@@ -27,7 +27,7 @@ Plus how to test the **packaged installer** offline.
 Everything else (whisper.cpp + model, YuNet model) **auto-downloads on first
 use** and caches under `~/.aive`. The first run of captions / auto-reframe will
 pause to download — that's normal and happens only once. Motion graphics render
-with ZabsReel's own renderer (the dev Electron in `node_modules`, nothing to
+with ZedMix's own renderer (the dev Electron in `node_modules`, nothing to
 install); the Remotion add-on path needs the graphics add-on (Remotion and its
 headless shell): see
 [The graphics add-on in a source checkout](#the-graphics-add-on-in-a-source-checkout).
@@ -93,18 +93,17 @@ npx tsx packages/core/scripts/smoke-clip-tokenizer.ts                  # CLIP te
 npx tsx apps/desktop/scripts/smoke-web.ts
 npx tsx apps/desktop/scripts/smoke-savename.ts                       # save picker file-name rule (typed extension kept, filter switches) + the export preset for a typed .webm/.mov/.mp4 and its notice; Electron's save-rules.cjs (same rule, overwrite re-ask, close guard); the network-computer dialogs and the one flow that asks and saves (Review…, and a picked file on a new server: asks once, never saves silently; the web shell's reviews one at a time); S/Delete after a split; path bar vs a late listing
 
-# Skill installer: `zabsreel migrate` handles two older generations. It finds and
-# removes only what Relo's SynthCut left (MCP server "ai-video-editor" that runs
-# Relo's SynthCut MCP server, skill "video-editor-pro"). It renames this
-# project's own pre-rename MCP key `synthcut` to `zabsreel` in place (and
-# replaces the old skill) only when the files the entry points at show that it
-# runs this app: an entry that points at Relo's SynthCut (checkout or packaged
-# app), at another monorepo or at a missing path is left alone; a packaged entry
-# needs --entry; an existing `zabsreel` entry for another program is never
-# overwritten. Also: the Claude Code CLI order (add-json before remove), Codex
-# TOML sub-tables, --from-checkout/--to-checkout, atomic writes that keep the
-# file mode and symlinks, backup folders 0700 and manifest 0600, --restore, keeps
-# formatting, asks first; temp HOME dirs, never the real one
+# Skill installer: `zedmix migrate` renames what the previous name (brand.ts
+# LEGACY) left. The old MCP key becomes `zedmix` in place, and the old skill
+# copies and marked sections are replaced, only when the files the entry points
+# at show that it runs this app: an entry that points at a look-alike (checkout
+# or packaged app), at another monorepo or at a missing path is left alone; a
+# packaged entry needs --entry; an existing `zedmix` entry for another program
+# is never overwritten; JSON with comments is only reported. Also: the Claude
+# Code CLI order (add-json before remove), Codex TOML sub-tables,
+# --from-checkout/--to-checkout, atomic writes that keep the file mode and
+# symlinks, backup folders 0700 and manifest 0600, --restore, keeps formatting,
+# asks first; temp HOME dirs, never the real one
 npx tsx packages/core/scripts/smoke-legacy-migrate.ts
 
 # Brand constants and the data-dir rule: core's brand.ts, the desktop's brand.cjs
@@ -131,8 +130,8 @@ npx tsx packages/core/scripts/smoke-security.ts
 # Graph values from a loaded project get their model type (transition type, asset
 # geometry, probed colour descriptions, effect params and colours, eq, volume,
 # speed, …) on load and again in the graph builders, and the executor accepts only
-# the filters ZabsReel builds, with files only of the engine's names in a working
-# directory ZabsReel owns (data dir or OS temp; no metadata file=, psnr, drawtext
+# the filters ZedMix builds, with files only of the engine's names in a working
+# directory ZedMix owns (data dir or OS temp; no metadata file=, psnr, drawtext
 # textfile=/etc/…), and a sendcmd file only when it holds a reframe crop plan
 # (no runtime curves plot=). AIVE_GUARD_REPORT=<file> (or 1 for stderr) logs what strict
 # mode would refuse instead of refusing it: run the matrix with it after adding
@@ -145,14 +144,14 @@ npx tsx packages/core/scripts/smoke-safepath.ts
 # reserved .invalid domain): one key per server, device / NT paths and server
 # names without a key refused with a message that says how to fix the path,
 # gatedfs and the FFmpeg argv check (a server not allowed is never opened),
-# graphic imports, the approval store (stamps, "added outside ZabsReel", the
+# graphic imports, the approval store (stamps, "added outside ZedMix", the
 # lock, read errors and the unread state) and the private trust folder (no rpc
 # path, /file request or graphic import reaches it, in any spelling or through a
 # link, and no error quotes the key). Rows 15-19 use FFmpeg: every input gets
 # FFmpeg's format allowlist, playlists, manifests and list files (also renamed
 # to .mov / .mp4) are refused before anything they name is opened (traced with
 # strace on Linux), /file answers 415 for a playlist, and an import says
-# "ZabsReel can't open this kind of file…"
+# "ZedMix can't open this kind of file…"
 npx tsx packages/core/scripts/smoke-unc.ts
 
 # The demuxer allowlist keeps media working: one lavfi sample per format on
@@ -220,7 +219,7 @@ ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron packages/core/scripts
 # I12's linux-x64 writes of names NTFS refuses or folds
 npx tsx packages/core/scripts/smoke-addon.ts
 
-# ZabsReel's own motion renderer (packages/motion; docs/MOTION_RENDERER.md).
+# ZedMix's own motion renderer (packages/motion; docs/MOTION_RENDERER.md).
 # The binary rule on fixture trees
 # for win32, darwin and linux (packaged and source checkout); hand-written pages:
 # frames on the pipe exact per frame (B,G,R,A, premultiplied), straight alpha
@@ -594,7 +593,7 @@ npx tsx packages/core/scripts/smoke-motion.ts
 `smoke-addon-real.ts` (not in CI) installs the real add-on offline, from a
 loopback registry that serves npm's local cache (`~/.npm/_cacache`, every
 linux-x64 tarball) and the pinned headless-shell zips
-(`~/.cache/zabsreel-addon/cft-149.0.7790.0`, downloaded there once;
+(`~/.cache/zedmix-addon/cft-149.0.7790.0`, downloaded there once;
 `node scripts/gen-graphics-lock.mjs --check --browser` checks them against the
 pin). It compares the installed tree with `node_modules` file by file, extracts all four zips, installs the win32
 and darwin lists (forced platform) and audits their names for Windows and
@@ -624,7 +623,7 @@ use the Remotion in its own `node_modules` instead (a devDependency of
 | `AIVE_ADDON_TEST_PIN=<file>` | The UI hosts (Electron main, the web shell) install the fixture closure in this JSON pin file instead of the real pin: the UI smokes' fixture add-on. |
 
 All four are honoured **only in a source checkout**: the core's own package
-folder holds `src/`. A packaged ZabsReel has no `src/` there (the `afterPack`
+folder holds `src/`. A packaged ZedMix has no `src/` there (the `afterPack`
 gate checks that), so it ignores them and prints one stderr line saying so.
 Run 11 of `smoke-electron.mts` checks that on a packed build.
 `addonInstallerForTests`, the installer's test seam that `@aive/core/addon`
@@ -655,7 +654,7 @@ Save → saved, then quit; the core it started exits), and network computers
 (test servers under `.invalid`, native dialogs stubbed): the banner and
 **Offline** badges, no `/file`, `/peaks`, `/frames` or thumbnail request for an
 offline clip, Allow and Keep offline, the Keep and Remove dialog for a server
-added outside ZabsReel, a picked file on a new server (it asks once, and
+added outside ZedMix, a picked file on a new server (it asks once, and
 nothing is saved before Allow), the "You opened" and "The AI
 assistant asked" wording, and **Project → Network computers…**; and the
 window's network limits (the sign-in switch, the request guard cancelling a
@@ -666,14 +665,14 @@ graphics add-on with a fixture closure from a loopback registry
 Accept and install through main's own session, Cancel during the download,
 Remove, Reinstall and Update disabled while a graphic job runs (also after a
 reconnect, and when a job ends before the dialog's job list arrives), a damaged
-copy and one from another ZabsReel version (Remove offered in both), and the
+copy and one from another ZedMix version (Remove offered in both), and the
 banner after an agent's refused `add_graphic`. Run 11 starts the packed `--dir`
 build (`AIVE_APP`, else `apps/desktop/build/dist/linux-unpacked` when it
 exists, else it is skipped) with those variables and `AIVE_REMOTION_ADDON`
 set: graphics stay "not-installed", and Install asks only for the real pin's
 URLs (a stub in main fails each one, so nothing leaves the machine), never the
 override. It fails on renderer console errors. The app runs with its own profile (`--user-data-dir` in the
-test folder), so your ZabsReel profile and its recent projects are left alone.
+test folder), so your ZedMix profile and its recent projects are left alone.
 
 ```bash
 node node_modules/electron/install.js        # once, if node_modules/electron/dist is missing
@@ -681,7 +680,7 @@ xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 # a packed build instead of the source tree (run 10 needs a source checkout and
 # is skipped then; a plain run already uses linux-unpacked for run 11 when it exists):
 (cd apps/desktop && npx electron-builder --dir --linux)
-AIVE_APP=$PWD/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+AIVE_APP=$PWD/apps/desktop/build/dist/linux-unpacked/zedmix-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 ```
 
 - Needs `npm run build`, FFmpeg on PATH, a display (`xvfb-run` gives one
@@ -798,7 +797,7 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-col
   resolution while playing (`gl/governor.ts`): half, and a quarter when
   frames with a look still come slower than about 16 fps; paused frames (and
   a GPU) always use full resolution. `--bench` shows all three.
-- Per-viewer switch: `localStorage["zabsreel.preview.gl"] = "off"` in the
+- Per-viewer switch: `localStorage["zedmix.preview.gl"] = "off"` in the
   app's devtools forces the CSS fallback preview (to compare).
 
 ### Motion renderer parity with Remotion (dev tools, run by hand)
@@ -806,7 +805,7 @@ npx tsx apps/desktop/scripts/parity-gl.mts --only colour   # just the source-col
 Two harnesses render the same compositions with Remotion 4.0.481 (this
 checkout's devDependency, with its pinned headless shell in
 `node_modules/.remotion`; nothing is downloaded, and a missing shell fails the
-run) and with ZabsReel's renderer, and compare the frames (D8's rule: a frame
+run) and with ZedMix's renderer, and compare the frames (D8's rule: a frame
 passes at 99.5 % of pixels within 4 levels and none more than 32 off) and, for
 media, the sound (window levels within 1 dB, sound edges within 5 ms). They are
 dev tools for the clean-room feedback rounds, not CI steps: they need Remotion's
@@ -823,7 +822,7 @@ npx tsx packages/motion/scripts/parity-render.ts --out=/tmp/pr-run [--only=sprin
 
 # Media: packages/motion/parity/media (fixtures generated with lavfi, FIXTURES.md);
 # the reference is Remotion's renderer called directly (asset("x") becomes
-# staticFile on that side only), and ZabsReel's side renders twice, so a frame
+# staticFile on that side only), and ZedMix's side renders twice, so a frame
 # that differs between its own two renders is reported as nondeterministic
 npx tsx packages/motion/scripts/parity-media.ts --self-test --out=/tmp/pm-selftest
 npx tsx packages/motion/scripts/parity-media.ts --out=/tmp/pm-run [--only=offthread-plain.tsx] [--scratch=<folder>]
@@ -841,7 +840,7 @@ room".
 
 ### FFmpeg versions
 
-ZabsReel supports FFmpeg **4.4, 6.1, 7.1, 8.0, 8.1 and 9.0**
+ZedMix supports FFmpeg **4.4, 6.1, 7.1, 8.0, 8.1 and 9.0**
 (`TESTED_FFMPEG_VERSIONS` in `packages/core/src/ffmpeg/version.ts`). The core's
 startup warning goes by major version (`TESTED_FFMPEG_MAJORS`): it logs one for
 5.x and for git builds, but another release of a listed major (for example 6.0
@@ -992,13 +991,13 @@ Ensure `npm run build` has produced `packages/mcp/dist/index.js`, then connect
 **either** client (see [`GETTING_STARTED.md` §4](GETTING_STARTED.md) for full
 detail):
 
-- **Claude Desktop:** merge the `zabsreel` entry from
+- **Claude Desktop:** merge the `zedmix` entry from
   [`claude_desktop_config.example.json`](../claude_desktop_config.example.json)
   into `%APPDATA%\Claude\claude_desktop_config.json` (absolute path to
   `index.js`), then **fully quit and restart** Claude Desktop.
 - **Claude Code (CLI):** run it **from the repo root** — the shipped
   [`.mcp.json`](../.mcp.json) registers the server (approve it when prompted, or
-  check with `/mcp`). Or `claude mcp add zabsreel -- node <abs path to index.js>`.
+  check with `/mcp`). Or `claude mcp add zedmix -- node <abs path to index.js>`.
 
 Optionally open the desktop app (`npm start`) too — every AI edit appears live in
 its timeline. If the app is closed, the MCP server runs a headless core and the
@@ -1079,7 +1078,7 @@ This verifies the Windows installer ships a self-contained, offline app.
 node apps/desktop/scripts/prepare-bundle.ts        # stage bundled binaries/models (~430 MB)
 npx tsx packages/core/scripts/smoke-bundled.ts     # re-runs the staging (cheap), then verifies the bundle renders OFFLINE
 npm run build
-npm run dist --workspace zabsreel-desktop          # -> apps/desktop/build/dist/ZabsReel-<version>.exe
+npm run dist --workspace zedmix-desktop          # -> apps/desktop/build/dist/ZedMix-<version>.exe
 ```
 
 `smoke-bundled.ts` points the engine at *only* the staged bundle (no PATH FFmpeg,
@@ -1094,11 +1093,11 @@ the build.
 
 ### 7.2 Install and run
 
-1. Run `apps/desktop/build/dist/ZabsReel-<version>.exe`.
+1. Run `apps/desktop/build/dist/ZedMix-<version>.exe`.
 2. It's **unsigned**, so SmartScreen may warn — click **More info → Run anyway**.
 3. Launch the installed app. Import a clip, add it, **Export** — it should render
    using the bundled FFmpeg with **no internet connection** (try it with Wi-Fi
-   off). Captions, auto-reframe and motion graphics (ZabsReel's renderer, the
+   off). Captions, auto-reframe and motion graphics (ZedMix's renderer, the
    default) also work offline. Only the optional Remotion graphics add-on is a
    download (**Help → Graphics add-on…**, Accept and install), once.
 
@@ -1112,7 +1111,7 @@ the build.
   config path points to an existing `packages/mcp/dist/index.js`.
 - **First captions/reframe call hangs for a minute** — it's the one-time
   model download. Watch the core's stderr for `[whisper] downloading …`.
-- **`add_graphic` fails with `graphic_renderer_unavailable`** — ZabsReel's
+- **`add_graphic` fails with `graphic_renderer_unavailable`** — ZedMix's
   renderer can't start on this computer; the error and `get_state`'s
   `graphicsReason` say why (`no-binary`: no Electron found; `no-display`;
   `sandbox-unavailable`: Chromium's sandbox can't run, for example when
@@ -1127,8 +1126,8 @@ the build.
   "not a valid Remotion project", make sure you're on the current build.
 - **macOS captions** — no prebuilt whisper-cli is published; `brew install
   whisper-cpp` and set `AIVE_WHISPER_BIN`.
-- **Reset everything** — delete `~/.zabsreel` (the data dir and `migrate`'s
-  backups) to start from a clean slate. `~/.zabsreel/data` holds your shared
+- **Reset everything** — delete `~/.zedmix` (the data dir and `migrate`'s
+  backups) to start from a clean slate. `~/.zedmix/data` holds your shared
   session/project. If the core logs `data dir: <folder> (legacy)`, it uses the
   older folder it names instead (see "The app and the AI client use different
   data folders" in the README), and that is the folder to delete. `~/.aive` holds

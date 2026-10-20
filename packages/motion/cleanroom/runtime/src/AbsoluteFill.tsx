@@ -86,9 +86,9 @@ export interface AbsoluteFillTimingProps {
   name?: string;
   /** Accepted and ignored. */
   showInTimeline?: boolean;
-  /** Accepted and ignored (ZabsReel never premounts). */
+  /** Accepted and ignored (ZedMix never premounts). */
   premountFor?: number;
-  /** Accepted and ignored (ZabsReel never postmounts). */
+  /** Accepted and ignored (ZedMix never postmounts). */
   postmountFor?: number;
   /** Accepted and ignored. */
   styleWhilePremounted?: React.CSSProperties;

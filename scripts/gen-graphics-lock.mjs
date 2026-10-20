@@ -28,7 +28,7 @@
 //    makes every user update the add-on. --accept-addon-change records the
 //    new one (a deliberate Remotion upgrade too).
 //  - --browser: the headless-shell table against a folder of the pinned
-//    zips, already downloaded (default ~/.cache/zabsreel-addon/cft-<version>,
+//    zips, already downloaded (default ~/.cache/zedmix-addon/cft-<version>,
 //    --zips <dir>); it reads no network. A write fills the table from them
 //    (url, sha256, size, entry count, the executable in each); --check says
 //    where the table and the zips differ. A zip holding a symlink, a zip64
@@ -413,7 +413,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(2);
   }
   const dataFile = JSON.parse(readFileSync(join(root, DATA), "utf8"));
-  const zips = resolve(arg("--zips") ?? join(userInfo().homedir, ".cache", "zabsreel-addon", `cft-${dataFile.headlessShell.version}`));
+  const zips = resolve(arg("--zips") ?? join(userInfo().homedir, ".cache", "zedmix-addon", `cft-${dataFile.headlessShell.version}`));
   const shell = browser ? browserTable(dataFile.headlessShell.version, zips) : null;
   // A write fills the table from the zips and computes the pin with it; both
   // files are written at the end, or neither when anything fails.

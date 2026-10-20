@@ -72,7 +72,7 @@ eq(presetSwapNote(labelled, undefined, "web", "C:\\x\\a.b\\out.webm"), "Used the
 
 // Electron's native save dialog (save-rules.cjs withExtension) applies the same
 // rule as resolveSaveName with the first filter active.
-eq(PROJECT_FILTERS[0].name, "ZabsReel Project", "the project file filter carries the product name");
+eq(PROJECT_FILTERS[0].name, "ZedMix Project", "the project file filter carries the product name");
 const filterSets: [string, FileFilter[]][] = [
   ["export mp4", exportFilters("mp4")], ["export webm", exportFilters("webm")], ["export mov", exportFilters("mov")],
   ["project", PROJECT_FILTERS.slice(0, 1)],
@@ -240,7 +240,7 @@ function fakeMain(store: Store, answers: number[], opts: { removed?: boolean } =
     recheck: async () => { writes.push("recheck"); },
     log: () => {},
   };
-  const pick = (paths: string[], dataDir = "/home/u/.zabsreel/data") =>
+  const pick = (paths: string[], dataDir = "/home/u/.zedmix/data") =>
     ms.askPicked(paths, { readList: () => store, dataDir, platform: "linux", unc }, io);
   return { io, shown, writes, pick };
 }
@@ -270,7 +270,7 @@ async function pickerChecks() {
   m = fakeMain({ ...emptyStore(), outside: [{ host: "zr-pick.invalid" }] }, [1]);
   await m.pick([PICK]);
   eq([m.shown[0]?.title, m.shown[0]?.buttons, m.writes], ["Keep \\\\zr-pick.invalid?", ["Remove", "Keep"], ["approve zr-pick.invalid picker", "recheck"]],
-    "a picked file on a server added outside ZabsReel → the Keep dialog; Keep (1) saves it with via \"picker\"");
+    "a picked file on a server added outside ZedMix → the Keep dialog; Keep (1) saves it with via \"picker\"");
   m = fakeMain({ ...emptyStore(), outside: [{ host: "zr-pick.invalid" }] }, [0]);
   eq([await m.pick([PICK]), m.writes], [[], ["revoke zr-pick.invalid", "recheck"]], "…Remove (0) removes the outside entry and leaves the path out");
 

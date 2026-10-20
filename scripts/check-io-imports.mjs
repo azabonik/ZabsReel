@@ -33,7 +33,7 @@
 //    or @remotion/* at run time (a value import or re-export, `import "…"`,
 //    import(…), require(…) or a createRequire call); `import type` is
 //    allowed. remotionload.ts registers the load hook that gives Remotion
-//    ZabsReel's same-as refusal, so a load anywhere else could come first and
+//    ZedMix's same-as refusal, so a load anywhere else could come first and
 //    miss it; for the same reason remotionload.ts itself may not import
 //    Remotion statically (a static import loads before its hook exists).
 //    This rule parses with the installed typescript package (npm ci first).

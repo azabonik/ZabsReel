@@ -208,7 +208,7 @@ async function rippleCase(t: Built, label: string, op: () => Promise<SpeedResult
 }
 
 async function main(): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-ripple-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-ripple-"));
   const media: Media = {
     coded: join(dir, "coded.mp4"),
     mic: join(dir, "mic.wav"),

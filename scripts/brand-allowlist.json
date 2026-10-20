@@ -1,6 +1,6 @@
 {
   "_about": [
-    "Allowlist of the leftover-name gate (scripts/check-brand.mjs): plan section 2 'Kept on purpose', entries A1-A16.",
+    "Allowlist of the leftover-name gate (scripts/check-brand.mjs): the counted places where the previous product name (ZabsReel) or Relo may appear.",
     "Each entry: the file, the allowed text (regex alternatives, or literal strings matched exactly; case-sensitive unless flags is \"i\"), the gate patterns that text may contain, the recorded match count, and the reason.",
     "A count that differs from the scan fails the gate. `node scripts/check-brand.mjs --counts` prints the counts it finds; record a new count only after checking that every match is a legitimate mention."
   ],
@@ -9,31 +9,28 @@
       "id": "A1",
       "file": "README.md",
       "literal": [
-        "ZabsReel is a modified version of [SynthCut](https://github.com/Relo-video/SynthCut) by Relo, used under the GNU General Public License v3.0 or later. ZabsReel is an independent project. It is not affiliated with, sponsored by or endorsed by Relo. The name \"SynthCut\" is used here only to identify the original work.",
-        "This program is a modified version of SynthCut, Copyright © 2026 Relo (https://github.com/Relo-video/SynthCut), which is licensed under the GNU General Public License, version 3 or (at your option) any later version. Zabs and the ZabsReel contributors modified it, starting on 11 October 2026. The modified version is also licensed under the GNU GPL, version 3 or any later version. The changes are recorded in the git history after upstream commit 96b1ca0 (SynthCut v1.0.5, 21 July 2026).",
-        "Relo's code relies on Relo's own published statement that accepts Remotion as a linked dependency (the \"One accepted exception\" in CONTRIBUTING.md), not on this permission."
+        "ZedMix is a modified version of an AI-native video editor by [Relo](https://github.com/Relo-video), used under the GNU General Public License v3.0 or later. ZedMix is an independent project. It is not affiliated with, sponsored by or endorsed by Relo.",
+        "This program is a modified version of Relo's AI-native video editor, Copyright © 2026 Relo (https://github.com/Relo-video), which is licensed",
+        "after upstream commit 96b1ca0 (Relo's version 1.0.5, 21 July 2026).",
+        "Relo's code relies on Relo's own published statement"
       ],
       "patterns": [
-        "synthcut",
         "Relo"
       ],
-      "count": 3,
-      "reason": "GPL section 4/5(a) credit: the credit line under the title, the dated 5(a) notice and the sentence that Relo's code relies on Relo's own Remotion statement (plan 3.4)"
+      "count": 4,
+      "reason": "GPL-3.0 credit to the copyright holder of the original work (s.4 copyright notice, s.5(a) modified-work notice) and the s.7 note on Relo's own code."
     },
     {
       "id": "A2",
       "file": "NOTICE",
       "regex": [
-        "github\\.com/Relo-video/SynthCut",
-        "SynthCut",
         "\\bRelo\\b"
       ],
       "patterns": [
-        "synthcut",
         "Relo"
       ],
-      "count": 9,
-      "reason": "NOTICE holds only the 5(a) notice, the copyright lines and the section 7 permission; only the name SynthCut, never the lowercase id"
+      "count": 8,
+      "reason": "NOTICE carries Relo's copyright line, the GPL s.5(a) modified-work notice and the s.7 permission's scope; GPL-required."
     },
     {
       "id": "A3",
@@ -45,310 +42,107 @@
         "Relo"
       ],
       "count": 1,
-      "reason": "build.copyright keeps Relo's copyright (plan 2)"
+      "reason": "The packaged app's copyright string keeps Relo's copyright line (GPL s.4)."
     },
     {
       "id": "A4",
       "file": "docs/RELEASING.md",
-      "regex": [
-        "com\\.relo\\.synthcut",
-        "Relo's SynthCut",
-        "io\\.github\\.azabonik\\.synthcut"
+      "literal": [
+        "shipped as ZabsReel",
+        "io.github.azabonik.zabsreel",
+        "uninstall ZabsReel"
       ],
       "patterns": [
-        "synthcut",
-        "Relo"
+        "zabsreel"
       ],
       "count": 3,
-      "reason": "the one-sentence appId note: Relo's appId differs, and a pre-rename fork install is not upgraded (plan 3.7)"
-    },
-    {
-      "id": "A5",
-      "file": "README.md",
-      "regex": [
-        "Relo's SynthCut",
-        "`ai-video-editor`",
-        "`video-editor-pro`"
-      ],
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 4,
-      "reason": "the \"If you used Relo's SynthCut before\" migrate paragraph"
+      "reason": "Release notes for the one app-id change: 0.2.0 shipped as ZabsReel, and ZedMix installs beside it."
     },
     {
       "id": "A6",
       "file": "README.md",
-      "regex": [
-        "`synthcut`",
-        "`synthcut-editor`",
-        "`~/\\.synthcut/data`"
+      "literal": [
+        "this app was called ZabsReel",
+        "`zabsreel`",
+        "`zabsreel-editor`",
+        "`~/.zabsreel/data`"
       ],
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
-      "count": 3,
-      "reason": "the sentence after A5 on the fork's old key and skill (plan 3.3), and the one Troubleshooting sentence on the data-dir fallback (plan 3.2)"
-    },
-    {
-      "id": "A7",
-      "file": "packages/skill-installer/README.md",
-      "regex": [
-        "Relo's SynthCut",
-        "@relo-video/synthcut",
-        "synthcut-video-editor-pro\\.mdc?",
-        "synthcut:video-editor-pro",
-        "\\.claude/skills/video-editor-pro/SKILL\\.md",
-        "`ai-video-editor`",
-        "`video-editor-pro`"
-      ],
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 11,
-      "reason": "the \"Removing what Relo's SynthCut left behind\" section"
+      "count": 4,
+      "reason": "Users of 0.2.0: the migrate paragraph (old MCP key and skill) and the data-folder rule's fallback."
     },
     {
       "id": "A8",
       "file": "packages/skill-installer/README.md",
-      "regex": [
-        "`synthcut`",
-        "`synthcut-editor`"
+      "literal": [
+        "Moving from ZabsReel",
+        "this app was called ZabsReel",
+        "`zabsreel`",
+        "`zabsreel-editor`",
+        "`zabsreel-desktop`",
+        "/zabsreel-editor/SKILL.md",
+        "/zabsreel-editor.mdc",
+        "/zabsreel-editor.md"
       ],
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
-      "count": 5,
-      "reason": "the section on the fork's own old key and skill (plan 3.3)"
-    },
-    {
-      "id": "A9",
-      "file": "docs/TESTING.md",
-      "regex": [
-        "Relo's SynthCut",
-        "\"ai-video-editor\"",
-        "\"video-editor-pro\"",
-        "`synthcut`"
-      ],
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 6,
-      "reason": "the smoke-legacy-migrate description, both generations"
-    },
-    {
-      "id": "A10",
-      "file": "packages/skill-installer/bin/zabsreel.mjs",
-      "regex": [
-        "Relo's SynthCut",
-        "\"ai-video-editor\"",
-        "\"video-editor-pro\""
-      ],
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 7,
-      "reason": "migrate's help and report text for Relo's generation; the fork's old names come from brand.mjs LEGACY"
-    },
-    {
-      "id": "A11",
-      "file": "packages/skill-installer/bin/legacy.mjs",
-      "regex": [
-        "synthcut",
-        "\\bRelo\\b",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "flags": "i",
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 33,
-      "reason": "migrate's detection code for both generations"
-    },
-    {
-      "id": "A12",
-      "file": "packages/core/scripts/smoke-legacy-migrate.ts",
-      "regex": [
-        "synthcut",
-        "\\bRelo\\b",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "flags": "i",
-      "patterns": [
-        "synthcut",
-        "Relo",
-        "ai-video-editor",
-        "video-editor-pro"
-      ],
-      "count": 197,
-      "reason": "fixtures and checks for both generations"
+      "count": 11,
+      "reason": "The installer's migrate section names what 0.2.0 (ZabsReel) left behind: its MCP key, skill, package names and skill paths."
     },
     {
       "id": "A13",
       "file": "packages/core/src/brand.ts",
       "regex": [
-        "synthcut"
+        "zabsreel"
       ],
       "flags": "i",
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
-      "count": 6,
-      "reason": "the LEGACY block: its six values are the only mentions"
+      "count": 7,
+      "reason": "The LEGACY identity block (six values) and its comment: the previous name, used only to find what 0.2.0 left behind and as the data-folder fallback."
     },
     {
       "id": "A13",
       "file": "apps/desktop/electron/brand.cjs",
       "regex": [
-        "synthcut"
+        "zabsreel"
       ],
       "flags": "i",
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
-      "count": 6,
-      "reason": "the LEGACY block: its six values are the only mentions"
+      "count": 7,
+      "reason": "The LEGACY identity block (six values) and its comment: the previous name, used only to find what 0.2.0 left behind and as the data-folder fallback."
     },
     {
       "id": "A13",
       "file": "packages/skill-installer/bin/brand.mjs",
       "regex": [
-        "synthcut"
+        "zabsreel"
       ],
       "flags": "i",
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
-      "count": 6,
-      "reason": "the LEGACY block: its six values are the only mentions"
+      "count": 7,
+      "reason": "The LEGACY identity block (six values) and its comment: the previous name, used only to find what 0.2.0 left behind and as the data-folder fallback."
     },
     {
       "id": "A14",
       "file": "packages/core/scripts/smoke-brand.ts",
       "regex": [
-        "synthcut"
+        "zabsreel"
       ],
       "flags": "i",
       "patterns": [
-        "synthcut"
+        "zabsreel"
       ],
       "count": 8,
-      "reason": "fixtures for ~/.synthcut/data and checks of the LEGACY values"
-    },
-    {
-      "id": "A15",
-      "file": "packages/core/src/interop/otio.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b",
-        "\\bsynthcut: \\{"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 15,
-      "reason": "OTIO metadata.synthcut (D5): the object key and its reads"
-    },
-    {
-      "id": "A15",
-      "file": "packages/core/scripts/smoke-registry.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b",
-        "\\bsynthcut: \\{"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 2,
-      "reason": "OTIO metadata.synthcut (D5): the object key and its reads"
-    },
-    {
-      "id": "A16",
-      "file": "packages/core/src/engine.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 1,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
-    },
-    {
-      "id": "A16",
-      "file": "packages/core/src/rpc.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 1,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
-    },
-    {
-      "id": "A16",
-      "file": "README.md",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 1,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
-    },
-    {
-      "id": "A16",
-      "file": "packages/core/scripts/smoke-otio.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 3,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
-    },
-    {
-      "id": "A16",
-      "file": "packages/core/scripts/smoke-ramps.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 1,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
-    },
-    {
-      "id": "A16",
-      "file": "packages/core/scripts/smoke-safepath.ts",
-      "regex": [
-        "metadata\\??\\.synthcut\\b"
-      ],
-      "patterns": [
-        "synthcut"
-      ],
-      "count": 4,
-      "reason": "OTIO metadata.synthcut (D5) in comments, tool text, the README OTIO section and tests"
+      "reason": "smoke-brand checks the LEGACY block in all three brand files and the ~/.zabsreel/data fallback."
     }
   ]
 }

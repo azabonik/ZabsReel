@@ -176,7 +176,7 @@ function createGraphicsAddonHost({ via, fetch, dataDir, log }) {
     }
   }
 
-  /** The user's click on a renderer in the dialog: "zabsreel" or "remotion" into renderer.json. Resolves with { ok, error? }. */
+  /** The user's click on a renderer in the dialog: "zedmix" or "remotion" into renderer.json. Resolves with { ok, error? }. */
   async function setRenderer(renderer) {
     try {
       const a = await addon();

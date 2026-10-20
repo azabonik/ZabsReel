@@ -410,7 +410,7 @@ function colourAgnostic(cmd: { args: string[]; totalDuration: number }): { args:
 async function main(): Promise<void> {
   mappingProperties();
 
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-ramps-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-ramps-"));
   // 8 s / 240 frames: frame N encodes N in 8 stripes; audio = 440 Hz tone.
   const src = join(dir, "coded.mp4");
   await execa(FFMPEG_BIN, [
@@ -983,14 +983,14 @@ async function main(): Promise<void> {
     const back = clipById(clip.id);
     check(JSON.stringify(back.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])) === JSON.stringify(pre.effects?.speedRamp?.points.map((p) => [Number(p.src.toFixed(4)), p.speed])), "un-reverse restores the original curve");
 
-    // OTIO: average speed + note; ZabsReel round trip keeps the curve.
+    // OTIO: average speed + note; ZedMix round trip keeps the curve.
     const otioPath = join(dir, "t.otio");
     await call("export_otio", { path: otioPath });
     const otio = JSON.parse((await import("node:fs")).readFileSync(otioPath, "utf8"));
     const item = otio.tracks.children[0].children.find((x: { OTIO_SCHEMA: string }) => x.OTIO_SCHEMA === "Clip.2");
     const warp = item.effects?.[0];
     const avg = (180 / FPS) / clipTimeMap(back, FPS).duration;
-    check(warp?.OTIO_SCHEMA === "LinearTimeWarp.1" && near(warp.time_scalar, avg, 1e-5) && /average/.test(warp.metadata?.synthcut?.note ?? ""), `OTIO: LinearTimeWarp at the average speed ${avg.toFixed(4)} + a note`);
+    check(warp?.OTIO_SCHEMA === "LinearTimeWarp.1" && near(warp.time_scalar, avg, 1e-5) && /average/.test(warp.metadata?.zedmix?.note ?? ""), `OTIO: LinearTimeWarp at the average speed ${avg.toFixed(4)} + a note`);
     await call("import_otio", { path: otioPath });
     const imported = engine.getProject().tracks.flatMap((t) => t.clips).find((c) => c.effects?.speedRamp);
     check(!!imported && JSON.stringify(imported.effects!.speedRamp) === JSON.stringify(back.effects!.speedRamp), "OTIO round trip keeps the speed ramp");

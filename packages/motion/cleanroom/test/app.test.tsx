@@ -521,7 +521,7 @@ test("recorded choice: calling renderFrame again before the previous frame settl
   m.app.unmount();
 });
 
-test("hooks used outside a ZabsReel graphic throw graphic_api_misuse", () => {
+test("hooks used outside a ZedMix graphic throw graphic_api_misuse", () => {
   const { createRoot } = require("react-dom") as { createRoot(el: Element): { render(n: unknown): void; unmount(): void } };
   const { flushSync } = require("react-dom") as { flushSync(fn: () => void): void };
   const el = document.createElement("div");

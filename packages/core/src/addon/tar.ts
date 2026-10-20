@@ -91,7 +91,7 @@ export async function extractTarball(gz: Uint8Array, dest: string, opts: TarOpti
       ext = pax(data);
       continue;
     }
-    if (type === "g") continue; // global pax records: nothing ZabsReel uses
+    if (type === "g") continue; // global pax records: nothing ZedMix uses
     if (type === "L") {
       longName = text(data, 0, data.length);
       continue;

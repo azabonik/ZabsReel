@@ -47,7 +47,7 @@ async function main() {
   // The server names itself by the MCP client key and @aive/mcp's own version.
   const serverInfo = client.getServerVersion();
   const mcpVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
-  if (serverInfo?.name !== "zabsreel") throw new Error(`serverInfo name: expected zabsreel, got ${serverInfo?.name}`);
+  if (serverInfo?.name !== "zedmix") throw new Error(`serverInfo name: expected zedmix, got ${serverInfo?.name}`);
   if (serverInfo.version !== mcpVersion)
     throw new Error(`serverInfo version: expected ${mcpVersion} (@aive/mcp package.json), got ${serverInfo.version}`);
   console.log(`2. MCP client connected (server ${serverInfo.name} ${serverInfo.version})`);

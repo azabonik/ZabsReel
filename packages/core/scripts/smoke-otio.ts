@@ -3,8 +3,8 @@
  *  - A 2-track timeline with a transition, effects, keyframes, text, markers
  *    and music exports to a valid OTIO Timeline.1 JSON.
  *  - Importing that file back restores an EQUIVALENT project (lossless
- *    round-trip through metadata.synthcut): normalized deep-equal.
- *  - A foreign-shaped OTIO (no metadata.synthcut) still imports structurally.
+ *    round-trip through metadata.zedmix): normalized deep-equal.
+ *  - A foreign-shaped OTIO (no metadata.zedmix) still imports structurally.
  *  - Missing media becomes offline placeholder assets (missing: true).
  *  - An .otio whose assets carry no colour description (an older export)
  *    imports with each file's colour probed: the preview's source-colour
@@ -128,7 +128,7 @@ async function main() {
   }
   check(same, "normalized projects deep-equal after round-trip");
 
-  console.log("4. foreign OTIO (no metadata.synthcut) imports structurally...");
+  console.log("4. foreign OTIO (no metadata.zedmix) imports structurally...");
   const foreign = {
     OTIO_SCHEMA: "Timeline.1",
     name: "Foreign cut",

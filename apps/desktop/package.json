@@ -1,7 +1,7 @@
 {
-  "name": "zabsreel-desktop",
+  "name": "zedmix-desktop",
   "version": "0.2.0",
-  "description": "Electron + React desktop UI for ZabsReel. Shows the timeline, clip library and preview; reflects AI edits live.",
+  "description": "Electron + React desktop UI for ZedMix. Shows the timeline, clip library and preview; reflects AI edits live.",
   "license": "GPL-3.0-or-later",
   "private": true,
   "author": "Zabs",
@@ -35,16 +35,16 @@
     "vite": "^6.0.7"
   },
   "build": {
-    "appId": "io.github.azabonik.zabsreel",
-    "productName": "ZabsReel",
+    "appId": "io.github.azabonik.zedmix",
+    "productName": "ZedMix",
     "publish": [
       {
         "provider": "github",
         "owner": "azabonik",
-        "repo": "ZabsReel"
+        "repo": "ZedMix"
       }
     ],
-    "copyright": "Copyright © 2026 Relo. Modifications copyright © 2026 Zabs and the ZabsReel contributors.",
+    "copyright": "Copyright © 2026 Relo. Modifications copyright © 2026 Zabs and the ZedMix contributors.",
     "electronVersion": "42.11.12",
     "npmRebuild": false,
     "asar": false,
@@ -86,15 +86,15 @@
         "nsis",
         "zip"
       ],
-      "artifactName": "ZabsReel-${version}.${ext}"
+      "artifactName": "ZedMix-${version}.${ext}"
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ZabsReel",
-      "uninstallDisplayName": "ZabsReel",
+      "shortcutName": "ZedMix",
+      "uninstallDisplayName": "ZedMix",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

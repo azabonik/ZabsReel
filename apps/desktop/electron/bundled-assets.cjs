@@ -12,7 +12,7 @@
 // engine's own ~/.aive download-on-first-use path.
 //
 // Hybrid bundling: everything here is local from the first run, motion graphics
-// too (ZabsReel's own renderer ships in the app). The only part not bundled is
+// too (ZedMix's own renderer ships in the app). The only part not bundled is
 // the optional Remotion add-on (Remotion and its headless shell), which no
 // installer holds; the user installs it from Help → Graphics add-on
 // (graphics-addon.cjs) into the data folder.

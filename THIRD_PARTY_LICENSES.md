@@ -1,6 +1,6 @@
 # Third-Party Licenses & Notices
 
-ZabsReel is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
+ZedMix is licensed under the **GNU General Public License v3.0 or later** (see `LICENSE`).
 It is a modified version of another GPL program; `NOTICE` names that program and its
 copyright holder, and carries the GPL section 7 permission for Remotion.
 It ships with, or downloads on first use, a number of third-party components.
@@ -9,7 +9,7 @@ redistribution. Packaged installers include a copy of this file, `LICENSE` and `
 
 > **TL;DR for redistributors**
 > - Everything bundled is freely redistributable. **Remotion is not bundled:**
->   motion graphics render with ZabsReel's own renderer (GPL, no Remotion
+>   motion graphics render with ZedMix's own renderer (GPL, no Remotion
 >   code), or, if the user chooses, with a copy of Remotion that the user
 >   installs as an optional add-on, under Remotion's own license (see the
 >   **Remotion** section). Remotion is
@@ -97,7 +97,7 @@ redistribution. Packaged installers include a copy of this file, `LICENSE` and `
   shipped in the app.
 
 ### React 18.3.1 UMD builds (in `@aive/motion`)
-- **Role:** the React that ZabsReel's motion renderer loads into its render
+- **Role:** the React that ZedMix's motion renderer loads into its render
   page: `react.production.min.js` and `react-dom.production.min.js`,
   unmodified, committed in `packages/motion/vendor/react-18.3.1/` with
   pinned sha256 values.
@@ -134,13 +134,13 @@ All MIT-licensed:
   with their dependencies (the `@remotion/*` compositors among them, which
   include an FFmpeg build that is not redistributable).
 - **Role:** renders AI-authored React/Remotion components into motion graphics.
-  Used **only** by the motion-graphics feature; ZabsReel loads it only in
+  Used **only** by the motion-graphics feature; ZedMix loads it only in
   `packages/core/src/motion/remotionload.ts`, for `motion/render.ts`.
-- **Not conveyed:** no ZabsReel installer contains Remotion. The user installs it
-  from inside ZabsReel (**Help → Graphics add-on**): the dialog shows ZabsReel's
+- **Not conveyed:** no ZedMix installer contains Remotion. The user installs it
+  from inside ZedMix (**Help → Graphics add-on**): the dialog shows ZedMix's
   notice and Remotion's `LICENSE.md` as of the v4.0.481 tag, and only **Accept
   and install** downloads the packages, from `registry.npmjs.org`, each checked
-  against the sha512 this ZabsReel version pins. The release build checks that
+  against the sha512 this ZedMix version pins. The release build checks that
   the packed app holds no Remotion package (`scripts/check-no-remotion.mjs`).
   In the source repository Remotion is a development dependency only.
 - **License:** the **Remotion License** — *source-available, not OSI
@@ -148,7 +148,7 @@ All MIT-licensed:
   people may use it for free; **larger companies need their own Remotion
   license.** The add-on dialog shows these terms before anything is
   downloaded: https://github.com/remotion-dev/remotion/blob/main/LICENSE.md
-- **Note:** Remotion's terms, not ZabsReel's GPL, govern the add-on. The code
+- **Note:** Remotion's terms, not ZedMix's GPL, govern the add-on. The code
   that loads it is confined to one module and can be swapped for a
   Puppeteer/Playwright-based renderer if a fully-OSI motion-graphics path is
   required. `NOTICE` carries the GPL section 7 permission for linking with it.
@@ -167,9 +167,9 @@ installer.
   Google as Chrome for Testing under Google's terms.
 - **Download:** the graphics add-on install downloads the Chrome for Testing
   headless shell 149.0.7790.0 for the user's platform from Google
-  (`storage.googleapis.com`), checked against the sha256 this ZabsReel version
+  (`storage.googleapis.com`), checked against the sha256 this ZedMix version
   pins, into the add-on's folder. Remotion itself never downloads a browser in
-  ZabsReel.
+  ZedMix.
 
 ### Additional whisper models
 Larger Whisper models (small/medium/large) download on demand from Hugging Face

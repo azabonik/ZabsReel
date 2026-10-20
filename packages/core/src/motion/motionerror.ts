@@ -1,5 +1,5 @@
 /**
- * The named errors of ZabsReel's own motion renderer (MOTION-PLAN D4's
+ * The named errors of ZedMix's own motion renderer (MOTION-PLAN D4's
  * table): rendermotion.ts and motionmedia.ts end a render with them, and
  * add_graphic reports their code.
  */

@@ -7,7 +7,7 @@
  * One HostTrust per engine. It holds the approved servers (valid stamps only)
  * plus the data folder's own server, and publishes them to io/gatedfs.ts
  * (setAllowedNetworkHosts) with the trust folder (setTrustDir). Servers added
- * outside ZabsReel are listed but never published. It picks up changes
+ * outside ZedMix are listed but never published. It picks up changes
  * without a restart:
  *  - a check that meets a server it does not trust re-reads the store when
  *    the size, mtime or file id of hosts.json or hosts.key changed;
@@ -20,7 +20,7 @@
  * It also keeps the pending list: servers the open project uses but the user
  * has not allowed (origin "project", set by the engine's G3 marking), servers
  * an rpc call asked for (origin "request", G1: {@link HostTrust.requirePath}),
- * and servers added outside ZabsReel (origin "outside", from the store).
+ * and servers added outside ZedMix (origin "outside", from the store).
  *
  * While io/gatedfs.ts NETWORK_GATE is "log", {@link HostTrust.isAllowed} only
  * logs what it would block, and nothing is pending. G2 and the load-field
@@ -45,7 +45,7 @@ import {
 } from "./io/gatedfs.js";
 import type { Project } from "./types.js";
 
-/** Why a server is pending: the open project uses it, an rpc call asked for it, or it was added outside ZabsReel. */
+/** Why a server is pending: the open project uses it, an rpc call asked for it, or it was added outside ZedMix. */
 export type PendingOrigin = "project" | "request" | "outside";
 
 /** A server waiting for the user (list_media_servers.pending). Examples are sanitized paths. */
@@ -77,7 +77,7 @@ export class MediaServerNotApprovedError extends Error {
     readonly host: string,
     readonly display: string,
     readonly path: string,
-    /** The server is in the store but was added outside ZabsReel. */
+    /** The server is in the store but was added outside ZedMix. */
     readonly outside = false,
     /** The store could not be read yet: the server may be approved. */
     readonly unread = false,
@@ -370,7 +370,7 @@ export class HostTrust {
     return this.unread.length > 0;
   }
 
-  /** Whether `host` is in the store but was added outside ZabsReel. */
+  /** Whether `host` is in the store but was added outside ZedMix. */
   isOutside(host: string): boolean {
     return this.outside.includes(host);
   }

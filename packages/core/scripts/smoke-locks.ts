@@ -43,7 +43,7 @@ function check(cond: boolean, name: string, detail = ""): void {
 }
 
 async function main(): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-locks-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-locks-"));
   const src = join(dir, "clip.mp4");
   await execa(FFMPEG_BIN, [
     "-hide_banner", "-y", "-f", "lavfi", "-i", `testsrc2=s=160x90:r=${FPS}:d=8`, "-f", "lavfi", "-i", "sine=frequency=440:duration=8:sample_rate=48000",

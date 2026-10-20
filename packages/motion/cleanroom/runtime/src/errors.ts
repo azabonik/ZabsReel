@@ -60,5 +60,5 @@ export function describeValue(value: unknown): string {
 
 /** The fixed message for names the module object does not provide (BRIEF section 5). */
 export function unsupportedNameMessage(name: string): string {
-  return `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
+  return `${name} is not available in ZedMix's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
 }

@@ -26,7 +26,7 @@ export type PickRequest =
 export type PendingPick = PickRequest & { id: number; resolve: (paths: string[] | null) => void };
 /**
  * An in-app dialog of the web shell: an approval dialog (Allow, or Keep for a
- * server added outside ZabsReel) resolves true for its second button, false
+ * server added outside ZedMix) resolves true for its second button, false
  * for the first (the default, and Esc); "unread" only says the list can't be
  * read and resolves false.
  */
@@ -86,8 +86,8 @@ let listMediaServers: () => Promise<MediaServers> = () => Promise.reject(new Err
 /** Call a web-shell /api endpoint with the shell key: GET, or POST with a JSON `body`. */
 export async function api<T>(path: string, body?: object): Promise<T> {
   const res = await fetch(path, body === undefined
-    ? { headers: { "x-zabsreel-shell": shellKey } }
-    : { method: "POST", headers: { "x-zabsreel-shell": shellKey, "content-type": "application/json" }, body: JSON.stringify(body) });
+    ? { headers: { "x-zedmix-shell": shellKey } }
+    : { method: "POST", headers: { "x-zedmix-shell": shellKey, "content-type": "application/json" }, body: JSON.stringify(body) });
   const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
   if (!res.ok || out.ok === false) throw Object.assign(new Error(out.error || `HTTP ${res.status}`), { status: res.status });
   return out as T;
@@ -342,7 +342,7 @@ export const platform = {
 
   /**
    * Review network computer `server`: the host shows the Allow dialog (or Keep,
-   * for one added outside ZabsReel, or only "couldn't read its list"). True
+   * for one added outside ZedMix, or only "couldn't read its list"). True
    * when the server is allowed now. `context` only changes the dialog's wording.
    */
   async approveMediaServer(server: string, context?: ApproveContext): Promise<boolean> {

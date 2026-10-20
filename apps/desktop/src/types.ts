@@ -69,7 +69,7 @@ export interface MediaAsset {
   missing?: boolean;
   /** Runtime only: the network computer (host key) this asset waits for the user to allow (core types.ts). */
   awaitingServer?: string;
-  /** Runtime only: ZabsReel couldn't check this file's folder (the error code, or "private"; core types.ts). */
+  /** Runtime only: ZedMix couldn't check this file's folder (the error code, or "private"; core types.ts). */
   pathCheckFailed?: string;
 }
 
@@ -367,7 +367,7 @@ export interface MediaServers {
   /** "log": nothing is blocked yet (only logged); "enforce". */
   gate: "log" | "enforce";
   approved: { host: string; display: string; via: "prompt" | "picker"; added: string }[];
-  /** In the allowed list, but ZabsReel did not add it: not used until the user keeps it. */
+  /** In the allowed list, but ZedMix did not add it: not used until the user keeps it. */
   outside: { host: string; display: string }[];
   /** Store files the core could not read yet: no listed server is used until it can. */
   unread: string[];
@@ -378,8 +378,8 @@ export interface MediaServers {
 /** The graphics add-on's state (core addon/state.ts, ADDON-PLAN D1). */
 export type GraphicsAddonState = "ready" | "not-installed" | "update-needed" | "broken" | "unsupported";
 
-/** The graphics renderer setting (core addon/renderer.ts, MOTION-PLAN D7): ZabsReel's own, or the Remotion add-on. */
-export type GraphicsRenderer = "zabsreel" | "remotion";
+/** The graphics renderer setting (core addon/renderer.ts, MOTION-PLAN D7): ZedMix's own, or the Remotion add-on. */
+export type GraphicsRenderer = "zedmix" | "remotion";
 
 /** What a UI host says of the add-on (electron/graphics-addon.cjs status()). */
 export interface GraphicsAddonStatus {

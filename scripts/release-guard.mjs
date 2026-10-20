@@ -1,7 +1,7 @@
 // Release guard: the first step of .github/workflows/release.yml.
 //
 // When the ref being built is a tag, it must be `v<semver>` with a version of
-// at least 0.2.0 (the first ZabsReel release; the inherited v0.1.x and v1.0.5
+// at least 0.2.0 (the first ZedMix release; the inherited v0.1.x and v1.0.5
 // tags must never publish) and equal to apps/desktop/package.json "version".
 // A branch ref (a manual run from the Actions tab) always passes.
 //

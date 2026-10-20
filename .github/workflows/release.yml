@@ -129,7 +129,7 @@ jobs:
         run: npx tsx packages/core/scripts/smoke-addon-real.ts --live
 
       - name: Stage bundled FFmpeg/whisper/YuNet/font resources
-        run: npm run prepare:bundle --workspace zabsreel-desktop
+        run: npm run prepare:bundle --workspace zedmix-desktop
 
       - name: Package Windows installer + portable ZIP (+ SHA256SUMS)
         # `--publish never` = build the installer AND emit the update feed
@@ -139,7 +139,7 @@ jobs:
         # packaging gate on the packed app before the installer is made: no
         # Remotion package, add-on-only package, headless shell or core src/,
         # and the core's Remotion licence intact. A refusal fails this step.
-        run: npm run dist --workspace zabsreel-desktop -- --publish never
+        run: npm run dist --workspace zedmix-desktop -- --publish never
 
       # --- Free code signing for open source (optional) -----------------------
       # Once approved by SignPath Foundation (https://signpath.org), uncomment and
@@ -151,7 +151,7 @@ jobs:
       #   with:
       #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
       #     organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
-      #     project-slug: zabsreel
+      #     project-slug: zedmix
       #     signing-policy-slug: release-signing
       #     artifact-configuration-slug: installer
       #     github-artifact-id: ${{ ... }}
@@ -178,7 +178,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: zabsreel-windows
+          name: zedmix-windows
           path: |
             apps/desktop/build/dist/*.exe
             apps/desktop/build/dist/*.zip

@@ -1,6 +1,6 @@
 # The motion renderer
 
-ZabsReel's own renderer for `add_graphic` (package `@aive/motion`). It renders
+ZedMix's own renderer for `add_graphic` (package `@aive/motion`). It renders
 AI-written React components that use the Remotion API subset in
 `packages/motion/cleanroom/runtime/exports.json`, with no Remotion code, in the
 Electron that every desktop install already has. It is the default graphics
@@ -85,7 +85,7 @@ capture the main forces a draw of the page as it is now (`drawn()` in
   `zrmotion://media/<handle>?t=<source frame>&w=&h=` (no `t` for an image).
   The renderer sends the request on stdout; the core checks the handle, the
   caps and whether the file may be opened (offline and network-path rules),
-  decodes with ZabsReel's FFmpeg (`ffmpeg/executor.ts`) to a PNG on FFmpeg's
+  decodes with ZedMix's FFmpeg (`ffmpeg/executor.ts`) to a PNG on FFmpeg's
   stdout, and answers on fd 4. No decoded frame is written to a file. Repeated
   requests come from an in-memory LRU.
 - FFmpeg 8.1 and newer place a video that starts later than its file's audio
@@ -144,11 +144,11 @@ The values are `MEDIA_CAPS` (`motionmedia.ts`), `AUDIO_CAPS`
    removed by `guard.js`).
 2. No path reaches the page or the renderer. The renderer knows only its own
    scratch folder; the page knows handles only.
-3. Every media byte is decoded by ZabsReel's FFmpeg after the offline and
+3. Every media byte is decoded by ZedMix's FFmpeg after the offline and
    network-path checks; font bytes are read by the core after the font
    checks. The renderer opens no library file.
 4. The renderer runs none of the desktop's code, the page has no Node, and the
-   renderer holds no core token and no ZabsReel API. Its only outputs are
+   renderer holds no core token and no ZedMix API. Its only outputs are
    frames, logs, audio cues, frame failures and media requests on its pipes.
 5. The renderer main drives its own page over the DevTools protocol
    in-process (`webContents.debugger`), only to force a draw before each

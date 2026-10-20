@@ -70,7 +70,7 @@
  *  C6. resolution    — AIVE_REMOTION_ADDON (and AIVE_REMOTION_BROWSER) in a
  *                      source checkout; in a packaged core folder (no src/)
  *                      the three variables are ignored, one stderr line each;
- *                      no fallback to ZabsReel's own Remotion; a malformed
+ *                      no fallback to ZedMix's own Remotion; a malformed
  *                      AIVE_REMOTION_ADDON leaves get_state and
  *                      timeline_summary answering ("broken"), and add_graphic
  *                      gives the variable's message.
@@ -224,16 +224,16 @@ delete process.env.AIVE_REMOTION_BROWSER;
 delete process.env.AIVE_ADDON_REGISTRY;
 
 /** D5.3's messages, as the agent reads them. */
-const WHERE = "in the ZabsReel window (Help → Graphics add-on)";
+const WHERE = "in the ZedMix window (Help → Graphics add-on)";
 const MESSAGES = {
   "not-installed": `Graphics need the Remotion add-on, which the user installs ${WHERE}. Ask the user to install it, then try again.`,
-  "update-needed": `The Remotion add-on must be updated for this version of ZabsReel. Ask the user to update it ${WHERE}, then try again.`,
+  "update-needed": `The Remotion add-on must be updated for this version of ZedMix. Ask the user to update it ${WHERE}, then try again.`,
   broken: `The Remotion add-on is damaged (missing files). Ask the user to reinstall it ${WHERE}, then try again.`,
   // This computer's platform (C2 forces the state with a seam).
   unsupported: `The graphics add-on isn't available for ${platformLabel()}, so graphics can't be made on this computer.`,
 } as const;
 const CODES = { "not-installed": "graphics_addon_missing", "update-needed": "graphics_addon_update", broken: "graphics_addon_broken", unsupported: "graphics_addon_unsupported" } as const;
-const BROWSER_MISSING = "The graphics add-on's browser is missing. Reinstall the add-on in the ZabsReel window (Help → Graphics add-on).";
+const BROWSER_MISSING = "The graphics add-on's browser is missing. Reinstall the add-on in the ZedMix window (Help → Graphics add-on).";
 
 // ---- fixtures ----------------------------------------------------------------------
 
@@ -295,7 +295,7 @@ function fixtureLock(): { packages: Record<string, Record<string, unknown>> } {
     packages: {
       "": { name: "fixture", workspaces: ["packages/*", "apps/*"] },
       "packages/core": { name: "@aive/core", devDependencies: { remotion: "4.0.481", "@remotion/bundler": "4.0.481", "@remotion/renderer": "4.0.481", react: "18.3.1", "react-dom": "18.3.1" } },
-      "apps/desktop": { name: "zabsreel-desktop", dependencies: { "@aive/core": "*", react: "^18.3.1", b: "1.0.0" } },
+      "apps/desktop": { name: "zedmix-desktop", dependencies: { "@aive/core": "*", react: "^18.3.1", b: "1.0.0" } },
       "node_modules/@aive/core": { resolved: "packages/core", link: true },
       "node_modules/remotion": entry("node_modules/remotion", "4.0.481", { peerDependencies: { react: ">=16.8.0", "react-dom": ">=16.8.0" } }),
       "node_modules/react": entry("node_modules/react", "18.3.1", { dependencies: { "loose-envify": "^1.1.0" } }),
@@ -634,7 +634,7 @@ function c1() {
   const dirOld = join(moved, "addons", "remotion", "4.0.480");
   mkdirSync(dirname(dirOld), { recursive: true });
   execFileSync(process.execPath, ["-e", `require("fs").renameSync(${JSON.stringify(graphicsAddonDir(moved))}, ${JSON.stringify(dirOld)})`]);
-  check(state(moved) === "update-needed", `only another version's folder (a ZabsReel update moved the pin): update-needed (${state(moved)})`);
+  check(state(moved) === "update-needed", `only another version's folder (a ZedMix update moved the pin): update-needed (${state(moved)})`);
   const keys: [string, string][] = [
     ["the renderer's ESM build", "node_modules/@remotion/renderer/dist/esm/index.mjs"],
     ["the bundler's package.json", "node_modules/@remotion/bundler/package.json"],
@@ -757,7 +757,7 @@ async function c2c3() {
     for (const [state, setup] of setups) {
       if (!PLATFORM && state !== "not-installed" && state !== "unsupported") continue;
       rmSync(join(dataDir, "addons"), { recursive: true, force: true });
-      // The add-on path: the Remotion add-on is the user's renderer setting (ZabsReel's own is the default).
+      // The add-on path: the Remotion add-on is the user's renderer setting (ZedMix's own is the default).
       useRemotionRenderer(dataDir);
       setup();
       const before = listing();
@@ -797,7 +797,7 @@ async function c2c3() {
     const quiet = await s.take();
     check(ok.status === 200 && !!ok.body.result?.clipId && quiet.length === 0, `a successful add_graphic: ${ok.status}, no graphics-addon message (${ok.body.error ?? JSON.stringify(quiet)})`);
 
-    // ZabsReel's own renderer (no setting: the default) needs no add-on: none of the add-on's refusals or signals,
+    // ZedMix's own renderer (no setting: the default) needs no add-on: none of the add-on's refusals or signals,
     // and its own state (here with no renderer binary, so nothing starts).
     // MUTATION: check the add-on before the renderer setting in addGraphic (engine.ts) → this row gets graphics_addon_missing.
     rmSync(join(dataDir, "addons"), { recursive: true, force: true });
@@ -807,8 +807,8 @@ async function c2c3() {
     const zSignals = await s.take();
     const zState = await s.rpc("get_state");
     check(z.status === 409 && z.body.code === "graphic_renderer_unavailable" && z.body.reason === "no-binary" && zSignals.length === 0
-      && zState.body.result?.graphicsRenderer === "zabsreel" && zState.body.result?.graphics === "renderer-unavailable" && zState.body.result?.graphicsReason === "no-binary",
-      `ZabsReel's renderer (the default), no add-on: no graphics_addon_* refusal or signal, its own state (${z.status} ${z.body.code} ${z.body.reason}; ${JSON.stringify(zSignals)}; ${zState.body.result?.graphics})`);
+      && zState.body.result?.graphicsRenderer === "zedmix" && zState.body.result?.graphics === "renderer-unavailable" && zState.body.result?.graphicsReason === "no-binary",
+      `ZedMix's renderer (the default), no add-on: no graphics_addon_* refusal or signal, its own state (${z.status} ${z.body.code} ${z.body.reason}; ${JSON.stringify(zSignals)}; ${zState.body.result?.graphics})`);
   } finally {
     await s.stop();
   }
@@ -946,7 +946,7 @@ async function c5() {
 }
 
 // MUTATION: make isSourceCheckout always true (addon/resolve.ts) → the packaged rows use the
-// variables. Give resolveGraphicsAddon a fallback to ZabsReel's own node_modules → the
+// variables. Give resolveGraphicsAddon a fallback to ZedMix's own node_modules → the
 // no-fallback row is ready.
 async function c6() {
   console.log("C6. AIVE_REMOTION_ADDON and the source-checkout rule...");
@@ -978,7 +978,7 @@ async function c6() {
     delete process.env.AIVE_REMOTION_ADDON;
   }
   const none = resolveGraphicsAddon(empty, { env: {} });
-  check(!none.ok && none.state === "not-installed", `no variable and no add-on: not-installed, never ZabsReel's own Remotion (${JSON.stringify(none)})`);
+  check(!none.ok && none.state === "not-installed", `no variable and no add-on: not-installed, never ZedMix's own Remotion (${JSON.stringify(none)})`);
   check(loadRemotion.length === 1 && graphicRemotion.length === 1, "loadRemotion and graphicRemotion take a root, with no default");
 
   // A packaged core: its package folder has dist/ and no src/.
@@ -1001,7 +1001,7 @@ async function c6() {
   }
   check(!isSourceCheckout(from) && !packaged.ok && packaged.state === "not-installed" && values.every((v) => v === undefined),
     `a packaged core ignores AIVE_REMOTION_ADDON, AIVE_REMOTION_BROWSER and AIVE_ADDON_REGISTRY (${JSON.stringify(packaged)})`);
-  const want = ["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY"].map((n) => `[aive-core] ${n} is ignored: ZabsReel honours it only in a source checkout.`);
+  const want = ["AIVE_REMOTION_ADDON", "AIVE_REMOTION_BROWSER", "AIVE_ADDON_REGISTRY"].map((n) => `[aive-core] ${n} is ignored: ZedMix honours it only in a source checkout.`);
   check(JSON.stringify(lines) === JSON.stringify(want), `…one stderr line for each, once (${JSON.stringify(lines)})`);
   mkdirSync(join(pkg, "src"));
   const control = join(pkg, "dist", "x.js");
@@ -1014,7 +1014,7 @@ async function c7() {
   const dataDir = freshData();
   const engine = newEngine(dataDir);
   if (PLATFORM) installFixture(dataDir);
-  const AREA = /is in ZabsReel's graphics add-on folder, which tools can't open\.$/;
+  const AREA = /is in ZedMix's graphics add-on folder, which tools can't open\.$/;
   const minimal = (schema: unknown): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries((schema as { shape: Record<string, { isOptional(): boolean; _def: { typeName: string } }> }).shape)) {
@@ -1036,7 +1036,7 @@ async function c7() {
         const params = { ...minimal(methods[m as keyof typeof methods].schema), ...(m === "add_graphic" ? { template: "title" } : {}), [key]: value };
         if (m === "remember_projects") {
           const r = (await dispatch(engine, m, params)) as { added: unknown[]; skipped: { reason: string }[] };
-          check(r.added.length === 0 && r.skipped.length === 1 && r.skipped[0].reason === "in ZabsReel's graphics add-on folder", `remember_projects skips ${path} (${JSON.stringify(r.skipped)})`);
+          check(r.added.length === 0 && r.skipped.length === 1 && r.skipped[0].reason === "in ZedMix's graphics add-on folder", `remember_projects skips ${path} (${JSON.stringify(r.skipped)})`);
           continue;
         }
         const e = await thrown(() => dispatch(engine, m, params));
@@ -1071,7 +1071,7 @@ async function c7() {
   for (const [what, file, field] of fields) {
     const e = await thrown(() => dispatch(engine, "load_project", { path: file }));
     const msg = e?.message ?? "";
-    check(msg.startsWith(`${field} `) && / is in ZabsReel's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(msg)
+    check(msg.startsWith(`${field} `) && / is in ZedMix's graphics add-on folder, which tools can't open\. Change this path in the project file and open the project again\.$/.test(msg)
       && JSON.stringify(engine.getProject()) === before && engine.getCurrentPath() === undefined,
       `a project whose ${what} is in the add-on folder does not load, with the add-on folder's message (${msg.slice(-120)})`);
   }
@@ -1222,7 +1222,7 @@ async function i2() {
   const file = WIN32 ? Buffer.from(committed(licenseFile)) : readFileSync(licenseFile);
   check(sha256hex(file) === "bd65083b940f61904f6ef298aade918a7cad72a3e35bc406e36fab365844b673" && t.license === file.toString("utf8") && t.sha256 === sha256hex(t.notice + t.license)
     && /Remotion is free for individuals, non-profit organizations and companies of up to three people\. Larger companies need their own Remotion license\./.test(t.notice)
-    && /is not covered by ZabsReel's GPL license/.test(t.notice) && new RegExp(`downloads about ${Math.round(ADDON_PLATFORM_LISTS[PLATFORM!].bytes! / 1e6)} MB of packages from registry\\.npmjs\\.org and the Chrome headless shell \\(about ${Math.round(HEADLESS_SHELL.platforms[PLATFORM!].size / 1e6)} MB\\) from Google`).test(t.notice),
+    && /is not covered by ZedMix's GPL license/.test(t.notice) && new RegExp(`downloads about ${Math.round(ADDON_PLATFORM_LISTS[PLATFORM!].bytes! / 1e6)} MB of packages from registry\\.npmjs\\.org and the Chrome headless shell \\(about ${Math.round(HEADLESS_SHELL.platforms[PLATFORM!].size / 1e6)} MB\\) from Google`).test(t.notice),
     `the terms: Remotion's LICENSE.md at v4.0.481 (sha256 bd65083b…), the notice with this platform's sizes, and sha256(notice + licence) (${t.sha256.slice(0, 12)}…)`);
 }
 
@@ -1296,13 +1296,13 @@ async function i4() {
   const pkgs = basePkgs(POSTINSTALL);
   pkgs.find((p) => p.path === "node_modules/a")!.files.push({ name: "../escape.txt", data: "x" });
   const { err } = await fixtureInstall(dataDir, buildPin(pkgs));
-  check(err?.reason === "archive" && /^The add-on's a@1\.0\.0 holds an entry ZabsReel doesn't install \("package\/\.\.\/escape\.txt": a "\.\." segment\)\. Nothing was installed\.$/.test(err.message) && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir),
+  check(err?.reason === "archive" && /^The add-on's a@1\.0\.0 holds an entry ZedMix doesn't install \("package\/\.\.\/escape\.txt": a "\.\." segment\)\. Nothing was installed\.$/.test(err.message) && !existsSync(graphicsAddonDir(dataDir)) && clean(dataDir),
     `in an install: "${err?.message}"; nothing activated`);
   // The browser zip's refusal names it the same way (the pinned bytes are the bad zip itself).
   const zd = freshData();
   const zip = fixtureZip(PLATFORM!, [{ name: `chrome-headless-shell-${PLATFORM}/locked.bin`, data: "x", flags: 1 }]);
   const z = await fixtureInstall(zd, buildPin(basePkgs(POSTINSTALL), { [PLATFORM!]: zip }, "-i4zip"));
-  check(z.err?.reason === "archive" && z.err.message === `The add-on's Chrome headless shell holds an entry ZabsReel doesn't install ("chrome-headless-shell-${PLATFORM}/locked.bin": an encrypted entry). Nothing was installed.` && !existsSync(graphicsAddonDir(zd)) && clean(zd),
+  check(z.err?.reason === "archive" && z.err.message === `The add-on's Chrome headless shell holds an entry ZedMix doesn't install ("chrome-headless-shell-${PLATFORM}/locked.bin": an encrypted entry). Nothing was installed.` && !existsSync(graphicsAddonDir(zd)) && clean(zd),
     `in an install, a browser zip entry: "${z.err?.message}"; nothing activated`);
 }
 
@@ -1346,7 +1346,7 @@ async function i5() {
     await thrown(() => T.recover(sd, packaged)),
     await thrown(() => T.remove(sd, "web", packaged)),
   ];
-  check(refused.every((e) => e?.message === "The add-on installer's test seams work only in a ZabsReel source checkout.") && urls.length === 0 && JSON.stringify(addonsListing(sd)) === JSON.stringify([".staging-planted"]),
+  check(refused.every((e) => e?.message === "The add-on installer's test seams work only in a ZedMix source checkout.") && urls.length === 0 && JSON.stringify(addonsListing(sd)) === JSON.stringify([".staging-planted"]),
     `a packaged core refuses the test seams (platform, pin) for install, recovery and Remove; nothing fetched or deleted (${refused.map((e) => e?.message ?? "no error").join(" | ")})`);
 }
 
@@ -1367,7 +1367,7 @@ async function i6() {
   const before = readFileSync(lockAt(live), "utf8");
   hits.clear();
   const { err } = await fixtureInstall(live, f);
-  check(err?.reason === "busy" && err.message === "Another ZabsReel window is installing the graphics add-on (desktop). Wait for it to finish." && readFileSync(lockAt(live), "utf8") === before && hits.size === 0,
+  check(err?.reason === "busy" && err.message === "Another ZedMix window is installing the graphics add-on (desktop). Wait for it to finish." && readFileSync(lockAt(live), "utf8") === before && hits.size === 0,
     `a live lock (another pid, fresh): "${err?.message}"; the lock is untouched, nothing fetched`);
   const removed = await thrown(() => T.remove(live, "web", {}));
   check(removed instanceof GraphicsAddonInstallError && removed.reason === "busy" && (await T.recover(live, {})) === false && readFileSync(lockAt(live), "utf8") === before,
@@ -1618,7 +1618,7 @@ async function i10() {
   esm.data = String(esm.data).replace("  if (isAssetCompressed(src)) {\n    return src;", "  if (isAssetCompressed(src)) {\n    return src ;");
   const d = freshData();
   const { err } = await fixtureInstall(d, buildPin(pkgs));
-  check(String(esm.data).includes("return src ;") && err?.reason === "guard" && err.message === "This add-on doesn't match the Remotion version ZabsReel guards. Nothing was installed." && !existsSync(graphicsAddonDir(d)) && clean(d),
+  check(String(esm.data).includes("return src ;") && err?.reason === "guard" && err.message === "This add-on doesn't match the Remotion version ZedMix guards. Nothing was installed." && !existsSync(graphicsAddonDir(d)) && clean(d),
     `a renderer whose text the guard doesn't know: "${err?.message}"; nothing activated`);
 }
 
@@ -1632,9 +1632,9 @@ async function i11() {
   const host = `127.0.0.1:${REG_PORT}`;
   const cases: [string, () => void, AddonSeams, InstallFailure, string][] = [
     ["the registry answers 500", () => answers.set(a, "500"), {}, "http", `${host} answered 500 for a@1.0.0. Try again later.`],
-    ["the socket closes mid-body", () => answers.set(a, "close"), {}, "network", `ZabsReel couldn't reach ${host}. Check the connection and try again.`],
-    ["no answer within the request timeout", () => answers.set(a, "hold"), { requestTimeoutMs: 300 }, "network", `ZabsReel couldn't reach ${host}. Check the connection and try again.`],
-    ["nothing listens (offline)", () => {}, { env: { AIVE_ADDON_REGISTRY: "http://127.0.0.1:5039" } }, "network", "ZabsReel couldn't reach 127.0.0.1:5039. Check the connection and try again."],
+    ["the socket closes mid-body", () => answers.set(a, "close"), {}, "network", `ZedMix couldn't reach ${host}. Check the connection and try again.`],
+    ["no answer within the request timeout", () => answers.set(a, "hold"), { requestTimeoutMs: 300 }, "network", `ZedMix couldn't reach ${host}. Check the connection and try again.`],
+    ["nothing listens (offline)", () => {}, { env: { AIVE_ADDON_REGISTRY: "http://127.0.0.1:5039" } }, "network", "ZedMix couldn't reach 127.0.0.1:5039. Check the connection and try again."],
   ];
   for (const [what, setup, s, reason, message] of cases) {
     const d = freshData();
@@ -1646,7 +1646,7 @@ async function i11() {
   const mb = Math.max(1, Math.round((f.pin.lists[PLATFORM!].bytes! + f.pin.shell[PLATFORM!].size) / 1e6));
   for (const [code, reason, message] of [
     ["ENOSPC", "disk", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
-    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZedMix's data folder to a shorter path and try again.`],
   ] as const) {
     const d = freshData();
     fault = (name, p) => (name === "writeFile" && p.includes(".staging-") && p.endsWith("x.js") ? errno(code) : null);
@@ -1657,7 +1657,7 @@ async function i11() {
   // The same while taking the lock: creating addons/, or writing .install.lock.
   for (const [code, reason, op, message] of [
     ["ENOSPC", "disk", "writeFile", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
-    ["ENAMETOOLONG", "path", "mkdir", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+    ["ENAMETOOLONG", "path", "mkdir", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZedMix's data folder to a shorter path and try again.`],
   ] as const) {
     const d = freshData();
     hits.clear();
@@ -1670,7 +1670,7 @@ async function i11() {
   // Remove takes the same lock, with the same messages; the add-on stays.
   for (const [code, reason, message] of [
     ["ENOSPC", "disk", (d: string) => `Not enough disk space: the add-on needs about ${mb} MB in ${d}.`],
-    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZabsReel's data folder to a shorter path and try again.`],
+    ["ENAMETOOLONG", "path", (d: string) => `A path in the add-on is too long for this folder (${d}). Move ZedMix's data folder to a shorter path and try again.`],
   ] as const) {
     const d = freshData();
     await fixtureInstall(d, f);
@@ -1823,7 +1823,7 @@ function i14() {
   const skill = readFileSync(join(REPO, "packages", "skill-installer", "skill", "SKILL.md"), "utf8");
   check(codes.every((c) => skill.includes(`\`${c}\``)) && skill.includes("Never try to install, update or repair the add-on") && skill.includes("Help → Graphics add-on"),
     "SKILL.md names the four refusals, where the user installs the add-on, and never to install it");
-  check(/Needs the Remotion graphics add-on, which only the user installs in the ZabsReel window \(Help → Graphics add-on\).*no tool can install it\.$/.test(methods.add_graphic.description),
+  check(/Needs the Remotion graphics add-on, which only the user installs in the ZedMix window \(Help → Graphics add-on\).*no tool can install it\.$/.test(methods.add_graphic.description),
     "add_graphic's description says the user installs the add-on and no tool can");
 }
 
@@ -1845,13 +1845,13 @@ function d1() {
   const live = steps.find((x) => /\n\s+run: npx tsx packages\/core\/scripts\/smoke-addon-real\.ts --live\s*$/.test(x));
   const at = (re: RegExp) => steps.findIndex((x) => re.test(x));
   check(!!live && !/\n\s+(if|continue-on-error):/.test(live) && !/workflow_dispatch:\s*\n\s+inputs:/.test(release)
-    && at(/smoke-addon-real\.ts --live/) < at(/npm run dist --workspace zabsreel-desktop/) && at(/smoke-addon-real\.ts --live/) > at(/npm run build\b/),
+    && at(/smoke-addon-real\.ts --live/) < at(/npm run dist --workspace zedmix-desktop/) && at(/smoke-addon-real\.ts --live/) > at(/npm run build\b/),
     "release.yml's Windows job runs smoke-addon-real.ts --live on every run (no if:, no continue-on-error, no workflow input), after the build and before electron-builder");
   // This smoke itself on every Windows run too, after FFmpeg is installed (C3) and before electron-builder.
   // MUTATION: give the smoke-addon.ts step `if: startsWith(github.ref, 'refs/tags/')` → this row fails.
   const ownStep = /^\s+run: npx tsx packages\/core\/scripts\/smoke-addon\.ts\s*$/m;
   const own = steps.find((x) => ownStep.test(x));
-  check(!!own && !/\n\s+(if|continue-on-error):/.test(own) && at(ownStep) > at(/choco install ffmpeg/) && at(ownStep) < at(/npm run dist --workspace zabsreel-desktop/),
+  check(!!own && !/\n\s+(if|continue-on-error):/.test(own) && at(ownStep) > at(/choco install ffmpeg/) && at(ownStep) < at(/npm run dist --workspace zedmix-desktop/),
     "release.yml's Windows job runs this smoke (smoke-addon.ts) on every run (no if:, no continue-on-error), after FFmpeg is installed and before electron-builder");
   // MUTATION: drop the Windows sentence above the smoke-addon.ts command in docs/TESTING.md → this row fails.
   const block = testing.slice(testing.indexOf("# The graphics add-on (no network"), testing.indexOf("npx tsx packages/core/scripts/smoke-addon.ts"));

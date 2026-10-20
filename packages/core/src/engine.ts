@@ -381,7 +381,7 @@ export interface GraphicOptions {
   opacity?: number;
   standalone?: boolean;
   /**
-   * Fonts the graphic loads with loadFont(asset("<id>")) (ZabsReel's renderer
+   * Fonts the graphic loads with loadFont(asset("<id>")) (ZedMix's renderer
    * only): id -> an installed family name or the path of a font file.
    */
   fonts?: Record<string, string>;
@@ -579,7 +579,7 @@ export class EditorEngine extends EventEmitter {
   /** Test seam: a stand-in for the Remotion add_graphic loads from the add-on. */
   graphicRemotion?: GraphicRemotion;
   /**
-   * ZabsReel's own motion renderer (MOTION-PLAN D7): the binary rule, the
+   * ZedMix's own motion renderer (MOTION-PLAN D7): the binary rule, the
    * probe, the renderer's environment and the clock; tests replace them.
    */
   motionRenderer: {
@@ -589,7 +589,7 @@ export class EditorEngine extends EventEmitter {
     now: () => number;
   } = { binary: () => rendererBinary(), probe: (dataDir, opts) => probeMotionRenderer(dataDir, opts), now: () => Date.now() };
   /**
-   * What is known of ZabsReel's renderer here: the binary rule's answer, the
+   * What is known of ZedMix's renderer here: the binary rule's answer, the
    * running probe, when the last one started (or a render failed to start),
    * and why it can't run, if it can't (graphicsState reads it, D7).
    */
@@ -1438,7 +1438,7 @@ export class EditorEngine extends EventEmitter {
     // Absolute but still a protocol/URL or device path must not be probed.
     assertLocalMediaPath(path, "import path");
     const asset = await probeAsset(path);
-    // A file taken from ZabsReel's own baked/ folder is the user's media now.
+    // A file taken from ZedMix's own baked/ folder is the user's media now.
     if (isEngineBake(asset, this.dataDir)) asset.userImported = true;
     this.mutate(() => {
       this.project.assets.push(asset);
@@ -1626,7 +1626,7 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Remove library assets no clip, overlay, bleep or music bed of the open
-   * project uses. ZabsReel-made ones (bakes, built-in bleep sounds) go by
+   * project uses. ZedMix-made ones (bakes, built-in bleep sounds) go by
    * default; imported media only with `includeImported`. One undo step;
    * `dryRun` only reports. Files are not deleted: the storage clean-up trashes
    * a bake once nothing references it any more.
@@ -6534,13 +6534,13 @@ export class EditorEngine extends EventEmitter {
   /**
    * Whether add_graphic can render now, for get_state and timeline_summary,
    * read when asked (never per broadcast) and never starting a process. On
-   * ZabsReel's renderer: "ready" or "renderer-unavailable" (with
+   * ZedMix's renderer: "ready" or "renderer-unavailable" (with
    * {@link graphicsReason}), from the cached probe (D7). On the Remotion
    * add-on: the add-on's state; a malformed AIVE_REMOTION_ADDON (source
    * checkouts only) reads as "broken" here, and add_graphic gives its message.
    */
   graphicsState(): GraphicsAddonState | "renderer-unavailable" {
-    if (this.graphicsRenderer() === "zabsreel") return this.motionUnavailable() ? "renderer-unavailable" : "ready";
+    if (this.graphicsRenderer() === "zedmix") return this.motionUnavailable() ? "renderer-unavailable" : "ready";
     try {
       const r = this.graphicsAddon();
       return r.ok ? "ready" : r.state;
@@ -6549,13 +6549,13 @@ export class EditorEngine extends EventEmitter {
     }
   }
 
-  /** Why ZabsReel's renderer can't run here, when it is the setting and can't (get_state's graphicsReason). */
+  /** Why ZedMix's renderer can't run here, when it is the setting and can't (get_state's graphicsReason). */
   graphicsReason(): RendererUnavailableReason | undefined {
-    return this.graphicsRenderer() === "zabsreel" ? this.motionUnavailable()?.reason : undefined;
+    return this.graphicsRenderer() === "zedmix" ? this.motionUnavailable()?.reason : undefined;
   }
 
   /**
-   * Why ZabsReel's renderer can't run, from what is cached: the probe's (or a
+   * Why ZedMix's renderer can't run, from what is cached: the probe's (or a
    * failed render start's) answer; before any probe has ended, the binary
    * rule's (no-binary, or nothing: "ready" until the probe says otherwise).
    */
@@ -6591,11 +6591,11 @@ export class EditorEngine extends EventEmitter {
     return probe;
   }
 
-  /** How often add_graphic probes ZabsReel's renderer again while it is unavailable (D7). */
+  /** How often add_graphic probes ZedMix's renderer again while it is unavailable (D7). */
   static readonly MOTION_PROBE_INTERVAL_MS = 60_000;
 
   /**
-   * Before a render on ZabsReel's renderer: wait for the running probe (or
+   * Before a render on ZedMix's renderer: wait for the running probe (or
    * run the first one), probe again when it has been unavailable for a
    * minute, then refuse with graphic_renderer_unavailable and the reason
    * while it still is. Returns the binary to render with.
@@ -6613,14 +6613,14 @@ export class EditorEngine extends EventEmitter {
    * Render an AI-authored motion graphic (TSX that default-exports a React
    * component) and attach it to a clip as an overlay, OR (standalone / no
    * clip) insert it as its own clip. Frame windows are in project frames.
-   * The renderer is the user's setting ({@link graphicsRenderer}): ZabsReel's
+   * The renderer is the user's setting ({@link graphicsRenderer}): ZedMix's
    * own (D7: the project library as its asset table, an overlay's sound as a
    * linked audio clip) or the Remotion add-on, exactly as before it. Either
-   * refuses before anything is written when it can't render: ZabsReel's
+   * refuses before anything is written when it can't render: ZedMix's
    * renderer unavailable (graphic_renderer_unavailable, its reason), or no
    * ready add-on (a GraphicsAddonError, which, like a render that finds the
    * add-on broken, tells the UI clients: "graphics-addon"), or a graphic
-   * that needs ZabsReel's renderer on the add-on path (its `fonts` too).
+   * that needs ZedMix's renderer on the add-on path (its `fonts` too).
    * `fonts` is checked first, on either path (checkGraphicFonts).
    */
   async addGraphic(
@@ -6628,7 +6628,7 @@ export class EditorEngine extends EventEmitter {
     opts: GraphicOptions,
   ): Promise<{ graphic?: GraphicOverlay; clip: Clip; asset: MediaAsset; audioClip?: Clip }> {
     const fonts = this.checkGraphicFonts(opts.fonts);
-    if (this.graphicsRenderer() === "zabsreel") {
+    if (this.graphicsRenderer() === "zedmix") {
       const fontAssets = await this.graphicFontAssets(fonts);
       const binary = await this.motionReady();
       const { promise } = this.jobs.start("graphic", "Render motion graphic", (signal, onProgress) => this.addMotionGraphicRun(clipId, opts, fontAssets, binary, signal, onProgress));
@@ -6761,7 +6761,7 @@ export class EditorEngine extends EventEmitter {
   }
 
   /**
-   * add_graphic on ZabsReel's own renderer (D7): renderMotion with the
+   * add_graphic on ZedMix's own renderer (D7): renderMotion with the
    * project library and the graphic's `fonts` as its asset table (the page
    * sees only opaque handles, motionmedia.ts) and the engine's own offline
    * checks, then the baked file as a clip, or as an overlay with its sound
@@ -6836,7 +6836,7 @@ export class EditorEngine extends EventEmitter {
     );
   }
 
-  /** add_graphic on the Remotion add-on, as before ZabsReel's renderer (F2's refusals stay). */
+  /** add_graphic on the Remotion add-on, as before ZedMix's renderer (F2's refusals stay). */
   private async addGraphicRun(
     clipId: string | undefined,
     opts: GraphicOptions,
@@ -6903,7 +6903,7 @@ export class EditorEngine extends EventEmitter {
   /**
    * Attach a rendered overlay graphic to a clip, as one undoable step: its
    * baked video as a library asset, the GraphicOverlay on the clip, and, when
-   * the render made sound (ZabsReel's motion renderer, MOTION-PLAN D4 E3),
+   * the render made sound (ZedMix's motion renderer, MOTION-PLAN D4 E3),
    * that .wav as its own library asset placed as an audio clip over the
    * graphic's window (graphicAudioSpan; neither when no frame of the window
    * is on the clip) on the first audio track free there (not locked or
@@ -7329,8 +7329,8 @@ export class EditorEngine extends EventEmitter {
 
   /**
    * Write the project as an OpenTimelineIO (.otio) JSON file — the interchange
-   * handoff to Resolve/Premiere/Hiero/etc. ZabsReel-specific data rides in
-   * metadata.synthcut so re-importing here is lossless.
+   * handoff to Resolve/Premiere/Hiero/etc. ZedMix-specific data rides in
+   * metadata.zedmix so re-importing here is lossless.
    */
   async exportOtio(path: string): Promise<{ path: string; trackCount: number; clipCount: number }> {
     assertPathUsable(path, "export_otio path");

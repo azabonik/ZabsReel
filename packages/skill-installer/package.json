@@ -1,14 +1,14 @@
 {
-  "name": "@azabonik/zabsreel",
+  "name": "@azabonik/zedmix",
   "version": "0.2.0",
   "publishConfig": {
     "access": "public"
   },
-  "description": "Installer for the ZabsReel 'zabsreel-editor' AI skill — teaches any AI client (Claude Code, Cursor, Codex, Gemini CLI, Windsurf) to operate the ZabsReel MCP video editor like a professional.",
+  "description": "Installer for the ZedMix 'zedmix-editor' AI skill — teaches any AI client (Claude Code, Cursor, Codex, Gemini CLI, Windsurf) to operate the ZedMix MCP video editor like a professional.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "bin": {
-    "zabsreel": "bin/zabsreel.mjs"
+    "zedmix": "bin/zedmix.mjs"
   },
   "files": [
     "bin",
@@ -19,7 +19,7 @@
     "node": ">=18"
   },
   "keywords": [
-    "zabsreel",
+    "zedmix",
     "video-editor",
     "mcp",
     "ai-skill",

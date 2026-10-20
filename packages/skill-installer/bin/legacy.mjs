@@ -1,27 +1,17 @@
 /**
- * `migrate`: finds what earlier versions of this app left on a machine, and
- * changes it. Two generations:
- *
- *   Relo's SynthCut: its MCP server entry "ai-video-editor" in AI client
- *   configs and its "video-editor-pro" skill files (written by
- *   @relo-video/synthcut). These are removed.
- *
- *   This fork's own previous identity (brand.mjs LEGACY): the MCP server entry
- *   "synthcut" and the "synthcut-editor" skill. The entry is renamed to the
- *   current key in place (command, args, env and other fields kept), old skill
- *   copies are removed and old marked sections are replaced by the current one.
+ * `migrate`: finds what the previous product identity (brand.mjs LEGACY) left
+ * on a machine, and changes it to the current one: the MCP server entry under
+ * LEGACY.mcpKey is renamed to the current key in place (command, args, env and
+ * other fields kept), old LEGACY.skillName skill copies are removed and old
+ * marked sections are replaced by the current one.
  *
  * Safety rules:
- *   - A Relo entry is removed only when its name is exactly "ai-video-editor"
- *     AND its command or args run an MCP entry point
- *     (…/packages/mcp/dist/index.js from a checkout, or
- *     …/node_modules/@aive/mcp/dist/index.js in the packaged app).
- *   - A fork entry is changed only when the files next to its MCP entry file
+ *   - An entry is changed only when the files next to its MCP entry file
  *     confirm it is this app (fingerprintCandidates): a checkout whose root
- *     package.json is named "synthcut" or "zabsreel", or a packaged app whose
- *     resources/app/package.json is named "synthcut-desktop" or
- *     "zabsreel-desktop". Relo's builds (root "ai-native-video-editor",
- *     packaged "synthcut-by-relo") and other monorepos do not pass.
+ *     package.json is named LEGACY.id or PRODUCT_ID, or a packaged app whose
+ *     resources/app/package.json is named LEGACY.desktopPackage or
+ *     DESKTOP_PACKAGE. Other programs with the same layout and other
+ *     monorepos do not pass.
  *   - An existing entry under the current key is never overwritten unless it
  *     passes the same check.
  *   - Claude Code's ~/.claude.json goes through the `claude` CLI when it is on
@@ -57,11 +47,6 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { PRODUCT_NAME, PRODUCT_ID, MCP_KEY, SKILL_NAME, DESKTOP_PACKAGE, BACKUP_DIR_PARTS, LEGACY } from "./brand.mjs";
 
-export const LEGACY_SERVER = "ai-video-editor";
-export const LEGACY_SKILL = "video-editor-pro";
-const RELO_MARK_START = `<!-- synthcut:${LEGACY_SKILL}:start -->`;
-const RELO_MARK_END = `<!-- synthcut:${LEGACY_SKILL}:end -->`;
-
 /** The markers of the current skill's section in AGENTS.md / GEMINI.md. */
 export const MARK_START = `<!-- ${PRODUCT_ID}:${SKILL_NAME}:start -->`;
 export const MARK_END = `<!-- ${PRODUCT_ID}:${SKILL_NAME}:end -->`;
@@ -70,25 +55,6 @@ const FORK_MARK_END = `<!-- ${LEGACY.id}:${LEGACY.skillName}:end -->`;
 
 const OLD_KEY = LEGACY.mcpKey;
 const NEW_KEY = MCP_KEY;
-
-// The MCP entry point of the old app: <checkout>/packages/mcp/dist/index.js, or
-// <app>/resources/app[.asar]/node_modules/@aive/mcp/dist/index.js when packaged.
-const LEGACY_ENTRY = /(?:^|\/)(?:packages|@aive)\/mcp\/dist\/index\.js$/i;
-
-function pointsAtLegacyEntry(value) {
-  if (typeof value !== "string") return false;
-  const v = value.trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/");
-  if (LEGACY_ENTRY.test(v)) return true;
-  // A command written as one string ("node /path/to/index.js").
-  return v.split(/\s+/).some((t) => LEGACY_ENTRY.test(t.replace(/^["']|["']$/g, "")));
-}
-
-/** True when an MCP server entry runs an MCP entry point of the shape Relo's SynthCut used. */
-export function isLegacyServer(entry) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  const args = Array.isArray(entry.args) ? entry.args : [];
-  return [entry.command, ...args].some(pointsAtLegacyEntry);
-}
 
 function describeServer(entry) {
   const parts = [entry?.command, ...(Array.isArray(entry?.args) ? entry.args : [])].filter((p) => typeof p === "string");
@@ -425,20 +391,15 @@ function jsonConfigs({ home, projectDir, env }) {
   return list.filter((c) => (seen.has(c.file) ? false : (seen.add(c.file), true)));
 }
 
-/** Files the old installers wrote their skill into (@relo-video/synthcut 0.1.x, and this package before the rename). */
+/** Files this package wrote its skill into before the rename. */
 function skillTargets({ home, projectDir, env }) {
   const bases = [...new Set([home, projectDir])];
   const codexHome = env.CODEX_HOME || join(home, ".codex");
   return {
-    skillFiles: [
-      ...bases.map((b) => ({ gen: "upstream", name: LEGACY_SKILL, file: join(b, ".claude", "skills", LEGACY_SKILL, "SKILL.md") })),
-      ...bases.map((b) => ({ gen: "fork", name: LEGACY.skillName, file: join(b, ".claude", "skills", LEGACY.skillName, "SKILL.md") })),
-    ],
+    skillFiles: bases.map((b) => join(b, ".claude", "skills", LEGACY.skillName, "SKILL.md")),
     ruleFiles: [
-      { gen: "upstream", name: LEGACY_SKILL, client: "Cursor rule", file: join(projectDir, ".cursor", "rules", `synthcut-${LEGACY_SKILL}.mdc`) },
-      { gen: "upstream", name: LEGACY_SKILL, client: "Windsurf rule", file: join(projectDir, ".windsurf", "rules", `synthcut-${LEGACY_SKILL}.md`) },
-      { gen: "fork", name: LEGACY.skillName, client: "Cursor rule", file: join(projectDir, ".cursor", "rules", `${LEGACY.skillName}.mdc`) },
-      { gen: "fork", name: LEGACY.skillName, client: "Windsurf rule", file: join(projectDir, ".windsurf", "rules", `${LEGACY.skillName}.md`) },
+      { client: "Cursor rule", file: join(projectDir, ".cursor", "rules", `${LEGACY.skillName}.mdc`) },
+      { client: "Windsurf rule", file: join(projectDir, ".windsurf", "rules", `${LEGACY.skillName}.md`) },
     ],
     sectionFiles: [...new Set([
       join(projectDir, "AGENTS.md"),
@@ -490,17 +451,6 @@ function tomlTables(lines, key) {
     blocks.push({ start: i, end, sub: m[1] ? m[1].slice(1).trim().replace(/^["']|["']$/g, "") : null, text: lines.slice(i + 1, end).join("\n") });
   }
   return blocks;
-}
-
-/**
- * Line ranges [start, end) of the [mcp_servers.ai-video-editor] table and its
- * sub-tables, when that table runs the old entry point.
- */
-function legacyTomlRanges(lines) {
-  const blocks = tomlTables(lines, LEGACY_SERVER);
-  const main = blocks.find((b) => !b.sub);
-  if (!main || !tomlStrings(main.text).some(pointsAtLegacyEntry)) return { ranges: [], mentioned: blocks.length > 0 };
-  return { ranges: blocks.map((b) => [b.start, b.end]), mentioned: true };
 }
 
 function removeTomlRanges(text, ranges) {
@@ -674,10 +624,10 @@ function forkToml(text, ctx) {
 // ----------------------------------------------------------------------- scan
 
 /**
- * Look for leftovers of both generations. Options: `entry` (a checked --entry,
- * see readEntryFile) and `move` (see checkoutMove). Returns
+ * Look for what the previous identity left. Options: `entry` (a checked
+ * --entry, see readEntryFile) and `move` (see checkoutMove). Returns
  *   { found: [...changes], skipped: [...left alone, with a reason] }.
- * Each finding has `gen` ("upstream" or "fork"), `what` and `verb`.
+ * Each finding has `what` and `verb`.
  */
 export function findLegacy({ home, projectDir, env = process.env, entry = null, move = null }) {
   const found = [];
@@ -687,16 +637,13 @@ export function findLegacy({ home, projectDir, env = process.env, entry = null, 
   for (const cfg of jsonConfigs({ home, projectDir, env })) {
     const text = readText(cfg.file);
     if (text === null) continue;
-    const mentionsLegacy = text.includes(LEGACY_SERVER) || text.includes(`"${OLD_KEY}"`);
+    const mentionsLegacy = text.includes(`"${OLD_KEY}"`);
     if (!mentionsLegacy && !text.includes(`"${NEW_KEY}"`)) continue;
     let data;
     try {
       data = JSON.parse(text);
     } catch {
-      if (mentionsLegacy) {
-        const name = text.includes(LEGACY_SERVER) ? LEGACY_SERVER : OLD_KEY;
-        skipped.push({ client: cfg.client, file: cfg.file, reason: `mentions "${name}" but is not plain JSON (comments?); edit it by hand` });
-      }
+      if (mentionsLegacy) skipped.push({ client: cfg.client, file: cfg.file, reason: `mentions "${OLD_KEY}" but is not plain JSON (comments?); edit it by hand` });
       continue;
     }
     const spots = [{ path: [cfg.key], scope: "user", base: cfg.project ? projectDir : null }];
@@ -709,28 +656,11 @@ export function findLegacy({ home, projectDir, env = process.env, entry = null, 
       const where = spot.project ? `${cfg.client} (project ${spot.project})` : cfg.client;
       const common = { kind: "json", client: where, file: cfg.file, claudeCode: !!cfg.claudeCode, scope: spot.scope, project: spot.project };
 
-      if (has(servers, LEGACY_SERVER)) {
-        const legacyEntry = servers[LEGACY_SERVER];
-        if (isLegacyServer(legacyEntry)) {
-          found.push({
-            ...common,
-            gen: "upstream",
-            verb: "removed",
-            path: [...spot.path, LEGACY_SERVER],
-            hasNewKey: has(servers, NEW_KEY) || has(servers, OLD_KEY),
-            what: `MCP server "${LEGACY_SERVER}": ${describeServer(legacyEntry)}`,
-          });
-        } else {
-          skipped.push({ client: where, file: cfg.file, reason: `"${LEGACY_SERVER}" does not run Relo's SynthCut MCP server (${describeServer(legacyEntry) || "no command"})` });
-        }
-      }
-
       const fork = forkJson(servers, spot.base, ctx);
       for (const reason of fork.notes) skipped.push({ client: where, file: cfg.file, reason });
       if (fork.change) {
         found.push({
           ...common,
-          gen: "fork",
           serversPath: spot.path,
           expectS: JSON.stringify(servers[OLD_KEY]),
           expectZ: JSON.stringify(servers[NEW_KEY]),
@@ -742,54 +672,37 @@ export function findLegacy({ home, projectDir, env = process.env, entry = null, 
 
   const codexToml = join(env.CODEX_HOME || join(home, ".codex"), "config.toml");
   const toml = readText(codexToml);
-  if (toml !== null && toml.includes(LEGACY_SERVER)) {
-    const lines = toml.split(/\r?\n/);
-    const { ranges, mentioned } = legacyTomlRanges(lines);
-    if (ranges.length) {
-      const hasNewKey = tomlTables(lines, NEW_KEY).length > 0 || tomlTables(lines, OLD_KEY).length > 0;
-      found.push({ kind: "toml", gen: "upstream", verb: "removed", client: "Codex CLI", file: codexToml, what: `[mcp_servers.${LEGACY_SERVER}]`, hasNewKey });
-    } else {
-      skipped.push({
-        client: "Codex CLI",
-        file: codexToml,
-        reason: mentioned
-          ? `[mcp_servers.${LEGACY_SERVER}] does not run Relo's SynthCut MCP server`
-          : `mentions "${LEGACY_SERVER}" in a form this tool does not edit; edit it by hand`,
-      });
-    }
-  }
   if (toml !== null) {
     const fork = forkToml(toml, ctx);
     if (fork) {
       for (const reason of fork.notes) skipped.push({ client: "Codex CLI", file: codexToml, reason });
-      if (fork.text !== null) found.push({ kind: "toml", gen: "fork", client: "Codex CLI", file: codexToml, rule: fork.rule, what: fork.what, verb: fork.verb, ctx });
+      if (fork.text !== null) found.push({ kind: "toml", client: "Codex CLI", file: codexToml, rule: fork.rule, what: fork.what, verb: fork.verb, ctx });
     }
   }
 
+  const skill = LEGACY.skillName;
   const { skillFiles, ruleFiles, sectionFiles } = skillTargets({ home, projectDir, env });
-  for (const { gen, name: skill, file } of skillFiles) {
+  for (const file of skillFiles) {
     const text = readText(file);
     if (text === null) continue;
     const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
     const name = fm && /^name:\s*["']?([^"'\r\n]+?)["']?\s*$/m.exec(fm[1]);
-    if (name && name[1] === skill) found.push({ kind: "file", gen, verb: "removed", client: "Claude Code skill", file, what: `skill "${skill}"`, removeDirIfEmpty: true });
+    if (name && name[1] === skill) found.push({ kind: "file", verb: "removed", client: "Claude Code skill", file, what: `skill "${skill}"`, removeDirIfEmpty: true });
     else skipped.push({ client: "Claude Code skill", file, reason: `its name is not "${skill}"` });
   }
-  for (const { gen, name: skill, client, file } of ruleFiles) {
+  for (const { client, file } of ruleFiles) {
     const text = readText(file);
     if (text === null) continue;
-    if (/synthcut/i.test(text)) found.push({ kind: "file", gen, verb: "removed", client, file, what: `rule for skill "${skill}"` });
-    else skipped.push({ client, file, reason: `does not look like the ${gen === "upstream" ? "Relo's SynthCut" : LEGACY.productName} skill` });
+    if (text.toLowerCase().includes(LEGACY.productName.toLowerCase())) found.push({ kind: "file", verb: "removed", client, file, what: `rule for skill "${skill}"` });
+    else skipped.push({ client, file, reason: `does not look like the ${LEGACY.productName} skill` });
   }
   for (const file of sectionFiles) {
     const text = readText(file);
     if (text === null) continue;
     const client = /GEMINI\.md$/.test(file) ? "Gemini CLI" : "Codex / agents";
-    const s = text.indexOf(RELO_MARK_START);
-    if (s >= 0 && text.indexOf(RELO_MARK_END, s) > s) found.push({ kind: "section", gen: "upstream", verb: "removed", client, file, what: `section ${RELO_MARK_START}` });
     const f = text.indexOf(FORK_MARK_START);
     if (f >= 0 && text.indexOf(FORK_MARK_END, f) > f) {
-      found.push({ kind: "section", gen: "fork", verb: "replaced", client, file, what: `section ${FORK_MARK_START} → ${MARK_START}` });
+      found.push({ kind: "section", verb: "replaced", client, file, what: `section ${FORK_MARK_START} → ${MARK_START}` });
     }
   }
   return { found, skipped };
@@ -838,10 +751,10 @@ export function atomicWrite(file, data, { mode } = {}) {
   }
 }
 
-/** ~/.zabsreel/backups */
+/** ~/.zedmix/backups */
 export const backupRoot = (home) => join(home, ...BACKUP_DIR_PARTS);
 
-/** A new, not yet created, backup folder: ~/.zabsreel/backups/<kind>-<time>. */
+/** A new, not yet created, backup folder: ~/.zedmix/backups/<kind>-<time>. */
 export function newBackupDir(home, kind = "migrate") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   let dir = join(backupRoot(home), `${kind}-${stamp}`);
@@ -860,8 +773,8 @@ function privateDir(dir) {
 }
 
 /**
- * Copies files into `dir` (~/.zabsreel/backups/<stamp>) before they change.
- * ~/.zabsreel, ~/.zabsreel/backups and the stamp folder get mode 0700;
+ * Copies files into `dir` (~/.zedmix/backups/<stamp>) before they change.
+ * ~/.zedmix, ~/.zedmix/backups and the stamp folder get mode 0700;
  * manifest.json (original and backup paths only) gets 0600.
  */
 function backupSet(dir) {
@@ -912,16 +825,6 @@ function findOnPath(cmd, env) {
 // safely, so `add-json` is only used with a real executable.
 const needsShell = (bin) => /\.(cmd|bat)$/i.test(bin);
 
-function stillThere(file, path) {
-  try {
-    const data = JSON.parse(readFileSync(file, "utf8"));
-    const parent = getAt(data, path.slice(0, -1));
-    return !!parent && typeof parent === "object" && path[path.length - 1] in parent;
-  } catch {
-    return true;
-  }
-}
-
 function stable(v) {
   if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
   if (isObject(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}`;
@@ -953,11 +856,9 @@ function claudeRoute(f, file, claude) {
   if (!f.claudeCode || !claude) return "direct";
   const cwd = f.scope === "local" ? f.project : dirname(file);
   if (!cwd || !existsSync(cwd)) return "direct";
-  if (f.gen === "fork") {
-    // The CLI cannot change an existing key in place without removing it first.
-    if (!f.zAtS && f.nextZ !== undefined) return "direct";
-    if (f.zAtS && needsShell(claude)) return "direct";
-  }
+  // The CLI cannot change an existing key in place without removing it first.
+  if (!f.zAtS && f.nextZ !== undefined) return "direct";
+  if (f.zAtS && needsShell(claude)) return "direct";
   return "cli";
 }
 
@@ -1011,22 +912,20 @@ function cutSection(text, start, end) {
   const s = text.indexOf(start);
   const e = s >= 0 ? text.indexOf(end, s) : -1;
   if (s < 0 || e < 0) return null;
-  // The old installers added "\n\n" in front of the section they appended.
+  // The old installer added "\n\n" in front of the section it appended.
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const head = text.slice(0, s).replace(/(?:\r?\n)+$/, "");
   const tail = text.slice(e + end.length).replace(/^(?:\r?\n)+/, "");
-  let out;
-  if (tail.trim() === "") out = head === "" ? "" : head + eol;
-  else out = head === "" ? tail : head + eol + eol + tail;
-  return { text: out, atStart: s === 0 };
+  if (tail.trim() === "") return head === "" ? "" : head + eol;
+  return head === "" ? tail : head + eol + eol + tail;
 }
 
-/** Replace the fork's old section with the current one (or drop it when the current one is already there). */
+/** Replace the old section with the current one (or drop it when the current one is already there). */
 function swapSection(text, newSection) {
   const s = text.indexOf(FORK_MARK_START);
   const e = s >= 0 ? text.indexOf(FORK_MARK_END, s) : -1;
   if (s < 0 || e < 0) return null;
-  if (text.includes(MARK_START) || !newSection) return cutSection(text, FORK_MARK_START, FORK_MARK_END)?.text ?? null;
+  if (text.includes(MARK_START) || !newSection) return cutSection(text, FORK_MARK_START, FORK_MARK_END);
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   let stop = e + FORK_MARK_END.length;
   if (text.startsWith("\r\n", stop)) stop += 2;
@@ -1060,18 +959,9 @@ export function removeLegacy(found, { backupDir, env = process.env, newSection =
         const handled = new Set();
         for (const f of items) {
           if (claudeRoute(f, file, claude) !== "cli") continue;
-          if (f.gen === "fork") {
-            const r = forkViaCli(f, file, claude, env);
-            results.push({ finding: f, ok: r.ok, note: r.note });
-            handled.add(f);
-            continue;
-          }
-          const cwd = f.scope === "local" ? f.project : dirname(file);
-          const r = runClaude(claude, ["mcp", "remove", LEGACY_SERVER, "-s", f.scope], cwd, env);
-          if (r.status === 0 && !stillThere(file, f.path)) {
-            results.push({ finding: f, ok: true, note: "removed with `claude mcp remove`" });
-            handled.add(f);
-          }
+          const r = forkViaCli(f, file, claude, env);
+          results.push({ finding: f, ok: r.ok, note: r.note });
+          handled.add(f);
         }
         const rest = items.filter((f) => !handled.has(f));
         if (rest.length && items[0].claudeCode && !claudeDirect) {
@@ -1079,7 +969,7 @@ export function removeLegacy(found, { backupDir, env = process.env, newSection =
         } else if (rest.length) {
           const current = readFileSync(file, "utf8");
           const data = JSON.parse(current);
-          const done = rest.filter((f) => (f.gen === "fork" ? applyForkJson(data, f) : deleteAt(data, f.path)));
+          const done = rest.filter((f) => applyForkJson(data, f));
           if (done.length) writeJsonLike(file, current, data);
           for (const f of rest) {
             const ok = done.includes(f);
@@ -1089,12 +979,7 @@ export function removeLegacy(found, { backupDir, env = process.env, newSection =
       } else if (kind === "toml") {
         let out = text;
         const oks = new Map();
-        for (const f of items.filter((i) => i.gen === "upstream")) {
-          const { ranges } = legacyTomlRanges(out.split(/\r?\n/));
-          if (ranges.length) out = removeTomlRanges(out, ranges);
-          oks.set(f, ranges.length > 0);
-        }
-        for (const f of items.filter((i) => i.gen === "fork")) {
+        for (const f of items) {
           const r = forkToml(out, f.ctx);
           const ok = !!r && r.text !== null && r.rule === f.rule && r.what === f.what;
           if (ok) out = r.text;
@@ -1107,21 +992,13 @@ export function removeLegacy(found, { backupDir, env = process.env, newSection =
         }
       } else if (kind === "section") {
         let out = text;
-        let empty = false;
         const oks = new Map();
         for (const f of items) {
-          if (f.gen === "upstream") {
-            const r = cutSection(out, RELO_MARK_START, RELO_MARK_END);
-            if (r) (out = r.text), (empty = r.atStart && r.text.trim() === "");
-            oks.set(f, !!r);
-          } else {
-            const r = swapSection(out, newSection);
-            if (r !== null) out = r;
-            oks.set(f, r !== null);
-          }
+          const r = swapSection(out, newSection);
+          if (r !== null) out = r;
+          oks.set(f, r !== null);
         }
-        if (empty && out.trim() === "") rmSync(file); // created by the old installer for the section alone
-        else if (out !== text) atomicWrite(file, out);
+        if (out !== text) atomicWrite(file, out);
         for (const f of items) results.push({ finding: f, ok: oks.get(f), note: oks.get(f) ? "" : "the section changed since the scan; left alone" });
       } else if (kind === "file") {
         rmSync(file);
@@ -1146,14 +1023,6 @@ function writeJsonLike(file, original, data) {
   if (original.includes("\r\n")) out = out.replace(/\n/g, "\r\n");
   if (/\r?\n$/.test(original)) out += original.endsWith("\r\n") ? "\r\n" : "\n";
   atomicWrite(file, out);
-}
-
-function deleteAt(data, path) {
-  const parent = getAt(data, path.slice(0, -1));
-  const key = path[path.length - 1];
-  if (!parent || typeof parent !== "object" || !(key in parent) || !isLegacyServer(parent[key])) return false;
-  delete parent[key];
-  return true;
 }
 
 // ------------------------------------------------------------------- restore

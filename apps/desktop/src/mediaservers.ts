@@ -159,7 +159,7 @@ export function allowDialogText(key: string, entry: Pending | undefined, userPat
   };
 }
 
-/** The Keep dialog for a server added outside ZabsReel (Remove is the default and Esc). */
+/** The Keep dialog for a server added outside ZedMix (Remove is the default and Esc). */
 export function keepDialogText(key: string, entry: Pending | undefined, platform: string): ApprovalText {
   const keepOnly = platform === "win32"
     ? `Keep it only if you added it yourself. When ${PRODUCT_NAME} opens files there, Windows may automatically send your Windows sign-in (a scrambled copy of your password) to that computer.`

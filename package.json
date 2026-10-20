@@ -1,5 +1,5 @@
 {
-  "name": "zabsreel",
+  "name": "zedmix",
   "version": "0.2.0",
   "private": true,
   "description": "An open-source video editor built to be operated by AI, not humans. Exposes itself as an MCP server so any MCP-compatible AI client can drive real, local FFmpeg-based edits.",
@@ -13,13 +13,13 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @aive/motion && npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace zabsreel-desktop",
-    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace zabsreel-desktop && npm run typecheck:scripts",
+    "build": "npm run build --workspace @aive/motion && npm run build --workspace @aive/core --workspace @aive/mcp && npm run build:renderer --workspace zedmix-desktop",
+    "typecheck": "tsc -b packages/core packages/mcp && npm run typecheck --workspace zedmix-desktop && npm run typecheck:scripts",
     "typecheck:scripts": "tsc -p packages/core/scripts && tsc -p packages/mcp/scripts && tsc -p packages/motion/scripts && tsc -p apps/desktop/scripts",
     "test:cleanroom": "npm run test:cleanroom --workspace @aive/motion && npm run typecheck:cleanroom --workspace @aive/motion",
     "check:cleanroom-lock": "node scripts/check-cleanroom-lock.mjs",
-    "start": "npm run start --workspace zabsreel-desktop",
-    "web": "npm run build && npm run web --workspace zabsreel-desktop --",
+    "start": "npm run start --workspace zedmix-desktop",
+    "web": "npm run build && npm run web --workspace zedmix-desktop --",
     "core": "npm run start --workspace @aive/core",
     "mcp": "npm run start --workspace @aive/mcp",
     "clean": "node -e \"require('fs').rmSync('node_modules',{recursive:true,force:true})\""

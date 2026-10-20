@@ -36,7 +36,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const rendererDir = resolve(HERE, "..", "dist", "renderer");
 const packaged: Ctx = { rendererDir, corePort: 4791, devOrigin: null, platform: process.platform === "win32" ? "win32" : "linux" };
 const dev: Ctx = { ...packaged, devOrigin: guard.devOriginOf("http://localhost:5173/?port=4791") };
-const win: Ctx = { rendererDir: "C:\\Program Files\\ZabsReel\\resources\\app.asar\\dist\\renderer", corePort: 4791, devOrigin: null, platform: "win32" };
+const win: Ctx = { rendererDir: "C:\\Program Files\\ZedMix\\resources\\app.asar\\dist\\renderer", corePort: 4791, devOrigin: null, platform: "win32" };
 const own = (rel: string) => pathToFileURL(join(rendererDir, rel)).href;
 
 console.log("1. what the packaged window may request...");
@@ -69,14 +69,14 @@ for (const url of ["http://localhost:5174/", "ws://localhost:5174/", "http://zr-
 
 console.log("3. Windows paths (win32 rules, case-insensitive)...");
 for (const url of [
-  "file:///C:/Program%20Files/ZabsReel/resources/app.asar/dist/renderer/index.html",
-  "file:///c:/program%20files/zabsreel/RESOURCES/app.asar/dist/renderer/assets/x.js",
+  "file:///C:/Program%20Files/ZedMix/resources/app.asar/dist/renderer/index.html",
+  "file:///c:/program%20files/zedmix/RESOURCES/app.asar/dist/renderer/assets/x.js",
 ]) {
   check(guard.isAllowedRendererUrl(url, win), `win32, allowed: ${url}`);
 }
 for (const url of [
   "file://zr-evil.invalid/s/x.png", "file:////zr-evil.invalid/s/x.png", "file:///C:/Windows/win.ini",
-  "file:///C:/Program%20Files/ZabsReel/resources/app.asar/dist/renderer-evil/x.js", "file:///%5C%5Czr-evil.invalid/s/x.png",
+  "file:///C:/Program%20Files/ZedMix/resources/app.asar/dist/renderer-evil/x.js", "file:///%5C%5Czr-evil.invalid/s/x.png",
 ]) {
   check(!guard.isAllowedRendererUrl(url, win), `win32, refused: ${url}`);
 }
@@ -87,7 +87,7 @@ check(guard.isAppPage(`${own("index.html")}?port=4791&token=t`, packaged) && !gu
   "packaged: index.html (with its query) only, not an asset, the core or another site");
 check(guard.isAppPage("http://localhost:5173/?port=1", dev) && !guard.isAppPage("http://localhost:5174/", dev) && !guard.isAppPage(own("index.html"), dev),
   "dev: the Vite origin only");
-check(guard.isAppPage("file:///C:/program%20files/ZabsReel/resources/app.asar/dist/renderer/INDEX.html", win), "win32: case-insensitive");
+check(guard.isAppPage("file:///C:/program%20files/ZedMix/resources/app.asar/dist/renderer/INDEX.html", win), "win32: case-insensitive");
 
 console.log("5. the log line and the page's Content-Security-Policy...");
 check(guard.shownOrigin("http://zr-evil.invalid/s/x.png?token=secret") === "http://zr-evil.invalid" && guard.shownOrigin("file://zr-evil.invalid/s/x") === "file://zr-evil.invalid",

@@ -15,7 +15,7 @@
 // in-app alertdialog (focus on Keep offline, Tab stays inside, Esc keeps it
 // offline, Allow allows it, the clips come online); Save As with a project
 // named \\zr-evil.invalid\s\x starts the picker with x.aive and saves in the
-// folder listed; an entry added outside ZabsReel gets the Keep dialog (focus
+// folder listed; an entry added outside ZedMix gets the Keep dialog (focus
 // on Remove, Esc removes it, Keep stamps it), and with two pages Keep in one
 // then Esc in the other leaves it allowed. Both processes run under a trace
 // preload (every fs and child_process call that names a test server): nothing
@@ -251,7 +251,7 @@ async function main() {
   const token = new URL(ready.url).searchParams.get("token") ?? "";
   const shellKey = new URL(ready.url).searchParams.get("shell") ?? "";
   const auth = { "x-aive-token": token };
-  const shellAuth = { "x-zabsreel-shell": shellKey };
+  const shellAuth = { "x-zedmix-shell": shellKey };
   console.log(`web shell on :${port}, core on :${corePort}`);
 
   try {
@@ -277,7 +277,7 @@ async function main() {
     check("foreign Host header refused (DNS rebinding)", (await request(port, "/", { host: `evil.example:${port}` })).status === 403);
     check("non-GET refused", (await request(port, "/", { method: "POST", body: "{}" })).status === 405);
     check("/api without the shell key → 401", (await request(port, "/api/config")).status === 401);
-    check("/api with a wrong shell key → 401", (await request(port, "/api/config", { headers: { "x-zabsreel-shell": "nope" } })).status === 401);
+    check("/api with a wrong shell key → 401", (await request(port, "/api/config", { headers: { "x-zedmix-shell": "nope" } })).status === 401);
     const coreOnly = await request(port, "/api/config", { headers: auth });
     check("/api/config with only the core token (what server.json gives the agent) → 401", coreOnly.status === 401 && !coreOnly.body.includes(shellKey));
     check("/api/fs/list with only the core token → 401", (await request(port, `/api/fs/list?path=${encodeURIComponent(mediaDir)}`, { headers: auth })).status === 401);
@@ -287,9 +287,9 @@ async function main() {
     const c = json(cfg);
     check("config ok with the shell key", cfg.status === 200 && c.ok === true && typeof c.home === "string");
     check("places include Home", Array.isArray(c.places) && c.places.some((p: { label: string }) => p.label === "Home"));
-    check("MCP config resolved", c.mcp?.available === true && !!JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers?.zabsreel);
-    check("MCP config has the one key zabsreel", JSON.stringify(Object.keys(JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers ?? {})) === '["zabsreel"]');
-    check("startup text names ZabsReel", shellLog.includes("ZabsReel is running at:"), shellLog);
+    check("MCP config resolved", c.mcp?.available === true && !!JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers?.zedmix);
+    check("MCP config has the one key zedmix", JSON.stringify(Object.keys(JSON.parse(String(c.mcp?.json ?? "{}")).mcpServers ?? {})) === '["zedmix"]');
+    check("startup text names ZedMix", shellLog.includes("ZedMix is running at:"), shellLog);
     check("launcher logs the data dir it chose", shellLog.includes(`[aive] data dir: ${dataDir} (AIVE_DATA_DIR)`), shellLog);
 
     console.log("4. /api/fs/list");
@@ -322,7 +322,7 @@ async function main() {
     const playlist = join(dataDir, "renamed-playlist.mp4");
     writeFileSync(playlist, "#EXTM3U\n#EXTINF:1.0,\n//zr-csp.invalid/s/seg0.ts\n");
     const hls = await request(corePort, `/file?path=${encodeURIComponent(playlist)}&token=${encodeURIComponent(token)}`);
-    check("/file answers 415 for a playlist, whatever its name", hls.status === 415 && json(hls).error === "ZabsReel can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.", `${hls.status} ${hls.body.slice(0, 160)}`);
+    check("/file answers 415 for a playlist, whatever its name", hls.status === 415 && json(hls).error === "ZedMix can't open this kind of file. If it is a playlist, manifest or list file, import the video file itself.", `${hls.status} ${hls.body.slice(0, 160)}`);
 
     await networkComputers({ port, corePort, token, shellKey, ready, root, dataDir, traceFile, clip });
     await graphicsAddon({ port, corePort, token, shellKey, ready, root, dataDir, traceFile, registry, fixture });
@@ -394,14 +394,14 @@ async function networkComputers(o: {
     const t = readTrustedHosts(dataDir);
     return [...t.approved, ...t.outside].some((e) => e.host === host);
   };
-  /** Write an entry ZabsReel did not stamp ("added outside ZabsReel"), as a hand edit would. */
+  /** Write an entry ZedMix did not stamp ("added outside ZedMix"), as a hand edit would. */
   const addOutside = (host: string) => {
     const cur = existsSync(hostsFile) ? JSON.parse(readFileSync(hostsFile, "utf8")) : { version: 2, servers: [] };
     cur.servers = [...cur.servers.filter((e: { host: string }) => e.host !== host), { host }];
     mkdirSync(join(dataDir, "trust"), { recursive: true, mode: 0o700 });
     writeFileSync(hostsFile, JSON.stringify(cur, null, 2));
   };
-  const post = (path: string, body: unknown, headers: Record<string, string> = { "x-zabsreel-shell": shellKey }) =>
+  const post = (path: string, body: unknown, headers: Record<string, string> = { "x-zedmix-shell": shellKey }) =>
     request(port, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const rpc = async (method: string, params: object = {}) => {
     const r = await request(corePort, "/rpc", {
@@ -440,10 +440,10 @@ async function networkComputers(o: {
   });
   check("a cross-site style POST (no custom header) → refused, nothing stored", crossSite.status === 401 && !listed("zr-evil-2.invalid"), `${crossSite.status}`);
   const preflight = await request(port, "/api/media-servers/approve", {
-    method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-method": "POST", "access-control-request-headers": "x-zabsreel-shell" },
+    method: "OPTIONS", headers: { origin: "https://evil.example", "access-control-request-method": "POST", "access-control-request-headers": "x-zedmix-shell" },
   });
   check("…and the CORS preflight a custom header needs is not answered", preflight.status >= 400 && !preflight.headers["access-control-allow-origin"] && !preflight.headers["access-control-allow-headers"], `${preflight.status}`);
-  const getApprove = await request(port, "/api/media-servers/approve?host=zr-evil-2.invalid", { headers: { "x-zabsreel-shell": shellKey } });
+  const getApprove = await request(port, "/api/media-servers/approve?host=zr-evil-2.invalid", { headers: { "x-zedmix-shell": shellKey } });
   check("GET approve → 405, nothing stored", getApprove.status === 405 && !listed("zr-evil-2.invalid"), `${getApprove.status}`);
   const bad = await post("/api/media-servers/approve", { host: "nas@SSL" });
   check("a host that can't be allowed → 400", bad.status === 400 && /Not a network computer name/.test(json(bad).error ?? ""), `${bad.status} ${bad.body}`);
@@ -457,25 +457,25 @@ async function networkComputers(o: {
   const keptRemove = await post("/api/media-servers/revoke", { host: "zr-evil-8.invalid", onlyIfOutside: true });
   check("POST revoke onlyIfOutside on an allowed server → removes nothing ({removed: false})", json(keptRemove).removed === false && viaOf("zr-evil-8.invalid") === "prompt", keptRemove.body);
   const outsideRemove = await post("/api/media-servers/revoke", { host: "zr-evil-6.invalid", onlyIfOutside: true });
-  check("…on one added outside ZabsReel → removed", json(outsideRemove).removed === true && !listed("zr-evil-6.invalid"), outsideRemove.body);
+  check("…on one added outside ZedMix → removed", json(outsideRemove).removed === true && !listed("zr-evil-6.invalid"), outsideRemove.body);
   await post("/api/media-servers/revoke", { host: "zr-evil-8.invalid" });
 
   const pickedPath = "//zr-pick.invalid/s/a.mp4";
   const unlisted = await post("/api/media-servers/picked", { paths: [pickedPath, clip] });
   check("picked on a server the shell never listed → needsApproval, not stored",
     unlisted.status === 200 && JSON.stringify(json(unlisted).needsApproval) === '["zr-pick.invalid"]' && !listed("zr-pick.invalid"), unlisted.body);
-  const listing = await request(port, `/api/fs/list?path=${encodeURIComponent("//zr-pick.invalid/s")}`, { headers: { "x-zabsreel-shell": shellKey } });
+  const listing = await request(port, `/api/fs/list?path=${encodeURIComponent("//zr-pick.invalid/s")}`, { headers: { "x-zedmix-shell": shellKey } });
   console.log(`  (listed //zr-pick.invalid/s: ${listing.status}; on Linux it is a missing local folder, and the shell notes the server either way)`);
   // Plan 2.2: a device path, or a server name that can't be allowed, is refused before the shell reads anything.
   // MUTATION: drop the refused check in listDir → these rows get 404 (a missing local folder) and the trace shows the readdir.
   for (const p of ["//./UNC/zr-evil-refused.invalid/s", "//zr-evil-refused.invalid@SSL/s"]) {
-    const refusedList = await request(port, `/api/fs/list?path=${encodeURIComponent(p)}`, { headers: { "x-zabsreel-shell": shellKey } });
+    const refusedList = await request(port, `/api/fs/list?path=${encodeURIComponent(p)}`, { headers: { "x-zedmix-shell": shellKey } });
     check(`/api/fs/list ${p} → 400 with the refusal`, refusedList.status === 400 && String(json(refusedList).error).startsWith(`Refusing to open ${p}: `), `${refusedList.status} ${refusedList.body.slice(0, 160)}`);
   }
   check("…and nothing in the shell read those paths", traced("zr-evil-refused").length === 0, JSON.stringify(traced("zr-evil-refused")).slice(0, 300));
   const pickedRes = await post("/api/media-servers/picked", { paths: [pickedPath] });
   check("…then picked on it → allowed (via picker)", JSON.stringify(json(pickedRes).approved) === '["zr-pick.invalid"]' && viaOf("zr-pick.invalid") === "picker", pickedRes.body);
-  check("GET picked → 405", (await request(port, "/api/media-servers/picked", { headers: { "x-zabsreel-shell": shellKey } })).status === 405);
+  check("GET picked → 405", (await request(port, "/api/media-servers/picked", { headers: { "x-zedmix-shell": shellKey } })).status === 405);
 
   console.log("7. network computers in the page (headless Chromium)");
   // Projects made from a saved one: the imported clip's asset on a test server, or a name that is a path.
@@ -609,14 +609,14 @@ async function networkComputers(o: {
     expect(await waitFor("saved", () => existsSync(join(saveDir, "x.aive")), 10000), "Save writes x.aive into the folder listed");
     expect(picked.every((b) => !b.includes("zr-evil.invalid")) && !listed("zr-evil.invalid"), `/api/media-servers/picked got no zr-evil.invalid path (${picked.join(" | ") || "no call"}); the store is unchanged`);
 
-    // Plan 9.6 step 6: added outside ZabsReel.
+    // Plan 9.6 step 6: added outside ZedMix.
     addOutside("zr-evil-3.invalid");
     await rpc("load_project", { path: crafted3 });
-    const outsideBanner = /This project uses 1 file on \\\\zr-evil-3\.invalid\. It is in your list of allowed network computers, but ZabsReel didn't put it there/;
+    const outsideBanner = /This project uses 1 file on \\\\zr-evil-3\.invalid\. It is in your list of allowed network computers, but ZedMix didn't put it there/;
     expect(await waitFor("outside banner", async () => outsideBanner.test(await banner(a))), `outside entry: banner "${(await banner(a)).replace(/\s+/g, " ")}"`);
     expect(await review(a, "zr-evil-3.invalid"), "Review… opens the in-app dialog");
     const kText = (await dialog(a).innerText().catch(() => "")).replace(/\s+/g, " ");
-    expect(kText.includes("Keep \\\\zr-evil-3.invalid?") && kText.includes("was added to your allowed network computers outside ZabsReel"), `…the Keep dialog (${kText.slice(0, 120)})`);
+    expect(kText.includes("Keep \\\\zr-evil-3.invalid?") && kText.includes("was added to your allowed network computers outside ZedMix"), `…the Keep dialog (${kText.slice(0, 120)})`);
     f = await focused(a);
     expect(f.inside && f.text === "Remove", `…focus starts on Remove (${f.text})`);
     await a.keyboard.press("Escape");
@@ -677,7 +677,7 @@ async function graphicsAddon(o: {
   const state = () => readGraphicsAddon(dataDir, { pin: fixture.pin }).state;
   const zipPath = new URL(fixture.pin.shell[platform].url).pathname;
   const wanted = [...fixture.pin.lists[platform].paths.map((p) => new URL(fixture.pin.closure.find((e) => e.path === p)!.resolved).pathname), zipPath].sort();
-  const shellAuth = { "x-zabsreel-shell": shellKey };
+  const shellAuth = { "x-zedmix-shell": shellKey };
   const post = (path: string, body: unknown, headers: Record<string, string>) =>
     request(port, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
@@ -748,7 +748,7 @@ async function graphicsAddon(o: {
     await closeDialog();
     await openDialog();
     check("another window's install lock: its message, and no install button",
-      (await text()).includes("Another ZabsReel window is installing the graphics add-on (desktop). Wait for it to finish.") && (await button("Accept and install").count()) === 0,
+      (await text()).includes("Another ZedMix window is installing the graphics add-on (desktop). Wait for it to finish.") && (await button("Accept and install").count()) === 0,
       (await text()).replace(/\s+/g, " ").slice(0, 160));
     // A status request that fails once while the dialog follows the lock: its error shows, and the next request
     // that succeeds clears it. The page logs that 503 (a response and a console line); those are expected here.
@@ -757,7 +757,7 @@ async function graphicsAddon(o: {
     await page.route("**/api/graphics-addon/status", (r) => r.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ ok: false, error: "zr-fixture: the status request failed" }) }), { times: 1 });
     const alert = dlg.locator(".storage-error");
     const pollError = await waitFor("poll error", async () => (await alert.innerText().catch(() => "")).includes("zr-fixture: the status request failed"), 5000);
-    const pollCleared = pollError && (await waitFor("poll error cleared", async () => (await alert.count()) === 0 && (await text()).includes("Another ZabsReel window is installing"), 5000));
+    const pollCleared = pollError && (await waitFor("poll error cleared", async () => (await alert.count()) === 0 && (await text()).includes("Another ZedMix window is installing"), 5000));
     const logged = errors.splice(errorsBefore);
     check("a status request that fails once while the dialog follows the lock: its error, then cleared by the next one",
       pollError && pollCleared && logged.every((e) => /503/.test(e)), `${pollError} ${pollCleared} ${JSON.stringify(logged)}`);
@@ -845,7 +845,7 @@ async function graphicsAddon(o: {
       await waitFor("removed", async () => (await button("Accept and install").count()) === 1, 10000) && state() === "not-installed" && !existsSync(graphicsAddonDir(dataDir)));
     await closeDialog();
 
-    // The graphics renderer setting (MOTION-PLAN D7): ZabsReel's by default; a click on "Remotion add-on" in the
+    // The graphics renderer setting (MOTION-PLAN D7): ZedMix's by default; a click on "Remotion add-on" in the
     // dialog makes the shell write renderer.json (behind its shell key; GET is 405).
     // MUTATION: make POST /api/graphics-addon/renderer do nothing in server.cjs → the click row fails.
     const rendererFile = join(dataDir, "addons", "renderer.json");
@@ -854,8 +854,8 @@ async function graphicsAddon(o: {
     const badRenderer = await post("/api/graphics-addon/renderer", { renderer: "chrome" }, shellAuth);
     check("POST renderer with another value → 400, nothing written", badRenderer.status === 400 && !existsSync(rendererFile), `${badRenderer.status} ${badRenderer.body.slice(0, 100)}`);
     await openDialog();
-    check("the dialog's Graphics renderer: ZabsReel's (the default) is chosen, no renderer.json",
-      (await radio(/^ZabsReel/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile));
+    check("the dialog's Graphics renderer: ZedMix's (the default) is chosen, no renderer.json",
+      (await radio(/^ZedMix/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile));
     await radio(/^Remotion add-on/).click();
     const chose = await waitFor("renderer.json", async () => existsSync(rendererFile) && JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "remotion" && (await radio(/^Remotion add-on/).isChecked()), 5000);
     const gs = await request(corePort, "/rpc", { method: "POST", headers: { "x-aive-token": token, "content-type": "application/json" }, body: JSON.stringify({ method: "get_state", params: {} }) });

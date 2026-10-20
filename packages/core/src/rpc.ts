@@ -225,7 +225,7 @@ function summarizeTimeline(engine: EditorEngine) {
 
 /**
  * get_state's and timeline_summary's graphics fields (MOTION-PLAN D7):
- * `graphics` (can add_graphic render now), `graphicsReason` when ZabsReel's
+ * `graphics` (can add_graphic render now), `graphicsReason` when ZedMix's
  * renderer is unavailable, and `graphicsRenderer`, the user's setting. Read
  * from cached values; never starts a process.
  */
@@ -244,7 +244,7 @@ const clipPlacement = {
 export const methods = {
   get_state: {
     description:
-      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers), `graphicsRenderer` (the user's graphics renderer setting: \"zabsreel\", ZabsReel's own, the default, or \"remotion\", the Remotion add-on; only the user changes it, in the app) and `graphics`: whether add_graphic can render. With \"zabsreel\": \"ready\", or \"renderer-unavailable\" with `graphicsReason` (\"no-binary\", \"no-display\", \"sandbox-unavailable\" or \"start-failed\"). With \"remotion\": \"ready\", or \"not-installed\", \"update-needed\", \"broken\", \"unsupported\": the user manages the Remotion add-on in the app. An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
+      "Return the full current project state (assets, tracks, clips, canvas) plus `recovery` — if a crash-recovery snapshot exists ({available:true, path}), an earlier session ended with unsaved work; offer to restore it via load_project on that path — and `mediaServers` (list_media_servers), `graphicsRenderer` (the user's graphics renderer setting: \"zedmix\", ZedMix's own, the default, or \"remotion\", the Remotion add-on; only the user changes it, in the app) and `graphics`: whether add_graphic can render. With \"zedmix\": \"ready\", or \"renderer-unavailable\" with `graphicsReason` (\"no-binary\", \"no-display\", \"sandbox-unavailable\" or \"start-failed\"). With \"remotion\": \"ready\", or \"not-installed\", \"update-needed\", \"broken\", \"unsupported\": the user manages the Remotion add-on in the app. An asset with `awaitingServer` is offline: its file is on a network computer the user has not allowed. All timing is in frames.",
     schema: empty,
     handler: (engine) => ({ ...engine.getProject(), recovery: engine.recoveryInfo(), mediaServers: engine.mediaServers(), ...graphicsFields(engine) }),
   },
@@ -1033,7 +1033,7 @@ export const methods = {
   add_graphic: {
     description:
       "Add an animated motion graphic (title card, lower-third, callout, or a whole motion-graphics clip): an AI-authored Remotion React component rendered headlessly to an alpha video. Provide EITHER `code` (a TSX module default-exporting a component using Remotion's useCurrentFrame/useVideoConfig/interpolate/spring/AbsoluteFill) OR `template` (a built-in, e.g. 'title'). PLACEMENT: pass `clipId` to OVERLAY on that clip within a frame window (keep the component background transparent); set standalone=true to insert it as its OWN clip after that one; OR OMIT clipId to add it as a standalone clip (a pure motion-graphics clip — give the component a `background` prop and use durationSeconds). startFrame/endFrame are frames from the clip's start. Rendered at the project canvas size/fps. " +
-      `RENDERER: only the user's setting decides (get_state's graphicsRenderer; no tool changes it). On ${PRODUCT_NAME}'s own renderer ("zabsreel", the default) the component may also use the project library's video, images and audio by asset id (asset("<id>") as the src of Img, OffthreadVideo, Video or Audio, all imported from 'remotion'), still with no network and no packages, and an overlay's audio becomes a linked audio clip; when that renderer can't run here this refuses with graphic_renderer_unavailable and its reason (get_state's graphicsReason). FONTS (that renderer only): \`fonts\` maps an id to an installed family name or the absolute path of a .ttf/.otf/.ttc/.woff/.woff2 file (at most 16, each file at most 32 MB, checked like add_text's font; an id may not be a library asset id), and the component loads it with loadFont(asset("<id>")), using the fontFamily it returns; an installed family can also simply be named in CSS with no fonts entry. On the Remotion add-on ("remotion") library media stays refused, and asset(), loadFont(), \`fonts\` or an @aive/motion import is refused naming the setting. ` +
+      `RENDERER: only the user's setting decides (get_state's graphicsRenderer; no tool changes it). On ${PRODUCT_NAME}'s own renderer ("zedmix", the default) the component may also use the project library's video, images and audio by asset id (asset("<id>") as the src of Img, OffthreadVideo, Video or Audio, all imported from 'remotion'), still with no network and no packages, and an overlay's audio becomes a linked audio clip; when that renderer can't run here this refuses with graphic_renderer_unavailable and its reason (get_state's graphicsReason). FONTS (that renderer only): \`fonts\` maps an id to an installed family name or the absolute path of a .ttf/.otf/.ttc/.woff/.woff2 file (at most 16, each file at most 32 MB, checked like add_text's font; an id may not be a library asset id), and the component loads it with loadFont(asset("<id>")), using the fontFamily it returns; an installed family can also simply be named in CSS with no fonts entry. On the Remotion add-on ("remotion") library media stays refused, and asset(), loadFont(), \`fonts\` or an @aive/motion import is refused naming the setting. ` +
       `Needs the Remotion graphics add-on, which only the user installs in the ${PRODUCT_NAME} window (Help → Graphics add-on), when the setting is "remotion": without it this refuses with a graphics_addon_* message saying what to ask the user, and no tool can install it.`,
     schema: z
       .object({
@@ -1562,7 +1562,7 @@ export const methods = {
   // ---- OpenTimelineIO interop -------------------------------------------------
   export_otio: {
     description:
-      `Write the timeline as an OpenTimelineIO (.otio) JSON file at the given absolute path — the industry interchange format (DaVinci Resolve, Premiere via extension, Hiero, RV all read it). Tracks/clips/gaps/transitions map to OTIO natively; ${PRODUCT_NAME}-only data (effects stacks, keyframes, captions, graphics, adjustment layers) rides in metadata.synthcut so importing back into ${PRODUCT_NAME} is LOSSLESS. Use it to hand the edit off for finishing.`,
+      `Write the timeline as an OpenTimelineIO (.otio) JSON file at the given absolute path — the industry interchange format (DaVinci Resolve, Premiere via extension, Hiero, RV all read it). Tracks/clips/gaps/transitions map to OTIO natively; ${PRODUCT_NAME}-only data (effects stacks, keyframes, captions, graphics, adjustment layers) rides in metadata.zedmix so importing back into ${PRODUCT_NAME} is LOSSLESS. Use it to hand the edit off for finishing.`,
     schema: z.object({ path: z.string().min(1) }).strict(),
     handler: async (engine, p) => engine.exportOtio(p.path),
   },
@@ -1706,7 +1706,7 @@ export async function dispatch(engine: EditorEngine, method: string, params: unk
     if (err instanceof MediaOfflineError) throw new RpcError(err.message, "media_offline", { hosts: err.hosts });
     // D5.3: no ready graphics add-on, by its state.
     if (err instanceof GraphicsAddonError) throw new RpcError(err.message, err.code);
-    // D7: ZabsReel's own graphics renderer can't run here, with its reason.
+    // D7: ZedMix's own graphics renderer can't run here, with its reason.
     if (err instanceof MotionRenderError && err.code === "graphic_renderer_unavailable") {
       const reason = (err as { reason?: unknown }).reason;
       throw new RpcError(err.message, err.code, typeof reason === "string" ? { reason } : {});

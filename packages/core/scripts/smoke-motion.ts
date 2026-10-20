@@ -8,14 +8,14 @@
  * graphic is visible, and the frame returns to the dark background colour before
  * and after the window. A no-op composite (or broken alpha) would fail this.
  * The baked graphic has no audio stream (renderGraphic renders muted;
- * ZabsReel's renderer writes none for a graphic without sound).
+ * ZedMix's renderer writes none for a graphic without sound).
  *
  * It runs on both graphics renderers (MOTION-PLAN D7): the Remotion add-on,
- * chosen as the user's setting (useRemotionRenderer), and ZabsReel's own
+ * chosen as the user's setting (useRemotionRenderer), and ZedMix's own
  * renderer, the default. Remotion comes from AIVE_REMOTION_ADDON
  * (graphics-addon-env.mjs: the repo root when unset); without it and without
  * an installed add-on, add_graphic refuses with graphics_addon_missing on the
- * add-on, and renders on ZabsReel's renderer, which needs no add-on.
+ * add-on, and renders on ZedMix's renderer, which needs no add-on.
  *
  * Run: npx tsx packages/core/scripts/smoke-motion.ts
  *
@@ -46,9 +46,9 @@ async function maxLuma(file: string, t: number): Promise<number> {
   return max;
 }
 
-type Renderer = "remotion" | "zabsreel";
+type Renderer = "remotion" | "zedmix";
 
-/** The user's renderer setting for a new data folder: the Remotion add-on, or ZabsReel's renderer (no file: the default). */
+/** The user's renderer setting for a new data folder: the Remotion add-on, or ZedMix's renderer (no file: the default). */
 const dataFor = (renderer: Renderer, prefix: string) => {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   return renderer === "remotion" ? useRemotionRenderer(dir) : dir;
@@ -56,8 +56,8 @@ const dataFor = (renderer: Renderer, prefix: string) => {
 
 async function main() {
   useDevAddon();
-  for (const renderer of ["remotion", "zabsreel"] as const) {
-    console.log(`\n== ${renderer === "remotion" ? "the Remotion add-on" : "ZabsReel's renderer"} ==`);
+  for (const renderer of ["remotion", "zedmix"] as const) {
+    console.log(`\n== ${renderer === "remotion" ? "the Remotion add-on" : "ZedMix's renderer"} ==`);
     await run(renderer);
   }
   console.log("\nMOTION GRAPHICS SMOKE TEST PASSED");
@@ -93,10 +93,10 @@ async function run(renderer: Renderer) {
   console.log(`   baked alpha graphic: ${r.asset.name} ${r.asset.duration.toFixed(2)}s  in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   if (!r.graphic) throw new Error("expected an overlay graphic to be created");
   // MUTATION: render the Remotion path whatever the setting (graphicsRenderer() always "remotion", engine.ts) → the
-  // ZabsReel run fails here (its baked file is Remotion's: no motion renderer started).
+  // ZedMix run fails here (its baked file is Remotion's: no motion renderer started).
   const job = engine.jobs.list(false).find((j) => j.type === "graphic");
   if (!job) throw new Error("expected a graphic job");
-  if (renderer === "zabsreel" && !(r.asset.path.endsWith("-graphic.mov") && engine.graphicsRenderer() === "zabsreel" && !r.graphic.audioClipId)) throw new Error("expected ZabsReel's renderer to bake the overlay (no sound: no audio clip)");
+  if (renderer === "zedmix" && !(r.asset.path.endsWith("-graphic.mov") && engine.graphicsRenderer() === "zedmix" && !r.graphic.audioClipId)) throw new Error("expected ZedMix's renderer to bake the overlay (no sound: no audio clip)");
   // MUTATION: drop muted: true from renderWith (motion/render.ts) → Remotion adds a silent track and this fails.
   console.log(`   baked graphic streams (ffprobe): video=${r.asset.hasVideo} audio=${r.asset.hasAudio}`);
   if (!r.asset.hasVideo || r.asset.hasAudio) throw new Error("the baked graphic must have a video stream and no audio stream (renderGraphic renders muted)");
@@ -127,8 +127,8 @@ async function run(renderer: Renderer) {
   console.log(`   peak luma during(2.0s) after clear = ${plainDuring} (expect background <130)`);
   if (plainDuring > 130) throw new Error(`graphic still present after clear_graphics (peak luma ${plainDuring})`);
 
-  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → the Remotion
-  // run's step renders and fails. Make ZabsReel's path ask for the add-on (addGraphic, engine.ts) → the ZabsReel run fails.
+  // MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules (addon/resolve.ts) → the Remotion
+  // run's step renders and fails. Make ZedMix's path ask for the add-on (addGraphic, engine.ts) → the ZedMix run fails.
   console.log(`5. without AIVE_REMOTION_ADDON and an installed add-on, add_graphic ${renderer === "remotion" ? "refuses" : "renders (no add-on needed)"}...`);
   const bare = new EditorEngine(dataFor(renderer, "aive-motion-bare-"));
   const refused = await withoutDevAddon(() => dispatch(bare, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));

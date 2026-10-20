@@ -45,7 +45,7 @@
 //      <name>.aive, then the app quits.
 //   9. Network computers (a 4th run; test servers under .invalid, which never
 //      resolve, and native dialogs stubbed). A server in the store that
-//      ZabsReel didn't stamp ("added outside") is
+//      ZedMix didn't stamp ("added outside") is
 //      offline at load, with the outside banner; Review… shows the Keep dialog
 //      (Remove default and Esc): Remove takes it out of the store, Keep stamps
 //      it and its clips come online without a reload. A project on a server
@@ -76,17 +76,17 @@
 //      the download (graphics-addon:cancel, main's session fetch aborted)
 //      leaves no add-on and no staging; a copy whose browser is gone shows
 //      "damaged" with Reinstall and Remove, and Reinstall repairs it; an
-//      add-on another ZabsReel version installed shows Update and Remove
+//      add-on another ZedMix version installed shows Update and Remove
 //      (both wait for a graphic), and Remove deletes it; with no add-on, an
 //      add_graphic sent over the core's HTTP RPC (as the MCP server sends it)
 //      on the Remotion add-on is refused (409 graphics_addon_missing) and the
 //      window shows the banner, whose Set up… opens the dialog. The dialog's
-//      Graphics renderer (MOTION-PLAN D7): ZabsReel's (the default) is chosen
+//      Graphics renderer (MOTION-PLAN D7): ZedMix's (the default) is chosen
 //      with no renderer.json, its help lists where the two renderers differ
 //      (and that <Video> shows <OffthreadVideo>'s decoded frames there),
 //      a click on "Remotion add-on" makes main write renderer.json (get_state
-//      says graphicsRenderer "remotion"), and a click back on ZabsReel's makes
-//      the next add_graphic render with ZabsReel's renderer, no add-on
+//      says graphicsRenderer "remotion"), and a click back on ZedMix's makes
+//      the next add_graphic render with ZedMix's renderer, no add-on
 //      needed. Needs a source checkout: it is skipped with AIVE_APP.
 //  11. The packed app (a 6th run; ADDON-PLAN D8.5): the `--dir` build
 //      (AIVE_APP, else apps/desktop/build/dist/linux-unpacked when it exists)
@@ -99,7 +99,7 @@
 //      test pin's hosts, and nothing is installed.
 //   No renderer console errors or page errors in any run.
 //   The app runs with its own profile (--user-data-dir) in the test folder, so
-//   the user's ZabsReel profile and its recent projects are left alone.
+//   the user's ZedMix profile and its recent projects are left alone.
 //
 // Run (needs a display; xvfb-run provides one without showing a window):
 //   xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
@@ -110,7 +110,7 @@
 // some ports, e.g. 5060/5061, with ERR_UNSAFE_PORT).
 // AIVE_APP=<packaged executable> runs a packed build instead of the source
 // tree, e.g. after `npx electron-builder --dir --linux` in apps/desktop:
-//   AIVE_APP=apps/desktop/build/dist/linux-unpacked/zabsreel-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
+//   AIVE_APP=apps/desktop/build/dist/linux-unpacked/zedmix-desktop xvfb-run -a npx tsx apps/desktop/scripts/smoke-electron.mts
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -205,7 +205,7 @@ async function launch(pw: PW, cwd: string, dataDir: string, extraEnv: Record<str
   const app = await pw._electron.launch({
     executablePath: packaged || electronBinary(),
     // SwiftShader gives the renderer WebGL2 without a GPU, as on a plain VM.
-    // A profile under the test folder: the user's own (~/.config/ZabsReel…,
+    // A profile under the test folder: the user's own (~/.config/ZedMix…,
     // with its recent projects) is neither read nor changed. Muted: Playwright
     // mutes only headless Chromium, never Electron, and the audio rows read the
     // WebAudio graph, not the speakers. AIVE_SMOKE_AUDIO=1 to hear it.
@@ -342,15 +342,15 @@ async function main() {
   check(userData === join(work, "profile"), `app profile is the test's own (${userData})`);
   // The brand: the app's name (taskbar, dialogs), the Windows AUMID and the window title.
   const appName = await app.evaluate(({ app }) => app.getName());
-  const wantName = process.env.AIVE_APP ? "ZabsReel" : "ZabsReel (DEV)";
+  const wantName = process.env.AIVE_APP ? "ZedMix" : "ZedMix (DEV)";
   check(appName === wantName, `app.getName() is "${wantName}" (${appName})`);
   const brand = require("../electron/brand.cjs") as { APP_ID: string; APP_ID_DEV: string };
-  check(brand.APP_ID === "io.github.azabonik.zabsreel" && brand.APP_ID_DEV === `${brand.APP_ID}.dev`, `AUMIDs are ${brand.APP_ID} and ${brand.APP_ID_DEV}`);
+  check(brand.APP_ID === "io.github.azabonik.zedmix" && brand.APP_ID_DEV === `${brand.APP_ID}.dev`, `AUMIDs are ${brand.APP_ID} and ${brand.APP_ID_DEV}`);
   // setAppUserModelId has no getter and does nothing off Windows, so check what main.cjs passes it.
   const mainSrc = readFileSync(join(APP_DIR, "electron", "main.cjs"), "utf8");
   check(/const AUMID = app\.isPackaged \? APP_ID : APP_ID_DEV;/.test(mainSrc) && /setAppUserModelId\(AUMID\)/.test(mainSrc), "main.cjs sets the AUMID: APP_ID when packaged, APP_ID_DEV in a dev run");
   const title = await win.title();
-  check(title.includes("ZabsReel"), `window title shows ZabsReel (${title})`);
+  check(title.includes("ZedMix"), `window title shows ZedMix (${title})`);
 
 
   console.log("2. import → add to timeline → play...");
@@ -633,11 +633,11 @@ async function main() {
   check((await win.evaluate(() => window.aive!.saveProjectAs("My Cut"))) === join(work, "My Cut.aive"), "Save project as: typed 'My Cut' → My Cut.aive");
   const [popts] = await calls(app, "showSaveDialog");
   check(popts?.defaultPath === "My Cut.aive", `project dialog default ${popts?.defaultPath}`);
-  check(popts?.filters?.[0]?.name === "ZabsReel Project", `project save filter is named "${popts?.filters?.[0]?.name}"`);
+  check(popts?.filters?.[0]?.name === "ZedMix Project", `project save filter is named "${popts?.filters?.[0]?.name}"`);
   await stub(app, "showOpenDialog", [{ canceled: true, filePaths: [] }]);
   await win.evaluate(() => window.aive!.openProject());
   const [oopts] = await calls(app, "showOpenDialog");
-  check(oopts?.filters?.[0]?.name === "ZabsReel Project", `project open filter is named "${oopts?.filters?.[0]?.name}"`);
+  check(oopts?.filters?.[0]?.name === "ZedMix Project", `project open filter is named "${oopts?.filters?.[0]?.name}"`);
   // A picked file is not added to the OS's recent files (all four dialogs).
   const noRecent = [mopts, opts, popts, oopts].map((o) => !!o?.properties?.includes("dontAddToRecent"));
   check(noRecent.every(Boolean), `import, export, save-as and open dialogs pass dontAddToRecent (${noRecent.join(", ")})`);
@@ -811,7 +811,7 @@ async function networkComputers(pw: PW, work: string, cwd: string, clip: string)
   const dataDir = join(work, "data-unc");
   const hostsFile = join(dataDir, "trust", "hosts.json");
   type Entry = { host: string };
-  /** Write an entry ZabsReel did not stamp ("added outside ZabsReel"), as a hand edit would. */
+  /** Write an entry ZedMix did not stamp ("added outside ZedMix"), as a hand edit would. */
   const addOutside = (host: string) => {
     const cur = existsSync(hostsFile) ? JSON.parse(readFileSync(hostsFile, "utf8")) : { version: 2, servers: [] };
     cur.servers = [...cur.servers.filter((e: Entry) => e.host !== host), { host }];
@@ -909,9 +909,9 @@ async function networkComputers(pw: PW, work: string, cwd: string, clip: string)
   };
   const buttonsOf = (o: { buttons?: string[] }) => JSON.stringify(o.buttons ?? []);
 
-  // 9a. Added outside ZabsReel: offline at load, the Keep dialog decides.
+  // 9a. Added outside ZedMix: offline at load, the Keep dialog decides.
   await openViaMenu(crafted3);
-  check(await waitFor("outside banner", async () => /It is in your list of allowed network computers, but ZabsReel didn't put it there/.test(await bannerText()), 15000),
+  check(await waitFor("outside banner", async () => /It is in your list of allowed network computers, but ZedMix didn't put it there/.test(await bannerText()), 15000),
     `outside entry: banner "${(await bannerText()).replace(/\s+/g, " ")}"`);
   check(await waitFor("badge", async () => (await badgeLabel()) === "Offline: waiting for you to allow \\\\zr-evil-3.invalid", 5000), `…the asset is offline (${await badgeLabel()})`);
   await sleep(1500);
@@ -1077,10 +1077,10 @@ async function networkComputers(pw: PW, work: string, cwd: string, clip: string)
   await win.getByRole("menuitem", { name: /Network computers/ }).click();
   const dlg = win.getByRole("dialog", { name: /Network computers/ });
   check(await waitFor("outside row", async () => (await dlg.innerText().catch(() => "")).includes("\\\\zr-evil-4.invalid"), 10000), "the dialog opens and lists the entry written by hand");
-  const outsideRow = dlg.locator("table", { has: win.locator("caption", { hasText: "Added outside ZabsReel" }) }).locator("tr", { hasText: "zr-evil-4.invalid" });
+  const outsideRow = dlg.locator("table", { has: win.locator("caption", { hasText: "Added outside ZedMix" }) }).locator("tr", { hasText: "zr-evil-4.invalid" });
   const rowText = (await outsideRow.innerText().catch(() => "")).replace(/\s+/g, " ");
-  const want = "ZabsReel didn't add this, so it doesn't use it.";
-  check(rowText.includes(want) && !/\d{4}/.test(rowText), `…under "Added outside ZabsReel", no date: "${rowText}"`);
+  const want = "ZedMix didn't add this, so it doesn't use it.";
+  check(rowText.includes(want) && !/\d{4}/.test(rowText), `…under "Added outside ZedMix", no date: "${rowText}"`);
   check((await outsideRow.getByRole("button", { name: "Keep \\\\zr-evil-4.invalid…", exact: true }).count()) === 1 && (await outsideRow.getByRole("button", { name: "Remove \\\\zr-evil-4.invalid", exact: true }).count()) === 1,
     "…with Keep… and Remove");
   const allowedText = (await dlg.locator("table", { has: win.locator("caption", { hasText: "Allowed" }) }).innerText().catch(() => "")).replace(/\s+/g, " ");
@@ -1158,7 +1158,7 @@ async function graphicsAddon(pw: PW, work: string) {
     const info = JSON.parse(readFileSync(join(dataDir, "server.json"), "utf8"));
     // Every URL main's add-on session fetches.
     await app.evaluate(({ session }) => {
-      const s = session.fromPartition("zabsreel-graphics-addon") as unknown as { fetch: (u: unknown, i: unknown) => Promise<unknown> };
+      const s = session.fromPartition("zedmix-graphics-addon") as unknown as { fetch: (u: unknown, i: unknown) => Promise<unknown> };
       const g = globalThis as unknown as { __addonUrls: string[] };
       g.__addonUrls = [];
       const real = s.fetch.bind(s);
@@ -1295,7 +1295,7 @@ async function graphicsAddon(pw: PW, work: string) {
       `Reinstall → ready, downloading only the browser (${JSON.stringify(registry.hitPaths())})`);
     await closeDialog();
 
-    // An add-on another ZabsReel version installed (another lock hash): Update and Remove, both waiting for a graphic.
+    // An add-on another ZedMix version installed (another lock hash): Update and Remove, both waiting for a graphic.
     const manifestFile = join(graphicsAddonDir(dataDir), "addon.json");
     writeFileSync(manifestFile, JSON.stringify({ ...JSON.parse(readFileSync(manifestFile, "utf8")), lockSha256: "0".repeat(64) }));
     await openDialog();
@@ -1321,15 +1321,15 @@ async function graphicsAddon(pw: PW, work: string) {
       return { status: res.status, body: (await res.json()) as { result?: Record<string, unknown>; code?: string; error?: string } };
     };
     await openDialog();
-    check((await radio(/^ZabsReel/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile) && (await dlg.locator("legend").innerText()) === "Graphics renderer",
-      "the dialog's Graphics renderer: ZabsReel's (the default) is chosen, and there is no renderer.json");
+    check((await radio(/^ZedMix/).isChecked()) && !(await radio(/^Remotion add-on/).isChecked()) && !existsSync(rendererFile) && (await dlg.locator("legend").innerText()) === "Graphics renderer",
+      "the dialog's Graphics renderer: ZedMix's (the default) is chosen, and there is no renderer.json");
     await dlg.getByText("Where the two renderers differ", { exact: true }).click();
     const differ = await dlg.locator(".ga-differ li").allTextContents();
     check(differ.length === 7 && differ.some((d) => d.includes("loop on a Sequence")) && differ.some((d) => d.includes("lab() and lch()")) && (await dlg.innerText()).includes("no staticFile, no remote URLs"),
       `…and its help lists where the two renderers differ (${differ.length} items)`);
     // MUTATION: drop the VIDEO_COLOURS paragraph from graphicsaddon.tsx's help → this row fails.
     check((await dlg.locator(".ga-differ").innerText()).includes("<Video> and <Html5Video> show the same decoded frames as <OffthreadVideo>"),
-      "…and says <Video> and <Html5Video> show <OffthreadVideo>'s decoded frames on ZabsReel's renderer");
+      "…and says <Video> and <Html5Video> show <OffthreadVideo>'s decoded frames on ZedMix's renderer");
     await radio(/^Remotion add-on/).click();
     const chose = await waitFor("renderer.json", async () => existsSync(rendererFile) && JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "remotion" && (await radio(/^Remotion add-on/).isChecked()), 5000);
     const st = await coreRpc("get_state");
@@ -1352,14 +1352,14 @@ async function graphicsAddon(pw: PW, work: string) {
     await banner.getByRole("button", { name: "Set up…" }).click();
     check(await waitFor("dialog from banner", async () => (await button("Accept and install").count()) === 1, 10000) && (await banner.count()) === 0, "Set up… opens the dialog (and the banner goes)");
 
-    // Back to ZabsReel's renderer: the next add_graphic renders with it, no add-on needed.
+    // Back to ZedMix's renderer: the next add_graphic renders with it, no add-on needed.
     // MUTATION: make addGraphic take the add-on path whatever the setting (engine.ts) → this row gets 409 graphics_addon_missing.
-    await radio(/^ZabsReel/).click();
-    const back = await waitFor("renderer.json back", () => JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "zabsreel", 5000);
+    await radio(/^ZedMix/).click();
+    const back = await waitFor("renderer.json back", () => JSON.parse(readFileSync(rendererFile, "utf8")).renderer === "zedmix", 5000);
     await closeDialog();
     const z = await coreRpc("add_graphic", { template: "title", durationSeconds: 1 });
     check(back && z.status === 200 && typeof z.body.result?.clipId === "string" && (await banner.count()) === 0,
-      `a click on ZabsReel's: renderer.json says zabsreel, and add_graphic renders with ZabsReel's renderer (${z.status} ${z.body.code ?? ""} ${z.body.error?.slice(0, 120) ?? ""})`);
+      `a click on ZedMix's: renderer.json says zedmix, and add_graphic renders with ZedMix's renderer (${z.status} ${z.body.code ?? ""} ${z.body.error?.slice(0, 120) ?? ""})`);
 
     // That graphic is an unsaved edit: once main has heard so (how soon varies), closing asks "Save changes before
     // closing?" with a modal dialog nothing here answers, and the close never returns. Answer it "Don't Save".
@@ -1382,7 +1382,7 @@ async function graphicsAddon(pw: PW, work: string) {
  * session is a stub that records each URL and fails it, so nothing leaves the machine.
  */
 async function packedAddon(pw: PW, work: string) {
-  const exe = process.env.AIVE_APP || (process.platform === "linux" ? join(APP_DIR, "build", "dist", "linux-unpacked", "zabsreel-desktop") : "");
+  const exe = process.env.AIVE_APP || (process.platform === "linux" ? join(APP_DIR, "build", "dist", "linux-unpacked", "zedmix-desktop") : "");
   if (!exe || !existsSync(exe)) {
     console.log(`11. skipped: no packed build (${exe || "set AIVE_APP"}; npx electron-builder --linux --dir in apps/desktop makes one)`);
     return;
@@ -1403,7 +1403,7 @@ async function packedAddon(pw: PW, work: string) {
   const cwd = join(work, "cwd6");
   mkdirSync(cwd);
   const dataDir = join(work, "data-packed");
-  // The add-on path (the user's renderer setting; ZabsReel's own renderer is the default and needs no add-on).
+  // The add-on path (the user's renderer setting; ZedMix's own renderer is the default and needs no add-on).
   mkdirSync(join(dataDir, "addons"), { recursive: true });
   writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "remotion" })}\n`);
   const repo = resolve(APP_DIR, "..", "..");
@@ -1414,7 +1414,7 @@ async function packedAddon(pw: PW, work: string) {
     check(await app.evaluate(({ app }) => app.isPackaged), "the app is packaged");
     // The add-on session's fetch: each URL recorded, then refused like a machine with no network.
     await app.evaluate(({ session }) => {
-      const s = session.fromPartition("zabsreel-graphics-addon") as unknown as { fetch: (u: unknown) => Promise<unknown> };
+      const s = session.fromPartition("zedmix-graphics-addon") as unknown as { fetch: (u: unknown) => Promise<unknown> };
       const g = globalThis as unknown as { __addonUrls: string[] };
       g.__addonUrls = [];
       s.fetch = (u) => {

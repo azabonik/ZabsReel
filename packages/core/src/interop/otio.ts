@@ -13,7 +13,7 @@ import {
 import { averageSpeed, hasSpeedRamp } from "../speed.js";
 
 /**
- * OpenTimelineIO interop — "start the edit with AI in ZabsReel, finish
+ * OpenTimelineIO interop — "start the edit with AI in ZedMix, finish
  * anywhere". OTIO (Apache-2.0) is plain JSON, so this is careful serialization
  * with no dependency:
  *
@@ -25,10 +25,10 @@ import { averageSpeed, hasSpeedRamp } from "../speed.js";
  *    LinearTimeWarp.1 (a speed RAMP becomes its average speed + a note — OTIO
  *    has no standard curve warp). Everything OTIO can't express (effects stack, keyframes,
  *    captions, graphics, adjustment layers, exact overlap frames) rides under
- *    `metadata.synthcut.*`, so a ZabsReel→ZabsReel round-trip is LOSSLESS.
+ *    `metadata.zedmix.*`, so a ZedMix→ZedMix round-trip is LOSSLESS.
  *
  *  - otioToProject: maps tracks/clips/gaps/transitions back. When
- *    metadata.synthcut is present the original objects are restored verbatim;
+ *    metadata.zedmix is present the original objects are restored verbatim;
  *    foreign OTIO is mapped structurally (cut positions from the sequence,
  *    transitions to overlap crossfades) and anything unmappable lands in the
  *    returned `warnings`.
@@ -138,7 +138,7 @@ export function projectToOtio(project: Project): OtioTimeline {
             transition_type: "SMPTE_Dissolve",
             in_offset: rt(Math.floor(overlap / 2), fps),
             out_offset: rt(Math.ceil(overlap / 2), fps),
-            metadata: { synthcut: { type: clip.transition.type, durationFrames: clip.transition.durationFrames } },
+            metadata: { zedmix: { type: clip.transition.type, durationFrames: clip.transition.durationFrames } },
           });
         }
 
@@ -146,7 +146,7 @@ export function projectToOtio(project: Project): OtioTimeline {
         // A speed RAMP has no OTIO equivalent (only LinearTimeWarp is standard):
         // other NLEs get its AVERAGE speed (source span / timeline span, so the
         // cut lengths match) and a note; the curve itself rides in the clip
-        // metadata, so ZabsReel→ZabsReel stays lossless.
+        // metadata, so ZedMix→ZedMix stays lossless.
         const ramped = hasSpeedRamp(clip);
         const speed = ramped ? Number(averageSpeed(clip, fps).toFixed(6)) : clip.effects?.speed ?? 1;
         // In the OTIO sequence, a transition doesn't consume time — the item
@@ -164,18 +164,18 @@ export function projectToOtio(project: Project): OtioTimeline {
                   OTIO_SCHEMA: "ExternalReference.1",
                   target_url: pathToFileURL(asset.path).href,
                   available_range: range(0, Math.max(1, Math.round(asset.duration * fps)), fps),
-                  metadata: { synthcut: { asset: stripCaches(asset) } },
+                  metadata: { zedmix: { asset: stripCaches(asset) } },
                 }
               : {
                   OTIO_SCHEMA: "ExternalReference.1",
                   target_url: "",
                   available_range: null,
-                  metadata: { synthcut: { adjustment: true } },
+                  metadata: { zedmix: { adjustment: true } },
                 },
           },
           active_media_reference_key: "DEFAULT_MEDIA",
           // Lossless round-trip: the ENTIRE original clip rides in metadata.
-          metadata: { synthcut: { clip: structuredClone(clip) } },
+          metadata: { zedmix: { clip: structuredClone(clip) } },
         };
         if (ramped) {
           item.effects = [
@@ -184,8 +184,8 @@ export function projectToOtio(project: Project): OtioTimeline {
               name: "speed_ramp_average",
               time_scalar: speed,
               metadata: {
-                synthcut: {
-                  note: `${PRODUCT_NAME} speed ramp (curve speed) approximated by its average speed; the exact curve is in metadata.synthcut.clip.effects.speedRamp.`,
+                zedmix: {
+                  note: `${PRODUCT_NAME} speed ramp (curve speed) approximated by its average speed; the exact curve is in metadata.zedmix.clip.effects.speedRamp.`,
                   speedRamp: structuredClone(clip.effects!.speedRamp),
                 },
               },
@@ -203,7 +203,7 @@ export function projectToOtio(project: Project): OtioTimeline {
         name: track.name ?? `${track.kind === "video" ? "V" : "A"}${track.index}`,
         kind: track.kind === "video" ? ("Video" as const) : ("Audio" as const),
         children,
-        metadata: { synthcut: { index: track.index, muted: track.muted, volume: track.volume, hidden: track.hidden, locked: track.locked } },
+        metadata: { zedmix: { index: track.index, muted: track.muted, volume: track.volume, hidden: track.hidden, locked: track.locked } },
       };
     });
 
@@ -212,7 +212,7 @@ export function projectToOtio(project: Project): OtioTimeline {
     name: project.name,
     global_start_time: rt(0, fps),
     metadata: {
-      synthcut: {
+      zedmix: {
         schemaVersion: PROJECT_SCHEMA_VERSION,
         width: project.width,
         height: project.height,
@@ -268,7 +268,7 @@ export async function otioToProject(
   const warnings: string[] = [];
   const missing: string[] = [];
 
-  const sc = (t.metadata?.synthcut ?? {}) as Partial<{
+  const sc = (t.metadata?.zedmix ?? {}) as Partial<{
     schemaVersion: number;
     width: number;
     height: number;
@@ -290,7 +290,7 @@ export async function otioToProject(
   const assetsByPath = new Map<string, MediaAsset>();
   const tracks: Track[] = [];
 
-  // Seed the library from the traveled ZabsReel asset list (keeps asset ids and
+  // Seed the library from the traveled ZedMix asset list (keeps asset ids and
   // unplaced assets like the music bed); probe refreshes reality on this disk,
   // the colour description and codec too (the preview's source-colour
   // correction reads them; an older export carries none). Not a matte-backed
@@ -322,7 +322,7 @@ export async function otioToProject(
       warnings.push(`Skipped unknown stack child "${otioTrack.OTIO_SCHEMA}"`);
       continue;
     }
-    const tsc = (otioTrack.metadata?.synthcut ?? {}) as Partial<{ index: number; muted: boolean; volume: number; hidden: boolean; locked: boolean }>;
+    const tsc = (otioTrack.metadata?.zedmix ?? {}) as Partial<{ index: number; muted: boolean; volume: number; hidden: boolean; locked: boolean }>;
     const kind = otioTrack.kind === "Audio" ? "audio" : "video";
     const track: Track = {
       id: newId("track"),
@@ -345,7 +345,7 @@ export async function otioToProject(
         continue;
       }
       if (item.OTIO_SCHEMA === "Transition.1") {
-        const meta = (item.metadata?.synthcut ?? {}) as Partial<{ type: string; durationFrames: number }>;
+        const meta = (item.metadata?.zedmix ?? {}) as Partial<{ type: string; durationFrames: number }>;
         const dur = meta.durationFrames ?? framesAt(item.in_offset, fps) + framesAt(item.out_offset, fps);
         pendingTransition = { type: meta.type ?? "dissolve", durationFrames: Math.max(1, dur) };
         continue;
@@ -357,8 +357,8 @@ export async function otioToProject(
 
       const ref =
         item.media_references?.[item.active_media_reference_key ?? "DEFAULT_MEDIA"] ?? item.media_reference;
-      const clipMeta = (item.metadata?.synthcut ?? {}) as Partial<{ clip: Clip }>;
-      const refMeta = (ref?.metadata?.synthcut ?? {}) as Partial<{ asset: MediaAsset; adjustment: boolean }>;
+      const clipMeta = (item.metadata?.zedmix ?? {}) as Partial<{ clip: Clip }>;
+      const refMeta = (ref?.metadata?.zedmix ?? {}) as Partial<{ asset: MediaAsset; adjustment: boolean }>;
 
       // Resolve the media (dedup by path; probe; placeholder when missing).
       let assetId: string | undefined;
@@ -394,7 +394,7 @@ export async function otioToProject(
               missing: true,
             } as MediaAsset;
           }
-          // Prefer the original ZabsReel asset identity when it traveled along.
+          // Prefer the original ZedMix asset identity when it traveled along.
           if (refMeta.asset) asset = { ...refMeta.asset, ...asset, id: refMeta.asset.id };
           assetsByPath.set(path, asset);
         }
@@ -402,7 +402,7 @@ export async function otioToProject(
       }
 
       if (clipMeta.clip) {
-        // ZabsReel round-trip: restore the exact original clip.
+        // ZedMix round-trip: restore the exact original clip.
         const restored = structuredClone(clipMeta.clip);
         if (assetId && restored.assetId) restored.assetId = assetId;
         track.clips.push(restored);
@@ -465,10 +465,10 @@ export async function otioToProject(
     music: sc.music,
     markers: sc.markers,
     revision: 0,
-    // The schema the ZabsReel clips in the metadata were written with, so the
+    // The schema the ZedMix clips in the metadata were written with, so the
     // engine's migrateProject upgrades them (e.g. pre-v4 vignette amounts). An
     // OTIO timeline is always frame-based, so never below v2; foreign OTIO
-    // carries no ZabsReel clips and is current.
+    // carries no ZedMix clips and is current.
     schemaVersion:
       typeof sc.schemaVersion === "number" && Number.isFinite(sc.schemaVersion)
         ? Math.max(2, Math.min(PROJECT_SCHEMA_VERSION, Math.floor(sc.schemaVersion)))

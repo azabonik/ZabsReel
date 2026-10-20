@@ -11,11 +11,11 @@ import { makeHost, rejectsWithCode, throwsCode, ticks, track } from "./helpers/h
 
 // BRIEF v5, section 5 (the renderer setting now lives in Help → Graphics add-on…).
 const fixedMessage = (name: string) =>
-  `${name} is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
+  `${name} is not available in ZedMix's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….`;
 
 const HOST_BOUND = new Set(["delayRender", "continueRender", "cancelRender", "loadFont", "random"]);
 
-/** Compiles graphic source the way ZabsReel does and evaluates it against a module object. */
+/** Compiles graphic source the way ZedMix does and evaluates it against a module object. */
 function evaluateGraphic(source: string, host: MotionHost): { exports: Record<string, unknown>; mod: object } {
   const { code } = transform(source, { transforms: ["typescript", "jsx", "imports"], jsxRuntime: "classic" });
   const mod = createModuleObject(host);

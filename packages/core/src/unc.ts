@@ -100,8 +100,8 @@ export function classifyPath(p: string): PathClass {
  * approval store as read by `readTrustedHosts` (trusthosts.ts): "unread" when
  * the store could not be read and there is no good copy yet (no dialog, only
  * "couldn't read its list of approved computers; try again"), "keep" when the
- * server is in the list but ZabsReel did not add it ("added outside
- * ZabsReel": Keep / Remove), else "allow". The store decides, never the
+ * server is in the list but ZedMix did not add it ("added outside
+ * ZedMix": Keep / Remove), else "allow". The store decides, never the
  * renderer or the core's pending list.
  */
 export function approvalDialogFor(

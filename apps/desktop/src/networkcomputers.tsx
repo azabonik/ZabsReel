@@ -68,7 +68,7 @@ function day(iso: string): string {
 
 /**
  * Project → Network computers…: allowed servers (Remove), servers added
- * outside ZabsReel (Keep… opens the UI host's Keep dialog; Remove), and
+ * outside ZedMix (Keep… opens the UI host's Keep dialog; Remove), and
  * servers waiting for the user (Review…). The list itself never allows one.
  */
 export function NetworkComputersDialog(props: {

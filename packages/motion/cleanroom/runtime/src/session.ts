@@ -6,7 +6,7 @@ import { resolveFontAsset } from "./assets";
 import { describeValue, graphicError, isError, misuse, toError } from "./errors";
 import type { MotionHost } from "./hostTypes";
 
-/** Options of delayRender(). Accepted and ignored by ZabsReel (BRIEF section 6.7). */
+/** Options of delayRender(). Accepted and ignored by ZedMix (BRIEF section 6.7). */
 export interface DelayRenderOptions {
   timeoutInMilliseconds?: number;
   retries?: number;

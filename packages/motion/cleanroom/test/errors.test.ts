@@ -24,7 +24,7 @@ test("toError passes Errors through and wraps other thrown values without a code
 test("the fixed module-object message is BRIEF v5 section 5's text, on one line", () => {
   assert.equal(
     unsupportedNameMessage("Composition"),
-    "Composition is not available in ZabsReel's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….",
+    "Composition is not available in ZedMix's built-in graphics renderer. Use the names listed in the graphics guide, or choose the Remotion add-on as the graphics renderer in Help → Graphics add-on….",
   );
   // The arrow is U+2192 and the ellipsis U+2026, followed by a full stop.
   assert.ok(unsupportedNameMessage("x").endsWith("Help → Graphics add-on…."));

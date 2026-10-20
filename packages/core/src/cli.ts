@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     .catch(() => {});
   // The motion/<id> folders of renders whose core is gone (rendermotion.ts). Never blocks startup.
   void sweepMotionScratch(dataDir).catch(() => {});
-  // D7's start probe: can ZabsReel's own graphics renderer run here (get_state's graphics)? Never blocks startup.
+  // D7's start probe: can ZedMix's own graphics renderer run here (get_state's graphics)? Never blocks startup.
   void engine.startGraphicsProbe();
   // Move unused baked/proxy files to their area's .trash/ and delete trash older
   // than AIVE_BAKED_TRASH_DAYS (storage.ts). No project is open yet, so this

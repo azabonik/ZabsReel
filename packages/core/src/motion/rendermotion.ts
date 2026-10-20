@@ -12,7 +12,7 @@ import { graphicPreviewProxy, tagGraphicColor } from "./render.js";
 import { rendererBinary, type RendererBinary } from "./rendererbinary.js";
 
 /**
- * The core's side of ZabsReel's own motion renderer (MOTION-PLAN D2): it
+ * The core's side of ZedMix's own motion renderer (MOTION-PLAN D2): it
  * starts one renderer process per render (rendererbinary.ts picks the
  * executable; main.cjs dispatches to @aive/motion's motion-renderer.cjs),
  * sends it the page's table, asks for each frame, and pipes the frames into
@@ -56,7 +56,7 @@ export { GRAPHIC_CODES, MotionRenderError, type GraphicCode, type MotionErrorCod
 export type RendererUnavailableReason = "no-binary" | "no-display" | "sandbox-unavailable" | "start-failed";
 
 /**
- * What add_graphic says when ZabsReel's renderer can't run here (D7):
+ * What add_graphic says when ZedMix's renderer can't run here (D7):
  * `reason` is get_state's graphicsReason, and what the agent can do.
  */
 export function rendererUnavailableMessage(reason: RendererUnavailableReason, detail: string): string {
@@ -312,7 +312,7 @@ async function pageModule(o: RenderMotionOptions, limits: MotionLimits, assets: 
 }
 
 /**
- * Render `o.module`'s frames with ZabsReel's renderer and encode them to
+ * Render `o.module`'s frames with ZedMix's renderer and encode them to
  * `o.outPath` (and the overlay's preview to `o.previewPath`). Rejects with a
  * {@link MotionRenderError} (or FFmpeg's error) after removing everything it
  * wrote; baked/ then holds nothing of this render.

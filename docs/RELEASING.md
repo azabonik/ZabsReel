@@ -1,6 +1,6 @@
 # Releasing & Auto-Update
 
-How to ship a new version of ZabsReel so that installed (Windows) users receive it
+How to ship a new version of ZedMix so that installed (Windows) users receive it
 **automatically**. This is the operator's guide to the auto-update pipeline wired
 via `electron-updater` + GitHub Releases.
 
@@ -23,7 +23,7 @@ git push origin v0.2.1     # never `git push --tags` (see "The release guard")
 
 Pushing the `v*` tag starts the **Release** workflow, which builds the Windows
 installer + the update feed and publishes a GitHub Release. Installed apps pick it
-up on their next launch. The first ZabsReel version is **0.2.0**; version numbers
+up on their next launch. The first ZedMix version is **0.2.0**; version numbers
 restarted there at the rename.
 
 ---
@@ -49,13 +49,13 @@ Keep these in lockstep — the app's version is `apps/desktop/package.json`:
 | `package.json` | repo root |
 | `packages/core/package.json` | `@aive/core` |
 | `packages/mcp/package.json` | `@aive/mcp` |
-| `packages/skill-installer/package.json` | `@azabonik/zabsreel` (the `npx @azabonik/zabsreel` skill installer) |
-| `apps/desktop/package.json` | `zabsreel-desktop` ← **the one the updater compares** |
+| `packages/skill-installer/package.json` | `@azabonik/zedmix` (the `npx @azabonik/zedmix` skill installer) |
+| `apps/desktop/package.json` | `zedmix-desktop` ← **the one the updater compares** |
 
 > Only `apps/desktop/package.json` strictly drives the update check, but bump all
-> five together so versions never diverge. The `@azabonik/zabsreel` package additionally
-> ships to npm — after tagging, run `npm publish --workspace @azabonik/zabsreel`
-> (that's what makes `npx @azabonik/zabsreel add` work for users). It's a scoped
+> five together so versions never diverge. The `@azabonik/zedmix` package additionally
+> ships to npm — after tagging, run `npm publish --workspace @azabonik/zedmix`
+> (that's what makes `npx @azabonik/zedmix add` work for users). It's a scoped
 > package: publishing requires owning the npm `azabonik` scope (an npm org or the
 > username), and `publishConfig.access: public` is already set in its package.json.
 
@@ -88,8 +88,8 @@ Defined in [`../.github/workflows/release.yml`](../.github/workflows/release.yml
    one graphic with it (below).
 7. `npm run dist -- --publish never` — electron-builder packs the app, runs the
    packaging gate on it (the `afterPack` hook, below), and produces:
-   - `ZabsReel-<ver>.exe` — the installer
-   - `ZabsReel-<ver>.exe.blockmap` — the differential-download map
+   - `ZedMix-<ver>.exe` — the installer
+   - `ZedMix-<ver>.exe.blockmap` — the differential-download map
    - `latest.yml` — **the update feed the app reads**
    - `.zip` (portable) + `SHA256SUMS.txt`
 8. Attaches **all** of those to a **published** GitHub Release.
@@ -119,7 +119,7 @@ them.
 
 ### The network-path gate
 
-ZabsReel opens media on a network computer only after the user allows that
+ZedMix opens media on a network computer only after the user allows that
 computer (README, "Media on a network drive"). The Linux CI runs the same
 smokes on every push to main and every pull request, but only a Windows host
 signs in to a network computer on its own, so the release job runs them again
@@ -200,17 +200,17 @@ Leave it out of later releases.
 
 > **Media on network computers now waits for your OK.** When a project uses
 > files on a network computer (`\\nas\video\…`) that you have not allowed,
-> those clips stay offline and ZabsReel does not contact that computer until
+> those clips stay offline and ZedMix does not contact that computer until
 > you click **Allow** once for it. On Windows, opening a file there can send
 > your Windows sign-in to that computer, so allow only computers you know.
-> Picking a file on a new network computer in ZabsReel's own dialogs asks
+> Picking a file on a new network computer in ZedMix's own dialogs asks
 > once for that computer. Remove a computer in **Project → Network
 > computers…**. An AI client can't allow a computer;
-> ZabsReel's tools tell it which clips wait for which computer.
+> ZedMix's tools tell it which clips wait for which computer.
 >
 > **Some network paths are now refused.** A project or an import that names
 > a Windows device path in any spelling (`\\?\…`, `//./…`, `\??\…`) or a
-> server name ZabsReel can't use (web-folder forms such as `\\nas@SSL\…` or
+> server name ZedMix can't use (web-folder forms such as `\\nas@SSL\…` or
 > `\\nas@8080\…`, names with non-ASCII letters, `…ipv6-literal.net` names,
 > or addresses not written as `a.b.c.d`, such as `\\127.1\…`) is refused.
 > Map that folder to a drive letter, or use the computer's plain name
@@ -238,14 +238,14 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 
 - Runs **only in the installed/packaged app** (guarded by `app.isPackaged`) — never
   during `npm start`.
-- The stable `appId` (`io.github.azabonik.zabsreel`) means updates upgrade in
-  place — no uninstall. Never change it after the first release.
-- `build.publish` in `apps/desktop/package.json` points at **azabonik/ZabsReel**,
+- The stable `appId` (`io.github.azabonik.zedmix`) means updates upgrade in
+  place — no uninstall. Never change it again.
+- `build.publish` in `apps/desktop/package.json` points at **azabonik/ZedMix**,
   so installs read only this repository's `latest.yml`.
-- Relo's SynthCut uses the appId `com.relo.synthcut`, and an install of this fork
-  made before the rename uses `io.github.azabonik.synthcut`; ZabsReel upgrades
-  neither, so such a pre-rename fork install is not upgraded and is uninstalled
-  by hand (after `zabsreel migrate` has moved its MCP entries).
+- Version 0.2.0 shipped as ZabsReel with the appId `io.github.azabonik.zabsreel`.
+  ZedMix does not upgrade it: the first ZedMix release installs beside it, and
+  its release notes tell users to run `zedmix migrate` (which moves the MCP
+  entries) and then uninstall ZabsReel by hand.
 - Unsigned is fine on Windows; SmartScreen only nags on the very first manual
   install, not on self-updates.
 - **macOS/Linux:** no packaged build or auto-update yet. Those users run from source
@@ -256,12 +256,12 @@ tag push ──► CI builds ──► published GitHub Release (exe + blockmap 
 ## Testing an update end-to-end
 
 1. Build + install an **older** version locally (e.g. v0.2.0):
-   `npm run dist --workspace zabsreel-desktop`, then run the installer.
+   `npm run dist --workspace zedmix-desktop`, then run the installer.
 2. Bump to a **higher** version (v0.2.1), tag, and push that tag → let CI publish the Release.
 3. Launch the installed **older** app → within a moment it downloads in the
    background → the "Update ready" dialog appears.
 4. To watch the process, add `electron-log` and check the log at
-   `%APPDATA%\ZabsReel\logs`.
+   `%APPDATA%\ZedMix\logs`.
 
 ---
 
@@ -276,6 +276,6 @@ bad Release stops *new* downloads but doesn't downgrade anyone already updated.)
 ## Who can trigger a release — and branches
 
 The trigger is the **tag**, not the branch, and only people with **push access to
-azabonik/ZabsReel** can publish to this fork's users. A tag pushed to another fork
+azabonik/ZedMix** can publish to this fork's users. A tag pushed to another fork
 publishes to that fork only; its installs do not see it, because they update from
-azabonik/ZabsReel.
+azabonik/ZedMix.

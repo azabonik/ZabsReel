@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "zabsreel": {
+    "zedmix": {
       "command": "node",
       "args": ["packages/mcp/dist/index.js"]
     }

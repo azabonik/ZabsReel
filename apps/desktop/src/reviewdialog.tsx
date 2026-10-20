@@ -1,5 +1,5 @@
 // The web shell's in-app approval dialog (platform.ts reviewInPage): "Allow
-// media from \\nas?", the Keep dialog for a server added outside ZabsReel,
+// media from \\nas?", the Keep dialog for a server added outside ZedMix,
 // or only "couldn't read its list". The page shows it and the shell writes the
 // store; Electron shows the same wording in a native dialog instead.
 //

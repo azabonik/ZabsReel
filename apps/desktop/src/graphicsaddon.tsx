@@ -1,5 +1,5 @@
 // Help → Graphics add-on… (ADDON-PLAN D4, MOTION-PLAN D7): the graphics
-// renderer setting first, ZabsReel's own renderer (the default) or the
+// renderer setting first, ZedMix's own renderer (the default) or the
 // Remotion add-on; only a click on its radio buttons changes it, and the host
 // writes it (the agent can't). Then the add-on: Remotion, which
 // the user installs as an add-on under Remotion's own licence. The dialog shows
@@ -92,10 +92,10 @@ function day(iso: string | null): string {
 const shownJob: { id: number | null } = { id: null };
 
 /**
- * Where the two renderers differ (MOTION-PLAN D7): what ZabsReel's renderer
+ * Where the two renderers differ (MOTION-PLAN D7): what ZedMix's renderer
  * takes from Remotion's newer documentation that the add-on's Remotion
  * lacks or treats differently (the clean-room runtime's NOTES.md section 9),
- * and ZabsReel's own rules. The agent's guide and SKILL.md carry the same list.
+ * and ZedMix's own rules. The agent's guide and SKILL.md carry the same list.
  */
 const RENDERER_DIFFERENCES = [
   "loop on a Sequence (and Loop.useLoop inside one)",
@@ -106,7 +106,7 @@ const RENDERER_DIFFERENCES = [
   "the crop props of Sequence",
   "lab() and lch() colours in interpolateColors",
 ];
-/** <Video> on ZabsReel's renderer draws FFmpeg's decode, as <OffthreadVideo> does (MOTION-PLAN D4 E1). The guide and SKILL.md say the same. */
+/** <Video> on ZedMix's renderer draws FFmpeg's decode, as <OffthreadVideo> does (MOTION-PLAN D4 E1). The guide and SKILL.md say the same. */
 const VIDEO_COLOURS = `On ${PRODUCT_NAME}'s renderer <Video> and <Html5Video> show the same decoded frames as <OffthreadVideo>: their colours match <OffthreadVideo>'s, within about 14 levels of the add-on's <Video> (which the browser decodes).`;
 
 /** The graphics renderer setting: two radio buttons, and what each one means. */
@@ -116,7 +116,7 @@ function RendererSetting(props: { renderer: GraphicsRenderer; version: string; s
     <fieldset className="ga-renderer">
       <legend>Graphics renderer</legend>
       <label className="ga-choice">
-        <input type="radio" name="ga-renderer" checked={renderer === "zabsreel"} disabled={saving} onChange={() => onChoose("zabsreel")} />
+        <input type="radio" name="ga-renderer" checked={renderer === "zedmix"} disabled={saving} onChange={() => onChoose("zedmix")} />
         <span>{PRODUCT_NAME} <span className="muted">(built in)</span></span>
       </label>
       <p className="ga-help">Nothing to install. Graphics can use the project's own video, images and sound; an overlay's sound becomes a linked audio clip. No network and no packages.</p>
@@ -235,7 +235,7 @@ export function GraphicsAddonDialog({ api, connected, onClose }: { api: CoreApi;
     setSavingRenderer(true);
     try {
       const r = await platform.graphicsAddon.setRenderer(renderer);
-      if (r.ok) setDone(renderer === "zabsreel" ? `Graphics render with ${PRODUCT_NAME}'s renderer.` : "Graphics render with the Remotion add-on.");
+      if (r.ok) setDone(renderer === "zedmix" ? `Graphics render with ${PRODUCT_NAME}'s renderer.` : "Graphics render with the Remotion add-on.");
       else setError(r.error ?? "The graphics renderer setting couldn't be saved.");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

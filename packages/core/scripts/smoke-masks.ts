@@ -631,7 +631,7 @@ async function blendEdges(dir: string) {
 }
 
 async function main() {
-  const dir = mkdtempSync(join(tmpdir(), "zabsreel-masks-"));
+  const dir = mkdtempSync(join(tmpdir(), "zedmix-masks-"));
   console.log(`work dir: ${dir}`);
   await blendModes(dir);
   await masks(dir);

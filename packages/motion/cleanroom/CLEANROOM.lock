@@ -1,16 +1,17 @@
 # Clean-room lock (MOTION-PLAN D3; decisions.md RUNTIME OWNERSHIP, HASH-LOCK).
 # These files come from clean-room implementer session 75ef70b4-debc-426d-8c72-8d2e56dc3505 (evidence step3-impl/run-1, feedback rounds run-2 and run-3),
-# audited 2026-10-17 (audit runs 1-3: 0 suspicious). Only a clean-room implementer session may change them;
-# a change needs a new clean-room run, a new audit and a regenerated lock.
-4c412653bc54a04f4f5d144ee29bb5138ab6624db716fc667ede97ac60b9372c  NOTES.md
+# audited 2026-10-17 (audit runs 1-3: 0 suspicious), and from rename session 28073955-3162-454c-b5d3-d969e77ff6c2 (evidence rename-zedmix/run-1,
+# 2026-10-20: the product name only, audited by equivalence: byte-identical to the earlier files with that one substitution).
+# Only a clean-room implementer session may change them; a change needs a new clean-room run, a new audit and a regenerated lock.
+2a66219cd4b5ab7594e68c413654b8ad777c9a8ce451ab293b09abfabfa19fe8  NOTES.md
 d77dc583f9caffefca82a811665459390bd757b58aa0155dd12c10f9518b8cff  runtime/exports.json
-83343fb08b1650ba04557d3150ad238d1de580ce7ba7cb8261e242048bb588fd  runtime/src/AbsoluteFill.tsx
+fc6d68d38f2c30192f040cf662d766bc8e974450985b30090f18d72e6328fd94  runtime/src/AbsoluteFill.tsx
 1d655b7e4dc186d04639112eedcfff21ed526a10f5d27b16bb4bed730fea2592  runtime/src/Audio.tsx
 0b6ad23bd857908c99b95f97f6bd0a02656b9e9bb688df78405001831dc3281a  runtime/src/Freeze.tsx
-1c0f2787780077eaada3ae2c2440062f8360dc4cb5b8242862cea1a47954cfac  runtime/src/Img.tsx
-23b034a09d52e59bca05341640102fa8863a3af32b02296062fbb0519c2e28ae  runtime/src/Loop.tsx
+8ec1628a6e74260885af88417832970ef9c5f6681756b6d5157325b630c8a9bf  runtime/src/Img.tsx
+7621e729a185211b79b99d23174d3120379e3865fb78ae813ad261ca55331611  runtime/src/Loop.tsx
 f56ff574ee540d8277d54afbd85106a00d95b3d323f6617b5d11cb02a8fe2593  runtime/src/MediaImage.tsx
-a7f8f549a99e118bd88a412562b801c9aa1419ab8e270d27d344703013d57233  runtime/src/Sequence.tsx
+4345d41894ced5f9aafabba8314b323fc48f68b8a79c2ff6b95f59e257cbb838  runtime/src/Sequence.tsx
 4b50b8d9d45e05096a141118c1e4d0e4b3f1c4b045ccd688dd948a98dbc0fa04  runtime/src/Series.tsx
 206f8af22ba06ec9c130a23b91b16a171eb9f8d58d22cdeed713153a79f281fe  runtime/src/Video.tsx
 8a048172e6755018d5647aff13b8fa3fd6529ca7cb3e0ec46bbddfd17f3dad8c  runtime/src/app.tsx
@@ -19,28 +20,28 @@ c2d57b1626aadbd7517c6600d385c4154f8783fc76be38884b7cf7c1168b223e  runtime/src/co
 073711f9c781d6d942efddf40c56e654ef3e58d9ba93767b92b274a622c32fcd  runtime/src/context.ts
 18244ba6034a2d7d17725f63949f1187ea3939ff99edbbef0b3c850392784bde  runtime/src/crop.ts
 dce2cbb780aa78dc8e24042743ae30ac49c529e7f4291531b996d4e469cce044  runtime/src/easing.ts
-957086606b72c61bf2755df0b56b307c70e06a6039d4c3927a2293611ea2bf6f  runtime/src/errors.ts
+8f923b45f3992378045d21a5407ba8d826b2a3e2172b551b82ad693081b10944  runtime/src/errors.ts
 742e6f692e0d8e9d64b5f03c4a2b09054f878b189cb3ec49079dc2dbce0d7eb1  runtime/src/exportNames.ts
-d5ead1f5e72973a3f880649a1f16569065cfdaa3555761930ed46920daf69103  runtime/src/hooks.ts
+7b1c0b51e2d6d048dda4a3e438f8beb44b23edef043d591d2e48524c76f78e52  runtime/src/hooks.ts
 e77fb993dcd976b6f6ec7e7a3ad310c2a09722a79ca5c382f350ab9dc154a7ed  runtime/src/host.ts
 40278724ecd6593b7e1ed224c564d4604cbab635e1789af184cb2f558866be30  runtime/src/hostTypes.ts
-23557a708b17a96bed992a4d222d4b9a9aa27dc8ff4bb4541d12fbfb96041580  runtime/src/index.ts
+a69b9b74838877166d7aea0308f2ed39984c32f7425b1c2dd30065350ffce7f8  runtime/src/index.ts
 f16290ea8ea1a9e92e74b8fbd359e34f473387aed0c3947a6f24318fe6c039ef  runtime/src/interpolate.ts
 9dbe888795487f52e51bdfcfb9258344490d63a5e0f9e795f06aa6178cd666c3  runtime/src/media.ts
 fff1bee2c4d1d8d3bdeae6c1fb498e984cb7ebd6eb8221b2ab65b82d0c0efbc1  runtime/src/moduleObject.ts
 bd5949f16720ebdfa4e629294f76d40011fd8d48ec6986afa676190fb6de1a0a  runtime/src/random.ts
 047999f6f7c9f3d19716aba5cb326e7338e0236458a6078556480d0467f19958  runtime/src/ranges.ts
-0225cb8065de07e5b814566c9b0f00fe8446341ae13514c9d086a9e4ac12d6be  runtime/src/session.ts
+cb752ceed60e1a13366f69b3df996a373daa128775fbc703370799118d74e5b8  runtime/src/session.ts
 5ff4f65d4569f99ada6ed4899cc6e2b11db94cdaa273fad56163944a2ebd70ea  runtime/src/spring.ts
 975b8a130b10a53961ae52a25778edb59cfe16aaaf2a8d7d5bcb6f769b0a1620  runtime/src/timing.ts
 a453177d800d6b590c1ef16f69843825d4760897db5db478cc25e4dd2bed3631  runtime/src/timingProps.ts
 d50610ee5f83bd42761a2bb0a04954d8ff57c0bed00ab7992d425b2198b56fef  runtime/src/validate.ts
-f9627766e3e084b21f9a37c9023002d032e88dcbccac2407da5badad182f6274  test/app.test.tsx
+5bb25b2895b512ca1dd6f986efd0d1b2856f48f1fe6533877a85451e53a3716f  test/app.test.tsx
 f2b30a041f03fe3befb70592fdbbaaaf88cade2ff49157c38f2212fd1d502e38  test/audio.test.tsx
 2f3ec812d3c5d7d8fbd6bd4bc8f4c5e4a2f3b27e8a9cca383e1b9626f2c14938  test/colors.test.ts
 98eba257ce4e986587bb682c1330f3d69daefe722472e3252bf2f499dcebe972  test/determinism.test.tsx
 fde4641a466886aa696551f0203d5041aecae29e4c01d5b5bb1eb99af4375d7d  test/easing.test.ts
-1433c7715b2089e6fbb25e00be3b5e7cd567ff18015fa6e81c7d9e61b39c73b7  test/errors.test.ts
+89b2efb31ebfc3ed26ca56189e5a5f522ba404784235734c1ccadc628d0bc307  test/errors.test.ts
 493537c6c9e6d55547470c805dc8d093bebc28e94bca4e51de95979d17b13ae3  test/exports.test.ts
 27f080a72382b790705fe30ade9110d78f63fb7e9f2ea106315e231a6a0ea1ca  test/fonts.test.tsx
 9d12cc6d9ca1b95833f3663c98744258d52d353043f89b84489e82eb50d3230e  test/helpers/dom.ts
@@ -49,7 +50,7 @@ e39a4ceaef2c522f271df768ac12d605d9d55b7a72c9e37aa655d1e0816efddd  test/helpers/p
 4fa033c872241fd8d0e260e45cf25596031ac8c04890b6f8ed16af66d02dc00f  test/helpers/production.ts
 e2de2ffea8f9f36aa9682c8bf5ee3f85fb87f8738e2f395b8113a9858c97362c  test/img.test.tsx
 7c4bf70bd1ae85bc9ccc31fd7236ec2f745516f0c2274bbf2fe3087200d09cae  test/interpolate.test.ts
-8813ea77437dfce0cac91e2799db7f1b737a03f5a8489fe37f1dbe22bac3f3e2  test/moduleObject.test.tsx
+b6ab53b47be02bf46fbda145b16ddae12d7bd76b76c22b64bea682cc14c7c835  test/moduleObject.test.tsx
 71c0884f49752422957ff11ead584993aa97e5fc2b28a282c78963a4ae95b9b7  test/parity-r1.cases.ts
 53da74ede46ac80ecb5ca43cd9a4ee3a9e8828bfd076afbd77f74bc20f037c16  test/parity-r1.test.ts
 4b5dd8fb7b0868d787e46c2beb20bc7b341295d72262f58424fc30fbf12b607f  test/parity-r2.cases.ts

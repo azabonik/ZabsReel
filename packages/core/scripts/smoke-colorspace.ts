@@ -54,7 +54,7 @@ import {
   chromiumSourceColor, colorFixAffine, inputColorOpts, keepsChromaSamples, needsTaggedProxy, OUTPUT_YUV_STEP, previewColorFix, resolveSourceColor, SWS_CONVERT, SWS_RESIZE, type ProbedColor, type SourceColor,
 } from "../src/ffmpeg/colorspace.js";
 
-const dir = mkdtempSync(join(tmpdir(), "zabsreel-colorspace-"));
+const dir = mkdtempSync(join(tmpdir(), "zedmix-colorspace-"));
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;
@@ -498,11 +498,11 @@ async function main() {
     check(!needsTaggedProxy(await probeAsset(untagHD)), "untagged H.264 HD gets none (every version reads it as the export does)");
   }
 
-  // MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules (addon/resolve.ts) → this row fails.
+  // MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules (addon/resolve.ts) → this row fails.
   console.log("8. no graphics add-on: add_graphic refuses...");
   {
     useDevAddon();
-    // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+    // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
     const engine = new EditorEngine(useRemotionRenderer(mkdtempSync(join(dir, "data-"))));
     const refused = await withoutDevAddon(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 }).then(() => "added", (e: unknown) => (e instanceof RpcError ? e.code : String(e))));
     check(refused === "graphics_addon_missing", `without AIVE_REMOTION_ADDON and an installed add-on: graphics_addon_missing (${refused})`);

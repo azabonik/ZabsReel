@@ -265,10 +265,10 @@ function notify(): void {
   listeners.forEach((l) => l());
 }
 
-/** A per-viewer opt-out (localStorage "zabsreel.preview.gl" = "off"): the CSS preview, e.g. to compare. */
+/** A per-viewer opt-out (localStorage "zedmix.preview.gl" = "off"): the CSS preview, e.g. to compare. */
 function optedOut(): boolean {
   try {
-    return typeof localStorage !== "undefined" && localStorage.getItem("zabsreel.preview.gl") === "off";
+    return typeof localStorage !== "undefined" && localStorage.getItem("zedmix.preview.gl") === "off";
   } catch {
     return false;
   }

@@ -1,6 +1,6 @@
-// The packaging gate (ADDON-PLAN D6): no Remotion byte in a packed ZabsReel.
+// The packaging gate (ADDON-PLAN D6): no Remotion byte in a packed ZedMix.
 // Remotion is a user-installed add-on (Help → Graphics add-on…), so no build
-// ZabsReel conveys may hold it. electron-builder's afterPack hook
+// ZedMix conveys may hold it. electron-builder's afterPack hook
 // (apps/desktop/build/afterpack.cjs) runs this on every build's appOutDir,
 // `--dir` included, before any installer is made. It fails when:
 //
@@ -151,8 +151,8 @@ function selfTest() {
   const pkg = (name, version) => JSON.stringify({ name, version });
   /** A clean Windows/Linux tree: shared packages (react, semver@7.8.4 as global-agent has it), the core without src/, its licence. */
   const base = {
-    "zabsreel.exe": "",
-    "resources/app/package.json": pkg("zabsreel-desktop", "0.2.0"),
+    "zedmix.exe": "",
+    "resources/app/package.json": pkg("zedmix-desktop", "0.2.0"),
     "resources/app/node_modules/react/package.json": pkg("react", "18.3.1"),
     "resources/app/node_modules/global-agent/node_modules/semver/package.json": pkg("semver", "7.8.4"),
     "resources/app/node_modules/esbuild-like/package.json": pkg("esbuild", "0.25.12"),
@@ -170,7 +170,7 @@ function selfTest() {
     mkdirSync(out, { recursive: true });
     for (const [f, body] of Object.entries(only ? files : { ...base, ...files })) {
       if (body === null) continue;
-      const at = join(out, mac ? f.replace(/^resources\//, "ZabsReel.app/Contents/Resources/") : f);
+      const at = join(out, mac ? f.replace(/^resources\//, "ZedMix.app/Contents/Resources/") : f);
       mkdirSync(f.endsWith("/") ? at : dirname(at), { recursive: true });
       if (!f.endsWith("/")) writeFileSync(at, body);
     }
@@ -201,7 +201,7 @@ function selfTest() {
     run("an empty src/ folder of the core fails", { "resources/app/node_modules/@aive/core/src/": "" }, /@aive\/core\/src exists/);
     run("a missing licence file fails", { "resources/app/node_modules/@aive/core/licenses/remotion-4.0.481-LICENSE.md": null }, /remotion-4\.0\.481-LICENSE\.md is missing/);
     run("a licence file with other line endings fails", { "resources/app/node_modules/@aive/core/licenses/remotion-4.0.481-LICENSE.md": LICENSE.replace("\r\n", "\n") }, /remotion-4\.0\.481-LICENSE\.md differs/);
-    run("a tree without resources/app fails", { "zabsreel.exe": "" }, /has no resources\/app$/, { only: true });
+    run("a tree without resources/app fails", { "zedmix.exe": "" }, /has no resources\/app$/, { only: true });
     // This repository's pin: the 18 packages production shares with the add-on, and semver@7.8.4 (global-agent's), pass;
     // the add-on's own esbuild does not.
     const lock = JSON.parse(readFileSync(join(DEFAULT_ROOT, "package-lock.json"), "utf8")).packages;

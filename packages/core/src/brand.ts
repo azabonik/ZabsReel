@@ -13,31 +13,31 @@
  * the brand and stays as it is.
  */
 
-export const PRODUCT_NAME = "ZabsReel";
-export const PRODUCT_ID = "zabsreel";
+export const PRODUCT_NAME = "ZedMix";
+export const PRODUCT_ID = "zedmix";
 /** The server key written into AI client configs (mcpServers.<key>). */
-export const MCP_KEY = "zabsreel";
-export const SKILL_NAME = "zabsreel-editor";
-/** Electron appId and Windows AUMID; frozen after the first release. */
-export const APP_ID = "io.github.azabonik.zabsreel";
-export const APP_ID_DEV = "io.github.azabonik.zabsreel.dev";
+export const MCP_KEY = "zedmix";
+export const SKILL_NAME = "zedmix-editor";
+/** Electron appId and Windows AUMID. Keep it fixed: a new id installs beside the old app instead of upgrading it (this happened once, after 0.2.0). */
+export const APP_ID = "io.github.azabonik.zedmix";
+export const APP_ID_DEV = "io.github.azabonik.zedmix.dev";
 /** The desktop workspace's package name (also the Linux executable name). */
-export const DESKTOP_PACKAGE = "zabsreel-desktop";
-export const GITHUB_REPO = "azabonik/ZabsReel";
+export const DESKTOP_PACKAGE = "zedmix-desktop";
+export const GITHUB_REPO = "azabonik/ZedMix";
 /** Default data folder, relative to the home folder. */
-export const DATA_DIR_PARTS = [".zabsreel", "data"] as const;
+export const DATA_DIR_PARTS = [".zedmix", "data"] as const;
 /** Where `migrate` keeps its backups, relative to the home folder. */
-export const BACKUP_DIR_PARTS = [".zabsreel", "backups"] as const;
+export const BACKUP_DIR_PARTS = [".zedmix", "backups"] as const;
 
 /**
- * The fork's previous identity. Used only to find and rename what it left
+ * The previous product identity (ZabsReel, through 0.2.0). Used only to find and rename what it left
  * behind (migrate) and as the data-dir fallback; never written anew.
  */
 export const LEGACY = {
-  productName: "SynthCut",
-  id: "synthcut",
-  mcpKey: "synthcut",
-  skillName: "synthcut-editor",
-  desktopPackage: "synthcut-desktop",
-  dataDirParts: [".synthcut", "data"],
+  productName: "ZabsReel",
+  id: "zabsreel",
+  mcpKey: "zabsreel",
+  skillName: "zabsreel-editor",
+  desktopPackage: "zabsreel-desktop",
+  dataDirParts: [".zabsreel", "data"],
 } as const;

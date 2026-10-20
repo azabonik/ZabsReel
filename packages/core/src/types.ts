@@ -1,5 +1,5 @@
 /**
- * Core data model for ZabsReel.
+ * Core data model for ZedMix.
  *
  * Editing is fully **non-destructive**: source files are never modified. A
  * project is an Edit Decision List (EDL) — clips that *reference* regions of
@@ -111,7 +111,7 @@ export interface MediaAsset {
    */
   awaitingServer?: string;
   /**
-   * Runtime only, never saved: ZabsReel could not check whether this file is
+   * Runtime only, never saved: ZedMix could not check whether this file is
    * in its private settings folder (the error code, or "private" when it is),
    * so it did not open it. Set on load; cleared by a later successful check.
    */
@@ -146,7 +146,7 @@ export interface MediaAsset {
    */
   cutout?: { colorPath: string; colorStart: number; colorAssetId?: string; colorTags?: ProbedColor; colorCodec?: string };
   /**
-   * Set when the user imported a file from ZabsReel's own baked/ folder: it is
+   * Set when the user imported a file from ZedMix's own baked/ folder: it is
    * user media, so the library clean-up never treats it as an engine bake.
    */
   userImported?: boolean;
@@ -439,13 +439,13 @@ export interface GraphicOverlay {
   /** Props passed to the component when it was rendered. */
   props?: Record<string, unknown>;
   /**
-   * add_graphic's `fonts` when it was rendered (ZabsReel's motion renderer):
+   * add_graphic's `fonts` when it was rendered (ZedMix's motion renderer):
    * id -> an installed family name or a font file path. Kept with the code
    * for a later add_graphic; nothing reads or opens them by itself.
    */
   fonts?: Record<string, string>;
   /**
-   * The graphic's own sound (ZabsReel's motion renderer, MOTION-PLAN D4 E3):
+   * The graphic's own sound (ZedMix's motion renderer, MOTION-PLAN D4 E3):
    * the id of the one audio clip that plays it, over the graphic's window and
    * linked to this clip. It follows the graphic: removing the graphic removes
    * it, set_graphic_window moves and trims it, and a split of this clip trims

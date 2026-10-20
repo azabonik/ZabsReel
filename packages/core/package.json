@@ -1,7 +1,7 @@
 {
   "name": "@aive/core",
   "version": "0.2.0",
-  "description": "Headless editing engine for ZabsReel: non-destructive timeline, FFmpeg pipeline, HTTP/WebSocket server.",
+  "description": "Headless editing engine for ZedMix: non-destructive timeline, FFmpeg pipeline, HTTP/WebSocket server.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",

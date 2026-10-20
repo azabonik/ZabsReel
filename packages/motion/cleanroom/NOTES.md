@@ -342,7 +342,7 @@ behaviour; section 10 lists the cases and the scripts that derive them.)
   `delayRender() without a label`, `loading image "id"`, `loading a data: image`,
   `loading frame N of video "id"`, `loading font "id"`.
 - `unmount()` unmounts the React root and removes the root element and the app's font faces.
-- Hooks and components used outside a graphic that ZabsReel renders throw `graphic_api_misuse`.
+- Hooks and components used outside a graphic that ZedMix renders throw `graphic_api_misuse`.
   `Loop.useLoop()` returns `null` (as documented) and `<AbsoluteFill>` without timing props works
   anywhere.
 
@@ -712,7 +712,7 @@ rule that no script could derive from the rows was not adopted.
   reference shows source frame 1 where `2 * (f mod 90)` gives 2; every source position here is an
   exact integer, so no rounding rule explains it, and frames 45, 89, 135 and 179 follow the formula.
   SPEC 19 says `<Html5Video>`'s frame accuracy is "not guaranteed" (a browser `<video>` seeking);
-  ZabsReel draws the exact frame.
+  ZedMix draws the exact frame.
 - `audio-volume-step-sequence`: the reference's volume step comes before this runtime's (frame 60),
   but "trimBefore included" (frame 45) and "composition frame" (frame 30) both give the reported
   13.98 dB and 0.02 ms, so the rows cannot tell which rule the reference uses.

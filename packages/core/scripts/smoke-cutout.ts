@@ -502,7 +502,7 @@ async function main(): Promise<void> {
     const o2 = new EditorEngine(join(dir, "otio2"));
     await dispatch(o2, "import_otio", { path: otioPath });
     const back = o2.getProject().assets.find((a) => a.cutout);
-    check(back?.cutout?.colorPath === colour && back.cutout.colorAssetId === oa.id && back.name.endsWith("(background removed)"), "ZabsReel → OTIO → ZabsReel keeps the cutout record", back?.cutout);
+    check(back?.cutout?.colorPath === colour && back.cutout.colorAssetId === oa.id && back.name.endsWith("(background removed)"), "ZedMix → OTIO → ZedMix keeps the cutout record", back?.cutout);
     const saved = join(dir, "otio-save.aive");
     await o.save(saved);
     const o3 = new EditorEngine(join(dir, "otio3"));

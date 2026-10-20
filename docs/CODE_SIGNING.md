@@ -1,4 +1,4 @@
-# Code signing — ZabsReel (Windows)
+# Code signing — ZedMix (Windows)
 
 Unsigned installers trigger Windows SmartScreen ("Windows protected your PC").
 A **trusted code‑signing certificate** removes/reduces that warning. This doc
@@ -55,7 +55,7 @@ $env:CSC_KEY_PASSWORD = "your-pfx-password"
 npm run dist
 ```
 
-It signs both `ZabsReel.exe` and the installer.
+It signs both `ZedMix.exe` and the installer.
 
 ### B) Azure Trusted Signing (recommended cloud option)
 

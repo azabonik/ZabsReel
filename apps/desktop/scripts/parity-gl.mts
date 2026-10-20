@@ -63,7 +63,7 @@ const ONLY = (() => {
 const FPS = 30;
 const W = 320;
 const H = 180;
-const dir = mkdtempSync(join(tmpdir(), "zabsreel-parity-"));
+const dir = mkdtempSync(join(tmpdir(), "zedmix-parity-"));
 
 // ---- locating playwright-core and Chromium ---------------------------------------
 

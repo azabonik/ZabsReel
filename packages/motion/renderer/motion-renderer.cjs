@@ -1,4 +1,4 @@
-// ZabsReel's motion-graphics renderer: the Electron main of ONE render
+// ZedMix's motion-graphics renderer: the Electron main of ONE render
 // (MOTION-PLAN D2). apps/desktop/electron/main.cjs requires this file, as its
 // first statement, when argv has --zr-motion-renderer, and runs nothing else;
 // the core (packages/core/src/motion/rendermotion.ts) starts it.

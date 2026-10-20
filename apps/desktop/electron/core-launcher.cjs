@@ -3,7 +3,7 @@
 // client (via the MCP server) share ONE live editing session: whoever starts
 // first launches the core; the other attaches to it. They must agree on the
 // data directory (where the core publishes server.json), so we use the same
-// rule the core and MCP server use (brand.cjs resolveDataDir: ~/.zabsreel/data, or
+// rule the core and MCP server use (brand.cjs resolveDataDir: ~/.zedmix/data, or
 // the old folder when only that one holds state).
 //
 // Electron-free on purpose, so it can be tested under plain Node.

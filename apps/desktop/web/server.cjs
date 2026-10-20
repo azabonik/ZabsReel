@@ -37,7 +37,7 @@ const MAX_ENTRIES = 10000;
 /** Cap on a POST body (a host name, or the few paths of one pick). */
 const MAX_BODY = 256 * 1024;
 /** The header that carries the shell key on every /api request. */
-const SHELL_HEADER = "x-zabsreel-shell";
+const SHELL_HEADER = "x-zedmix-shell";
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",

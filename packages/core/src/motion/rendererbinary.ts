@@ -4,13 +4,13 @@ import { corePackageDir, isSourceCheckout } from "../addon/resolve.js";
 import { existsSync, realpathNative } from "../io/gatedfs.js";
 
 /**
- * Which executable runs ZabsReel's motion renderer (MOTION-PLAN D2, ruling
+ * Which executable runs ZedMix's motion renderer (MOTION-PLAN D2, ruling
  * D-LAUNCH-3). "Packaged or source checkout" is decided by isSourceCheckout()
  * alone, never by process.versions.electron (under `electron .` the core runs
  * under Electron too):
  * - packaged: the core always runs under the app's own Electron in Node mode,
- *   so the executable is process.execPath (ZabsReel.exe, the .app's
- *   Contents/MacOS binary, zabsreel-desktop), started with only the flag:
+ *   so the executable is process.execPath (ZedMix.exe, the .app's
+ *   Contents/MacOS binary, zedmix-desktop), started with only the flag:
  *   main.cjs dispatches on it before anything else. Without an Electron
  *   version there is no binary;
  * - source checkout (dev desktop, web shell, tests): the Electron binary

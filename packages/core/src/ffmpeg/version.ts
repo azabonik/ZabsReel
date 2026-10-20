@@ -1,6 +1,6 @@
 /**
  * FFmpeg versions and the few behaviours that differ between the releases
- * ZabsReel supports (4.4 and 6.1 – 9.0). Pure: executor.ts runs the probes
+ * ZedMix supports (4.4 and 6.1 – 9.0). Pure: executor.ts runs the probes
  * (`ffmpeg -version` once per process, plus two lazy feature probes) and
  * applies what is decided here.
  *

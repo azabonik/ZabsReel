@@ -130,7 +130,7 @@ jobs:
       # call traced and a logging FFmpeg stub: nothing names a test host, no
       # rpc or MCP tool can allow a server or read the stamp key, and a server
       # allowed (or revoked) in the app takes effect without a reload. Its
-      # add_graphic rows run ZabsReel's renderer, so it allows the user
+      # add_graphic rows run ZedMix's renderer, so it allows the user
       # namespaces as the motion steps below do.
       - name: Smoke — network paths end to end (core process, traced)
         run: |
@@ -214,7 +214,7 @@ jobs:
       # Each motion smoke below (and the window guard smoke) runs whenever the
       # pack succeeded (if: on each), even when an earlier one failed, so every
       # one reports; any failed step still fails the job.
-      # ZabsReel's own motion renderer (packages/motion): the binary rule on
+      # ZedMix's own motion renderer (packages/motion): the binary rule on
       # fixture trees, frames from hand-written pages through the offscreen
       # Electron renderer into FFmpeg, every network route refused (a private
       # network namespace, loopback listeners only), the limits and lifecycle,
@@ -230,7 +230,7 @@ jobs:
       - name: Smoke — motion renderer host and runtime (Electron offscreen, no network)
         if: ${{ !cancelled() && steps.pack_linux.outcome == 'success' }}
         env:
-          AIVE_APP: ${{ github.workspace }}/apps/desktop/build/dist/linux-unpacked/zabsreel-desktop
+          AIVE_APP: ${{ github.workspace }}/apps/desktop/build/dist/linux-unpacked/zedmix-desktop
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-renderer.ts
@@ -272,7 +272,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           npx tsx packages/motion/scripts/smoke-motion-audio.ts
 
-      # add_graphic switched over to ZabsReel's own renderer (MOTION-PLAN D7):
+      # add_graphic switched over to ZedMix's own renderer (MOTION-PLAN D7):
       # the renderer setting (renderer.json, which only the UI hosts write; no
       # agent tool can), renderer-unavailable with its reason (no binary, no
       # display, no usable sandbox) in get_state and add_graphic's refusal,
@@ -292,7 +292,7 @@ jobs:
         run: npx tsx apps/desktop/scripts/smoke-netguard.ts
 
   # The packed Windows app renders (MOTION-PLAN D8 "Launch" row (c) on the build
-  # ZabsReel ships): electron-builder --dir with the Electron npm ci installed,
+  # ZedMix ships): electron-builder --dir with the Electron npm ci installed,
   # then smoke-renderer's R1 (the binary rule on fixture trees) and R10 on it:
   # the packed core's binary rule and probe, and one graphic with a library
   # video, an image and a font rendered by the packed app (real frames over fd
@@ -351,5 +351,5 @@ jobs:
 
       - name: Smoke — the packed Windows app renders (frames over fd 3, media over fd 4, probe)
         env:
-          AIVE_APP: ${{ github.workspace }}\apps\desktop\build\dist\win-unpacked\ZabsReel.exe
+          AIVE_APP: ${{ github.workspace }}\apps\desktop\build\dist\win-unpacked\ZedMix.exe
         run: npx tsx packages/motion/scripts/smoke-renderer.ts --only=R1,R10

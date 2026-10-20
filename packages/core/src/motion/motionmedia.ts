@@ -10,7 +10,7 @@ import { isOffline, type MediaAsset } from "../types.js";
 import { MotionRenderError } from "./motionerror.js";
 
 /**
- * Library video, images and fonts for ZabsReel's own motion renderer, on
+ * Library video, images and fonts for ZedMix's own motion renderer, on
  * demand (MOTION-PLAN D4 E1, E2, E4; D-ONDEMAND, D-CAPS-2).
  *
  * The render's caller gives the graphic's asset table as the core keeps it

@@ -18,7 +18,7 @@
  *  1. load_project of a crafted project naming the hosts in every spelling and
  *     every field: the assets wait for their servers, network caches are
  *     dropped, each server is pending once (origin project; the two entries
- *     written outside ZabsReel also "outside"), with the 7.4 notice.
+ *     written outside ZedMix also "outside"), with the 7.4 notice.
  *  2. Every tool on that project refuses before any I/O (renders with
  *     media_offline and one message; rpc paths with media_server_not_approved
  *     and a pending request) or works without opening the media; /file,
@@ -277,7 +277,7 @@ async function enforcedSteps(): Promise<void> {
   const keyText = randomBytes(32).toString("base64url");
   writeFileSync(join(trustDir, "hosts.key"), keyText);
   const added = "2026-10-14T10:00:00.000Z";
-  const forged = createHmac("sha256", randomBytes(32)).update(`zabsreel-hosts-v2\n${H(4)}\nprompt\n${added}`).digest("base64url");
+  const forged = createHmac("sha256", randomBytes(32)).update(`zedmix-hosts-v2\n${H(4)}\nprompt\n${added}`).digest("base64url");
   writeFileSync(join(trustDir, "hosts.json"), JSON.stringify({ version: 2, servers: [{ host: H(3) }, { host: H(4), via: "prompt", added, stamp: forged }] }));
   const storeHash = () => createHash("sha256").update(readFileSync(join(trustDir, "hosts.json"))).digest("hex");
   const storeBefore = storeHash();
@@ -293,7 +293,7 @@ async function enforcedSteps(): Promise<void> {
 
   // The stub answers ffprobe for a test host with a canned 1 s 64x64 clip: only once its server is allowed (step 5)
   // may anything probe one (step 3 checks that nothing did before).
-  // The graphics rows below test the Remotion add-on's gates: the user's renderer setting (ZabsReel's own is the default).
+  // The graphics rows below test the Remotion add-on's gates: the user's renderer setting (ZedMix's own is the default).
   useRemotionRenderer(dataDir);
   const core = await startCore(dataDir, { ZR_STUB_CANNED: "zr-evil" });
   try {
@@ -352,8 +352,8 @@ async function enforcedSteps(): Promise<void> {
       `list_media_servers: nothing approved, ${H(3)} and ${H(4)} outside (${JSON.stringify(servers)})`);
     check(!/stamp|"key"/.test(JSON.stringify(servers)), "no stamp and no key in list_media_servers");
     const notice = String(loaded.result?.notice ?? "");
-    check(new RegExp(`files? on \\\\\\\\${H(3)}\\. \\\\\\\\${H(3)} is in ZabsReel's allowed list, but it was added outside ZabsReel`).test(notice)
-      && notice.includes(`\\\\${H(4)} is in ZabsReel's allowed list, but it was added outside`)
+    check(new RegExp(`files? on \\\\\\\\${H(3)}\\. \\\\\\\\${H(3)} is in ZedMix's allowed list, but it was added outside ZedMix`).test(notice)
+      && notice.includes(`\\\\${H(4)} is in ZedMix's allowed list, but it was added outside`)
       && new RegExp(`on \\\\\\\\${H(1)}, which the user hasn't allowed\\. They are offline\\.`).test(notice),
       `the load_project notice: the outside wording for ${H(3)} and ${H(4)}, the plain one for ${H(1)} (${notice})`);
 
@@ -374,7 +374,7 @@ async function enforcedSteps(): Promise<void> {
     const allow = (n: number) => `waiting for the user to allow \\\\${H(n)}`;
     const want: [string, string | undefined][] = [
       ["clip_local", undefined], ["clip_e1", allow(1)], ["clip_cut", allow(1)], ["clip_e2", allow(2)], ["clip_adj", `LUT: ${allow(2)}`],
-      ["clip_e3", `waiting for the user to keep \\\\${H(3)} (added outside ZabsReel)`], ["clip_e4", `waiting for the user to keep \\\\${H(4)} (added outside ZabsReel)`],
+      ["clip_e3", `waiting for the user to keep \\\\${H(3)} (added outside ZedMix)`], ["clip_e4", `waiting for the user to keep \\\\${H(4)} (added outside ZedMix)`],
     ];
     const om = sum.result?.offlineMedia;
     check(sum.ok && want.every(([id, text]) => rows.get(id)?.offline === text) && om?.count === 6 && [1, 2, 3, 4].every((n) => om.servers.includes(`\\\\${H(n)}`)) && om.music === allow(2),
@@ -437,14 +437,14 @@ async function enforcedSteps(): Promise<void> {
       check(r.status === 403 && r.code === "media_server_not_approved" && r.host === H(7) && /You cannot allow it yourself/.test(r.error ?? ""), `${m}: media_server_not_approved (${r.status} ${r.code} ${r.error?.slice(0, 120)})`);
     }
     const out3 = await rpc(core, "import_video", { path: `\\\\${H(3)}\\s\\x.mp4` });
-    check(out3.code === "media_server_not_approved" && out3.outside === true && /added to ZabsReel's allowed list outside ZabsReel/.test(out3.error ?? "") && /editing ZabsReel's files does not allow it/.test(out3.error ?? ""),
+    check(out3.code === "media_server_not_approved" && out3.outside === true && /added to ZedMix's allowed list outside ZedMix/.test(out3.error ?? "") && /editing ZedMix's files does not allow it/.test(out3.error ?? ""),
       `an outside server: media_server_not_approved with outside: true and the outside wording (${out3.error?.slice(0, 160)})`);
     const rem = await rpc(core, "remember_projects", { paths: [`//${H(6)}/p/x.aive`] });
     check(rem.ok && rem.result.skipped.length === 1 && /network computer you haven't allowed/.test(rem.result.skipped[0].reason), `remember_projects skips it (${JSON.stringify(rem.result?.skipped)})`);
     const req = (await rpc(core, "list_media_servers")).result.pending as any[];
     check([H(6), H(7)].every((h) => req.find((p) => p.host === h)?.origins.includes("request")), `the asked-for servers are pending with origin request (${JSON.stringify(req.map((p) => [p.host, p.origins]))})`);
     // An .otio whose media is on a test host (a clip's target_url, and an unplaced asset that only the
-    // ZabsReel metadata names): offline placeholders, never probed. Built by projectToOtio, as export_otio
+    // ZedMix metadata names): offline placeholders, never probed. Built by projectToOtio, as export_otio
     // writes it, with the clip's target_url then set to the raw network path (on POSIX, pathToFileURL makes
     // any path local).
     const otio = join(root, "crafted.otio");
@@ -461,7 +461,7 @@ async function enforcedSteps(): Promise<void> {
     check(io.ok && ioAssets.length === 2 && ioAssets.every((a) => a.missing === true && a.awaitingServer === H(5)) && /\\\\zr-evil-5\.invalid, which the user hasn't allowed/.test(io.result.notice ?? ""),
       `import_otio: both media paths on ${H(5)} are offline placeholders, with the notice (${io.error ?? JSON.stringify(ioAssets.map((a) => [a.path, a.missing, a.awaitingServer]))})`);
     // Graphics never import a network file (G9), standalone so no clip is needed.
-    const G9 = /graphics can't open network paths or ZabsReel's private files/;
+    const G9 = /graphics can't open network paths or ZedMix's private files/;
     const networkImports = [
       // Each import is used: the TypeScript loader drops an unused one before webpack resolves it.
       `import x from "//${H(6)}/s/x";\nexport default () => String(x);`,
@@ -472,15 +472,15 @@ async function enforcedSteps(): Promise<void> {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       check(!r.ok && G9.test(r.error ?? ""), `add_graphic importing a network file fails with the G9 message (${(r.error ?? r.text).split("\n")[0].slice(0, 200)})`);
     }
-    // The same graphics on ZabsReel's own renderer (the setting, read on every call): its import check refuses the
+    // The same graphics on ZedMix's own renderer (the setting, read on every call): its import check refuses the
     // imports before a renderer starts, and require.context does not exist in its page (step 3 checks nothing was touched).
     // MUTATION: drop the specifier check from graphicImportRefusal (motion/graphicmodule.ts) → the import rows fail.
     useRemotionRenderer(dataDir);
-    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zabsreel" })}\n`);
+    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zedmix" })}\n`);
     for (const [i, code] of networkImports.entries()) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       const refused = i === 1 || /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "(?:\/\/|file:\/\/)zr-evil-6\.invalid/.test(r.error ?? "");
-      check(!r.ok && refused, `on ZabsReel's renderer, add_graphic importing a network file fails${i === 1 ? "" : " with the import check's message"} (${(r.error ?? r.text).split("\n")[0].slice(0, 200)})`);
+      check(!r.ok && refused, `on ZedMix's renderer, add_graphic importing a network file fails${i === 1 ? "" : " with the import check's message"} (${(r.error ?? r.text).split("\n")[0].slice(0, 200)})`);
     }
     useRemotionRenderer(dataDir);
 
@@ -580,12 +580,12 @@ async function enforcedSteps(): Promise<void> {
       responses.push(r.text);
       check(!r.ok && /graphics can only import 'react' and 'remotion': /.test(r.error ?? ""), `add_graphic importing the key fails with the I9 message, before it is resolved (${r.error?.slice(0, 120)})`);
     }
-    // On ZabsReel's own renderer: its import check refuses them (no file is resolved; the responses hold no key).
-    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zabsreel" })}\n`);
+    // On ZedMix's own renderer: its import check refuses them (no file is resolved; the responses hold no key).
+    writeFileSync(join(dataDir, "addons", "renderer.json"), `${JSON.stringify({ renderer: "zedmix" })}\n`);
     for (const code of keyImports) {
       const r = await rpc(core, "add_graphic", { code, durationSeconds: 1 });
       responses.push(r.text);
-      check(!r.ok && /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "/.test(r.error ?? ""), `on ZabsReel's renderer, add_graphic importing the key fails with the import check's message (${r.error?.slice(0, 120)})`);
+      check(!r.ok && /^A graphic can import only react, react\/jsx-runtime, remotion and @aive\/motion, not "/.test(r.error ?? ""), `on ZedMix's renderer, add_graphic importing the key fails with the import check's message (${r.error?.slice(0, 120)})`);
     }
     useRemotionRenderer(dataDir);
     const fontKey = projectFile("fontkey.aive", {
@@ -638,12 +638,12 @@ async function enforcedSteps(): Promise<void> {
         `tools/list (${tools.length} tools): list_media_servers (read-only) and recheck_offline_media, no tool named like approve / trust / allow / grant (${JSON.stringify(named)})`);
       const instructions = mcp.getInstructions() ?? "";
       check(/## Offline media\n/.test(instructions) && instructions.includes("You cannot allow a server; no tool can.")
-        && instructions.includes("Never edit files in ZabsReel's data folder (such as trust/hosts.json) to allow a server"),
+        && instructions.includes("Never edit files in ZedMix's data folder (such as trust/hosts.json) to allow a server"),
         "the server's instructions carry the Offline media paragraph, with the do-not-edit sentence");
       const text = (r: Awaited<ReturnType<typeof mcp.callTool>>) => (r.content as { text?: string }[]).map((c) => c.text ?? "").join("\n");
       const lp = await mcp.callTool({ name: "load_project", arguments: { path: crafted } });
       const lpNotice = lp.isError ? "" : String(JSON.parse(text(lp)).notice ?? "");
-      check(lpNotice.includes(`on \\\\${H(1)}, which the user hasn't allowed. They are offline.`) && lpNotice.includes(`\\\\${H(3)} is in ZabsReel's allowed list, but it was added outside ZabsReel`),
+      check(lpNotice.includes(`on \\\\${H(1)}, which the user hasn't allowed. They are offline.`) && lpNotice.includes(`\\\\${H(3)} is in ZedMix's allowed list, but it was added outside ZedMix`),
         `load_project through MCP: the pending notice, and the outside notice for ${H(3)} (${lpNotice.slice(0, 200)})`);
       const ms = await mcp.callTool({ name: "list_media_servers", arguments: {} });
       const msText = text(ms);
@@ -718,7 +718,7 @@ async function enforcedSteps(): Promise<void> {
     const th = await rpc(core, "generate_thumbnail", { assetId: "asset_e2" });
     check(th.code !== "media_offline" && (await until(() => traces(zr(2)) > 0, 2_000)),
       `without a recheck, generate_thumbnail on ${H(2)}'s asset goes through right after the approval (${th.status} ${th.code ?? ""} ${th.error?.slice(0, 100)})`);
-    // Keep (what a UI host does for an entry added outside ZabsReel): the entry is stamped, so it is approved.
+    // Keep (what a UI host does for an entry added outside ZedMix): the entry is stamped, so it is approved.
     await approveHost(dataDir, H(3), "prompt");
     // Before any recheck, inspect_clip's own lazy check: clip_e3 is no longer offline. Its frames
     // render the whole timeline, which G5 still refuses for clip_e4 (zr-evil-4, never allowed).
@@ -737,7 +737,7 @@ async function enforcedSteps(): Promise<void> {
     for (const [i, p] of [`\\\\ｚｒ-evil-1.invalid\\s\\a.mp4`, `\\\\zr​-evil-1.invalid\\s\\a.mp4`].entries()) {
       const f = projectFile(`lookalike-${i}.aive`, { assets: [asset("asset_x", p)], tracks: [{ id: "track_v", kind: "video", index: 0, clips: [clip("clip_x", "asset_x", 0)] }] });
       const r = await rpc(core, "load_project", { path: f });
-      check(!r.ok && /names the network computer .*, which ZabsReel can't use/.test(r.error ?? ""), `a look-alike of ${H(1)} does not load (${r.error?.slice(0, 120)})`);
+      check(!r.ok && /names the network computer .*, which ZedMix can't use/.test(r.error ?? ""), `a look-alike of ${H(1)} does not load (${r.error?.slice(0, 120)})`);
     }
     check(!lines(traceFile).some((l) => LOOK.test(JSON.stringify(l.args))) && !lines(stubLog).some((l) => LOOK.test(JSON.stringify(l.args))), "no trace or stub-log line names a look-alike spelling");
 
@@ -845,11 +845,11 @@ async function enforcedSteps(): Promise<void> {
 }
 
 // ---- 8. no graphics add-on -----------------------------------------------------------------
-// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules
 // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
 async function noAddon() {
   console.log("8. no graphics add-on: add_graphic answers 409 graphics_addon_missing...");
-  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
   const core = await startCore(useRemotionRenderer(mkdtempSync(join(root, "data-noaddon-"))), { AIVE_REMOTION_ADDON: "" });
   try {
     const r = await rpc(core, "add_graphic", { template: "title", durationSeconds: 1 });

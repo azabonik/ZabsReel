@@ -129,7 +129,7 @@ const require = createRequire(import.meta.url);
 const RENDERER_DIR = dirname(require.resolve("@remotion/renderer/package.json"));
 const CJS_FILE = "dist/assets/download-and-map-assets-to-file.js";
 const ESM_FILE = "dist/esm/index.mjs";
-const REFUSAL = "ZabsReel refuses same-as sources";
+const REFUSAL = "ZedMix refuses same-as sources";
 const REMOTION_MODULE = /[\\/]node_modules[\\/](?:remotion|@remotion[\\/][^\\/]+)[\\/]/;
 /** Remotion modules loaded once render.ts and chromeguard.ts (imported above) are. */
 const loadedByImports = Object.keys(require.cache).filter((p) => REMOTION_MODULE.test(p));
@@ -260,7 +260,7 @@ async function m2(work: string) {
   });
 
   const plain = await thrown(() => renderGraphic(opts("plain"), DEV, stub(async () => ({ close: async () => {} }))));
-  check(plain?.message === "Graphics are turned off: ZabsReel couldn't start the graphics browser with its network limits." && !calls.includes("renderMedia") && calls.some((c) => c.startsWith("close")),
+  check(plain?.message === "Graphics are turned off: ZedMix couldn't start the graphics browser with its network limits." && !calls.includes("renderMedia") && calls.some((c) => c.startsWith("close")),
     `a browser that did not come through the wrapper: refused and closed, nothing rendered (${plain?.message}; ${calls.join(", ")})`);
 
   calls.length = 0;
@@ -299,7 +299,7 @@ async function m2(work: string) {
 async function m3(work: string) {
   console.log("M3. the same-as refusal remotionload.ts gives the installed (unpatched) @remotion/renderer...");
   check(loadedByImports.length === 0, `importing render.ts and chromeguard.ts loads no Remotion (${JSON.stringify(loadedByImports.slice(0, 3))})`);
-  const onDisk = [CJS_FILE, ESM_FILE].map((f) => readFileSync(join(RENDERER_DIR, f), "utf8").includes("/* zabsreel: same-as refused */"));
+  const onDisk = [CJS_FILE, ESM_FILE].map((f) => readFileSync(join(RENDERER_DIR, f), "utf8").includes("/* zedmix: same-as refused */"));
   check(JSON.stringify(remotion.guard()) === '{"ok":true}' && !onDisk.includes(true), `the guard is ok, and the files on disk are unpatched (${JSON.stringify(remotion.guard())}; marker on disk: ${JSON.stringify(onDisk)})`);
   const cjs = child("cjs");
   check(cjs.message === REFUSAL && JSON.stringify(cjs.guard) === '{"ok":true}', `downloadAsset (CommonJS) refuses a same-as source; the guard stays ok (${JSON.stringify(cjs)})`);
@@ -329,16 +329,16 @@ async function m3(work: string) {
   // Another Remotion version: the text the hook knows is not there.
   const other = copyRoot(work, "other-version", (text) => text.replace(EARLY_RETURN, (_m, head: string) => `${head}return src;`));
   const v = child("render", other);
-  check(refusedEarly(v, { ok: false, reason: "version" }, off("ZabsReel works with Remotion 4.0.481, and this copy of Remotion is a version it doesn't know.")),
+  check(refusedEarly(v, { ok: false, reason: "version" }, off("ZedMix works with Remotion 4.0.481, and this copy of Remotion is a version it doesn't know.")),
     `a copy whose text changed (another version): refused before bundling, nothing written (${JSON.stringify(v)})`);
   // As patch-package left it: the refusal already in both builds.
   const patched = copyRoot(work, "patched", (text, f) => text.replace(EARLY_RETURN, (_m, head: string, indent: string, close: string) => {
     const q = f === CJS_FILE ? "'" : '"';
-    return `${head}{\n${indent}/* zabsreel: same-as refused */\n${indent}throw new Error(${q}${REFUSAL}${q});${close}`;
+    return `${head}{\n${indent}/* zedmix: same-as refused */\n${indent}throw new Error(${q}${REFUSAL}${q});${close}`;
   }));
   const p = child("cjs", patched);
   check(p.message === REFUSAL && JSON.stringify(p.guard) === '{"ok":true}', `a copy that already carries the refusal: the guard is ok, its downloadAsset refuses (${JSON.stringify(p)})`);
-  const before = off("Remotion was loaded before ZabsReel could guard it. Restart ZabsReel.");
+  const before = off("Remotion was loaded before ZedMix could guard it. Restart ZedMix.");
   for (const how of ["esm", "cjs"]) {
     const e = child("render", "", how);
     check(refusedEarly(e, { ok: false, reason: "loaded-before" }, before), `@remotion/renderer loaded (${how === "esm" ? "import" : "require"}) before the hook: refused (${JSON.stringify(e)})`);
@@ -346,7 +346,7 @@ async function m3(work: string) {
   const t = child("cjs", "", "tsx");
   check(t.message !== REFUSAL && JSON.stringify(t.guard) === '{"ok":false,"reason":"loaded-before"}', `tsx compiles the CommonJS build past the hook: the guard is not ok (${JSON.stringify(t)})`);
   const n = child("render", "", "no-hooks");
-  check(refusedEarly(n, { ok: false, reason: "node" }, off(`graphics need Node.js 22.15 or later, and ZabsReel is running on Node.js ${process.versions.node}.`)),
+  check(refusedEarly(n, { ok: false, reason: "node" }, off(`graphics need Node.js 22.15 or later, and ZedMix is running on Node.js ${process.versions.node}.`)),
     `Node without module.registerHooks: refused (${JSON.stringify(n)})`);
 }
 
@@ -607,7 +607,7 @@ function m6(work: string) {
   realChrome("M6b", "--m6b");
 
   const c = child("render", "", "no-channel");
-  check(refusedEarly(c, { ok: true }, off(`ZabsReel couldn't guard Remotion's server on Node.js ${process.versions.node}.`)),
+  check(refusedEarly(c, { ok: true }, off(`ZedMix couldn't guard Remotion's server on Node.js ${process.versions.node}.`)),
     `(c) Node's request channel reaches no subscriber: refused before bundling, nothing written (${JSON.stringify(c)})`);
 
   const dLog = traced ? join(work, "m6d.strace") : "";
@@ -780,7 +780,7 @@ async function m7Cap() {
     const later = connections;
     const status = await raw(port, "/proxy?src=x");
     check(atCap >= 5 && later === atCap, `a port that never closes: the background check polled it (${atCap} connections) and stopped at its cap (${later - atCap} after it)`);
-    check(!released && status === 200 && seen === "/%zabsreel-refused-proxy" && channel(REQUEST_START).hasSubscribers,
+    check(!released && status === 200 && seen === "/%zedmix-refused-proxy" && channel(REQUEST_START).hasSubscribers,
       `…and the guard stays on: /proxy on that port reaches the server as ${JSON.stringify(seen)} (${status}; released ${released})`);
   } finally {
     release();
@@ -824,11 +824,11 @@ async function m6b() {
 }
 
 // ---- M8 ------------------------------------------------------------------------
-// MUTATION: give resolveGraphicsAddon a fallback to ZabsReel's own node_modules
+// MUTATION: give resolveGraphicsAddon a fallback to ZedMix's own node_modules
 // (addon/resolve.ts) → add_graphic gets past the refusal and this row fails.
 async function m8(work: string) {
   console.log("M8. no add-on: add_graphic refuses with graphics_addon_missing...");
-  // The add-on path: the user chose the Remotion add-on (ZabsReel's own renderer, the default, needs none).
+  // The add-on path: the user chose the Remotion add-on (ZedMix's own renderer, the default, needs none).
   const dataDir = useRemotionRenderer(mkdtempSync(join(work, "m8-data-")));
   const engine = new EditorEngine(dataDir);
   const e = await withoutDevAddon(() => thrown(() => dispatch(engine, "add_graphic", { template: "title", durationSeconds: 1 })));

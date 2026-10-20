@@ -16,7 +16,7 @@
  * step), mp3 within 0.021 (the two mp3 decoders skip different priming).
  *
  * Results are cached as raw Float32 (little-endian, as FFmpeg's f32le and
- * every platform ZabsReel ships on; the renderer reads a Float32Array) under
+ * every platform ZedMix ships on; the renderer reads a Float32Array) under
  * <dataDir>/cache/peaks/<sha256(path, size, mtime, buckets)>.f32, written to a
  * temp name and renamed into place. pruneDataDir (gc.ts) only prunes
  * cache/segments, and the storage report counts cache/ as cache, never as

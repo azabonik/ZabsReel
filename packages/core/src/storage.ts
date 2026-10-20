@@ -25,7 +25,7 @@ import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } 
  *    history, a file in <dataDir>/autosave/ or a known project file
  *    (<dataDir>/projects.json, appended by save/load) resolves to it. Strings
  *    are scanned without knowing field names, so new bake writers are covered.
- *  - Other ZabsReel cores on the same data dir (an AI client's core next to the
+ *  - Other ZedMix cores on the same data dir (an AI client's core next to the
  *    app's) count too: each running core publishes the managed paths its open
  *    project and undo/redo history name to <dataDir>/run/core-<pid>-<id>.json
  *    (atomic rewrite, about 1 s after a change, refreshed every 30 s, removed
@@ -60,7 +60,7 @@ import { assetFileBytes, collectStrings, normPath as norm, unusedLibraryBakes } 
  *  - Nothing runs while a job is running. Symlinks are never followed or moved,
  *    and nothing outside the two managed dirs is touched.
  *  - Files older than the known-projects list itself (`since` in projects.json)
- *    may belong to a project saved before ZabsReel recorded project files, so
+ *    may belong to a project saved before ZedMix recorded project files, so
  *    automatic runs leave them alone; an explicit clean-up (clean_up_storage,
  *    "Clean up now") moves them to the trash like any other unused file, and
  *    Empty trash keeps the ones it just moved in the trash for the retention
@@ -249,7 +249,7 @@ function referencedNames(dir: string, refs: Set<string>): RefNames {
 
 interface KnownProjects {
   version: 1;
-  /** When ZabsReel started recording project files here (ms). */
+  /** When ZedMix started recording project files here (ms). */
   since: number;
   projects: string[];
   /**
@@ -1205,7 +1205,7 @@ export class StorageJanitor {
     /** Known project files and autosaves that can't be read; pausesCleanUp → nothing is moved to the trash. */
     unavailableProjects: { path: string; autosave: boolean; missing: boolean; reason: string; since: string; pausesCleanUp: boolean }[];
     blockedBy: string | null;
-    /** Other running ZabsReel cores on this data dir whose open project and undo history were counted. */
+    /** Other running ZedMix cores on this data dir whose open project and undo history were counted. */
     otherCores: number;
     /**
      * Bakes the open project's library holds that no clip of it uses (deleted

@@ -1,6 +1,6 @@
 // Library panel → "Remove unused media…" (the head button, or a right-click in
 // the library): a strip under the panel head that lists what nothing in the
-// project uses, from a remove_unused_media dry run, and removes it. ZabsReel's
+// project uses, from a remove_unused_media dry run, and removes it. ZedMix's
 // own bakes (and built-in bleep sounds) are selected; the user's imported
 // media only when they tick it. One undo step; files stay on disk (the storage
 // clean-up trashes a bake's file once nothing uses it).
@@ -67,7 +67,7 @@ export function UnusedMediaStrip({ api, onClose }: { api: CoreApi; onClose: () =
         <>
           <span>
             {generated.length > 0
-              ? <>{plural(generated.length, "bake")} ZabsReel made ({fmtBytes(total(generated))}) — nothing in the project uses {generated.length === 1 ? "it" : "them"}.</>
+              ? <>{plural(generated.length, "bake")} ZedMix made ({fmtBytes(total(generated))}) — nothing in the project uses {generated.length === 1 ? "it" : "them"}.</>
               : "No unused bakes."}
           </span>
           {imported.length > 0 && (

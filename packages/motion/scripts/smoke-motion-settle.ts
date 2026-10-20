@@ -1,5 +1,5 @@
 /**
- * ZabsReel's own motion renderer captures a frame of library media only once
+ * ZedMix's own motion renderer captures a frame of library media only once
  * the requested source frame is painted (finding ZR-MEDIA-SETTLE, slice 4f).
  * The renderer runs for real, muted, with fresh HOME and data folders, in a
  * private network namespace; the fixtures are FIXTURES.md's (parity-lib.ts,

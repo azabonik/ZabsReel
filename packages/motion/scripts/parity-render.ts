@@ -10,8 +10,8 @@
  *  - reference: renderGraphic (core motion/render.ts) with this checkout's
  *    Remotion and its pinned headless shell (node_modules/.remotion, passed as
  *    the add-on's browser, so a missing one fails and nothing is downloaded);
- *  - zabsreel:  renderMotion (core motion/rendermotion.ts) with the graphic
- *    {source, props: {}} through ZabsReel's renderer (muted).
+ *  - zedmix:  renderMotion (core motion/rendermotion.ts) with the graphic
+ *    {source, props: {}} through ZedMix's renderer (muted).
  * Both render every frame of the composition as an overlay (ProRes 4444 with
  * alpha); the header's frames are decoded from both files with the same FFmpeg
  * (the one on PATH) to 8-bit RGBA and compared per pixel and channel:
@@ -35,7 +35,7 @@
  * rendered and some frames fail D8; 1 the harness itself failed.
  *
  * --self-test (to --out): compare() on known buffers; control.tsx rendered
- * twice through ZabsReel passes against itself with max_diff 0; the same
+ * twice through ZedMix passes against itself with max_diff 0; the same
  * frames with +40 on every colour channel give a mismatch row per frame in
  * render-mismatches.jsonl; control.tsx with its green circle 40 brighter on
  * the second side only (its own render, its own file) fails every frame, and
@@ -61,7 +61,7 @@ import { compare, decodeFrames, DRIFT, fmt, heatmap, inPrivateNetns, leftovers, 
 const SELF = fileURLToPath(import.meta.url);
 const CASES = join(REPO, "packages", "motion", "parity", "compositions");
 
-type Pipeline = "reference" | "zabsreel";
+type Pipeline = "reference" | "zedmix";
 
 // ---- one pipeline, in a child process ---------------------------------------------------
 
@@ -118,7 +118,7 @@ interface Row {
 interface SizeResult {
   size: string;
   reference: Outcome;
-  zabsreel: Outcome;
+  zedmix: Outcome;
   frames: ({ frame: number } & Metrics)[];
   /** A decode failure after both rendered. */
   error?: string;
@@ -128,15 +128,15 @@ interface CaseResult {
   case: string;
   spec: string;
   why: string;
-  status: "pass" | "mismatch" | typeof DRIFT | "zabsreel failed" | "harness error";
+  status: "pass" | "mismatch" | typeof DRIFT | "zedmix failed" | "harness error";
   sizes: SizeResult[];
 }
 
 interface Run {
   out: string;
   scratch: string;
-  /** Which pipeline renders each side (the self-test renders ZabsReel on both). */
-  sides: { reference: Pipeline; zabsreel: Pipeline };
+  /** Which pipeline renders each side (the self-test renders ZedMix on both). */
+  sides: { reference: Pipeline; zedmix: Pipeline };
   /** Self-test: change the second side's decoded frames before comparing. */
   alter?: (frame: Buffer) => Buffer;
   /** Self-test: change one side's composition before it renders (the header is read from the original). */
@@ -159,20 +159,20 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
     const size = `${w}x${h}`;
     const job = { source, width: w, height: h, fps: header.fps, durationInFrames: header.durationInFrames };
     const tag = `${name.replace(/\.tsx$/, "")}-${size}`;
-    const [reference, zabsreel] = await Promise.all([
+    const [reference, zedmix] = await Promise.all([
       runPipeline(SELF, run.scratch, `${tag}-a`, { ...job, source: run.sourceA?.(source) ?? source, pipeline: run.sides.reference }),
-      runPipeline(SELF, run.scratch, `${tag}-b`, { ...job, source: run.sourceB?.(source) ?? source, pipeline: run.sides.zabsreel }),
+      runPipeline(SELF, run.scratch, `${tag}-b`, { ...job, source: run.sourceB?.(source) ?? source, pipeline: run.sides.zedmix }),
     ]);
-    const sized: SizeResult = { size, reference, zabsreel, frames: [] };
+    const sized: SizeResult = { size, reference, zedmix, frames: [] };
     result.sizes.push(sized);
     const row = (n: number, actual: string): Row => ({ case: name, function: "render", size, input: `frame ${n}`, metric: "pct_within_4/max_diff", expected: `D8: >=${RULE.pct} / <=${RULE.max}`, actual, spec: header.spec, why: header.why });
     let failed: string | undefined;
-    if (!reference.ok) failed = zabsreel.ok ? DRIFT : `${DRIFT}; zabsreel failed: ${zabsreel.code ?? "error"}`;
-    else if (!zabsreel.ok) failed = `zabsreel failed: ${zabsreel.code ?? "error"}`;
-    if (!failed && reference.ok && zabsreel.ok) {
+    if (!reference.ok) failed = zedmix.ok ? DRIFT : `${DRIFT}; zedmix failed: ${zedmix.code ?? "error"}`;
+    else if (!zedmix.ok) failed = `zedmix failed: ${zedmix.code ?? "error"}`;
+    if (!failed && reference.ok && zedmix.ok) {
       try {
         const a = decodeFrames(reference.mov, w, h, header.frames);
-        const b = decodeFrames(zabsreel.mov, w, h, header.frames);
+        const b = decodeFrames(zedmix.mov, w, h, header.frames);
         for (const n of header.frames) {
           const fa = a.get(n)!;
           const fb = run.alter ? run.alter(b.get(n)!) : b.get(n)!;
@@ -184,7 +184,7 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
             mismatches.push(r);
             const dir = join(run.out, "images", name.replace(/\.tsx$/, ""), size);
             writePng(join(dir, `frame-${n}-reference.png`), fa, w, h);
-            writePng(join(dir, `frame-${n}-zabsreel.png`), fb, w, h);
+            writePng(join(dir, `frame-${n}-zedmix.png`), fb, w, h);
             writePng(join(dir, `frame-${n}-diff.png`), heatmap(fa, fb), w, h);
           }
         }
@@ -200,12 +200,12 @@ async function runCase(run: Run, file: string, source = readFileSync(file, "utf8
         mismatches.push(r);
       }
     }
-    for (const o of [reference, zabsreel]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
-    const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zabsreel failed" : sized.frames.every((f) => f.pass) ? "pass" : "mismatch";
-    const rank = ["pass", "mismatch", "zabsreel failed", DRIFT, "harness error"];
+    for (const o of [reference, zedmix]) if (o.ok) rmSync(dirname(dirname(dirname(o.mov))), { recursive: true, force: true, maxRetries: 5 });
+    const status: CaseResult["status"] = failed === "harness error" ? "harness error" : failed?.startsWith(DRIFT) ? DRIFT : failed ? "zedmix failed" : sized.frames.every((f) => f.pass) ? "pass" : "mismatch";
+    const rank = ["pass", "mismatch", "zedmix failed", DRIFT, "harness error"];
     if (rank.indexOf(status) > rank.indexOf(result.status)) result.status = status;
     const worst = sized.frames.length ? `min pct ${Math.min(...sized.frames.map((f) => f.pct_within_4))}, max diff ${Math.max(...sized.frames.map((f) => f.max_diff))}` : failed;
-    console.log(`  ${name} ${size}: ${worst} (${run.sides.reference} ${(reference.ms / 1000).toFixed(1)} s, ${run.sides.zabsreel} ${(zabsreel.ms / 1000).toFixed(1)} s)`);
+    console.log(`  ${name} ${size}: ${worst} (${run.sides.reference} ${(reference.ms / 1000).toFixed(1)} s, ${run.sides.zedmix} ${(zedmix.ms / 1000).toFixed(1)} s)`);
   }
   rowsFile(run, "render-all.jsonl", rows);
   rowsFile(run, "render-mismatches.jsonl", mismatches);
@@ -224,7 +224,7 @@ function noiseFloor(control: CaseResult | undefined) {
       min_pct_within_4: s.frames.length ? Math.min(...s.frames.map((f) => f.pct_within_4)) : null,
       max_diff: s.frames.length ? Math.max(...s.frames.map((f) => f.max_diff)) : null,
       mean_diff: s.frames.length ? Math.round((s.frames.reduce((t, f) => t + f.mean_diff, 0) / s.frames.length) * 1e4) / 1e4 : null,
-      errors: [s.reference, s.zabsreel].filter((o) => !o.ok).map((o) => (o as { error: string }).error),
+      errors: [s.reference, s.zedmix].filter((o) => !o.ok).map((o) => (o as { error: string }).error),
     })),
   };
 }
@@ -272,15 +272,15 @@ async function parity(run: Run, casesDir: string, only: string[] | undefined, ne
     passing: count("pass"),
     mismatching: count("mismatch"),
     referenceRefused: count(DRIFT),
-    zabsreelFailed: count("zabsreel failed"),
+    zedmixFailed: count("zedmix failed"),
     harnessErrors: count("harness error"),
     leftoverProcesses: leftovers,
     cases: results,
   };
   writeFileSync(join(run.out, "render-summary.json"), JSON.stringify(summary, null, 2) + "\n");
-  console.log(`\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zabsreel failed ${summary.zabsreelFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`);
+  console.log(`\n${summary.counts.framesPassing}/${summary.counts.frames} frames pass D8; pass ${summary.passing.length}, mismatch ${summary.mismatching.length}, ${DRIFT} ${summary.referenceRefused.length}, zedmix failed ${summary.zedmixFailed.length}, harness errors ${summary.harnessErrors.length}; ${summary.seconds} s; netns ${netns}`);
   if (leftovers.length) console.log(`killed ${leftovers.reduce((t, l) => t + l.pids.length, 0)} leftover process(es): ${JSON.stringify(leftovers)}`);
-  const unrendered = results.filter((r) => r.status === DRIFT || r.status === "zabsreel failed" || r.status === "harness error");
+  const unrendered = results.filter((r) => r.status === DRIFT || r.status === "zedmix failed" || r.status === "harness error");
   if (unrendered.length) {
     for (const r of unrendered) console.error(`NOT RENDERED: ${r.case} (${r.status})`);
     return 2;
@@ -313,9 +313,9 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   check(edge.pass && edge.pct_within_4 === 99.5 && edge.max_diff === 32, `50 pixels' red +32 and every green +4: 99.5/32 passes (${fmt(edge)})`);
 
   const control = join(CASES, "control.tsx");
-  console.log("S2. control.tsx rendered twice through ZabsReel passes against itself...");
+  console.log("S2. control.tsx rendered twice through ZedMix passes against itself...");
   const selfOut = join(out, "self");
-  const self: Run = { out: selfOut, scratch, sides: { reference: "zabsreel", zabsreel: "zabsreel" } };
+  const self: Run = { out: selfOut, scratch, sides: { reference: "zedmix", zedmix: "zedmix" } };
   freshOut(selfOut);
   const r2 = await runCase(self, control);
   const all2 = readRows(join(selfOut, "render-all.jsonl"));
@@ -366,14 +366,14 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   };
   const near = (px: number[], want: number[]) => px.every((v, c) => Math.abs(v - want[c]) <= 4);
   const ref3b = centre("reference");
-  const zr3b = centre("zabsreel");
+  const zr3b = centre("zedmix");
   check(!!ref3b && !!zr3b && near(ref3b, [0x3c, 0xb4, 0x4b]) && near(zr3b, [0x64, 0xdc, 0x73]), `the circle is #3cb44b in the first side's image and #64dc73 in the second's (${ref3b} and ${zr3b})`);
 
   console.log("S4. a composition that throws, through the real reference pipeline, is a drift candidate and is named...");
   const throws = join(scratch, "throws.tsx");
   writeFileSync(throws, ["// size: 64x48", "// fps: 30", "// durationInFrames: 2", "// frames: 0, 1", "// spec: self-test", "// why: a composition both pipelines refuse", "export default function Throws(): never {", '  throw new Error("parity self-test");', "}", ""].join("\n"));
   const refOut = join(out, "refused");
-  const refRun: Run = { out: refOut, scratch, sides: { reference: "reference", zabsreel: "zabsreel" } };
+  const refRun: Run = { out: refOut, scratch, sides: { reference: "reference", zedmix: "zedmix" } };
   const code = await parity(refRun, scratch, ["throws.tsx"], offline());
   const mis4 = readRows(join(refOut, "render-mismatches.jsonl"));
   const summary4 = JSON.parse(readFileSync(join(refOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; cases: CaseResult[] };
@@ -390,11 +390,11 @@ async function selfTest(out: string, scratch: string): Promise<number> {
   const driftRun: Run = { ...refRun, out: driftOut, sourceA: (tsx) => tsx.replace("  return <div", '  throw new Error("parity self-test drift");\n  return <div') };
   const code4b = await parity(driftRun, driftDir, undefined, offline());
   const mis4b = readRows(join(driftOut, "render-mismatches.jsonl"));
-  const summary4b = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zabsreelFailed: string[]; cases: CaseResult[] };
+  const summary4b = JSON.parse(readFileSync(join(driftOut, "render-summary.json"), "utf8")) as { referenceRefused: string[]; zedmixFailed: string[]; cases: CaseResult[] };
   check(code4b === 2, `the run exits 2 (it exited ${code4b})`);
   check(mis4b.length === 2 && mis4b.every((r) => r.actual === DRIFT), `both rows say exactly "${DRIFT}" (${JSON.stringify(mis4b.map((r) => r.actual))})`);
   const sized4b = summary4b.cases[0].sizes[0];
-  check(summary4b.referenceRefused.join() === "drift.tsx" && !summary4b.zabsreelFailed.length && !sized4b.reference.ok && sized4b.zabsreel.ok, "the summary lists it as refused by the reference only, ZabsReel rendered it");
+  check(summary4b.referenceRefused.join() === "drift.tsx" && !summary4b.zedmixFailed.length && !sized4b.reference.ok && sized4b.zedmix.ok, "the summary lists it as refused by the reference only, ZedMix rendered it");
   check(!mis4b.some((r) => r.actual.includes("parity self-test")), "no row carries the error text");
 
   console.log(failures === 0 ? "\nPARITY HARNESS SELF-TEST PASSED" : `\n${failures} CHECK(S) FAILED`);
@@ -423,7 +423,7 @@ async function main(): Promise<number> {
   try {
     if (args.includes("--self-test")) return await selfTest(resolve(out), scratch);
     const only = arg("only")?.split(",");
-    return await parity({ out: resolve(out), scratch, sides: { reference: "reference", zabsreel: "zabsreel" } }, resolve(arg("cases") ?? CASES), only, offline());
+    return await parity({ out: resolve(out), scratch, sides: { reference: "reference", zedmix: "zedmix" } }, resolve(arg("cases") ?? CASES), only, offline());
   } finally {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
   }

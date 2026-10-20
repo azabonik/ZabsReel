@@ -10,7 +10,7 @@ import { duplexPair } from "node:stream";
  * Remotion's own HTTP server (the one renderMedia starts on the port
  * renderGraphic gives it) answers /proxy?src=… for any page that asks, the
  * graphic's own TSX included, and hands the source to its compositor.
- * ZabsReel's graphics never use that route (refuseDownload refuses every
+ * ZedMix's graphics never use that route (refuseDownload refuses every
  * source), so while a render runs, every request on that port whose path is
  * /proxy is rewritten to {@link REFUSED} before Remotion's handler sees it.
  *
@@ -32,7 +32,7 @@ import { duplexPair } from "node:stream";
 
 const CHANNEL = "http.server.request.start";
 /** A path Remotion's file handler can't decode: it answers 400 and looks up no file. */
-const REFUSED = "/%zabsreel-refused-proxy";
+const REFUSED = "/%zedmix-refused-proxy";
 /** The guarded ports, with how many renders hold each. */
 const ports = new Map<number, number>();
 

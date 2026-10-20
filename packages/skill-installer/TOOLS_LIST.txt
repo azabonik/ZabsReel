@@ -1,4 +1,4 @@
-ZabsReel AI Video Editor — Full Tool List (119 tools)
+ZedMix AI Video Editor — Full Tool List (119 tools)
 =====================================================
 
 IMPORT & PROJECT
@@ -158,9 +158,9 @@ STORAGE
 114. storage_report — Disk usage per data-dir area (bakes, proxies, trash, caches) and a dry run of which unused baked/proxy files a clean-up would move to the trash, and why.
 115. clean_up_storage — Move unused baked/proxy files to the trash now (opening a project restores what it needs) and delete expired trash; emptyTrash deletes the trash for good; forgetMissing forgets project files that are gone.
 116. remember_projects — Record existing .aive/.otio files (such as the recent projects) so the clean-up keeps the baked files they use.
-117. remove_unused_media — Remove library assets nothing in the project uses: ZabsReel-made bakes by default, imported media only on request; dryRun reports first.
+117. remove_unused_media — Remove library assets nothing in the project uses: ZedMix-made bakes by default, imported media only on request; dryRun reports first.
 
 NETWORK COMPUTERS
 -------------------
-118. list_media_servers — The network computers ZabsReel may open files on, those added outside ZabsReel (not used until the user keeps them), and those waiting for the user. Only the user can allow one, in the ZabsReel window.
+118. list_media_servers — The network computers ZedMix may open files on, those added outside ZedMix (not used until the user keeps them), and those waiting for the user. Only the user can allow one, in the ZedMix window.
 119. recheck_offline_media — Re-check offline media (clips waiting for a network computer, or whose folder could not be checked) after the user changed something; allows nothing itself.

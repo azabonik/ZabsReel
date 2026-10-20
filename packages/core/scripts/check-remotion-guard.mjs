@@ -48,7 +48,7 @@ try {
 } catch (err) {
   message = err.message;
 }
-check(message === "ZabsReel refuses same-as sources", `downloadAsset (CommonJS) refuses a same-as source (${message})`);
+check(message === "ZedMix refuses same-as sources", `downloadAsset (CommonJS) refuses a same-as source (${message})`);
 check(remotion.guard().ok === true, `the guard stays ok after the CommonJS build is loaded (${JSON.stringify(remotion.guard())})`);
 
 const { stitchFramesToVideo, RenderInternals } = remotion.renderer;
@@ -65,7 +65,7 @@ try {
 } finally {
   RenderInternals.deleteDirectory(map.assetDir);
 }
-check(message === "ZabsReel refuses same-as sources", `downloadAsset (ESM, through stitchFramesToVideo) refuses a same-as source (${message.slice(0, 120)})`);
+check(message === "ZedMix refuses same-as sources", `downloadAsset (ESM, through stitchFramesToVideo) refuses a same-as source (${message.slice(0, 120)})`);
 
 const { proxyGuardWorks } = await import(pathToFileURL(PROXY_GUARD).href);
 check((await proxyGuardWorks()) === true, "the /proxy guard works here (a /proxy request reaches the handler rewritten)");
