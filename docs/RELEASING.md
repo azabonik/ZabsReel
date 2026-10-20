@@ -23,8 +23,9 @@ git push origin v0.2.1     # never `git push --tags` (see "The release guard")
 
 Pushing the `v*` tag starts the **Release** workflow, which builds the Windows
 installer + the update feed and publishes a GitHub Release. Installed apps pick it
-up on their next launch. The first ZedMix version is **0.2.0**; version numbers
-restarted there at the rename.
+up on their next launch. Version numbers restarted at **0.2.0**, the first public
+release, which shipped under the previous name (see "How the update reaches
+users"). The first ZedMix release comes after it.
 
 ---
 

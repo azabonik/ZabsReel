@@ -501,6 +501,18 @@ function partRename() {
     check(same(snap, snapshot(root, notBackups)), `${label}: nothing restored, not even the good entry`);
   }
 
+  console.log(`A7. a rule file at the old ${OLD_SKILL} path that is not the ${OLD_NAME} skill is left alone...`);
+  const proj2 = join(root, "proj2");
+  const ownRule = join(proj2, ".windsurf", "rules", `${OLD_SKILL}.md`);
+  const ownRuleText = `# My own rules\n\nUse tabs.\n`;
+  write(ownRule, ownRuleText);
+  const ruleDry = run(env, proj2, ["migrate", "--dry-run"]);
+  const ruleLeftAlone = new RegExp(`does not look like the ${OLD_NAME} skill[^\\n]*\\n\\s+${ownRule.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+  check(ruleDry.code === 0 && ruleLeftAlone.test(ruleDry.out), `--dry-run reports it as left alone\n${indent(ruleDry.out)}`);
+  const ruleYes = run(env, proj2, ["migrate", "--yes"]);
+  check(ruleYes.code === 0, `exit 0 (got ${ruleYes.code})\n${indent(ruleYes.out)}`);
+  check(existsSync(ownRule) && read(ownRule) === ownRuleText, "after --yes the rule file is unchanged");
+
   rmSync(root, { recursive: true, force: true });
 }
 
