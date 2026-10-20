@@ -692,10 +692,10 @@ export class NotMediaError extends FfmpegError {
  * True when FFmpeg's stderr says an input's format is not on the allowlist.
  * The text is the only stable part: FFmpeg 8.1+ prints it under `[in#0 @ …]`
  * and may leave out the list. From 6.1 FFmpeg itself also declines an HLS
- * playlist whose name does not end in .m3u8, .m3u or .hls, before the
- * allowlist sees it, and then fails on the file as another format ("moov
- * atom not found" for a .mp4); its "Not detecting m3u8/hls …" line says the
- * file is a playlist, so that counts too.
+ * playlist whose name does not end in .m3u8 or .m3u (a .hls name included),
+ * before the allowlist sees it, and then fails on the file as another
+ * format ("moov atom not found" for a .mp4); its "Not detecting m3u8/hls …"
+ * line says the file is a playlist, so that counts too.
  */
 export function notMediaFrom(stderr: string): boolean {
   return stderr.includes("Format not on whitelist") || stderr.includes("Not detecting m3u8/hls with non standard extension");
