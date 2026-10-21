@@ -860,8 +860,23 @@ export function hasAlphaModes(): Promise<boolean> {
 
 let anlmdnPromise: Promise<boolean> | null = null;
 
-/** How long {@link anlmdnWorks}' probe may run. A working anlmdn takes about 0.1 s on the probe's 0.25 s of noise. */
-export const ANLMDN_PROBE_TIMEOUT_MS = 15_000;
+/** The probe's default time limit. A working anlmdn takes about 0.1 s on the probe's 0.25 s of noise. */
+const ANLMDN_PROBE_DEFAULT_MS = 15_000;
+
+/**
+ * The anlmdn probe's time limit for an AIVE_ANLMDN_PROBE_TIMEOUT_MS value.
+ * That variable is for tests only (smoke-ffcompat sets 500 so that a fake
+ * FFmpeg that never exits fails fast). Only a whole number of milliseconds
+ * from 100 to 600,000 is used. Anything else, including 0, gives the default
+ * (15 s): execa takes a timeout of 0 as no time limit.
+ */
+export function anlmdnProbeTimeoutMs(raw: string | undefined): number {
+  const ms = Number(raw);
+  return raw && Number.isInteger(ms) && ms >= 100 && ms <= 600_000 ? ms : ANLMDN_PROBE_DEFAULT_MS;
+}
+
+/** How long {@link anlmdnWorks}' probe may run: 15 s, or AIVE_ANLMDN_PROBE_TIMEOUT_MS (read once, when this module loads). */
+export const ANLMDN_PROBE_TIMEOUT_MS = anlmdnProbeTimeoutMs(process.env.AIVE_ANLMDN_PROBE_TIMEOUT_MS);
 
 /**
  * Whether `bin`'s anlmdn runs: 0.25 s of generated noise through it, stopped
