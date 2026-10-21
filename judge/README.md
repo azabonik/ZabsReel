@@ -92,8 +92,8 @@ that writes passing results into its scratch folder, lines on the result pipe th
 without exec that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and
 a clean test must pass. A not-applicable check (also one made through `needs=` on an input that could not be
 crafted) and a not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`.
-A fixture adapter that addresses another computer (a UDP connect to 192.0.2.1, which sends no packet) must fail the
-download check, one that addresses only 127.0.0.1 must pass it, and with strace switched off (`JUDGE_STRACE=`) the
+A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53, which sends no packet) must fail the
+download check, one that connects to 127.0.0.1 and makes a UDP probe elsewhere (no packet) must pass it, and with strace switched off (`JUDGE_STRACE=`) the
 check must be not observed, a failure with `--require-trace`. The cases that need strace are skipped without it,
 unless `--self-test --require-trace` is given (`judge.yml` does): then a missing strace fails the self-test. On Linux an adapter that tries to open the test's and the runner's descriptors through
 `/proc/<pid>/fd` for writing must be refused every time, with the verdict unchanged, and a fork child that writes

@@ -17,10 +17,11 @@ started and prints the interrupted JUDGE line. A relative --adapter path works (
 
 Statuses: a check recorded as not applicable (directly, or through T.check(needs=...) on an input observe.craft could
 not make) passes the run and is counted on the JUDGE line, and fails it with --strict; a check recorded as not
-observed passes and is counted, and fails with --require-trace. The download tripwire: an adapter that addresses
-another computer (a UDP connect to 192.0.2.1, which sends no packet) fails the run's "nothing was downloaded" check,
-one that addresses only 127.0.0.1 passes it, and with strace switched off (JUDGE_STRACE empty) the check is not
-observed, a failure with --require-trace. The cases that need strace are skipped without it, unless --require-trace
+observed passes and is counted, and fails with --require-trace. The download tripwire: an adapter that starts a DNS
+lookup (a UDP connect to 192.0.2.1 port 53; a UDP connect sends no packet) fails the run's "nothing was downloaded"
+check; one that connects only to 127.0.0.1 and makes a UDP connect elsewhere on another port (a reachability probe,
+no packet) passes it; with strace switched off (JUDGE_STRACE empty) the check is not observed, a failure with
+--require-trace. The cases that need strace are skipped without it, unless --require-trace
 is given (judge.yml): then a missing strace fails the self-test.
 """
 import json
@@ -100,8 +101,9 @@ TESTS = {
 # the descriptors it holds, then tries to open every descriptor of the test process (its nearest ancestor started
 # with --child; strace may sit between them) and of the runner (that process's parent) for writing through
 # /proc/<pid>/fd, writes a passing record through any it opens, and reports each attempt in procfd.json in its scratch
-# folder; "connect" addresses another computer at start (a UDP connect to 192.0.2.1, TEST-NET-1: a UDP connect sends
-# no packet) and "loopback" addresses only 127.0.0.1 the same way.
+# folder; "connect" starts a DNS lookup at start (a UDP connect to 192.0.2.1, TEST-NET-1, port 53: a UDP connect sends
+# no packet) and "loopback" makes a UDP connect to 127.0.0.1 and one to 192.0.2.1 port 443 (a reachability probe, which
+# observe.net_hits does not count).
 FAKE = r'''import json, os, socket, subprocess, sys
 proto, mode = int(sys.argv[1]), sys.argv[2]
 scratch = None
@@ -180,10 +182,11 @@ for line in sys.stdin:
             forge()
         if mode == "procfd":
             procfd()
-        if mode in ("connect", "loopback"):
+        targets = {"connect": [("192.0.2.1", 53)], "loopback": [("127.0.0.1", 443), ("192.0.2.1", 443)]}
+        for addr in targets.get(mode, []):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                s.connect(("192.0.2.1" if mode == "connect" else "127.0.0.1", 443))
+                s.connect(addr)
             except OSError:
                 pass  # no route (a network namespace without one): the call is still traced
             s.close()
@@ -413,12 +416,13 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
               label="not observed with --require-trace: the run fails")
         # The download tripwire (strace on the adapter's tree, ptrace_scope 1 allows it: strace starts the adapter).
         if traced:
-            s.run("driver", 1, [fail.format("driver", net + ".*192\\.0\\.2\\.1"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+            s.run("driver", 1, [fail.format("driver", net + ".*htons\\(53\\).*192\\.0\\.2\\.1"),
+                                r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 connect",
-                  label="the adapter addresses another computer: the download check fails")
+                  label="the adapter starts a DNS lookup: the download check fails")
             s.run("driver", 0, [r"^PASS  test_driver: " + net, r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 loopback",
-                  label="the adapter addresses only 127.0.0.1: the download check passes")
+                  label="the adapter connects to 127.0.0.1 and makes a UDP probe that sends no packet: the check passes")
         else:
             print(f"{'FAIL' if require_trace else 'skip'} the download tripwire cases: strace is not installed"
                   + (" (--require-trace)" if require_trace else ""), flush=True)
