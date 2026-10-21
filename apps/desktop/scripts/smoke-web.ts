@@ -15,9 +15,10 @@
 // in-app alertdialog (focus on Keep offline, Tab stays inside, Esc keeps it
 // offline, Allow allows it, the clips come online); Save As with a project
 // named \\zr-evil.invalid\s\x starts the picker with x.aive and saves in the
-// folder listed; an entry added outside ZedMix gets the Keep dialog (focus
-// on Remove, Esc removes it, Keep stamps it), and with two pages Keep in one
-// then Esc in the other leaves it allowed. Both processes run under a trace
+// folder listed (not before a typed folder's listing lands); an entry added
+// outside ZedMix gets the Keep dialog (focus on Remove, Esc removes it, Keep
+// stamps it), and with two pages Keep in one then Esc in the other leaves it
+// allowed. Both processes run under a trace
 // preload (every fs and child_process call that names a test server): nothing
 // touches a server before it is allowed, and the shell only lists the folder
 // the picker was sent to.
@@ -502,7 +503,7 @@ async function networkComputers(o: {
 
   const pw = await loadPlaywright();
   const exe = chromiumPath();
-  const browser = await pw.chromium.launch({ ...(exe ? { executablePath: exe } : {}), args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-audio-output"] });
+  const browser = await pw.chromium.launch({ ...(exe ? { executablePath: exe } : {}), args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-audio-output", "--mute-audio"] });
   try {
     const evil: string[] = [];
     const picked: string[] = [];
@@ -593,7 +594,8 @@ async function networkComputers(o: {
     expect(await waitFor("project x", async () => (await a.locator(".proj-name").innerText().catch(() => "")).trim().startsWith("x")),
       `a project named \\\\zr-evil.invalid\\s\\x opens as "${(await a.locator(".proj-name").innerText().catch(() => "")).trim()}"`);
     const saveDir = join(root, "saved");
-    mkdirSync(saveDir);
+    // A folder row the picker shows once it lists saveDir (the start folder has none named so).
+    mkdirSync(join(saveDir, "listed-here"), { recursive: true });
     await a.getByRole("button", { name: /Project/ }).click().catch(() => {});
     await a.getByRole("menuitem", { name: /^Save As/ }).click().catch(() => {});
     const picker = a.getByRole("dialog", { name: "Save project as" });
@@ -601,11 +603,30 @@ async function networkComputers(o: {
     const nameField = picker.locator(".picker-filename input");
     expect((await nameField.inputValue().catch(() => "")) === "x.aive", `…with the name field "${await nameField.inputValue().catch(() => "")}"`);
     const pathBar = picker.getByRole("textbox", { name: "Folder path" });
+    // The picker opens on its start folder, and that listing writes its path into the bar unless something was typed.
+    // fill() selects the bar's text, then types in a second round trip: a listing landing between the two left its path
+    // in front of the typed one, so Enter listed nothing and Save wrote into the start folder. Type once it has landed.
+    await waitFor("start folder", async () => (await pathBar.inputValue().catch(() => "")) !== "", 10000);
     await pathBar.fill(saveDir).catch(() => {});
+    // Hold saveDir's listing: until it lands the picker still shows the start folder, and Save must not write there.
+    // MUTATION: drop `loading` from pathpicker.tsx confirmSave and canConfirm → x.aive goes to the start folder here.
+    let release = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    let parked = false;
+    const fsList = /\/api\/fs\/list\?/;
+    await a.route(fsList, async (route) => { parked = true; await held; await route.continue().catch(() => {}); });
     await pathBar.press("Enter").catch(() => {});
-    await waitFor("listing", async () => (await pathBar.inputValue().catch(() => "")) === saveDir, 5000);
-    await sleep(300);
-    await picker.getByRole("button", { name: "Save", exact: true }).click().catch(() => {});
+    await waitFor("saved folder requested", () => parked, 5000);
+    const saveButton = picker.getByRole("button", { name: "Save", exact: true });
+    const disabled = await saveButton.isDisabled().catch(() => false);
+    await saveButton.click({ force: true, timeout: 1000 }).catch(() => {});
+    await nameField.press("Enter").catch(() => {});
+    expect(parked && disabled && (await picker.count()) === 1 && !existsSync(join(saveDir, "x.aive")),
+      `…Save waits while the typed folder is being listed (${parked ? "" : "no listing asked for; "}Save ${disabled ? "disabled" : "enabled"}, picker ${(await picker.count()) === 1 ? "open" : "closed"})`);
+    release();
+    await a.unroute(fsList);
+    expect(await waitFor("listing", async () => (await picker.locator('.picker-row[title="listed-here"]').count()) === 1, 10000), "…then lists it");
+    await saveButton.click().catch(() => {});
     expect(await waitFor("saved", () => existsSync(join(saveDir, "x.aive")), 10000), "Save writes x.aive into the folder listed");
     expect(picked.every((b) => !b.includes("zr-evil.invalid")) && !listed("zr-evil.invalid"), `/api/media-servers/picked got no zr-evil.invalid path (${picked.join(" | ") || "no call"}); the store is unchanged`);
 
@@ -704,7 +725,7 @@ async function graphicsAddon(o: {
   check("a new project in the core", fresh.status === 200, fresh.body.slice(0, 120));
   const pw = await loadPlaywright();
   const exe = chromiumPath();
-  const browser = await pw.chromium.launch({ ...(exe ? { executablePath: exe } : {}), args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-audio-output"] });
+  const browser = await pw.chromium.launch({ ...(exe ? { executablePath: exe } : {}), args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-audio-output", "--mute-audio"] });
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(5000);

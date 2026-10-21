@@ -177,7 +177,10 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   };
 
   const confirmSave = (typed: string = name) => {
-    if (!listing) return;
+    // While a folder is being listed the path bar already names it, but
+    // `listing` is still the folder shown before: saving now would write
+    // there. Wait for the listing (Save is disabled meanwhile).
+    if (!listing || loading) return;
     let n = typed.trim();
     if (!n) return;
     if (isAbsolute(n)) {
@@ -277,7 +280,7 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   };
 
   const selectedFiles = selected.filter((n) => visible.some((v) => v.name === n && !v.dir)).length;
-  const canConfirm = save ? !!name.trim() && !!listing : selected.length > 0;
+  const canConfirm = save ? !!name.trim() && !!listing && !loading : selected.length > 0;
 
   return (
     <>
