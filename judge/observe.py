@@ -4,6 +4,11 @@ Python 3 standard library only. Each function reads a file with FFmpeg / ffprobe
 them with their own expectations. The filter chains are the ones the first-try baseline's checker used (check.py 3
 rev 4), so a value measured here and a baseline value measured there are the same measurement.
 
+The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback
+listener that must receive nothing, the host-level file-system trace (strace) of the adapter's process tree, files
+that must not appear, secrets that must not appear in any answer, and the text substitution that makes a hostile input
+from a file the editor itself wrote.
+
 FFmpeg: JUDGE_FFMPEG / JUDGE_FFPROBE, else the ffmpeg / ffprobe on PATH. Heavy commands run under `nice -n 19` (when
 `nice` exists) with a timeout.
 
@@ -16,8 +21,10 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 
 FFMPEG = os.environ.get("JUDGE_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = os.environ.get("JUDGE_FFPROBE") or shutil.which("ffprobe") or "ffprobe"
@@ -433,3 +440,152 @@ def parse_otio(path):
 
     walk(tracks, 0)
     return out
+
+
+# ---------------------------------------------------------------- side effects (no media)
+class Canary:
+    """A TCP listener on 127.0.0.1 (a free port) that must receive nothing. A URL that names it in a hostile input shows
+    whether the editor, or anything it starts (FFmpeg, a browser), ever connects: every accepted connection is counted,
+    whatever its protocol, with the first bytes it sent. An HTTP client gets a 404 and the connection is closed."""
+
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.hits = []
+        self._lock = threading.Lock()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(1.0)
+                try:
+                    first = conn.recv(256)
+                except OSError:
+                    first = b""
+                with self._lock:
+                    self.hits.append(first.split(b"\r\n", 1)[0].decode("latin-1")[:200] or "(connected, sent nothing)")
+                try:
+                    conn.sendall(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                except OSError:
+                    pass
+            finally:
+                conn.close()
+
+    def url(self, name):
+        """An http URL on the listener."""
+        return f"http://127.0.0.1:{self.port}/{name}"
+
+    def count(self):
+        with self._lock:
+            return len(self.hits)
+
+    def seen(self):
+        with self._lock:
+            return list(self.hits)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def strace_form(text):
+    """`text` as strace prints it inside a quoted string: printable ASCII as is (with \\ and \" escaped), every other
+    byte as a three-digit octal escape. A non-ASCII look-alike of a host name is found in a trace only in this form."""
+    out = []
+    for b in text.encode("utf-8"):
+        if b == 0x5C:
+            out.append("\\\\")
+        elif b == 0x22:
+            out.append('\\"')
+        elif 0x20 <= b < 0x7F:
+            out.append(chr(b))
+        else:
+            out.append("\\%03o" % b)
+    return "".join(out)
+
+
+def trace_lines(path):
+    """The lines of an `strace -o` log, without execve / execveat lines: what a process was started with (its argv)
+    is not observed, only what it opened, read, listed or wrote."""
+    if not path or not os.path.isfile(path):
+        raise Unmeasurable("no trace log")
+    with open(path, "r", encoding="latin-1") as f:
+        return [ln.rstrip("\n") for ln in f if not re.match(r"^\d+\s+(<\.\.\. )?execve(at)?[ (]", ln)]
+
+
+def trace_hits(path, needles, start=0):
+    """Trace lines (from index `start` of trace_lines) that name any of `needles`, matched as strace prints them
+    (strace_form) and without regard to ASCII case."""
+    forms = [strace_form(n).lower() for n in needles]
+    lines = trace_lines(path)[start:]
+    return [ln for ln in lines if any(f in ln.lower() for f in forms)]
+
+
+def substitute(src, out, pairs):
+    """Writes a copy of `src` to `out` with each (old, new) of `pairs` applied, and returns how many replacements each
+    made. In a JSON file every string value that holds `old` gets it replaced, and every number equal to a numeric
+    `old` becomes `new` (keys are kept); any other file is replaced as UTF-8 text. A test crafts a hostile input this
+    way from a file the editor itself wrote, without knowing its layout; a pair that made no replacement means the
+    file does not hold that value, and the test records that as a failed check."""
+    raw = open(src, "rb").read()
+    counts = [0] * len(pairs)
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        is_json = True
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        is_json = False
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def walk(v):
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        for i, (old, new) in enumerate(pairs):
+            if isinstance(v, str) and isinstance(old, str) and old and old in v:
+                counts[i] += v.count(old)
+                v = v.replace(old, new)
+            elif num(v) and num(old) and v == old:
+                counts[i] += 1
+                v = new
+        return v
+
+    if is_json:
+        data = json.dumps(walk(doc), ensure_ascii=False).encode("utf-8")
+    else:
+        text = raw.decode("utf-8", "replace")
+        for i, (old, new) in enumerate(pairs):
+            counts[i] = text.count(str(old))
+            text = text.replace(str(old), str(new))
+        data = text.encode("utf-8")
+    with open(out, "wb") as f:
+        f.write(data)
+    return counts
+
+
+def named(root, marker):
+    """Paths under `root` (files, folders and links; links are not followed) whose name holds `marker`."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for n in dirnames + filenames:
+            if marker in n:
+                found.append(os.path.join(dirpath, n))
+    return found
+
+
+def holds_secret(text, secret, n=8):
+    """Whether `text` holds any `n` consecutive characters of `secret`."""
+    if not secret or not text:
+        return False
+    return any(secret[i:i + n] in text for i in range(0, max(1, len(secret) - n + 1)))

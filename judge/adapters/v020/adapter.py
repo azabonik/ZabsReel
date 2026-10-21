@@ -12,11 +12,23 @@ point at fresh folders there, AIVE_PORT is a free port (never 4791, the default,
 use), and AIVE_CLIP_DISABLE=1 keeps the visual index model from loading. The editor uses the FFmpeg on PATH, or
 AIVE_FFMPEG / AIVE_FFPROBE when they are set in the adapter's environment. `start` checks that the core that answers
 is the one it started (its server.json is in the sandbox's data folder, names the sandbox's port, and its process has
-the sandbox's data folder in its environment) and refuses to go on otherwise. `stop` ends the MCP server, then every
-process whose environment holds the sandbox's data folder or home, by exact process id.
+the sandbox's data folder in its environment) and refuses to go on otherwise. `stop` ends the editor's window server
+(below) and the MCP server, then every process whose environment holds the sandbox's data folder or home, by exact
+process id.
+
+Network computers: v0.2.0 allows one only from its window. approve_host and revoke_host use the web shell's routes
+(POST /api/media-servers/approve and /revoke with the shell key, as the window does). The first of them starts the
+web shell (<build>/apps/desktop/web/server.cjs --port 0 --no-open) with the sandbox's environment and AIVE_PORT set to
+the running core's port, so it attaches to that core; it refuses to go on when the shell reports another core or a
+core of its own. The shell needs the renderer built (apps/desktop/dist/renderer: `npm run build` makes it). Its key
+header was renamed with the product, so every request sends the key as x-zedmix-shell and as x-zabsreel-shell (the
+v0.2.0 release's name). Only the shell's JSON "ready" line is read; its port comes back in the operation's `ports`.
+add_host_outside writes the editor's allowed-computers store (<data>/trust/hosts.json, and hosts.key when there is
+none yet) the way a hand edit would: on purpose, as the attacker that PROTOCOL.md describes.
 """
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -31,9 +43,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ADAPTER = "v020 (v0.2.0 MCP tools over stdio + core HTTP routes)"
+ADAPTER = "v020 (v0.2.0 MCP tools over stdio + core HTTP routes + the web shell's network-computer routes)"
 PROTOCOL = 1
 BODY_CAP = 262144
+TRANSCRIPT_CAP = 1 << 20     # characters kept of one answer in the transcript
+SHELL_HEADERS = ("x-zedmix-shell", "x-zabsreel-shell")  # this tree's name, the v0.2.0 release's name
+POKE_TIMEOUT = 120           # seconds per tool in poke_agent_tools
 # Ports that Chromium-based browsers and Electron refuse to connect to (README: the app stops on them), and the
 # editor's own default ports.
 AVOID_PORTS = {4790, 4791, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080}
@@ -283,14 +298,32 @@ class Adapter:
         self.token = None
         self.core_pid = None
         self.frames = 0
+        self.env = None
+        self.build = None
+        self.scratch = None
+        self.instructions = ""
+        self.shell = None        # the web shell (Popen) once approve_host / revoke_host started it
+        self.shell_port = None
+        self.shell_key = None
+        self.texts = []          # every text the editor answered since start (transcript)
+
+    def note(self, text):
+        """Keeps one answer of the editor for the transcript operation."""
+        if text:
+            self.texts.append(text if len(text) <= TRANSCRIPT_CAP else text[:TRANSCRIPT_CAP])
 
     # ------------------------------------------------------------ helpers
     def call(self, name, args, timeout=MCP_TIMEOUT):
         """A tool call: the parsed JSON result (or {"text": ...}); a tool error becomes product_error."""
         if self.mcp is None:
             raise OpError("adapter_error", "the editor is not started")
-        r = self.mcp.request("tools/call", {"name": name, "arguments": args}, timeout)
+        try:
+            r = self.mcp.request("tools/call", {"name": name, "arguments": args}, timeout)
+        except OpError as e:
+            self.note(e.message)
+            raise
         text = text_of(r)
+        self.note(text)
         j = as_json(text)
         if r.get("isError"):
             code = None
@@ -322,7 +355,7 @@ class Adapter:
 
     # ------------------------------------------------------------ lifecycle
     def op_hello(self, a):
-        ops = sorted(n[3:] for n in dir(self) if n.startswith("op_") and n not in ("op_approve_host",))
+        ops = sorted(n[3:] for n in dir(self) if n.startswith("op_"))
         return {"protocol": PROTOCOL, "adapter": ADAPTER, "ops": ops}
 
     def op_start(self, a):
@@ -358,10 +391,12 @@ class Adapter:
             if not os.path.realpath(env[k]).startswith(root + os.sep):
                 raise OpError("adapter_error", f"{k} is outside the sandbox")
         log(f"starting {entry} on port {self.port}, sandbox {root}")
+        self.env, self.build, self.scratch = env, build, scratch
         self.mcp = Mcp([node, entry], env, dirs["home"], os.path.join(scratch, "mcp-server.stderr"))
         try:
             init = self.mcp.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                                    "clientInfo": {"name": "judge", "version": "1"}}, 120)
+            self.instructions = str(init.get("instructions") or "")
             self.mcp.notify("notifications/initialized")
             self.call("get_state", {}, 120)  # the MCP server starts its core on the first tool call
             self._check_core(dirs["data"])
@@ -394,6 +429,14 @@ class Adapter:
 
     def op_stop(self, a):
         stopped = []
+        if self.shell is not None:
+            if self.shell.poll() is None:
+                stopped += end_processes([self.shell.pid])
+                try:
+                    self.shell.wait(10)
+                except subprocess.TimeoutExpired:
+                    pass
+            self.shell = None
         if self.mcp is not None:
             self.mcp.close()
             if self.mcp.p.poll() is None:
@@ -513,8 +556,10 @@ class Adapter:
         canvas = ts.get("canvas") or {"width": st.get("width"), "height": st.get("height"), "fps": st.get("fps")}
         assets = []
         for x in st.get("assets", []):
+            waiting = x.get("awaitingServer")
             assets.append({"id": x.get("id"), "path": x.get("path"),
-                           "offline": bool(x.get("missing") or x.get("awaitingServer") or x.get("offline"))})
+                           "offline": bool(x.get("missing") or waiting or x.get("offline")),
+                           "waiting_host": waiting if isinstance(waiting, str) and waiting else None})
         def speed_of(c):  # v0.2.0 keeps a constant speed in the clip's effects
             v = (c.get("effects") or {}).get("speed", c.get("speed", 1))
             return v if isinstance(v, (int, float)) and v > 0 else 1
@@ -631,6 +676,7 @@ class Adapter:
                 body = b""
         except (urllib.error.URLError, OSError) as e:
             raise OpError("adapter_error", f"GET {route} failed: {e}")
+        self.note(body[:TRANSCRIPT_CAP].decode("utf-8", "replace"))
         return {"status": status, "content_type": ctype, "body_length": len(body),
                 "body_sha256": hashlib.sha256(body).hexdigest(),
                 "body_b64": base64.b64encode(body[:BODY_CAP]).decode("ascii"), "truncated": len(body) > BODY_CAP}
@@ -644,11 +690,215 @@ class Adapter:
         self.call("recheck_offline_media", {})
         return {}
 
+    # v0.2.0 allows a network computer only from its window (the desktop app, or the web shell with its shell key); no
+    # MCP tool can. approve_host and revoke_host go through the web shell, started on first use (see the docstring).
+    def _shell_start(self):
+        """Starts the web shell attached to the running core. Returns the list of ports it opened ([] if running)."""
+        if self.shell is not None and self.shell.poll() is None:
+            return []
+        if self.mcp is None or self.env is None:
+            raise OpError("adapter_error", "the editor is not started")
+        server = os.path.join(self.build, "apps", "desktop", "web", "server.cjs")
+        if not os.path.isfile(server):
+            raise OpError("adapter_error", f"no web shell at {server}")
+        env = dict(self.env)
+        env["AIVE_PORT"] = str(self.port)  # attach to the sandbox's running core, never start another one
+        for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "AIVE_DATA_DIR", "TMPDIR"):  # the sandbox rule, checked
+            if not os.path.realpath(env[k]).startswith(self.root + os.sep):
+                raise OpError("adapter_error", f"{k} is outside the sandbox")
+        err = open(os.path.join(self.scratch, "web-shell.stderr"), "ab")
+        log(f"starting the web shell {server} for core port {self.port}")
+        self.shell = subprocess.Popen([shutil.which("node") or "node", server, "--port", "0", "--no-open"], env=env,
+                                      cwd=env["HOME"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err,
+                                      text=True, bufsize=1)
+        err.close()
+        found = {}
+
+        def read():
+            for line in self.shell.stdout:  # the JSON "ready" line; the rest is drained so the pipe never fills
+                if "ready" not in found:
+                    try:
+                        m = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(m, dict) and m.get("event") == "ready":
+                        found["ready"] = m
+        threading.Thread(target=read, daemon=True).start()
+        deadline = time.time() + 60
+        while "ready" not in found and self.shell.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        ready = found.get("ready")
+        try:
+            if ready is None:
+                raise OpError("adapter_error", f"the web shell did not report ready (exit {self.shell.poll()}); see "
+                                               f"{os.path.join(self.scratch, 'web-shell.stderr')}")
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(str(ready.get("url", ""))).query)
+            key = (q.get("shell") or [""])[0]
+            if int(ready.get("corePort", -1)) != self.port or ready.get("coreOwned") is not False:
+                raise OpError("adapter_error", f"the web shell is not attached to the sandbox's core "
+                                               f"(corePort {ready.get('corePort')}, coreOwned {ready.get('coreOwned')})")
+            if not key or not isinstance(ready.get("port"), int):
+                raise OpError("adapter_error", "the web shell's ready line has no shell key or port")
+        except BaseException:
+            end_processes([self.shell.pid])
+            self.shell = None
+            raise
+        self.shell_port, self.shell_key = ready["port"], key
+        return [self.shell_port]
+
+    def _shell_post(self, route, body):
+        """POST to the web shell with its key: (status, parsed JSON body or {})."""
+        req = urllib.request.Request(f"http://127.0.0.1:{self.shell_port}{route}", data=json.dumps(body).encode(),
+                                     method="POST", headers={"content-type": "application/json",
+                                                             **{h: self.shell_key for h in SHELL_HEADERS}})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                status, raw = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status = e.code
+            try:
+                raw = e.read()
+            except OSError:
+                raw = b""
+        except (urllib.error.URLError, OSError) as e:
+            raise OpError("adapter_error", f"POST {route} failed: {e}")
+        text = raw.decode("utf-8", "replace")
+        self.note(text)
+        j = as_json(text)
+        return status, (j if isinstance(j, dict) else {})
+
+    def _shell_answer(self, route, status, j):
+        if status == 200 and j.get("ok") is not False:
+            return
+        msg = str(j.get("error") or f"status {status}")
+        if 400 <= status < 500 and status not in (401, 403, 404, 405):
+            raise OpError("product_error", msg)  # the window refused the host (e.g. not a network computer name)
+        raise OpError("adapter_error", f"POST {route}: {status} {msg}")
+
     def op_approve_host(self, a):
-        # v0.2.0 allows a network computer only from its window (the desktop app, or the web shell's own route with
-        # the shell key); no MCP tool can. Deferred to the judge batch that needs it (it decides how this adapter
-        # reaches the user's route).
-        raise OpError("unsupported", "approve_host: not in the v0.2.0 adapter yet (needs the editor window's route)")
+        host = arg_str(a, "host")
+        ports = self._shell_start()
+        status, j = self._shell_post("/api/media-servers/approve", {"host": host})
+        self._shell_answer("/api/media-servers/approve", status, j)
+        return {"ports": ports}
+
+    def op_revoke_host(self, a):
+        host = arg_str(a, "host")
+        only = a.get("only_if_outside", False)
+        if not isinstance(only, bool):
+            raise bad(f"'only_if_outside' must be true or false, got {only!r}")
+        ports = self._shell_start()
+        status, j = self._shell_post("/api/media-servers/revoke", {"host": host, **({"onlyIfOutside": True} if only else {})})
+        self._shell_answer("/api/media-servers/revoke", status, j)
+        if not isinstance(j.get("removed"), bool):
+            raise OpError("adapter_error", f"revoke answered no 'removed': {json.dumps(j)[:300]}")
+        return {"removed": j["removed"], "ports": ports}
+
+    def op_add_host_outside(self, a):
+        """The attacker's edit: an entry in the allowed-computers store that the window did not make. forged: the entry
+        claims an approval, with a stamp made with a random key (not the editor's)."""
+        host = arg_str(a, "host")
+        forged = a.get("forged", False)
+        if not isinstance(forged, bool):
+            raise bad(f"'forged' must be true or false, got {forged!r}")
+        if self.root is None:
+            raise OpError("adapter_error", "the editor is not started")
+        trust = os.path.join(self.root, "data", "trust")
+        os.makedirs(trust, mode=0o700, exist_ok=True)
+        store, keyf = os.path.join(trust, "hosts.json"), os.path.join(trust, "hosts.key")
+        if not os.path.isfile(keyf):  # what a shell agent with file access can do before any approval
+            with open(keyf, "w", encoding="utf-8") as f:
+                f.write(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("="))
+            os.chmod(keyf, 0o600)
+        try:
+            cur = json.load(open(store, encoding="utf-8"))
+        except (OSError, ValueError):
+            cur = {}
+        if not isinstance(cur, dict) or not isinstance(cur.get("servers"), list):
+            cur = {"version": 2, "servers": []}
+        entry = {"host": host}
+        if forged:
+            added = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+            stamp = hmac.new(os.urandom(32), f"zedmix-hosts-v2\n{host}\nprompt\n{added}".encode(), "sha256").digest()
+            entry = {"host": host, "via": "prompt", "added": added,
+                     "stamp": base64.urlsafe_b64encode(stamp).decode("ascii").rstrip("=")}
+        cur["servers"] = [e for e in cur["servers"] if not (isinstance(e, dict) and e.get("host") == host)] + [entry]
+        with open(store, "w", encoding="utf-8") as f:
+            json.dump(cur, f, indent=2)
+        with open(keyf, encoding="utf-8") as f:
+            secret = f.read().strip()
+        return {"files": [store, keyf], "secrets": [secret]}
+
+    # ------------------------------------------------------------ text, colour, proxies
+    STYLE = {"position": "position", "x": "x", "y": "y", "font": "font", "font_size": "fontSize", "color": "color",
+             "outline_color": "outlineColor", "outline_width": "outlineWidth", "shadow_color": "shadowColor",
+             "shadow_x": "shadowX", "shadow_y": "shadowY", "box": "box", "box_color": "boxColor",
+             "box_border": "boxBorderW"}
+
+    def op_add_text(self, a):
+        style = a.get("style") or {}
+        if not isinstance(style, dict):
+            raise bad(f"'style' must be an object, got {style!r}")
+        args = {"clipId": arg_str(a, "clip"), "text": arg_str(a, "text")}
+        for k, v in style.items():  # passed on unchanged: the editor accepts or refuses each value
+            if k in self.STYLE:
+                args[self.STYLE[k]] = v
+        j = self.call("add_text", args)
+        tid = find_key(j.get("overlay") or j, ["overlayId", "id"])
+        if not tid:
+            raise OpError("adapter_error", f"add_text returned no text id: {json.dumps(j)[:300]}")
+        return {"text": tid}
+
+    def op_apply_lut(self, a):
+        self.call("apply_lut", {"clipId": arg_str(a, "clip"), "path": arg_str(a, "path")})
+        return {}
+
+    def op_make_proxy(self, a):
+        self.call("generate_proxy", {"assetId": arg_str(a, "asset")})
+        return {}
+
+    def op_thumbnail(self, a):
+        args = {"assetId": arg_str(a, "asset")}
+        if a.get("time") is not None:
+            args["atSeconds"] = float(arg_num(a, "time"))
+        j = self.call("generate_thumbnail", args)
+        path = find_key(j, ["path", "thumbnailPath", "imagePath"])
+        if not path:  # v0.2.0 answers in prose: "generate_thumbnail → rendered frame (<path>):"
+            m = re.search(r"(/[^\s()\"']+\.(?:jpe?g|png|webp))", str(j.get("text") or ""))
+            path = m.group(1) if m else None
+        return {"path": path}
+
+    # ------------------------------------------------------------ what an agent has
+    def _tools(self):
+        if self.mcp is None:
+            raise OpError("adapter_error", "the editor is not started")
+        tools, cursor = [], None
+        for _ in range(50):
+            r = self.mcp.request("tools/list", {"cursor": cursor} if cursor else {}, 120)
+            tools += [t for t in r.get("tools", []) if isinstance(t, dict) and isinstance(t.get("name"), str)]
+            cursor = r.get("nextCursor")
+            if not cursor:
+                break
+        return tools
+
+    def op_agent_tools(self, a):
+        tools = self._tools()
+        return {"tools": [{"name": t["name"], "read_only": bool((t.get("annotations") or {}).get("readOnlyHint"))}
+                          for t in tools], "instructions": self.instructions}
+
+    def op_poke_agent_tools(self, a):
+        """Every agent tool once, with empty arguments; answers and refusals are only counted."""
+        called = refused = 0
+        for t in self._tools():
+            called += 1
+            try:
+                self.call(t["name"], {}, POKE_TIMEOUT)
+            except OpError:
+                refused += 1
+        return {"called": called, "refused": refused}
+
+    def op_transcript(self, a):
+        return {"texts": list(self.texts)}
 
 
 def handle(ad, raw):
@@ -742,6 +992,64 @@ def self_test():
                handle(notnum, json.dumps({"id": 3, "op": "x", "args": {}}))["error"]["code"], "adapter_error")
         expect("an unknown operation is unsupported",
                handle(Adapter(), json.dumps({"id": 4, "op": "nope", "args": {}}))["error"]["code"], "unsupported")
+
+        # Network computers, text and the transcript (batch 1a operations), on canned replies.
+        def op(ad, name, args):
+            return handle(ad, json.dumps({"id": 5, "op": name, "args": args}))
+
+        def state_reply(n, a):
+            if n == "timeline_summary":
+                return {"tracks": [], "canvas": {"width": 64, "height": 64, "fps": 30}, "totalFrames": 0}
+            return {"assets": [{"id": "a1", "path": "//nas/s/a.mp4", "awaitingServer": "nas"},
+                               {"id": "a2", "path": "/m/b.mp4"}]}
+        assets = op(adapter(state_reply), "get_state", {})["result"]["assets"]
+        expect("get_state: an asset waiting for its computer is offline with waiting_host",
+               [(x["offline"], x["waiting_host"]) for x in assets], [(True, "nas"), (False, None)])
+        seen = {}
+
+        def text_reply(n, a):
+            seen.update(a)
+            return {"overlayId": "text_1"}
+        r = op(adapter(text_reply), "add_text", {"clip": "c1", "text": "t", "style": {"font_size": "12,x", "box": True,
+                                                                                      "nope": 1}})
+        expect("add_text: style fields are renamed and passed on unchanged; unknown ones are dropped",
+               (r.get("result"), seen.get("fontSize"), seen.get("box"), "nope" in seen),
+               ({"text": "text_1"}, "12,x", True, False))
+        r = op(adapter(lambda n, a: {"text": "generate_thumbnail → rendered frame (/d/thumbnails/a1.jpg):"}),
+               "thumbnail", {"asset": "a1", "time": 0.5})
+        expect("thumbnail: the path in v0.2.0's prose answer", r.get("result"), {"path": "/d/thumbnails/a1.jpg"})
+
+        def shell(status, body):
+            ad = adapter(lambda n, a: {})
+            ad._shell_start = lambda: []
+            ad._shell_post = lambda route, b: (status, body)
+            return ad
+        expect("approve_host: 200 answers ok", op(shell(200, {"ok": True}), "approve_host", {"host": "nas"}).get("result"),
+               {"ports": []})
+        expect("approve_host: a 400 refusal is product_error",
+               op(shell(400, {"ok": False, "error": "Not a network computer name."}), "approve_host",
+                  {"host": "nas@SSL"})["error"]["code"], "product_error")
+        expect("approve_host: a 401 (the shell key not taken) is adapter_error",
+               op(shell(401, {"ok": False}), "approve_host", {"host": "nas"})["error"]["code"], "adapter_error")
+        expect("revoke_host: removed is passed on",
+               op(shell(200, {"ok": True, "removed": False}), "revoke_host", {"host": "nas", "only_if_outside": True})
+               .get("result"), {"removed": False, "ports": []})
+        class FakeMcp:
+            def request(self, method, params, timeout=None):
+                err = params["name"] == "bad"
+                return {"isError": err, "content": [{"type": "text", "text": f"answer of {params['name']}"},
+                                                    {"type": "image", "data": "AAAA"}]}
+        ad = Adapter()
+        ad.mcp = FakeMcp()
+        ad.call("get_state", {})
+        try:
+            ad.call("bad", {})
+        except OpError:
+            pass
+        ad.note("an HTTP body")
+        expect("transcript: every text answer kept (results, errors, HTTP bodies), images left out",
+               op(ad, "transcript", {}).get("result"),
+               {"texts": ["answer of get_state", "answer of bad", "an HTTP body"]})
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"[v020 adapter] self-test FAILED: {len(failures)} case(s)" if failures else "[v020 adapter] self-test ok")

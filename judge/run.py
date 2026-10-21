@@ -193,6 +193,7 @@ class T:
         self._out = out  # the write end of the runner's result pipe
         self._driver = None
         self.n_checks = 0
+        self.trace_path = None  # set by driver(trace=True) when strace runs
 
     def _emit(self, rec):
         self._out.write(json.dumps(rec) + "\n")
@@ -234,12 +235,22 @@ class T:
         self.check(name, accept(v), f"{_short(v)} (want {want})")
         return v
 
-    def driver(self):
+    def driver(self, trace=False):
         """The editor, started through the adapter in this test's scratch folder (started once per test). The
-        adapter must answer hello with this judge's protocol version first."""
+        adapter must answer hello with this judge's protocol version first.
+
+        trace=True (on the first call): when `strace` is on PATH, the adapter runs under `strace -f -e trace=%file`,
+        so every file-system call of the adapter, the editor and every process they start is logged to
+        self.trace_path (observe.trace_hits reads it). Without strace, self.trace_path stays None and the test
+        records its trace checks as not observed."""
         if self._driver is None:
             import driver
-            self._driver = driver.Driver(self.adapter, self.scratch)
+            cmd = list(self.adapter)
+            if trace and shutil.which("strace"):
+                self.trace_path = os.path.join(self.scratch, "adapter-strace.log")
+                cmd = [shutil.which("strace"), "-f", "-qq", "-s", "4096", "-e", "trace=%file", "-e", "signal=none",
+                       "-o", self.trace_path, "--"] + cmd
+            self._driver = driver.Driver(cmd, self.scratch)
             hello = self._driver.hello()
             proto = hello.get("protocol") if isinstance(hello, dict) else None
             if not self.check(f"the adapter speaks protocol {driver.PROTOCOL}", proto == driver.PROTOCOL,

@@ -24,7 +24,9 @@ serves. They never import editor code, and they do not depend on its tool names,
 ## Run it
 
 Requirements: Python 3 (standard library only), FFmpeg and ffprobe on `PATH`, and for the v0.2.0 adapter, Node and
-a built checkout (`npm run build`).
+a built checkout (`npm run build`; the adapter's approve_host and revoke_host start the web shell, which needs the
+renderer that the build makes). Optional: `strace` on `PATH` for the file-system trace checks (without it they are
+recorded as not observed).
 
 ```sh
 python3 -I judge/run.py                      # the v0.2.0 adapter against this checkout
@@ -79,12 +81,13 @@ starts gets the flag, and the two refusal cases are skipped.
 | `PROTOCOL.md` | The adapter protocol: JSON lines on stdin and stdout, the operations, the rules for adapters. |
 | `driver.py` | The judge's side of the protocol. Tests call its methods (`import_media`, `place_clip`, `export`, ...). |
 | `adapters/v020/adapter.py` | The adapter for v0.2.0's interfaces: its MCP tools over stdio, and the core's HTTP routes. |
-| `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. |
+| `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. Also the judge's own observations of side effects: a loopback listener that must receive nothing, the search of the file-system trace, files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote. |
 | `check_observe.py` | Compares `observe.py` with the values that the baseline checker recorded for its oracle exports (a local tool: the oracles are not in the repository). |
 | `fixtures/make.sh` | Makes the test media. |
 | `run.py` | The runner. |
 | `selftest.py` | The runner's own tests (`run.py --self-test`). |
 | `tests/test_*.py` | The tests. |
+| `PORTING.md` | Where each section of the older test scripts went: a judge check, a test that stays with v0.2.0, or a recorded drop. |
 | `JUDGE.lock` | The lock (above). |
 
 ## Write a test
@@ -114,6 +117,14 @@ def run(t):
   that need it as failed with the reason instead of returning early. The runner fails a test whose number of checks
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
 - `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
+- `t.driver(trace=True)` runs the adapter, and so the editor and everything they start, under
+  `strace -f -e trace=%file` when `strace` is on `PATH`; `t.trace_path` is then the log (`adapter-strace.log` in the
+  test's scratch folder, which a failed CI run uploads with the other logs), and `observe.trace_hits`
+  searches it for names (never in a process's argv). Without strace, `t.trace_path` is None and the test records its
+  trace checks as passed with "not observed".
+- A hostile input (a crafted project or OTIO file) is made from a file the editor wrote, with
+  `observe.substitute`: the test needs no knowledge of the file format, and a value it cannot find fails the check
+  that uses the file.
 - A test that needs an operation the protocol does not have adds it to `PROTOCOL.md`, `driver.py` and the
   adapters (see "Adding operations" in `PROTOCOL.md`).
 - **Safety:** a test writes only in its scratch folder. It starts the editor only through `t.driver()`, which gives
@@ -198,6 +209,10 @@ What it does not defend against:
   stops it. Enforcing the base gate needs GitHub settings: a required check from a workflow the pull request cannot
   change (for example one triggered by `pull_request_target`), or a required review. That is an open decision for
   Anthony.
+- The file-system trace (`t.driver(trace=True)`) is a file in the test's scratch folder, written by `strace`: the
+  editor under test runs as the same user and could change or delete it. It is an extra observation, as trustworthy
+  as the editor's own process isolation (running the editor as another user is an open decision for Anthony), not a
+  protected one like the result pipe.
 - An unreviewed judge change: a pull request that edits the judge and updates the lock passes every gate, and the
   base gate and the warning (when `judge.yml` is unchanged) only make the change visible. Enforcing review of judge
   changes needs GitHub settings (the Judge check required, and a required review); that is an open decision for

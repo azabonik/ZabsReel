@@ -4,14 +4,19 @@ editor. If a measurement is wrong here, every test that uses it is wrong, so thi
 Known properties (judge/fixtures/make.sh): a.mp4 and b.mp4 are 6 s, 1280x720, 30 fps, 180 frames, with a 440 Hz
 (a) or 660 Hz (b) tone at amplitude 1/8; m.mp3 is 20 s of 330 Hz with no picture; gap.m4a is a 440 Hz tone with
 digital silence from 2.0 to 3.5 s, 5.5 s in all.
+
+The side-effect observations (the loopback listener, the strace form of a name and the trace search, the text
+substitution, the marker search and the secret search) are checked on inputs made here.
 """
 import json
+import os
+import socket
 
 import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 26
+CHECKS = 32
 
 
 def run(t):
@@ -72,3 +77,47 @@ def run(t):
     with open(otio, "w", encoding="utf-8") as f:
         json.dump({"OTIO_SCHEMA": "Clip.2"}, f)
     t.check("OTIO: a file that is not a timeline is flagged", bool(observe.parse_otio(otio)["problems"]))
+
+    side_effects(t)
+
+
+def side_effects(t):
+    canary = observe.Canary()
+    try:
+        c = socket.create_connection(("127.0.0.1", canary.port), timeout=5)
+        c.sendall(b"GET /x HTTP/1.0\r\n\r\n")
+        c.recv(64)
+        c.close()
+        t.check("the loopback listener counts a connection and its first line",
+                canary.count() == 1 and canary.seen()[0].startswith("GET /x"), canary.seen())
+    finally:
+        canary.close()
+    t.check("strace form: a non-ASCII byte as three-digit octal, a backslash doubled",
+            observe.strace_form("\uff5a-x") == "\\357\\275\\232-x" and observe.strace_form("\\\\nas") == "\\\\\\\\nas",
+            [observe.strace_form("\uff5a-x"), observe.strace_form("\\\\nas")])
+    log = t.path("side", "trace.log")
+    with open(log, "w", encoding="latin-1") as f:
+        f.write('10 execve("/usr/bin/ffmpeg", ["ffmpeg", "-i", "//zr-evil-9.invalid/s/a.mp4"], 0x0 /* 3 vars */) = 0\n'
+                '10 <... execve resumed>) = 0\n'
+                '11 stat("//ZR-EVIL-9.invalid/s/a.mp4", 0x7ff) = -1 ENOENT (No such file or directory)\n'
+                '12 openat(AT_FDCWD, "\\\\\\\\\\357\\275\\232r-x\\\\s", O_RDONLY) = -1 ENOENT\n')
+    hits = observe.trace_hits(log, ["zr-evil-9.invalid", "\uff5ar-x"])
+    t.check("trace search: finds a file call (any ASCII case, a non-ASCII name), never an execve's argv",
+            len(hits) == 2 and hits[0].startswith("11 ") and hits[1].startswith("12 "), hits)
+    src = t.path("side", "p.json")
+    with open(src, "w", encoding="utf-8") as f:
+        json.dump({"path": "/m/a.mp4", "list": ["x /m/a.mp4 y", 0.0123], "/m/a.mp4": 1, "n": 0.0123, "k": 2}, f)
+    out = t.path("side", "q.json")
+    counts = observe.substitute(src, out, [("/m/a.mp4", "//h/s/a.mp4"), (0.0123, "0.0123,x"), ("absent", "z")])
+    q = json.load(open(out, encoding="utf-8"))
+    t.check("substitution: strings and equal numbers replaced, keys kept, a missing value counted 0",
+            counts == [2, 2, 0] and q == {"path": "//h/s/a.mp4", "list": ["x //h/s/a.mp4 y", "0.0123,x"],
+                                          "/m/a.mp4": 1, "n": "0.0123,x", "k": 2}, [counts, q])
+    os.makedirs(t.path("side", "deep", "x"), exist_ok=True)
+    with open(t.path("side", "deep", "x", "a-MARK-1.jpg"), "w") as f:
+        f.write("")
+    found = observe.named(t.path("side", "deep"), "MARK-1")
+    t.check("marker search: a file named with the marker is found", len(found) == 1 and found[0].endswith("a-MARK-1.jpg"),
+            found)
+    t.check("secret search: 8 characters of the secret are found, 7 are not",
+            observe.holds_secret("..abcdefgh..", "xabcdefghz") and not observe.holds_secret("..abcdefg..", "xabcdefghz"))

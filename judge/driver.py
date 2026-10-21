@@ -21,6 +21,7 @@ import threading
 PROTOCOL = 1               # T.driver() fails the test when the adapter's hello names another version
 DEFAULT_TIMEOUT = 600      # seconds per request (PROTOCOL.md, "Timeouts")
 EXPORT_TIMEOUT = 1800
+POKE_TIMEOUT = 1800         # poke_agent_tools calls every agent tool
 
 
 class JudgeError(Exception):
@@ -56,6 +57,13 @@ class AdapterError(JudgeError):
 
 
 ERRORS = {c.code: c for c in (ProductError, Unsupported, BadRequest, AdapterError)}
+
+
+def path_arg(path):
+    """A path argument as the driver sends it: an absolute path unchanged (not normalized, so a test can send a '..'
+    spelling), a relative one made absolute against the current folder. Tests that send a string that is not a
+    local path on purpose (a URL, a network path, a relative path) pass it through the method's `raw` argument."""
+    return path if os.path.isabs(path) else os.path.abspath(path)
 
 
 class Driver:
@@ -114,7 +122,12 @@ class Driver:
             if not isinstance(msg, dict) or msg.get("id") != rid:
                 raise AdapterError(f"answer for another request: {raw[:200]!r}", op=op)
             if msg.get("ok") is True:
-                return msg.get("result")
+                result = msg.get("result")
+                # Any result may name TCP ports the editor started listening on during the operation (PROTOCOL.md,
+                # "Ports"): the runner checks those are closed after stop too.
+                if op != "start" and isinstance(result, dict) and isinstance(result.get("ports"), list):
+                    self.ports += [p for p in result["ports"] if isinstance(p, int) and p not in self.ports]
+                return result
             err = msg.get("error") or {}
             cls = ERRORS.get(err.get("code"), AdapterError)
             raise cls(str(err.get("message", "no message")), err.get("product_code"), op=op)
@@ -153,9 +166,9 @@ class Driver:
         return r
 
     # ------------------------------------------------------------ media and timeline
-    def import_media(self, path):
+    def import_media(self, path, raw=False):
         """Imports a media file. -> asset id (str)"""
-        return self.request("import_media", {"path": os.path.abspath(path)})["asset"]
+        return self.request("import_media", {"path": path if raw else path_arg(path)})["asset"]
 
     def place_clip(self, asset, track="v0", start_frame=0, in_frame=0, out_frame=None):
         """Places source frames [in_frame, out_frame) of `asset` at `start_frame` on `track` ("v0" = the base video
@@ -232,9 +245,9 @@ class Driver:
         return []
 
     # ------------------------------------------------------------ output and jobs
-    def export(self, path, wait=True, timeout=EXPORT_TIMEOUT):
+    def export(self, path, wait=True, timeout=EXPORT_TIMEOUT, raw=False):
         """Exports the timeline to `path`. -> Job {"job", "status", "path", "error", "fraction"}"""
-        return self.request("export", {"path": os.path.abspath(path), "wait": bool(wait)}, timeout=timeout)
+        return self.request("export", {"path": path if raw else path_arg(path), "wait": bool(wait)}, timeout=timeout)
 
     def jobs(self):
         """-> [Job]"""
@@ -246,24 +259,24 @@ class Driver:
 
     def render_frame(self, time, path):
         """Renders the composited frame at `time` seconds as a PNG at `path`. -> path"""
-        return self.request("render_frame", {"time": float(time), "path": os.path.abspath(path)})["path"]
+        return self.request("render_frame", {"time": float(time), "path": path_arg(path)})["path"]
 
     # ------------------------------------------------------------ projects and interchange
-    def save_project(self, path):
+    def save_project(self, path, raw=False):
         """Saves the project as `path`."""
-        return self.request("save_project", {"path": os.path.abspath(path)})
+        return self.request("save_project", {"path": path if raw else path_arg(path)})
 
-    def load_project(self, path):
+    def load_project(self, path, raw=False):
         """Opens the project at `path`. -> {"notice": str or None}"""
-        return self.request("load_project", {"path": os.path.abspath(path)})
+        return self.request("load_project", {"path": path if raw else path_arg(path)})
 
-    def export_otio(self, path):
+    def export_otio(self, path, raw=False):
         """Writes the timeline as an OpenTimelineIO file."""
-        return self.request("export_otio", {"path": os.path.abspath(path)})
+        return self.request("export_otio", {"path": path if raw else path_arg(path)})
 
-    def import_otio(self, path):
+    def import_otio(self, path, raw=False):
         """Opens an OpenTimelineIO file as the project. -> {"missing": [path]}"""
-        return self.request("import_otio", {"path": os.path.abspath(path)})
+        return self.request("import_otio", {"path": path if raw else path_arg(path)})
 
     # ------------------------------------------------------------ file surface and network computers
     def http_get(self, route, query=None):
@@ -281,6 +294,51 @@ class Driver:
         """Allows media from network computer `host`, as the user does in the editor's window."""
         return self.request("approve_host", {"host": host})
 
+    def revoke_host(self, host, only_if_outside=False):
+        """Removes network computer `host` from the allowed ones, as the user does in the editor's window.
+        only_if_outside: only when it is still an entry added outside the editor (the Remove of a Keep question).
+        -> bool: whether an entry was removed"""
+        args = {"host": host}
+        if only_if_outside:
+            args["only_if_outside"] = True
+        return bool(self.request("revoke_host", args).get("removed"))
+
+    def add_host_outside(self, host, forged=False):
+        """Adds `host` to the editor's allowed computers by editing its files, not through its window (what another
+        program or agent with file access could do). forged: the entry claims an approval it never had.
+        -> {"files": [the editor's files that hold the allowed computers and their secret], "secrets": [str]}"""
+        return self.request("add_host_outside", {"host": host, "forged": bool(forged)})
+
     def recheck_media(self):
         """The editor re-reads its allowed computers and re-checks offline media."""
         return self.request("recheck_media", {})
+
+    # ------------------------------------------------------------ text, colour, proxies
+    def add_text(self, clip, text, **style):
+        """Adds a text overlay to the clip; style fields (PROTOCOL.md, add_text) are passed on unchanged. -> text id"""
+        return self.request("add_text", {"clip": clip, "text": text, "style": style})["text"]
+
+    def apply_lut(self, clip, path, raw=False):
+        """Applies the colour look-up table (.cube) at `path` to the clip."""
+        return self.request("apply_lut", {"clip": clip, "path": path if raw else path_arg(path)})
+
+    def make_proxy(self, asset):
+        """Makes the editor's lower-resolution working copy of the asset."""
+        return self.request("make_proxy", {"asset": asset})
+
+    def thumbnail(self, asset, time=0.0):
+        """Makes a still image of the asset at `time` s. -> its path (where the editor put it), or None"""
+        return self.request("thumbnail", {"asset": asset, "time": float(time)}).get("path")
+
+    # ------------------------------------------------------------ what an AI agent sees
+    def agent_tools(self):
+        """-> {"tools": [{"name", "read_only"}], "instructions": str}: what the editor offers an AI agent."""
+        return self.request("agent_tools", {})
+
+    def poke_agent_tools(self):
+        """Calls every agent tool once with empty arguments. -> {"called": int, "refused": int}"""
+        return self.request("poke_agent_tools", {}, timeout=POKE_TIMEOUT)
+
+    def transcript(self):
+        """-> [str]: every text the editor answered through this adapter since start (results, errors, HTTP bodies)."""
+        return self.request("transcript", {})["texts"]
