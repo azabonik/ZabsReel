@@ -369,7 +369,7 @@ async function browserChecks(dir: string): Promise<void> {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
-  const browser = await pw.chromium.launch({ executablePath: exe, headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
+  const browser = await pw.chromium.launch({ executablePath: exe, headless: true, args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"] });
   try {
     for (const [label, url] of [
       ["file:// (Electron loadFile)", pathToFileURL(join(dir, "index.html")).href],
