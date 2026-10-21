@@ -33,6 +33,16 @@ jobs:
           node scripts/check-cleanroom-lock.mjs --self-test
           node scripts/check-cleanroom-lock.mjs
 
+      # The judge (judge/: black-box tests for the rewrite) must not change
+      # without review: every file under judge/ must match judge/JUDGE.lock
+      # (the self-test proves a changed, added or deleted file, a link and a
+      # __pycache__ file fail, on copies). Reads only, so it runs before the
+      # install too.
+      - name: Judge lock gate
+        run: |
+          node scripts/check-judge-lock.mjs --self-test
+          node scripts/check-judge-lock.mjs
+
       # The release.yml tag guard otherwise runs only on a real tag push.
       - name: Release guard self-test
         run: node scripts/release-guard.mjs --self-test
@@ -58,6 +68,14 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The judge's tests (judge/run.py) against this build through the
+      # v0.2.0 adapter (its MCP server over stdio, a scratch home and data
+      # folder, a free port), measured with the runner's FFmpeg (apt, on
+      # PATH). Media made with lavfi, nothing downloaded. timeout -k ends a
+      # hang as a failure; the runner also times out each test.
+      - name: Judge (v0.2.0 adapter)
+        run: timeout -k 30 1200 python3 -I judge/run.py
 
       # The clean-room runtime's own unit tests (node --test through
       # sucrase/register, jsdom, React's development and production builds)
