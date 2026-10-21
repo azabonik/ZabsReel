@@ -216,6 +216,25 @@ jobs:
           fi
           JOBS="$(nproc)" bash scripts/ci/matrix-job.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/matrix" "$RUNNER_TEMP/media" "$FFV"
 
+      # On main (push, the weekly run, a manual run), the FLAKY lines of this
+      # version's shards, for the flaky-report job below. An empty file when
+      # nothing flaked; written even when the job failed.
+      - name: FLAKY lines for the tracking issue
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/flaky"
+          cat "$RUNNER_TEMP/matrix"/m"$FFV"-*.log 2>/dev/null | grep '^FLAKY ' > "$RUNNER_TEMP/flaky/flaky-$FFV.txt" || true
+          cat "$RUNNER_TEMP/flaky/flaky-$FFV.txt"
+
+      - name: Upload the FLAKY lines
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-${{ matrix.ffmpeg }}
+          path: ${{ runner.temp }}/flaky/flaky-${{ matrix.ffmpeg }}.txt
+          if-no-files-found: warn
+          retention-days: 7
+
       # Every shard's output, results-<k>.tsv, flaky-<k>.tsv and per-suite logs
       # (a rerun's logs/<suite>.retry.log next to its logs/<suite>.log; not the
       # media copies), also when the job failed or timed out.
@@ -228,3 +247,38 @@ jobs:
             ${{ runner.temp }}/matrix
             !${{ runner.temp }}/matrix/**/media/**
           if-no-files-found: warn
+
+  # Runs on main only (never for a pull request, whose token stays read-only):
+  # every FLAKY suite of this run goes as one comment on the tracking issue
+  # "Flaky suites in the FFmpeg matrix" (scripts/ci/flaky-report.sh; it opens
+  # the issue when none is open). Runs also when a version's job failed, so a
+  # flake next to a real failure is recorded too.
+  flaky-report:
+    needs: [plan, ffmpeg]
+    if: always() && needs.plan.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: FLAKY lines of every version
+        uses: actions/download-artifact@v4
+        with:
+          pattern: flaky-*
+          path: ${{ runner.temp }}/flaky
+          merge-multiple: true
+
+      - name: Record them on the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: bash scripts/ci/flaky-report.sh "$RUNNER_TEMP/flaky"
