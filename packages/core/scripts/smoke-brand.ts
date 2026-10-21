@@ -33,7 +33,7 @@
  * core stopped fails the run.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -257,12 +257,32 @@ async function stop(run: { child: ChildProcess; exited: Promise<number | null> }
   if (run.child.exitCode === null && run.child.signalCode === null && run.child.pid) process.kill(run.child.pid, "SIGKILL");
 }
 
-/** Other processes whose command line names `dir`, as "pid args" lines (ps); null on Windows, which has no ps. */
+/**
+ * Other processes whose command line names `dir` or (on Linux) whose working directory is in it, as "pid args"
+ * lines (ps); null on Windows, which has no ps. A process can hold `dir` only through its cwd, and on Linux that
+ * does not stop rmSync, so the command line alone would miss it.
+ */
 function processesNaming(dir: string): string[] | null {
   if (process.platform === "win32") return null;
   const ps = spawnSync("ps", ["-ww", "-eo", "pid=,args="], { encoding: "utf8" });
   if (ps.error || ps.status !== 0) throw new Error(`ps failed: ${ps.error?.message ?? ps.stderr}`);
-  return ps.stdout.split("\n").map((l) => l.trim()).filter((l) => l.includes(dir) && Number(l.split(/\s+/)[0]) !== process.pid);
+  const real = process.platform === "linux" && existsSync(dir) ? realpathSync(dir) : dir; // /proc shows real paths
+  const cwdIn = (pid: number) => {
+    if (process.platform !== "linux") return false;
+    try {
+      const cwd = readlinkSync(`/proc/${pid}/cwd`);
+      return cwd === real || cwd.startsWith(real + "/");
+    } catch {
+      return false; // exited meanwhile, or not ours to read
+    }
+  };
+  return ps.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => {
+      const pid = Number(l.split(/\s+/)[0]);
+      return l !== "" && pid !== process.pid && (l.includes(dir) || cwdIn(pid));
+    });
 }
 
 /**
@@ -372,7 +392,7 @@ async function main() {
   // <home>/.zedmix/data/motion/probe-<core pid>. Stopping a core does not wait for it: it stops on its own soon
   // after (execa's cleanup SIGTERM, its closed control pipe, its 1 s parent poll) and writes its profile until
   // then, so removing root first fails with ENOTEMPTY or leaves files behind. Wait for every process that names
-  // root; one still running after 15 s is a leak (it fails the run and is killed by its pid).
+  // root or works in it; one still running after 15 s is a leak (it fails the run and is killed by its pid).
   const waitFrom = Date.now();
   let left = processesNaming(root);
   while (left?.length && Date.now() - waitFrom < 15_000) {

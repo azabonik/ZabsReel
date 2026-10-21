@@ -640,6 +640,7 @@ async function main(): Promise<void> {
       const outPath = join(dir, `full-${tag.replace(/ /g, "-")}.mkv`);
       const ac = new AbortController();
       const liveBefore = new Set(workers.live);
+      const createdBefore = workers.created;
       if (inline) process.env.AIVE_RVM_INLINE = "1";
       const p = matteVideo({ input: long, sourceIn: 0, span: 60, srcW: 1280, srcH: 720, fps: 30, withAudio: false, outPath, signal: ac.signal, stubMatte: true });
       delete process.env.AIVE_RVM_INLINE;
@@ -663,11 +664,13 @@ async function main(): Promise<void> {
         }
         return { workers: mine(), children: left };
       };
-      return { outPath, ac, p, encoder, leftovers };
+      return { outPath, ac, p, encoder, leftovers, createdBefore };
     };
     for (const inline of [false, true]) {
       const tag = inline ? "inline cancel" : "worker cancel";
       const r = await fullQueueRun(tag, inline);
+      check(workers.created === r.createdBefore + (inline ? 0 : 1), `${tag}: runs ${inline ? "on the calling thread" : "in a worker"}`,
+        { created: workers.created - r.createdBefore });
       const t0 = performance.now();
       r.ac.abort();
       const outcome = await answer(r.p);
