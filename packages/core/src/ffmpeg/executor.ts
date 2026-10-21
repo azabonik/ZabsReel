@@ -860,21 +860,35 @@ export function hasAlphaModes(): Promise<boolean> {
 
 let anlmdnPromise: Promise<boolean> | null = null;
 
+/** How long {@link anlmdnWorks}' probe may run. A working anlmdn takes about 0.1 s on the probe's 0.25 s of noise. */
+export const ANLMDN_PROBE_TIMEOUT_MS = 15_000;
+
 /**
- * False when this FFmpeg's anlmdn crashes (FFmpeg 9.0 corrupts its heap on
- * any input, which would kill the whole export). A 0.25 s run on generated
- * noise, once per process, only when a render would use anlmdn.
+ * Whether `bin`'s anlmdn runs: 0.25 s of generated noise through it, stopped
+ * after `timeoutMs`. FFmpeg 9.0's anlmdn corrupts its heap on any input. The
+ * run then aborts or segfaults, but about 1 run in 2,400 deadlocks instead:
+ * every thread waits on a futex and the process never exits. So the probe has
+ * a time limit, and a run that reaches it counts as broken (a timed-out run
+ * has no exit code). It is stopped with SIGKILL because FFmpeg catches
+ * SIGTERM and only sets a flag, which a deadlocked process never reads.
+ */
+export function probeAnlmdn(bin: string, timeoutMs: number): Promise<boolean> {
+  return execa(
+    bin,
+    ["-hide_banner", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=0.25:sample_rate=48000:amplitude=0.1", "-af", "anlmdn", "-f", "null", "-"],
+    { reject: false, timeout: timeoutMs, killSignal: "SIGKILL" },
+  )
+    .then((r) => r.exitCode === 0)
+    .catch(() => false);
+}
+
+/**
+ * False when this FFmpeg's anlmdn crashes or hangs (FFmpeg 9.0, see
+ * {@link probeAnlmdn}; it would kill or stall the whole export). Probed once
+ * per process, only when a render would use anlmdn.
  */
 export function anlmdnWorks(): Promise<boolean> {
-  if (!anlmdnPromise) {
-    anlmdnPromise = execa(
-      FFMPEG_BIN,
-      ["-hide_banner", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=0.25:sample_rate=48000:amplitude=0.1", "-af", "anlmdn", "-f", "null", "-"],
-      { reject: false },
-    )
-      .then((r) => r.exitCode === 0)
-      .catch(() => false);
-  }
+  if (!anlmdnPromise) anlmdnPromise = probeAnlmdn(FFMPEG_BIN, ANLMDN_PROBE_TIMEOUT_MS);
   return anlmdnPromise;
 }
 

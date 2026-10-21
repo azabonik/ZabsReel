@@ -29,7 +29,8 @@
  *   - alpha modes (8.1+): premultiply → alphamerge → unpremultiply (the trails /
  *     alphaSafe shape) keeps a translucent colour, and the graph adapter's rewrite;
  *   - afftdn (rewritten in 5.0): the noise reduction chain adds no latency and
- *     still lowers a noise floor; heavy mode runs (anlmdn crashes 9.0);
+ *     still lowers a noise floor; heavy mode runs (anlmdn crashes 9.0, and now
+ *     and then deadlocks it: the anlmdn probe stops a run that never exits);
  *   - afftfilt (rewritten in 5.1): an impulse shows which afftfilt this build
  *     has (5.1+ delays it by win_size − hop), and the robot effect in graph.ts's
  *     clip-chain shape matches a model of 4.4's robot — sample for sample on
@@ -49,12 +50,12 @@
  */
 import { execa } from "execa";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, adaptFfmpegArgs, anlmdnWorks, checkBinaries, ffmpegVersion,
-  filterScriptFlagInUse, hasAlphaModes, runFfmpeg, runFfmpegStdoutBuffer, setFilterScriptFlag,
+  filterScriptFlagInUse, hasAlphaModes, probeAnlmdn, runFfmpeg, runFfmpegStdoutBuffer, setFilterScriptFlag,
 } from "../src/ffmpeg/executor.js";
 import {
   TESTED_FFMPEG_MAJORS, acrossfadeUnreliable, adaptFilterGraph, hasAfftdnV2, hasAfftfiltV2, parseFfmpegVersion, passthroughFlag, preferredFilterScriptFlag,
@@ -543,6 +544,38 @@ async function main(): Promise<void> {
     console.error(`     ${String(e).slice(0, 300)}`);
   }
   check(heavyOk && !!heavyCaps?.noAnlmdn === !works, `heavy noise reduction runs (anlmdn ${works ? "works" : "crashes this FFmpeg: skipped"})`);
+  // FFmpeg 9.0's anlmdn deadlocks about 1 run in 2,400 (all threads asleep): without a time limit the probe, and the
+  // export waiting on it, never finished (this suite hung here on CI). The fake FFmpeg ignores SIGTERM, as a
+  // deadlocked FFmpeg does, and never exits.
+  // MUTATION: drop the probe's timeout, or its killSignal (execa then waits 5 s before SIGKILL) → the first row fails.
+  if (process.platform !== "win32") {
+    const fakeDir = mkdtempSync(join(tmpdir(), "aive-anlmdn-"));
+    const fake = (name: string, body: string) => {
+      const p = join(fakeDir, name);
+      writeFileSync(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return p;
+    };
+    const pidFile = join(fakeDir, "hung.pid");
+    const hung = fake("hung", `echo $$ > '${pidFile}'\ntrap '' TERM\nexec sleep 600`);
+    const t0 = Date.now();
+    let guard: NodeJS.Timeout | undefined;
+    const got = await Promise.race([probeAnlmdn(hung, 500), new Promise<string>((r) => { guard = setTimeout(r, 5000, "still waiting"); })]);
+    clearTimeout(guard);
+    const ms = Date.now() - t0;
+    const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : NaN;
+    let alive = false;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+      process.kill(pid, "SIGKILL");
+    } catch { /* gone */ }
+    check(got === false && Number.isFinite(pid) && !alive,
+      `an anlmdn probe whose FFmpeg never exits counts as broken at its time limit, and that FFmpeg is killed (${got} after ${ms} ms, ${!Number.isFinite(pid) ? "never ran" : alive ? "still running" : "killed"})`);
+    // A crash is a run ended by a signal; SIGKILL here, since a fake that segfaults would leave a core dump.
+    const ok = await probeAnlmdn(fake("ok", "exit 0"), 5000);
+    const crashed = await probeAnlmdn(fake("crash", "kill -KILL $$"), 5000);
+    check(ok && !crashed, `…an FFmpeg whose run exits 0 has a working anlmdn, one killed by a signal does not (${ok}, ${crashed})`);
+  }
   // vibrato: primed with silence, so the first output samples are never heap leftovers.
   const uw = audioEffectFilterSteps([{ type: "underwater", params: { muffle: 1500, wobble: 1 } }]);
   let worst = -Infinity;
