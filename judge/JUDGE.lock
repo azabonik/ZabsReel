@@ -1,0 +1,12 @@
+# sha256 of every file under judge/ except this one, sorted by path (scripts/check-judge-lock.mjs).
+# The agents that rewrite the editor must not change the judge. A change to this file needs Anthony's review.
+aa0074037431a8ab48a65817073343dbe1c2e9d24871aac3cee74bd7e04ac9a8  PROTOCOL.md
+2d9cfd2db654c5d6e47d3c58b73f10768a03c79c26f86d1e6634da1b913ede82  README.md
+1bb9d40cc3144028b7f2651674a5dca7cbfda705d9dc81ba3a1b07230738c683  adapters/v020/adapter.py
+d623986527b34ddbe07ba3526c4bf6e11738288f9795cd9b8011e9e25659479a  check_observe.py
+29aa641912e835eb0190389fc4b73a737e22a3bc2fc36a5f56052c4eb87ba2c1  driver.py
+aa206cf36d14d7ac6d909471ae122b09a8c7bb4f03d62d3a9ef6c78a87897603  fixtures/make.sh
+9cea8511820064437d53e8a32ebfd9e12e2dafb0226073503a36f6106f9433bb  observe.py
+3c647c11d113c3cf5c05eeccd7e779d4ff4d196a230424c6232f20c6e3a4009a  run.py
+3d16618ade41db65fce6bacdadf759334ae04eadd192a81291d52ab3d0eafc9d  tests/test_import_export.py
+902f6728d143608ede0dedcc76a45f9f180133844a4991c7792c524380dbc3a1  tests/test_observe.py
