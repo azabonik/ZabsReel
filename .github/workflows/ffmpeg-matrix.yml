@@ -54,7 +54,8 @@ jobs:
     # The local kit takes about 12 min per version (3 shards, JOBS=6 on a
     # 24-thread machine). A runner has 4 vCPUs: about 3x that for the shards,
     # plus about 10 min for apt, npm ci, Electron and the build. Each suite is
-    # also capped at 15 min (timeout -k 10 900).
+    # also capped at 15 min (timeout -k 10 900), and a failed suite is rerun
+    # once at the end of its shard, so a hang costs up to 30 min.
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -188,11 +189,18 @@ jobs:
       - name: Test media
         run: bash scripts/ci/make-media.sh "$RUNNER_TEMP/media"
 
-      # All three shards run even when one fails; the step fails when any
-      # suite failed or anything was downloaded, and before the shards when
-      # the FFmpeg under test is not this job's version. Each shard's MATRIX
-      # and FAIL lines go to the job summary when it ends, then the
-      # [ffmpeg-guard] count. Ubuntu 24.04 restricts unprivileged user
+      # All three shards run even when one fails. A failed suite is rerun
+      # once in its shard, one at a time after the shard's other suites, with
+      # the same environment (MATRIX_RETRY=1; a strict local run sets 0, and
+      # then every failure counts at once). A suite that passes its rerun is
+      # FLAKY: the job stays green, a FLAKY line (first exit, rerun 0) goes to
+      # the job summary with a warning, and both logs go to the artifact; each
+      # flaky suite is investigated. The step fails when any suite failed its
+      # rerun too, gave no result row, or downloaded anything, when fewer
+      # suites gave a result than scripts/ci/matrix-suites.txt says, and before
+      # the shards when the FFmpeg under test is not this job's version. Each
+      # shard's MATRIX, FAIL and FLAKY lines go to the job summary when it
+      # ends, then the counts. Ubuntu 24.04 restricts unprivileged user
       # namespaces (AppArmor), which the motion renderer's sandbox and
       # smoke-unc-e2e's add_graphic rows need, so they are allowed first, as
       # ci.yml does before its renderer steps; ubuntu-22.04 has no such
@@ -201,14 +209,16 @@ jobs:
       - name: Matrix (3 shards, one after another)
         env:
           SKIP_BUILD: '1'
+          MATRIX_RETRY: '1'
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           JOBS="$(nproc)" bash scripts/ci/matrix-job.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/matrix" "$RUNNER_TEMP/media" "$FFV"
 
-      # Every shard's output, results-<k>.tsv and per-suite logs (not the media
-      # copies), also when the job failed or timed out.
+      # Every shard's output, results-<k>.tsv, flaky-<k>.tsv and per-suite logs
+      # (a rerun's logs/<suite>.retry.log next to its logs/<suite>.log; not the
+      # media copies), also when the job failed or timed out.
       - name: Upload logs and results
         if: always()
         uses: actions/upload-artifact@v4
