@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Stub for `npx tsx <suite> [args]`: no suite runs. The suite's matrix name comes from the log run_one opened as stdout
+# (logs/<name>.log or logs/<name>.retry.log); STUB_STATE counts its attempts, logs the call order and keeps each
+# attempt's environment. Behaviour per name, from space-separated env lists:
+#   STUB_FAIL_ONCE     attempt 1 exits 1          STUB_FAIL_TWICE  every attempt exits 1
+#   STUB_HANG_ONCE     attempt 1 exits 124        STUB_SLEEP_ONCE  attempt 1 sleeps 60 s (for a real `timeout`)
+#   STUB_KILL          every attempt kills run_one's shell (no row)
+#   STUB_KILL_RERUN    attempt 1 exits 1, attempt 2 kills run_one's shell
+#   STUB_DL_RERUN      attempt 1 exits 1, attempt 2 writes $HOME/.aive/models/new.bin and passes
+#   STUB_WHISPER_RERUN attempt 1 exits 1, attempt 2 prints a "[whisper] downloading" line and passes
+#   STUB_GUARD         every attempt prints one "[ffmpeg-guard]" line
+log="$(readlink /proc/$$/fd/1)"; f="$(basename "$log" .log)"; name="${f%.retry}"
+st="${STUB_STATE:?}"; mkdir -p "$st/n" "$st/env"
+n=$(( $(cat "$st/n/$name" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$st/n/$name"
+echo "$name $n $(date +%s.%N) log=$f" >> "$st/order.log"
+env | grep -vE '^(_|SHLVL|PWD|OLDPWD)=' | sort > "$st/env/$name.$n"
+has() { [[ " ${!1:-} " == *" $name "* ]]; }
+killrun() { echo "stub $name: killing run_one's shell"; kill -9 "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; sleep 2; }
+echo "stub $name attempt $n: args $*"
+has STUB_GUARD && echo "[ffmpeg-guard] stub $name: refused (attempt $n)"
+if has STUB_FAIL_TWICE; then echo "stub $name: FAILED (attempt $n)"; exit 1; fi
+if has STUB_KILL; then killrun; fi
+if [ "$n" = 1 ]; then
+  has STUB_FAIL_ONCE && { echo "stub $name: FAILED first run"; exit 1; }
+  has STUB_HANG_ONCE && { echo "stub $name: hung (timeout's exit)"; exit 124; }
+  has STUB_SLEEP_ONCE && { echo "stub $name: sleeping"; sleep 60; }
+  has STUB_KILL_RERUN && { echo "stub $name: FAILED first run"; exit 1; }
+  has STUB_DL_RERUN && { echo "stub $name: FAILED first run"; exit 1; }
+  has STUB_WHISPER_RERUN && { echo "stub $name: FAILED first run"; exit 1; }
+else
+  has STUB_KILL_RERUN && killrun
+  has STUB_DL_RERUN && { mkdir -p "$HOME/.aive/models"; echo x > "$HOME/.aive/models/new.bin"; }
+  has STUB_WHISPER_RERUN && echo "[whisper] downloading base.en (stub)"
+fi
+echo "stub ok $name attempt $n"
