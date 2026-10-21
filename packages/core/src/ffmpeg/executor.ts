@@ -960,6 +960,11 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
 
   if (opts.onProgress && opts.totalDuration && opts.totalDuration > 0 && child.stdout) {
     let buf = "";
+    // The furthest fraction reported. FFmpeg 9.0 (upstream 8a0ae6b344) gives
+    // out_time as the largest dts of the output streams that are still
+    // running, so when the audio ends ahead of the video, out_time goes back to
+    // the video's dts. Progress must not go backwards: ignore such values.
+    let reached = 0;
     child.stdout.on("data", (chunk: Buffer) => {
       buf += chunk.toString();
       let nl: number;
@@ -974,6 +979,8 @@ async function runFfmpegOnce(args: string[], opts: FfmpegRunOptions): Promise<vo
           if (Number.isFinite(raw)) {
             const seconds = raw / 1e6;
             const frac = Math.max(0, Math.min(1, seconds / opts.totalDuration!));
+            if (frac < reached) continue;
+            reached = frac;
             opts.onProgress!(frac);
           }
         }
