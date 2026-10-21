@@ -456,7 +456,8 @@ npx tsx packages/core/scripts/smoke-matte.ts [portrait.jpg | clip.mp4]
 # frame (those differences are printed). Plus odd-size 24 fps footage on a 30 fps
 # project, generate_proxy alpha (reuses the baked preview, rebuilds a missing one),
 # thumbnails / key colour / scenes, refusals,
-# segment keys, storage GC, the AIVE_RVM_INLINE=1 fallback and cancel; and cutouts of
+# segment keys, storage GC, the AIVE_RVM_INLINE=1 fallback and cancel (also with a full
+# read-ahead queue: worker and inline cancel, an encoder that dies); and cutouts of
 # BT.601-tagged HD, BT.709-tagged SD and full-range footage show the clip's own colours
 # (export, thumbnail, freeze, reverse) with a completely tagged preview proxy. ~4 min.
 npx tsx packages/core/scripts/smoke-cutout.ts
