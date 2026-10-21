@@ -26,8 +26,9 @@
 // <checkout> is the folder that holds judge/ (default: this script's ../);
 // --repo is the same option.
 // --write rewrites JUDGE.lock from the files as they are (sorted, so the same
-// files give the same bytes). A lock update needs Anthony's review
-// (judge/README.md). Exits 0 when the files match the lock, 1 otherwise.
+// files give the same bytes). A lock update is reviewed by the gauntlet on its
+// pull request, which includes a lock and leakage check (judge/README.md).
+// Exits 0 when the files match the lock, 1 otherwise.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -43,7 +44,7 @@ export const EXTRA = ["scripts/check-judge-lock.mjs", ".github/workflows/judge.y
 const HEADER = [
   "# sha256 of every file under judge/ except this one, of scripts/check-judge-lock.mjs and of",
   "# .github/workflows/judge.yml, sorted by path from the repository root (scripts/check-judge-lock.mjs).",
-  "# The agents that rewrite the editor must not change the judge. A change to this file needs Anthony's review.",
+  "# The agents that rewrite the editor must not change the judge. The gauntlet reviews a change to this file on its PR.",
 ];
 
 const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -250,7 +251,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const repo = resolve(i >= 0 ? process.argv[i + 1] : DEFAULT_REPO);
   if (process.argv.includes("--write")) {
     writeFileSync(join(repo, LOCK), lockText(repo));
-    console.log(`[check-judge-lock] wrote ${join(repo, LOCK)}; a lock update needs Anthony's review`);
+    console.log(`[check-judge-lock] wrote ${join(repo, LOCK)}; the gauntlet reviews the lock change on its pull request`);
     process.exit(0);
   }
   const problems = check(repo);

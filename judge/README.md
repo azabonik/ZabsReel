@@ -14,19 +14,20 @@ serves. They never import editor code, and they do not depend on its tool names,
   the judge's workflow `.github/workflows/judge.yml`. The lock gate (`node scripts/check-judge-lock.mjs`) fails when
   one of them differs from the lock, or when one is added or removed without a lock update. So every change to the
   judge, to its gate or to how CI runs it also changes `JUDGE.lock` in the same pull request, where review sees it.
-- **A lock update needs Anthony's review.** What enforces this is that the lock change is visible in the pull
-  request's diff and CI fails without it. There is no CODEOWNERS file: a reviewer has to look for a `JUDGE.lock`
-  change.
+- **Lock changes are reviewed by the gauntlet on their pull request.** A pull request that changes the judge (and
+  so `JUDGE.lock`) merges under the same rule as any other: once the gauntlet's review of it passes (that review
+  includes a lock and leakage check) and CI is green. Anthony does not review each lock change. What makes the change
+  visible to that review is that it shows in the pull request's diff and CI fails without the lock update; nothing in
+  GitHub requires the review (see "Threat model"). There is no CODEOWNERS file.
 - The judge asserts only on **observable behaviour**: exported media, files on disk, the state and errors the editor
   reports, and HTTP answers. It does not assert on filter-graph text, command lines, internal identifiers or the
   wording of the older code's error messages. An exact string is checked only where a spec defines it.
 
 ## Run it
 
-Requirements: Python 3 (standard library only), FFmpeg and ffprobe on `PATH`, and for the v0.2.0 adapter, Node and
-a built checkout (`npm run build`; the adapter's approve_host and revoke_host start the web shell, which needs the
-renderer that the build makes). Optional: `strace` on `PATH` for the file-system trace checks (without it they are
-recorded as not observed).
+Requirements: Python 3 (standard library only), FFmpeg and ffprobe on `PATH`, `strace` (CI installs it; see "Statuses"
+for a run without it), and for the v0.2.0 adapter, Node and a built checkout (`npm run build`; the adapter's
+approve_host and revoke_host start the web shell, which needs the renderer that the build makes).
 
 ```sh
 python3 -I judge/run.py                      # the v0.2.0 adapter against this checkout
@@ -34,12 +35,31 @@ python3 -I judge/run.py --build /path/to/other/checkout
 python3 -I judge/run.py --adapter "node /path/to/new-adapter.mjs" --build /path/to/new/editor
 python3 -I judge/run.py --only import_export --keep
 python3 -I judge/run.py --list
+python3 -I judge/run.py --strict --require-trace   # as CI runs it: not applicable and not observed fail
 python3 -I judge/run.py --allow-unprotected  # not Linux: run without the /proc protection (JUDGE line says UNPROTECTED)
 ```
 
-The runner prints one line per check (`PASS` or `FAIL`), then `JUDGE: <passed>/<checks> passed`. It exits 1 when
-any check fails, when a test does not finish within its timeout, when there are no checks, or when the runner or a
-test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given. Each run makes
+The runner prints one line per check (`PASS`, `FAIL`, `N/A` or `N/O`, see "Statuses"), then
+`JUDGE: <passed>/<judged> passed`, followed by `, <n> not applicable` and `, <n> not observed` when there are any. It
+exits 1 when any check fails, when a test does not finish within its timeout, when there are no checks, or when the
+runner or a test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given.
+
+### Statuses
+
+A check passes or fails, or it is not made, for one of two reasons, each printed with its name and counted on the
+`JUDGE` line (`JUDGE: 150/150 passed, 6 not applicable`), neither passed nor failed:
+
+- **Not applicable** (`N/A`): the hostile input the check is about could not be made. The judge makes a hostile
+  project or OTIO file by text substitution in a file the editor itself saved (`observe.craft`). That needs the file
+  to hold the values as the test gave them: media and LUT paths and identifiers verbatim, colours as given, a number
+  exactly once. A correct rewrite with another file format must not fail a security check for that reason, and must
+  not skip it silently either, so every check on that input is recorded as not applicable, with the replacement
+  counts. `--strict` makes each one a failure. `judge.yml` passes `--strict` while the judge grades v0.2.0, whose
+  format every crafted input comes from. A rewrite's run without `--strict` lists its not-applicable checks: each one
+  is a security check the judge could not apply to that build, not a pass.
+- **Not observed** (`N/O`): the observation needs `strace`, which is not installed (or `JUDGE_STRACE` is set empty):
+  the download check of every test that starts the editor, and `test_network_hosts`' file-system trace checks.
+  `--require-trace` makes each one a failure; `judge.yml` passes it. Each run makes
 its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch folder. A run
 that passes deletes that folder unless you give `--keep`. A run that fails keeps it, and the runner prints its path.
 Each test's folder holds `test.log`, `adapter.stderr` and the editor's own logs.
@@ -48,8 +68,9 @@ CI runs the judge in its own workflow, `.github/workflows/judge.yml`, with the F
 the install it copies `judge/`, the gate and `judge.yml` to `$RUNNER_TEMP/judge-src` (read-only), checks the copy with
 the copied gate, and runs `run.py --self-test` from it. After `npm ci` and the build it checks that the copy's lock and
 gate are the bytes it pinned before the install and that the copy still matches its lock, then runs the judge from
-the copy with `--build "$GITHUB_WORKSPACE"`. A failed run uploads the logs of its kept scratch folder (`*.log`,
-`*.stderr`) as the `judge-logs` artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting
+the copy with `--build "$GITHUB_WORKSPACE" --strict --require-trace`, with the FFmpeg and `strace` that it installs
+from apt. A failed run uploads the logs of its kept scratch folder (`*.log`, `*.stderr`, among them
+`adapter-strace.log`) as the `judge-logs` artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting
 `judge.yml` or the gate fails `ci.yml`.
 
 On a pull request, `judge.yml` also fetches the base branch, writes the base branch's copy of the gate to
@@ -66,7 +87,12 @@ a crash, a hang past the timeout, `sys.exit(0)` in the middle, no checks, fewer 
 `CHECKS`, a process left by the test or by the adapter, an adapter that speaks another protocol version, an adapter
 that writes passing results into its scratch folder, lines on the result pipe that are not the test's records, a fork
 without exec that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and
-a clean test must pass. On Linux an adapter that tries to open the test's and the runner's descriptors through
+a clean test must pass. A not-applicable check (also one made through `needs=` on an input that could not be
+crafted) and a not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`.
+A fixture adapter that addresses another computer (a UDP connect to 192.0.2.1, which sends no packet) must fail the
+download check, one that addresses only 127.0.0.1 must pass it, and with strace switched off (`JUDGE_STRACE=`) the
+check must be not observed, a failure with `--require-trace`. The cases that need strace are skipped without it,
+unless `--self-test --require-trace` is given (`judge.yml` does): then a missing strace fails the self-test. On Linux an adapter that tries to open the test's and the runner's descriptors through
 `/proc/<pid>/fd` for writing must be refused every time, with the verdict unchanged, and a fork child that writes
 through the result pipe's descriptor number must get EBADF. A runner or a test process that cannot be made
 non-dumpable (forced with `JUDGE_FORCE_UNPROTECTED=runner` or `child`) must fail the run, and with
@@ -81,7 +107,7 @@ starts gets the flag, and the two refusal cases are skipped.
 | `PROTOCOL.md` | The adapter protocol: JSON lines on stdin and stdout, the operations, the rules for adapters. |
 | `driver.py` | The judge's side of the protocol. Tests call its methods (`import_media`, `place_clip`, `export`, ...). |
 | `adapters/v020/adapter.py` | The adapter for v0.2.0's interfaces: its MCP tools over stdio, and the core's HTTP routes. |
-| `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. Also the judge's own observations of side effects: a loopback listener that must receive nothing, the search of the file-system trace, files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote. |
+| `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. Also the judge's own observations of side effects: a loopback listener that must receive nothing, the search of the file-system trace, the search of the network calls for a download (`net_hits`), files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote (`craft`, which also says when it cannot). |
 | `check_observe.py` | Compares `observe.py` with the values that the baseline checker recorded for its oracle exports (a local tool: the oracles are not in the repository). |
 | `fixtures/make.sh` | Makes the test media. |
 | `run.py` | The runner. |
@@ -112,29 +138,38 @@ def run(t):
 ```
 
 - `t.check(name, ok, detail)` records one check. `t.measure(name, fn, accept, want)` records a check on a measured
-  value. If the file makes the measurement impossible, the check fails with the reason.
+  value. If the file makes the measurement impossible, the check fails with the reason. `t.not_applicable(name, why)`
+  and `t.not_observed(name, why)` record a check that is not made (see "Statuses"); they count against `CHECKS`.
 - Record the same checks on every path: where an input is missing (no export file, for example), record the checks
   that need it as failed with the reason instead of returning early. The runner fails a test whose number of checks
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
 - `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
-- `t.driver(trace=True)` runs the adapter, and so the editor and everything they start, under
-  `strace -f -e trace=%file` when `strace` is on `PATH`; `t.trace_path` is then the log (`adapter-strace.log` in the
-  test's scratch folder, which a failed CI run uploads with the other logs), and `observe.trace_hits`
-  searches it for names (never in a process's argv). Without strace, `t.trace_path` is None and the test records its
-  trace checks as passed with "not observed".
-- A hostile input (a crafted project or OTIO file) is made from a file the editor wrote, with
-  `observe.substitute`: the test needs no knowledge of the file format, and a value it cannot find fails the check
-  that uses the file.
+- `t.driver()` runs the adapter, and so the editor and everything they start, under `strace -f -yy` with the
+  network calls traced (`connect`, `sendto`, `sendmsg`, `sendmmsg`) when strace is available (`JUDGE_STRACE`, else
+  `strace` on `PATH`). After `stop` the runner adds the check "nothing was downloaded" (`observe.net_hits`): no TCP
+  connect to an address that is not this computer's own, no DNS lookup, and no send to another computer. A UDP
+  connect elsewhere sends no packet and is not counted (Chromium's IPv6 reachability probe makes one). The check
+  sees an attempt also when the network is down. `t.driver(trace=True)` traces the file-system calls (`%file`) too;
+  `t.trace_path` is then the log (`adapter-strace.log` in the test's scratch folder, which a failed CI run uploads
+  with the other logs), and `observe.trace_hits` searches it for names (never in a process's argv or a send's data).
+  Without strace, `t.trace_path` is None and the test records its trace checks with `t.not_observed`.
+- A hostile input (a crafted project or OTIO file) is made from a file the editor wrote, with `observe.craft`: the
+  test needs no knowledge of the file format. Pass the result to every check that is about it,
+  `t.check(name, ok, detail, needs=crafted)`: when a value was not found (another file format), the check is recorded
+  as not applicable instead of failed. Do not open a file that could not be crafted where the check needs a refusal
+  (it is the user's project, not a hostile one).
 - A test that needs an operation the protocol does not have adds it to `PROTOCOL.md`, `driver.py` and the
   adapters (see "Adding operations" in `PROTOCOL.md`).
 - **Safety:** a test writes only in its scratch folder. It starts the editor only through `t.driver()`, which gives
   the editor a scratch home and data folder and a free port. It never uses the user's own editor or its data. Every
-  Chromium or Electron launch passes `--mute-audio`. Nothing is downloaded. The runner runs every test under a
-  timeout, and CI runs the whole judge under `timeout -k`.
+  Chromium or Electron launch passes `--mute-audio`. Nothing is downloaded: the adapter starts the editor so that a
+  feature that would fetch a model or a helper program refuses instead (PROTOCOL.md rule 4), and the runner's
+  "nothing was downloaded" check fails a test whose editor addresses another computer anyway. The runner runs every
+  test under a timeout, and CI runs the whole judge under `timeout -k`.
 
 ## Update the lock
 
-After a reviewed change to the judge:
+After a change to the judge (its pull request's gauntlet reviews the lock change):
 
 ```sh
 node scripts/check-judge-lock.mjs --write       # rewrite judge/JUDGE.lock from the covered files
@@ -153,15 +188,16 @@ lifecycle scripts, the build) and in the editor under test, as the same user as 
 What it defends against:
 
 - **Edits to the judge, its gate or its workflow** that do not show as a `JUDGE.lock` change: the lock gate fails in
-  `ci.yml` and in `judge.yml`. An edit together with a lock update passes the gate; it is visible in the diff for
-  review, and nothing more stops it.
+  `ci.yml` and in `judge.yml`. An edit together with a lock update passes the gate; it is visible in the diff, where
+  the gauntlet's review of the pull request (with its lock and leakage check) sees it, and nothing more stops it.
 - **A weakened gate in the same pull request, when `judge.yml` is unchanged**: a pull request that changes the gate's
   checking logic (for example so that it finds no problems) and updates the lock passes its own copy of the gate, but
   not the base branch's gate, which `judge.yml` runs on pull requests. The lock's content always comes from the pull
-  request, because a reviewed judge change must update it; what the base gate adds is only that a pull request that
-  leaves `judge.yml` unchanged cannot weaken the checking logic (see "What it does not defend against" for one that
-  changes `judge.yml` too). A pull request that changes what the gate covers can fail the base gate by design; it needs
-  Anthony to merge it knowingly. This takes effect from the first pull request whose base branch has the gate.
+  request, because a judge change must update it; what the base gate adds is only that a pull request that leaves
+  `judge.yml` unchanged cannot weaken the checking logic (see "What it does not defend against" for one that changes
+  `judge.yml` too). A pull request that changes what the gate covers can fail the base gate by design: its Judge check
+  is red, so it cannot merge under the merge-when-green rule, and merging it is a deliberate exception that the
+  gauntlet's review has to justify. This takes effect from the first pull request whose base branch has the gate.
 - **Edits made by the install or the build** to the judge after the gate ran: `judge.yml` runs the judge from a copy
   made before any code from the change runs, and checks the copy against bytes pinned before the install.
 - **Forged results** through a path the editor or the adapter is given: a test sends its results to the runner over a
@@ -185,6 +221,15 @@ What it defends against:
   folders, and children inherit them.
 - **A killed runner**: SIGTERM or SIGINT ends the running test's session and every process found by the same sweep,
   prints `JUDGE: interrupted by signal N` and exits 1.
+- **A download during a run**: every test that starts the editor runs it under strace with the network calls traced,
+  and its "nothing was downloaded" check fails on a TCP connect to another computer, a DNS lookup or a send to another
+  computer, also when the call failed (no network). In CI `--require-trace` makes a run without strace fail, so the
+  check cannot quietly turn into not observed (for example through a `JUDGE_STRACE` value that a build step writes to
+  `$GITHUB_ENV`). `test_network_hosts` also fails when a file of 1 MiB or more appears in its folder during the agent
+  tool calls.
+- **A file format that defeats the crafted inputs**: a rewrite whose saved files do not hold the values as given
+  turns the checks on crafted inputs into not applicable, each listed by name and counted on the `JUDGE` line, never
+  into passes; `--strict` fails them.
 
 What it does not defend against:
 
@@ -209,11 +254,16 @@ What it does not defend against:
   stops it. Enforcing the base gate needs GitHub settings: a required check from a workflow the pull request cannot
   change (for example one triggered by `pull_request_target`), or a required review. That is an open decision for
   Anthony.
-- The file-system trace (`t.driver(trace=True)`) is a file in the test's scratch folder, written by `strace`: the
-  editor under test runs as the same user and could change or delete it. It is an extra observation, as trustworthy
-  as the editor's own process isolation (running the editor as another user is an open decision for Anthony), not a
-  protected one like the result pipe.
-- An unreviewed judge change: a pull request that edits the judge and updates the lock passes every gate, and the
-  base gate and the warning (when `judge.yml` is unchanged) only make the change visible. Enforcing review of judge
-  changes needs GitHub settings (the Judge check required, and a required review); that is an open decision for
-  Anthony.
+- The strace log (`adapter-strace.log`: the file-system trace and the network calls the download check reads) is a
+  file in the test's scratch folder, written by `strace`: the editor under test runs as the same user and could change
+  or delete it. A missing log fails the download check, but a rewritten one passes it. It is an extra observation, as
+  trustworthy as the editor's own process isolation (running the editor as another user is an open decision for
+  Anthony), not a protected one like the result pipe. The download check also does not see a `write()` on a
+  connected UDP socket (only the send calls are traced), and the 1 MiB file check sees only files that stay in the
+  test's folder. A `strace` replaced on `PATH` is the same case as a replaced `python3` (above).
+- A judge change that review lets through: judge changes are reviewed by the gauntlet on their pull request (with a
+  lock and leakage check), not by Anthony, and merge when CI is green. A pull request that edits the judge and
+  updates the lock passes every gate; the base gate and the warning (when `judge.yml` is unchanged) only make the
+  change visible to that review. As decided on 2026-10-21, main's branch protection requires the Judge check but no
+  review, so GitHub enforces neither the gauntlet's review nor any other. A required review (or CODEOWNERS) on
+  `judge/**`, the gate and `judge.yml` would; that is an open decision for Anthony.

@@ -4,8 +4,9 @@ Keep, Remove, and that a path never allows its computer by itself); the dialogs'
 (judge/PORTING.md).
 
 Computers are under the reserved .invalid domain, so nothing can reach them. The project's media is moved onto one by
-text substitution in a project the editor saved (observe.substitute), so the test needs no knowledge of the file
-format. approve_host / revoke_host are the window's own actions (PROTOCOL.md); add_host_outside is an edit of the
+text substitution in a project the editor saved (observe.craft), so the test needs no knowledge of the file format;
+when the saved file does not hold the media path as given, the checks on that project are recorded as not applicable
+(run.py --strict fails them), never as failed. approve_host / revoke_host are the window's own actions (PROTOCOL.md); add_host_outside is an edit of the
 editor's files that the window did not make.
 
 Only the editor's side of a Keep question's Remove is judged here: the test itself asks for a removal limited to an
@@ -60,10 +61,10 @@ def run(t):
 
     # A project whose media is on \\zr-pick.invalid: it loads, and the media waits for that computer.
     net_path = f"//{PICK}/s/a.mp4"
-    crafted = t.path("projects", "pick.aive")
-    n = observe.substitute(legit, crafted, [(a, net_path)])[0]
-    loaded = False
-    if n:
+    cr = observe.craft(legit, t.path("projects", "pick.aive"), [(a, net_path)], "the media path as given")
+    crafted = cr.path
+    loaded, what = False, ""
+    if cr.applicable:
         try:
             d.load_project(crafted)
             loaded = True
@@ -71,8 +72,8 @@ def run(t):
             what = str(e)
     x = asset_of(d, net_path) if loaded else None
     t.check(f"a project with its media on \\\\{PICK} loads, the media waiting for {PICK}",
-            n > 0 and loaded and x is not None and x.get("offline") is True and x.get("waiting_host") == PICK,
-            f"{n} substitution(s); {x if loaded else what}")
+            loaded and x is not None and x.get("offline") is True and x.get("waiting_host") == PICK,
+            f"{cr.counts[0]} substitution(s); {x if loaded else what}", needs=cr)
 
     # Allow, in upper case: kept as the lower-case name, and the media is no longer waiting after a re-check.
     d.approve_host(PICK.upper())
@@ -81,7 +82,7 @@ def run(t):
             and not any(x != x.lower() for x in h["approved"]), h)
     d.recheck_media()
     x = asset_of(d, net_path)
-    t.check("after a re-check its media no longer waits", x is not None and not x.get("waiting_host"), x)
+    t.check("after a re-check its media no longer waits", x is not None and not x.get("waiting_host"), x, needs=cr)
     d.approve_host(PICK)
     h = d.list_hosts()
     t.check("allowing it again keeps one entry", h["approved"].count(PICK) == 1, h)
@@ -99,7 +100,8 @@ def run(t):
     t.check(f"after a revoke {PICK} is not allowed", PICK not in h["approved"], h)
     d.recheck_media()
     x = asset_of(d, net_path)
-    t.check("…and after a re-check its media waits again", x is not None and x.get("waiting_host") == PICK, x)
+    t.check("…and after a re-check its media waits again", x is not None and x.get("waiting_host") == PICK, x,
+            needs=cr)
 
     # An entry added outside the window: listed as outside, not allowed, until the user keeps it.
     d.add_host_outside(KEEP)
@@ -130,4 +132,4 @@ def run(t):
     refused(lambda: d.import_media(f"//{ASK}/s/y.mp4", raw=True))
     h = d.list_hosts()
     t.check(f"opening {PICK}'s project and {ASK}'s paths again allows neither",
-            PICK not in h["approved"] and ASK not in h["approved"], h)
+            PICK not in h["approved"] and ASK not in h["approved"], h, needs=cr)

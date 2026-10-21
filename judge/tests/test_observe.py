@@ -16,7 +16,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 32
+CHECKS = 35
 
 
 def run(t):
@@ -102,8 +102,54 @@ def side_effects(t):
                 '11 stat("//ZR-EVIL-9.invalid/s/a.mp4", 0x7ff) = -1 ENOENT (No such file or directory)\n'
                 '12 openat(AT_FDCWD, "\\\\\\\\\\357\\275\\232r-x\\\\s", O_RDONLY) = -1 ENOENT\n')
     hits = observe.trace_hits(log, ["zr-evil-9.invalid", "\uff5ar-x"])
-    t.check("trace search: finds a file call (any ASCII case, a non-ASCII name), never an execve's argv",
-            len(hits) == 2 and hits[0].startswith("11 ") and hits[1].startswith("12 "), hits)
+    with open(log, "a", encoding="latin-1") as f:
+        f.write('13 sendto(5<TCP:[127.0.0.1:1->127.0.0.1:2]>, "GET /file?path=//zr-evil-9.invalid/s HTTP/1.1", 40, 0, '
+                'NULL, 0) = 40\n')
+    hits = observe.trace_hits(log, ["zr-evil-9.invalid", "\uff5ar-x"])
+    t.check("trace search: finds a file call (any ASCII case, a non-ASCII name), never an execve's argv or a "
+            "send's data", len(hits) == 2 and hits[0].startswith("11 ") and hits[1].startswith("12 "), hits)
+    net = t.path("side", "net.log")
+    lines = {
+        "tcp out": '20 connect(19<TCP:[9]>, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("140.82.1.3")}, 16)'
+                   ' = -1 ENETUNREACH (Network is unreachable)',
+        "tcp6 out": '21 connect(7<TCPv6:[9]>, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), '
+                    'inet_pton(AF_INET6, "2606:50c0::153", &sin6_addr), sin6_scope_id=0}, 28 <unfinished ...>',
+        "dns": '22 connect(3<UDP:[9]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.53")}, 16) = 0',
+        "udp send": '23 sendmmsg(3<UDP:[10.0.0.2:5->1.1.1.1:443]>, [{msg_hdr={msg_name=NULL, msg_namelen=0}}], 1, 0) = 1',
+        "sendto addr": '24 sendto(4<UDP:[9]>, "x", 1, 0, {sa_family=AF_INET, sin_port=htons(9), '
+                       'sin_addr=inet_addr("192.0.2.1")}, 16) = 1',
+        "unknown socket": '25 connect(8, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("192.0.2.9")}, 16) = 0',
+        "udp probe": '30 connect(19<UDPv6:[9]>, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), '
+                     'inet_pton(AF_INET6, "2001:4860:4860::8888", &sin6_addr), sin6_scope_id=0}, 28) = 0',
+        "loopback": '31 connect(4<TCP:[9]>, {sa_family=AF_INET, sin_port=htons(4791), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
+        "loopback6": '32 sendto(4<TCPv6:[[::1]:5->[::1]:6]>, "hi", 2, 0, NULL, 0) = 2',
+        "unix": '33 connect(5<UNIX-STREAM:[9]>, {sa_family=AF_UNIX, sun_path="/run/x"}, 110) = 0',
+        "quoted data": '34 sendto(4<TCP:[127.0.0.1:5->127.0.0.1:6]>, "sa_family=AF_INET, sin_port=htons(443), '
+                       'sin_addr=inet_addr(\\"8.8.8.8\\")", 60, 0, NULL, 0) = 60',
+        "resumed": '35 <... connect resumed>) = 0',
+        "file": '36 openat(AT_FDCWD, "/m/a.mp4", O_RDONLY) = 3',
+    }
+    with open(net, "w", encoding="latin-1") as f:
+        f.write("\n".join(lines.values()) + "\n")
+    found = {k for k, v in lines.items() if any(h == v for h in observe.net_hits(net))}
+    want = {"tcp out", "tcp6 out", "dns", "udp send", "sendto addr", "unknown socket"}
+    t.check("network search: a TCP connect, a DNS lookup or a send to another computer is found; a UDP connect "
+            "elsewhere (no packet), loopback, unix sockets and quoted data are not", found == want,
+            sorted(found ^ want) or sorted(found))
+    src = t.path("side", "saved.json")
+    with open(src, "w", encoding="utf-8") as f:
+        json.dump({"path": "/m/a.mp4", "size": 113, "counter": 113}, f)
+    made = observe.craft(src, t.path("side", "made.json"), [("/m/a.mp4", "//h/s/a.mp4")], "the media path")
+    twice = observe.craft(src, t.path("side", "twice.json"), [(113, "113,x")], "the size once",
+                          need=lambda c: c == [1])
+    lost = observe.craft(src, t.path("side", "lost.json"), [("/m/b.mp4", "x")], "the other path")
+    t.check("crafting: an input made, one whose number occurs twice and one whose value is absent are not",
+            made.applicable and not twice.applicable and not lost.applicable and twice.counts == [2]
+            and "the other path" in lost.why and json.load(open(made.path))["path"] == "//h/s/a.mp4",
+            [made, twice, lost])
+    sizes = observe.file_sizes(t.path("side"))
+    t.check("file sizes: every file under a folder with its size", sizes.get(src) == os.path.getsize(src)
+            and sizes.get(net) == os.path.getsize(net), len(sizes))
     src = t.path("side", "p.json")
     with open(src, "w", encoding="utf-8") as f:
         json.dump({"path": "/m/a.mp4", "list": ["x /m/a.mp4 y", 0.0123], "/m/a.mp4": 1, "n": 0.0123, "k": 2}, f)

@@ -90,15 +90,22 @@ jobs:
           node "$J/scripts/check-judge-lock.mjs"
           echo "sum=$(cat "$J/judge/JUDGE.lock" "$J/scripts/check-judge-lock.mjs" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # strace: every test that starts the editor runs its adapter under
+      # strace (the download tripwire, and test_network_hosts' file-system
+      # trace). strace starts the adapter as its own child, which
+      # kernel.yama.ptrace_scope 1 allows.
+      - name: Install FFmpeg and strace
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
 
       # The runner's own tests (crash, hang, early exit, wrong check counts, a
-      # leaked process, forged results, SIGTERM) and the adapter's and
-      # check_observe.py's self-tests. No editor starts, so it runs before the
-      # install.
+      # leaked process, forged results, SIGTERM, the not applicable and not
+      # observed statuses, the download tripwire on a fixture adapter that
+      # addresses another computer) and the adapter's and check_observe.py's
+      # self-tests. No editor starts, so it runs before the install.
+      # --require-trace: the tripwire cases must run here, so a runner where
+      # strace cannot trace a child fails this step.
       - name: Judge runner self-test
-        run: timeout -k 30 900 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --self-test --scratch "$RUNNER_TEMP/judge-selftest"
+        run: timeout -k 30 900 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --self-test --require-trace --scratch "$RUNNER_TEMP/judge-selftest"
 
       - name: Install dependencies
         run: npm ci
@@ -129,14 +136,20 @@ jobs:
       # The judge from the copy against the checkout's build, through the
       # v0.2.0 adapter (its MCP server over stdio, a scratch home and data
       # folder, a free port), measured with the runner's FFmpeg (apt, on PATH).
-      # Media made with lavfi, nothing downloaded. timeout -k ends a hang as a
-      # failure; the runner also times out each test.
+      # Media made with lavfi, nothing downloaded: the adapter starts the
+      # editor so that it fetches nothing, and every test's "nothing was
+      # downloaded" check fails on any connection to another computer.
+      # --require-trace: a check that needs strace fails without it (never
+      # "not observed"). --strict: while the judge grades v0.2.0, whose file
+      # format every crafted input is made from, a check recorded as not
+      # applicable fails. timeout -k ends a hang as a failure; the runner also
+      # times out each test.
       - name: Judge (v0.2.0 adapter)
-        run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build "$GITHUB_WORKSPACE" --scratch "$RUNNER_TEMP/judge-scratch"
+        run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build "$GITHUB_WORKSPACE" --scratch "$RUNNER_TEMP/judge-scratch" --strict --require-trace
 
       # A failed run keeps its scratch folder: upload the logs (test.log,
-      # adapter.stderr, mcp-server.stderr, the editor's own logs), not the
-      # media or the exports.
+      # adapter.stderr, mcp-server.stderr, adapter-strace.log, the editor's own
+      # logs), not the media or the exports.
       - name: Upload the judge's logs
         if: failure()
         uses: actions/upload-artifact@v4

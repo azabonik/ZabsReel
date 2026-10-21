@@ -14,6 +14,14 @@ child that writes through the result pipe's descriptor number gets EBADF and the
 or a test process cannot make itself non-dumpable (forced with JUDGE_FORCE_UNPROTECTED) the run fails; with
 --allow-unprotected it passes and its JUDGE line says UNPROTECTED. SIGTERM to the runner ends the test and what it
 started and prints the interrupted JUDGE line. A relative --adapter path works (the runner makes it absolute).
+
+Statuses: a check recorded as not applicable (directly, or through T.check(needs=...) on an input observe.craft could
+not make) passes the run and is counted on the JUDGE line, and fails it with --strict; a check recorded as not
+observed passes and is counted, and fails with --require-trace. The download tripwire: an adapter that addresses
+another computer (a UDP connect to 192.0.2.1, which sends no packet) fails the run's "nothing was downloaded" check,
+one that addresses only 127.0.0.1 passes it, and with strace switched off (JUDGE_STRACE empty) the check is not
+observed, a failure with --require-trace. The cases that need strace are skipped without it, unless --require-trace
+is given (judge.yml): then a missing strace fails the self-test.
 """
 import json
 import os
@@ -68,6 +76,18 @@ TESTS = {
     # The editor driver with a fixture adapter (FAKE below); which behaviour is chosen by the --adapter words.
     "driver": "CHECKS = 1\ndef run(t):\n    t.driver()\n    t.check('the fixture editor started', True)\n",
     "forge": "CHECKS = 1\ndef run(t):\n    t.driver()\n    t.check('a check the editor fails', False)\n",
+    # A check on an input that observe.craft made, one on an input it could not make (not applicable), and one
+    # recorded as not applicable directly.
+    "na": "import json, observe\nPORT_BOUND = False\nCHECKS = 3\ndef run(t):\n"
+          "    src = t.path('saved.json')\n"
+          "    open(src, 'w').write(json.dumps({'path': '/m/a.mp4', 'n': 113}))\n"
+          "    made = observe.craft(src, t.path('made.json'), [('/m/a.mp4', '//h/s/a.mp4')], 'the media path')\n"
+          "    lost = observe.craft(src, t.path('lost.json'), [('/m/b.mp4', 'x'), (113, 1)], 'the clip path')\n"
+          "    t.check('a check on a crafted file', json.load(open(made.path))['path'] == '//h/s/a.mp4', needs=made)\n"
+          "    t.check('a check whose input cannot be made', False, 'never recorded', needs=[made, lost])\n"
+          "    t.not_applicable('a check recorded as not applicable', 'the reason')\n",
+    "nobs": "PORT_BOUND = False\nCHECKS = 2\ndef run(t):\n    t.check('a passing check', True)\n"
+            "    t.not_observed('a trace check', 'strace is not installed')\n",
     "interrupt": "PORT_BOUND = False\nCHECKS = 1\nTIMEOUT = 600\ndef run(t):\n"
                  "    p = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
                  "    open(t.path('pids.tmp'), 'w').write(f'{os.getpid()} {p.pid}')\n"
@@ -77,10 +97,12 @@ TESTS = {
 
 # A fixture adapter: fake_adapter.py <protocol> <mode>. mode "leak" leaves a process running at stop; "forge" writes
 # passing result lines into results.jsonl and every other file it can find under its scratch folder; "procfd" lists
-# the descriptors it holds, then tries to open every descriptor of the test process (its parent) and of the runner
-# (its grandparent) for writing through /proc/<pid>/fd, writes a passing record through any it opens, and reports each
-# attempt in procfd.json in its scratch folder.
-FAKE = r'''import json, os, subprocess, sys
+# the descriptors it holds, then tries to open every descriptor of the test process (its nearest ancestor started
+# with --child; strace may sit between them) and of the runner (that process's parent) for writing through
+# /proc/<pid>/fd, writes a passing record through any it opens, and reports each attempt in procfd.json in its scratch
+# folder; "connect" addresses another computer at start (a UDP connect to 192.0.2.1, TEST-NET-1: a UDP connect sends
+# no packet) and "loopback" addresses only 127.0.0.1 the same way.
+FAKE = r'''import json, os, socket, subprocess, sys
 proto, mode = int(sys.argv[1]), sys.argv[2]
 scratch = None
 FORGED = json.dumps({"check": "forged", "ok": True, "detail": ""}) + "\n"
@@ -111,11 +133,17 @@ def procfd():
             own.append(fd)
         except OSError:
             pass
-    test = os.getppid()
-    with open(f"/proc/{test}/stat", "rb") as f:
-        runner = int(f.read().rsplit(b")", 1)[1].split()[1])
-    with open(f"/proc/{test}/cmdline", "rb") as f:
-        argv = f.read().split(b"\0")
+    def parent(pid):
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return int(f.read().rsplit(b")", 1)[1].split()[1])
+    test = parent(os.getpid())
+    while test > 1:
+        with open(f"/proc/{test}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+        if b"--child" in argv:
+            break
+        test = parent(test)
+    runner = parent(test)
     results_fd = int(argv[argv.index(b"--results-fd") + 1])
     report = {"own_fds": own, "test": test, "runner": runner, "results_fd": results_fd, "attempts": {}}
     for who, pid in (("test", test), ("runner", runner)):
@@ -152,6 +180,13 @@ for line in sys.stdin:
             forge()
         if mode == "procfd":
             procfd()
+        if mode in ("connect", "loopback"):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("192.0.2.1" if mode == "connect" else "127.0.0.1", 443))
+            except OSError:
+                pass  # no route (a network namespace without one): the call is still traced
+            s.close()
     elif op == "stop":
         res = {}
         if mode == "leak":
@@ -175,6 +210,13 @@ def _alive(pid):
             return f.read().rsplit(b")", 1)[1].split()[0] != b"Z"
     except (OSError, IndexError):
         return False
+
+
+def strace_here():
+    """Whether the runner will trace (run.strace(): JUDGE_STRACE, else strace on PATH, and it can trace a child)."""
+    sys.path.insert(0, JUDGE)
+    import run
+    return run.strace() is not None
 
 
 class SelfTest:
@@ -218,11 +260,11 @@ class SelfTest:
             print("     | " + "\n     | ".join(out.strip().splitlines()[-25:]), flush=True)
         return out
 
-    def procfd(self):
+    def procfd(self, judge_line):
         """The procfd adapter's report: no descriptor inherited, and every open of the test's or the runner's
         descriptors through /proc refused with PermissionError (a dumpable process gives FileNotFoundError for a
         number it does not use, and opens the ones it does)."""
-        self.run("driver", 0, [r"^PASS  test_driver: the fixture editor started", r"^JUDGE: 3/3 passed"],
+        self.run("driver", 0, [r"^PASS  test_driver: the fixture editor started", judge_line],
                  adapter=f"{shlex.quote(sys.executable)} -I -B {FAKE_ADAPTER} 1 procfd", extra=("--keep",),
                  label="adapter opens the result pipe through /proc: the verdict is unchanged")
         problems, rep = [], None
@@ -299,12 +341,20 @@ class SelfTest:
             print("     | " + "\n     | ".join((p.stdout + p.stderr).strip().splitlines()[-25:]), flush=True)
 
 
-def main(run_py, parent=None, allow_unprotected=False):
+def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
     if parent:
         os.makedirs(parent, exist_ok=True)
     s = SelfTest(run_py, parent, allow_unprotected)
     py = f"{shlex.quote(sys.executable)} -I -B"
     fail = r"^FAIL  test_{}: {}"
+    traced = strace_here()
+    net = re.escape("nothing was downloaded: ")
+
+    def drv(passed, total):
+        """The JUDGE line of a test that started the fixture adapter: with strace, one more check (the download
+        tripwire, passed); without it, that check is not observed."""
+        return (rf"^JUDGE: {passed + 1}/{total + 1} passed( UNPROTECTED|$)" if traced
+                else rf"^JUDGE: {passed}/{total} passed, 1 not observed( UNPROTECTED|$)")
     try:
         s.run("ok", 0, [r"^PASS  test_ok: a passing check", r"^JUDGE: 2/2 passed"])
         s.run("crash", 1, [fail.format("crash", "the test process exited cleanly"),
@@ -332,7 +382,7 @@ def main(run_py, parent=None, allow_unprotected=False):
                                    + re.escape(os.strerror(9)), r"^JUDGE: 2/2 passed"],
                   label="a fork child writes through the result pipe's number: EBADF, the verdict is unchanged")
         # The driver path, with the adapter named by a relative path (the runner makes it absolute).
-        s.run("driver", 0, [r"^PASS  test_driver: the adapter speaks protocol 1", r"^JUDGE: 3/3 passed"],
+        s.run("driver", 0, [r"^PASS  test_driver: the adapter speaks protocol 1", drv(3, 3)],
               adapter=f"{py} {FAKE_ADAPTER} 1 plain", label="driver, adapter named by a relative path")
         s.run("driver", 1, [fail.format("driver", "the adapter speaks protocol 1  -- hello says protocol 2"),
                             fail.format("driver", "the test ran to its end")],
@@ -340,10 +390,45 @@ def main(run_py, parent=None, allow_unprotected=False):
         out = s.run("driver", 1, [fail.format("driver", "nothing left running after the test  -- \\d+ sleep 300")],
                     adapter=f"{py} {FAKE_ADAPTER} 1 leak", label="adapter leaves a process at stop")
         s.still_running("adapter leak", [int(x) for x in re.findall(r"-- (\d+) sleep 300", out)])
-        s.run("forge", 1, [fail.format("forge", "a check the editor fails"), r"^JUDGE: 2/3 passed"],
+        s.run("forge", 1, [fail.format("forge", "a check the editor fails"), drv(2, 3)],
               adapter=f"{py} {FAKE_ADAPTER} 1 forge", label="adapter forges passing results in the scratch folder")
         if sys.platform.startswith("linux"):
-            s.procfd()
+            s.procfd(drv(3, 3))
+        # Statuses: not applicable passes and is counted, fails with --strict; not observed likewise with
+        # --require-trace.
+        na = r"^N/A   test_na: {}  -- not applicable: {}"
+        s.run("na", 0, [r"^PASS  test_na: a check on a crafted file$",
+                        na.format("a check whose input cannot be made", re.escape(
+                            "the file the editor saved does not hold the clip path (replacements [0, 1])")),
+                        na.format("a check recorded as not applicable", "the reason"),
+                        r"^judge:   test_na: a check whose input cannot be made$",
+                        r"^JUDGE: 2/2 passed, 2 not applicable( UNPROTECTED|$)"], label="not applicable: counted, the run passes")
+        s.run("na", 1, [fail.format("na", "a check whose input cannot be made  -- not applicable, a failure with "
+                                    "--strict: "), r"^JUDGE: 2/4 passed( UNPROTECTED|$)"], extra=("--strict",),
+              label="not applicable with --strict: the run fails")
+        s.run("nobs", 0, [r"^N/O   test_nobs: a trace check  -- not observed: strace is not installed",
+                          r"^JUDGE: 2/2 passed, 1 not observed( UNPROTECTED|$)"], label="not observed: counted, the run passes")
+        s.run("nobs", 1, [fail.format("nobs", "a trace check  -- not observed, a failure with --require-trace"),
+                          r"^JUDGE: 2/3 passed( UNPROTECTED|$)"], extra=("--require-trace",),
+              label="not observed with --require-trace: the run fails")
+        # The download tripwire (strace on the adapter's tree, ptrace_scope 1 allows it: strace starts the adapter).
+        if traced:
+            s.run("driver", 1, [fail.format("driver", net + ".*192\\.0\\.2\\.1"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 connect",
+                  label="the adapter addresses another computer: the download check fails")
+            s.run("driver", 0, [r"^PASS  test_driver: " + net, r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 loopback",
+                  label="the adapter addresses only 127.0.0.1: the download check passes")
+        else:
+            print(f"{'FAIL' if require_trace else 'skip'} the download tripwire cases: strace is not installed"
+                  + (" (--require-trace)" if require_trace else ""), flush=True)
+            s.failures += bool(require_trace)
+        s.run("driver", 0, [r"^N/O   test_driver: " + net + ".*not observed: strace is not installed",
+                            r"^JUDGE: 3/3 passed, 1 not observed( UNPROTECTED|$)"], adapter=f"{py} {FAKE_ADAPTER} 1 connect",
+              env={"JUDGE_STRACE": ""}, label="no strace: the download check is not observed, the run passes")
+        s.run("driver", 1, [fail.format("driver", net + ".*a failure with --require-trace"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+              adapter=f"{py} {FAKE_ADAPTER} 1 connect", env={"JUDGE_STRACE": ""}, extra=("--require-trace",),
+              label="no strace with --require-trace: the run fails")
         # The protection fails open nowhere: a runner or test process that is not non-dumpable fails the run unless
         # --allow-unprotected is given, and then the JUDGE line says UNPROTECTED.
         force = "JUDGE_FORCE_UNPROTECTED"

@@ -6,10 +6,13 @@ The computers are under the reserved .invalid domain (zr-evil-N.invalid, never r
 //zr-evil-1.invalid/s/a1.mp4 is also a local path that does not exist, so the only sign that the editor tried to open
 it is the file-system call itself: the adapter and everything it starts run under `strace -f -e trace=%file`
 (t.driver(trace=True)), and the test searches that trace for the computers' names (observe.trace_hits; argv is never
-looked at). Without strace on the system the trace checks are recorded as passed with "not observed".
+looked at). Without strace on the system the trace checks are recorded as not observed (run.py --require-trace fails
+them).
 
 The hostile project is the editor's own saved project with its media paths replaced by network paths
-(observe.substitute), so the test needs no knowledge of the file format. add_host_outside plays an attacker who edits
+(observe.craft), so the test needs no knowledge of the file format. When the saved file does not hold a value as
+given (another file format), that input cannot be made, and every check on it is recorded as not applicable (listed
+by name; run.py --strict fails it), never as failed. add_host_outside plays an attacker who edits
 the editor's allowed list without its window (one plain entry, one with a forged stamp); approve_host and revoke_host
 are the user's own actions. Every approval or revoke is followed by recheck_media.
 
@@ -24,7 +27,8 @@ import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
-CHECKS = 40
+CHECKS = 41
+BIG = 1 << 20  # a new file this large during the agent tool calls is a download (models are 13 to 150 MB)
 
 
 def H(n):
@@ -56,7 +60,7 @@ def sha(paths):
 
 
 class Trace:
-    """The adapter tree's file-system trace, or "not observed" when strace is missing."""
+    """The adapter tree's file-system trace, or not observed when strace is missing."""
 
     def __init__(self, t):
         self.path = t.trace_path
@@ -79,11 +83,11 @@ class Trace:
                 return True
         return False
 
-    def check(self, t, name, ok_fn, detail_fn):
+    def check(self, t, name, ok_fn, detail_fn, needs=()):
         if not self.path:
-            t.check(name, True, "not observed: strace is not installed")
+            t.not_observed(name, "strace is not installed")
         else:
-            t.check(name, ok_fn(), detail_fn())
+            t.check(name, ok_fn(), detail_fn(), needs=needs)
 
 
 def run(t):
@@ -121,12 +125,13 @@ def run(t):
     private, secrets = list(priv.get("files") or []), [s for s in priv.get("secrets") or [] if s]
     private_before = sha(private)
 
-    crafted = t.path("projects", "crafted.aive")
     net = {n: SPELL[n](f"a{n}.mp4") for n in SPELL}
     lut_net = f"\\\\{H(1)}\\s\\look.cube"
-    counts = observe.substitute(legit, crafted, [(files[n], net[n]) for n in SPELL] + [(lut, lut_net)])
+    cr = observe.craft(legit, t.path("projects", "crafted.aive"), [(files[n], net[n]) for n in SPELL]
+                       + [(lut, lut_net)], "each media path and the LUT path as given")
+    crafted = cr.path
     t.check("the saved project names each media file and the LUT, so the hostile copy holds network paths only",
-            all(c > 0 for c in counts), f"replacements {counts}")
+            True, f"replacements {cr.counts}", needs=cr)
 
     # ---- 1. load: every asset on a computer waits for it, each computer is pending once
     notice = None
@@ -135,37 +140,40 @@ def run(t):
         loaded = True
     except drv.JudgeError as e:
         loaded, notice = False, str(e)
-    t.check("the crafted project loads", loaded, str(notice)[:300])
+    t.check("the crafted project loads", loaded, str(notice)[:300], needs=cr)
     st = d.get_state()
     by_path = {a.get("path"): a for a in st.get("assets", [])}
     waits = {n: (by_path.get(net[n]) or {}).get("waiting_host") for n in SPELL}
     loc = by_path.get(local) or {}
     t.check("each network asset waits for its own computer; the local one waits for none",
             all(waits[n] == H(n) and (by_path.get(net[n]) or {}).get("offline") is True for n in SPELL)
-            and loc.get("waiting_host") is None and loc.get("offline") is False, f"{waits}; local {loc}")
+            and loc.get("waiting_host") is None and loc.get("offline") is False, f"{waits}; local {loc}", needs=cr)
     h = d.list_hosts()
     t.check("each computer is pending once, nothing is allowed",
-            all(h["pending"].count(H(n)) == 1 for n in SPELL) and not h["approved"], h)
+            all(h["pending"].count(H(n)) == 1 for n in SPELL) and not h["approved"], h, needs=cr)
+    d.recheck_media()  # the editor reads its allowed list again (the load may already have; this does not rely on it)
+    h = d.list_hosts()
     t.check(f"{H(3)} (plain entry) and {H(4)} (forged stamp), written outside the window, are listed outside",
-            sorted(h["outside"]) == [H(3), H(4)], h)
+            sorted(h["outside"]) == [H(3), H(4)] and not h["approved"], h)
     t.check("the load's notice names each computer", all(H(n) in str(notice or "").lower() for n in SPELL),
-            str(notice)[:400])
+            str(notice)[:400], needs=cr)
 
     # ---- 2. what refuses and what works while the media waits
     ok_x, what_x = refused(lambda: d.export(t.path("out", "x.mp4")))
     ok_f, what_f = refused(lambda: d.render_frame(0.5, t.path("out", "f.png")))
-    t.check("an export of the timeline is refused", ok_x and not os.path.exists(t.path("out", "x.mp4")), what_x)
-    t.check("rendering a frame is refused", ok_f, what_f)
+    t.check("an export of the timeline is refused", ok_x and not os.path.exists(t.path("out", "x.mp4")), what_x,
+            needs=cr)
+    t.check("rendering a frame is refused", ok_f, what_f, needs=cr)
     ok_t, what_t = refused(lambda: d.thumbnail(assets[1], 0.5))
     ok_p, what_p = refused(lambda: d.make_proxy(assets[1]))
-    t.check("a thumbnail and a proxy of a waiting asset are refused", ok_t and ok_p, f"{what_t}; {what_p}")
+    t.check("a thumbnail and a proxy of a waiting asset are refused", ok_t and ok_p, f"{what_t}; {what_p}", needs=cr)
     answers = []
     for p in (net[1], lut_net):
         for route, q in (("/file", {}), ("/frames", FRAMES_Q), ("/peaks", {})):
             r = d.http_get(route, {"path": p, **q})
             answers.append((route, p, r["status"]))
     t.check("the file surface serves no file of a waiting computer (/file, /frames, /peaks; media and LUT)",
-            all(not 200 <= s < 300 for _, _, s in answers), answers)
+            all(not 200 <= s < 300 for _, _, s in answers), answers, needs=cr)
     r = d.http_get("/file", {"path": local})
     t.check("control: the file surface serves the local clip", r["status"] == 200, r["status"])
 
@@ -174,12 +182,13 @@ def run(t):
     ok_load = ok_save and not refused(lambda: d.load_project(resaved))[0]
     a1 = next((a for a in d.get_state().get("assets", []) if a.get("path") == net[1]), {})
     t.check("the project saves to a local file and loads again with the media still waiting",
-            ok_save and ok_load and a1.get("waiting_host") == H(1), f"save {ok_save}, load {ok_load}, {a1}")
+            ok_save and ok_load and a1.get("waiting_host") == H(1), f"save {ok_save}, load {ok_load}, {a1}", needs=cr)
     moved = refused(lambda: d.move_clip(d.clips("v0")[0]["id"], 300))
     undo_ok = not refused(d.undo)[0] and not refused(d.redo)[0]
     a1 = next((a for a in d.get_state().get("assets", []) if a.get("path") == net[1]), {})
     t.check("editing, undo and redo work while media waits, and it still waits",
-            not moved[0] and undo_ok and a1.get("waiting_host") == H(1), f"move {moved[1]}; undo/redo {undo_ok}; {a1}")
+            not moved[0] and undo_ok and a1.get("waiting_host") == H(1), f"move {moved[1]}; undo/redo {undo_ok}; {a1}",
+            needs=cr)
 
     def h7(name):
         return f"//{H(7)}/s/{name}"
@@ -202,13 +211,14 @@ def run(t):
 
     # An OTIO file names its media by URL (file://<path>) and may repeat the path elsewhere: both become the raw
     # network path, as a file written on another computer would hold it.
-    otio5 = t.path("projects", "h5.otio")
     pairs5 = []
     for p in [local] + list(files.values()):
         net5 = f"\\\\{H(5)}\\s\\{os.path.basename(p)}"
         pairs5 += [(f"file://{p}", net5), (p, net5)]
-    c5 = observe.substitute(legit_otio, otio5, pairs5)
-    n5 = [c5[i] + c5[i + 1] for i in range(0, len(c5), 2)]
+    cr5 = observe.craft(legit_otio, t.path("projects", "h5.otio"), pairs5, "each media path (as a file:// URL or a path)",
+                        need=lambda c: all(c[i] + c[i + 1] > 0 for i in range(0, len(c), 2)))
+    otio5 = cr5.path
+    n5 = [cr5.counts[i] + cr5.counts[i + 1] for i in range(0, len(cr5.counts), 2)]
     st5, what5 = None, ""
     try:
         d.import_otio(otio5)
@@ -217,8 +227,8 @@ def run(t):
         what5 = str(e)
     w5 = [(a.get("offline"), a.get("waiting_host")) for a in (st5 or {}).get("assets", [])]
     t.check(f"an OTIO file whose media is on {H(5)} imports, every asset offline and waiting for it",
-            all(c > 0 for c in n5) and st5 is not None and len(w5) >= 5 and all(w == (True, H(5)) for w in w5),
-            f"replacements {n5}; {w5 or what5}")
+            st5 is not None and len(w5) >= 5 and all(w == (True, H(5)) for w in w5),
+            f"replacements {n5}; {w5 or what5}", needs=cr5)
 
     # ---- 3. so far nothing opened a file on any test computer
     tr.check(t, "no file-system call of the editor named a test computer (before any approval)",
@@ -229,19 +239,35 @@ def run(t):
     # ---- 4. the allowed list's files and secret are out of the agent's reach
     t.check("the editor names the files of its allowed list and a secret to look for",
             len(private) >= 1 and all(os.path.isfile(p) for p in private) and len(secrets) >= 1, private)
-    dotted = [os.path.join(os.path.dirname(p), "..", os.path.basename(os.path.dirname(p)), os.path.basename(p))
-              for p in private]
-    key = private[-1] if private else "/nonexistent/key"
-    link = t.path("links", "store-link.mp4")       # a link to the secret
-    os.symlink(key, link)
-    link_dir = t.path("links", "store-dir")        # a link to its folder: <link>/../<folder>/<file> is the secret to
-    os.symlink(os.path.dirname(key), link_dir)     # the kernel, a path outside the folder to a lexical check
-    after_link = os.path.join(link_dir, "..", os.path.basename(os.path.dirname(key)), os.path.basename(key))
-    aliases = private + dotted + [link, after_link, f"/proc/self/root{key}"]
-    saves = [(p, refused(lambda p=p: d.save_project(p, raw=True))) for p in private + dotted]
-    t.check("saving the project over the allowed list's files is refused (also through '..')",
-            all(ok for _, (ok, _) in saves), [(p, w) for p, (ok, w) in saves if not ok] or len(saves))
+    store_dir = os.path.dirname(private[-1]) if private else "/nonexistent"
+    link_dir = t.path("links", "store-dir")        # a link to the store's folder: <link>/../<folder>/<file> is the
+    os.symlink(store_dir, link_dir)                # file to the kernel, a path outside the folder to a lexical check
+
+    def spellings(p, ext):
+        """Every spelling of private file `p` (the original's section 4): direct, '..' inside the path, a link to the
+        file named like a project or OTIO file (`ext`), '..' after a link to its folder, /proc/self/root before it,
+        and /proc/self/root/.. before it (the kernel's root has no parent; to a lexical check it is /proc/self/...)."""
+        folder, base = os.path.dirname(p), os.path.basename(p)
+        link = t.path("links", f"{base}-link{ext}")
+        if not os.path.lexists(link):
+            os.symlink(p, link)
+        return [p, os.path.join(folder, "..", os.path.basename(folder), base), link,
+                os.path.join(link_dir, "..", os.path.basename(folder), base), f"/proc/self/root{p}",
+                f"/proc/self/root/..{p}"]
+
+    listing_before = sorted(os.listdir(store_dir)) if os.path.isdir(store_dir) else None
+    writes = []
+    for p in private:
+        for label, ext, fn in (("save", ".aive", d.save_project), ("export OTIO", ".otio", d.export_otio)):
+            for x in spellings(p, ext):
+                writes.append((label, x, *refused(lambda x=x, fn=fn: fn(x, raw=True))))
+    t.check("saving the project or exporting an OTIO file over the allowed list's files is refused in every "
+            "spelling (direct, '..', a link, '..' after a link, /proc/self/root, /proc/self/root/..)",
+            len(writes) == 12 * len(private) > 0 and all(ok for _, _, ok, _ in writes),
+            [(lb, x, w) for lb, x, ok, w in writes if not ok]
+            or f"{len(writes)} refused: " + " | ".join(sorted({w[:90] for _, _, _, w in writes})))
     clip0 = d.clips("v0")[0]["id"] if d.clips("v0") else "none"
+    aliases = [x for p in private for x in spellings(p, ".mp4")]
     opens = []
     for p in aliases:
         for label, fn in (("open", lambda p=p: d.load_project(p, raw=True)),
@@ -251,7 +277,7 @@ def run(t):
                           ("font", lambda p=p: d.add_text(clip0, "t", font=p))):
             opens.append((label, p, *refused(fn)))
     t.check("opening the allowed list's files as a project, OTIO, media, LUT or font is refused (direct, '..', a "
-            "link, '..' after a link, /proc/self/root)", all(ok for _, _, ok, _ in opens),
+            "link, '..' after a link, /proc/self/root, /proc/self/root/..)", all(ok for _, _, ok, _ in opens),
             [(lb, p, w) for lb, p, ok, w in opens if not ok] or len(opens))
     served = []
     for p in aliases:
@@ -259,12 +285,15 @@ def run(t):
             served.append((route, p, d.http_get(route, {"path": p, **q})["status"]))
     t.check("the file surface serves none of them", all(not 200 <= s < 300 for _, _, s in served),
             [x for x in served if 200 <= x[2] < 300] or len(served))
-    t.check("the allowed list's files are unchanged", sha(private) == private_before, private)
-    fontkey = t.path("projects", "font-key.aive")
-    nk = observe.substitute(legit, fontkey, [(font, key)])[0]
-    ok, what = refused(lambda: d.load_project(fontkey))
-    t.check("a project whose text font is the allowed list's secret file does not open", nk > 0 and ok,
-            f"{nk} substitution(s); {what}")
+    listing = sorted(os.listdir(store_dir)) if os.path.isdir(store_dir) else None
+    t.check("the allowed list's files are unchanged, and no file was added beside them",
+            sha(private) == private_before and listing is not None and listing == listing_before,
+            f"{private}; folder {listing_before} -> {listing}")
+    key = private[-1] if private else "/nonexistent/key"
+    crk = observe.craft(legit, t.path("projects", "font-key.aive"), [(font, key)], "the text's font path as given")
+    ok, what = refused(lambda: d.load_project(crk.path))
+    t.check("a project whose text font is the allowed list's secret file does not open", ok,
+            f"{crk.counts[0]} substitution(s); {what}", needs=crk)
 
     # ---- 9.4 what an agent is offered
     tools = d.agent_tools()
@@ -282,11 +311,11 @@ def run(t):
     by_path = {a.get("path"): a for a in st.get("assets", [])}
     waits = {n: (by_path.get(net[n]) or {}).get("waiting_host") for n in SPELL}
     t.check(f"after the user allows {H(1)} and a re-check, its asset no longer waits; the others still do",
-            waits == {1: None, 2: H(2), 3: H(3), 4: H(4)}, waits)
+            waits == {1: None, 2: H(2), 3: H(3), 4: H(4)}, waits, needs=cr)
     a1_id = (by_path.get(net[1]) or {}).get("id", "")
     refused(lambda: d.thumbnail(a1_id, 0.5))  # makes the editor open \\zr-evil-1's file (it is not there)
     tr.check(t, f"control: the trace now has the editor opening {H(1)}'s files", lambda: bool(tr.hits([H(1)], mark)),
-             lambda: f"{len(tr.hits([H(1)], mark))} lines")
+             lambda: f"{len(tr.hits([H(1)], mark))} lines", needs=cr)
     others = [H(n) for n in (2, 3, 4, 5, 6, 7, 8, 9)]
     tr.check(t, "…and still none for any other test computer", lambda: not tr.hits(others),
              lambda: tr.hits(others)[:3])
@@ -299,28 +328,28 @@ def run(t):
     t.check(f"keeping {H(3)} in the window brings its asset online; {H(4)} (forged) still waits and stays outside",
             (by_path.get(net[3]) or {}).get("waiting_host") is None
             and (by_path.get(net[4]) or {}).get("waiting_host") == H(4) and h["outside"] == [H(4)]
-            and H(4) not in h["approved"], f"{h}")
+            and H(4) not in h["approved"], f"{h}", needs=cr)
 
     w5 = []
     if not refused(lambda: d.import_otio(otio5))[0]:
         d.approve_host(H(5))
         d.recheck_media()
         w5 = [a.get("waiting_host") for a in d.get_state().get("assets", [])]
-    t.check(f"the OTIO's placeholders stop waiting once {H(5)} is allowed", len(w5) >= 5 and not any(w5), w5)
+    t.check(f"the OTIO's placeholders stop waiting once {H(5)} is allowed", len(w5) >= 5 and not any(w5), w5,
+            needs=cr5)
 
-    look = []
+    look, crl = [], []
     lmark = tr.mark()
     for i, p in enumerate(LOOKALIKES):
-        crafted_l = t.path("projects", f"lookalike-{i}.aive")
-        n = observe.substitute(legit, crafted_l, [(files[1], p)])[0]
-        ok, what = refused(lambda: d.load_project(crafted_l))
+        c = observe.craft(legit, t.path("projects", f"lookalike-{i}.aive"), [(files[1], p)], "the media path as given")
+        crl.append(c)
+        ok, what = refused(lambda: d.load_project(c.path))
         a = next((x for x in d.get_state().get("assets", []) if x.get("path") == p), None) if not ok else None
-        safe = n > 0 and (ok or (a is not None and a.get("offline") is True))
-        look.append((repr(p), safe, what if ok else a))
+        look.append((repr(p), ok or (a is not None and a.get("offline") is True), what if ok else a))
     t.check(f"a look-alike of the allowed {H(1)} (fullwidth, zero-width space) is refused or stays offline",
-            all(s for _, s, _ in look), look)
+            all(s for _, s, _ in look), look, needs=crl)
     tr.check(t, "…and the editor never opened a look-alike path", lambda: not tr.hits(LOOKALIKE_HOSTS, lmark),
-             lambda: tr.hits(LOOKALIKE_HOSTS, lmark)[:3])
+             lambda: tr.hits(LOOKALIKE_HOSTS, lmark)[:3], needs=crl)
 
     # ---- 6. revoke: the media waits again and nothing opens it
     refused(lambda: d.load_project(crafted))
@@ -329,24 +358,31 @@ def run(t):
     d.recheck_media()
     st = d.get_state()
     a1 = next((a for a in st.get("assets", []) if a.get("path") == net[1]), {})
-    t.check(f"after the user revokes {H(1)} and a re-check, its asset waits again", a1.get("waiting_host") == H(1), a1)
+    t.check(f"after the user revokes {H(1)} and a re-check, its asset waits again", a1.get("waiting_host") == H(1), a1,
+            needs=cr)
     mark = tr.mark()
     again = [refused(lambda: d.export(t.path("out", "x2.mp4"))),
              refused(lambda: d.render_frame(0.5, t.path("out", "f2.png"))),
              refused(lambda: d.thumbnail(a1.get("id", ""), 0.5)), refused(lambda: d.make_proxy(a1.get("id", "")))]
-    t.check("export, frame, thumbnail and proxy are refused again", all(ok for ok, _ in again), [w for _, w in again])
+    t.check("export, frame, thumbnail and proxy are refused again", all(ok for ok, _ in again), [w for _, w in again],
+            needs=cr)
     served = [(route, d.http_get(route, {"path": net[1], **q})["status"])
               for route, q in (("/file", {}), ("/frames", FRAMES_Q), ("/peaks", {}))]
     t.check("the file surface refuses the revoked computer's file again", all(not 200 <= s < 300 for _, s in served),
-            served)
+            served, needs=cr)
     tr.check(t, f"after the revoke nothing opened {H(1)}'s files", lambda: not tr.hits([H(1)], mark),
-             lambda: tr.hits([H(1)], mark)[:3])
+             lambda: tr.hits([H(1)], mark)[:3], needs=cr)
     tr.check(t, f"the computers never allowed ({H(4)} with its forged stamp, {H(7)}) were never opened",
              lambda: not tr.hits([H(4), H(7)]), lambda: tr.hits([H(4), H(7)])[:3])
 
     # ---- 4 (end). every agent tool with empty arguments allows nothing, and no answer held the secret
     before, files_before = d.list_hosts(), sha(private)
+    sizes_before = observe.file_sizes(t.scratch)
     poked = d.poke_agent_tools()
+    big = [(os.path.relpath(p, t.scratch), n) for p, n in observe.file_sizes(t.scratch).items()
+           if p not in sizes_before and n >= BIG]
+    t.check("no file of 1 MiB or more appeared in the test's folder during the agent tool calls (nothing was "
+            "downloaded)", not big, big[:3] or "none")
     after = d.list_hosts()
     t.check("calling every agent tool with empty arguments allows nothing and keeps the outside entry outside",
             poked.get("called", 0) > 0 and sorted(after["approved"]) == sorted(before["approved"])

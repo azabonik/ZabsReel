@@ -8,8 +8,11 @@ in `start` (<build>/packages/mcp/dist/index.js, run with the `node` on PATH), an
 operation needs them (http_get). Python 3 standard library only.
 
 The editor runs in a sandbox under <scratch>/editor: HOME, USERPROFILE, XDG_CONFIG_HOME, AIVE_DATA_DIR and TMPDIR
-point at fresh folders there, AIVE_PORT is a free port (never 4791, the default, which the user's own editor may
-use), and AIVE_CLIP_DISABLE=1 keeps the visual index model from loading. The editor uses the FFmpeg on PATH, or
+point at fresh folders there, and AIVE_PORT is a free port (never 4791, the default, which the user's own editor may
+use). It downloads nothing (PROTOCOL.md rule 4): AIVE_CLIP_DISABLE=1 keeps the visual index model from loading, and
+AIVE_WHISPER_BIN / AIVE_WHISPER_MODEL name files that do not exist (<scratch>/editor/absent/..., never made), so a
+transcription is refused instead of fetching whisper.cpp and its model (~170 MB), as in the FFmpeg matrix
+(ffmpeg-matrix.yml). `start` refuses to go on if either of those files exists. The editor uses the FFmpeg on PATH, or
 AIVE_FFMPEG / AIVE_FFPROBE when they are set in the adapter's environment. `start` checks that the core that answers
 is the one it started (its server.json is in the sandbox's data folder, names the sandbox's port, and its process has
 the sandbox's data folder in its environment) and refuses to go on otherwise. `stop` ends the editor's window server
@@ -379,11 +382,16 @@ class Adapter:
             raise OpError("adapter_error", "no node on PATH")
         self.root = root
         self.port = free_port()
+        absent = os.path.join(root, "absent")  # never made: the editor's model and helper settings name missing files
         env = {
             "HOME": dirs["home"], "USERPROFILE": dirs["home"], "XDG_CONFIG_HOME": dirs["xdg"],
             "AIVE_DATA_DIR": dirs["data"], "AIVE_PORT": str(self.port), "AIVE_CLIP_DISABLE": "1",
+            "AIVE_WHISPER_BIN": os.path.join(absent, "whisper-cli"),
+            "AIVE_WHISPER_MODEL": os.path.join(absent, "ggml-base.en.bin"),
             "TMPDIR": dirs["tmp"], "LANG": "C.UTF-8", "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
+        if os.path.lexists(absent):
+            raise OpError("adapter_error", f"{absent} exists: the model settings must name files that do not exist")
         for k in ("AIVE_FFMPEG", "AIVE_FFPROBE"):
             if os.environ.get(k):
                 env[k] = os.environ[k]

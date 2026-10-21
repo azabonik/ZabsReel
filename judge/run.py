@@ -2,8 +2,8 @@
 """Runs the judge's tests against one editor build through an adapter (judge/PROTOCOL.md).
 
     python3 -I judge/run.py [--adapter "<command>"] [--build <dir>] [--only <text>] [--timeout <s>] [--jobs <n>]
-                            [--scratch <dir>] [--keep] [--list] [--allow-unprotected]
-    python3 -I judge/run.py --self-test
+                            [--scratch <dir>] [--keep] [--list] [--strict] [--require-trace] [--allow-unprotected]
+    python3 -I judge/run.py --self-test [--require-trace]
 
 --adapter   the adapter command (default: this judge's v0.2.0 adapter, run with this Python). A word that names an
             existing file or folder relative to the current folder is made absolute: the adapter runs with its
@@ -14,10 +14,25 @@
 --jobs      tests that use no network port run this many at a time (default 2); port-bound tests run one at a time
 --scratch   the folder for this run's scratch folder (default: $JUDGE_SCRATCH, else the system temp folder)
 --keep      keep the scratch folder after a run that passed (a failed run always keeps it)
+--strict    a check recorded as not applicable fails (see "Statuses" below); judge.yml passes it while it grades v0.2.0
+--require-trace
+            a check recorded as not observed fails: every observation needs strace (judge.yml passes it). With
+            --self-test: the trace cases must run (strace present), not be skipped
 --allow-unprotected
             run even when the runner or a test process cannot be made non-dumpable (see below); the JUDGE line says
             UNPROTECTED. Development only (not Linux); CI never passes it
 --self-test the runner's own tests (judge/selftest.py): each way a test can fail must fail the run
+
+Statuses: a check passes or fails, or is recorded as NOT APPLICABLE (the hostile input it needs could not be made from
+the file the editor saved, for example because the editor's file format does not hold the value as given) or NOT
+OBSERVED (the observation needs strace, which is not installed). Those two count as neither passed nor failed: each
+is printed with its name and the JUDGE line counts them ("JUDGE: 150/150 passed, 6 not applicable, 2 not
+observed"). --strict turns not applicable into a failure, --require-trace turns not observed into a failure.
+
+Downloads: every test that starts the editor runs its adapter under strace (JUDGE_STRACE names it; empty means none,
+else the strace on PATH), with the network calls traced, and the runner adds the check "nothing was downloaded": no
+process of the adapter's tree addressed another computer (observe.net_hits). Without strace that check is not
+observed.
 
 Each test file judge/tests/test_*.py has a function run(t), sets CHECKS (the number of checks run(t) records) and may
 set PORT_BOUND (default True: it starts the editor) and TIMEOUT. Each test runs in its own session under its
@@ -184,6 +199,45 @@ def sweep(folder):
     return left
 
 
+# ---------------------------------------------------------------- strace (file-system trace and the download tripwire)
+NET_CALLS = "connect,sendto,sendmsg,sendmmsg"  # every way a process addresses another computer (observe.net_hits)
+NET_CHECK = "nothing was downloaded: no process of the adapter or the editor addressed another computer"
+_STRACE = {}
+
+
+def strace():
+    """The strace to run the adapter under, or None: JUDGE_STRACE when set (empty: none), else strace on PATH. A
+    strace that cannot trace a child here (a test run of `true`) counts as none."""
+    if "path" not in _STRACE:
+        env = os.environ.get("JUDGE_STRACE")
+        st = (env or None) if env is not None else shutil.which("strace")
+        if st and not (os.path.isfile(st) and os.access(st, os.X_OK)):
+            st = None
+        _STRACE["path"], _STRACE["bpf"] = st, False
+        if st:
+            def works(extra):
+                try:
+                    return subprocess.run([st, *extra, "-f", "-qq", "-e", "trace=connect", "-o", os.devnull, "--",
+                                           "true"], stdin=subprocess.DEVNULL, capture_output=True,
+                                          timeout=60).returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    return False
+            if works(["--seccomp-bpf"]):
+                _STRACE["bpf"] = True   # stops only at the traced calls: the network-only trace costs almost nothing
+            elif not works([]):
+                _STRACE["path"] = None
+    return _STRACE["path"]
+
+
+def strace_cmd(log, files):
+    """The strace words that run a command with the network calls (and with files=True, the file calls) traced to
+    `log`, following every process it starts. -yy names each socket (TCP, UDP, UNIX, ...) and the ends of a connected
+    one, which observe.net_hits needs."""
+    calls = ("%file," if files else "") + NET_CALLS
+    return ([strace(), "-f"] + (["--seccomp-bpf"] if _STRACE.get("bpf") else [])
+            + ["-qq", "-yy", "-s", "4096", "-e", f"trace={calls}", "-e", "signal=none", "-o", log, "--"])
+
+
 # ---------------------------------------------------------------- the test's side (child process)
 class T:
     """What a test's run(t) gets: its scratch folder, the media, checks, and the editor (t.driver())."""
@@ -193,7 +247,8 @@ class T:
         self._out = out  # the write end of the runner's result pipe
         self._driver = None
         self.n_checks = 0
-        self.trace_path = None  # set by driver(trace=True) when strace runs
+        self.trace_path = None  # the file-system trace: set by driver(trace=True) when strace runs
+        self.net_trace = None   # the adapter tree's strace log (network calls, and file calls with trace=True)
 
     def _emit(self, rec):
         self._out.write(json.dumps(rec) + "\n")
@@ -212,16 +267,40 @@ class T:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         return p
 
-    def check(self, name, ok, detail="", harness=False):
-        """Records one check. Returns ok. A harness check (one the runner adds, such as "port closed after stop") is
-        not counted against the test's CHECKS."""
+    def _record(self, name, ok, detail, harness, status):
         if not harness:
             self.n_checks += 1
         rec = {"check": str(name), "ok": bool(ok), "detail": str(detail)}
         if harness:
             rec["harness"] = True
+        if status:
+            rec["status"] = status
         self._emit(rec)
         return bool(ok)
+
+    def check(self, name, ok, detail="", harness=False, needs=()):
+        """Records one check. Returns ok. A harness check (one the runner adds, such as "port closed after stop") is
+        not counted against the test's CHECKS.
+
+        needs: the crafted inputs (observe.Crafted, one or a list) the check is about. When one of them could not be
+        made (the substitution found nothing to replace in the file the editor saved), the check is recorded as not
+        applicable with that reason, and ok and detail are not used: a different file format must not fail a check,
+        and the check is still listed by name (run.py --strict fails it)."""
+        needs = [needs] if hasattr(needs, "applicable") else list(needs or ())
+        missing = [c for c in needs if not c.applicable]
+        if missing:
+            return self.not_applicable(name, "; ".join(c.why for c in missing), harness=harness)
+        return self._record(name, ok, detail, harness, None)
+
+    def not_applicable(self, name, why, harness=False):
+        """Records a check that cannot be made on this editor (its input cannot be crafted): neither passed nor
+        failed, listed by name and counted on the JUDGE line; a failure with run.py --strict."""
+        return self._record(name, True, why, harness, "not_applicable")
+
+    def not_observed(self, name, why, harness=False):
+        """Records a check whose observation is not available here (strace is not installed): neither passed nor
+        failed, listed by name and counted on the JUDGE line; a failure with run.py --require-trace."""
+        return self._record(name, True, why, harness, "not_observed")
 
     def measure(self, name, fn, accept, want):
         """Records a check on a measured value: value = fn(); ok = accept(value). A measurement the file makes
@@ -239,17 +318,18 @@ class T:
         """The editor, started through the adapter in this test's scratch folder (started once per test). The
         adapter must answer hello with this judge's protocol version first.
 
-        trace=True (on the first call): when `strace` is on PATH, the adapter runs under `strace -f -e trace=%file`,
-        so every file-system call of the adapter, the editor and every process they start is logged to
-        self.trace_path (observe.trace_hits reads it). Without strace, self.trace_path stays None and the test
-        records its trace checks as not observed."""
+        When strace is available (strace()), the adapter always runs under `strace -f` with the network calls traced
+        to self.net_trace, for the runner's download check (NET_CHECK, after stop). trace=True (on the first call)
+        traces the file-system calls too, so every file-system call of the adapter, the editor and every process
+        they start is logged, and self.trace_path names the log (observe.trace_hits reads it). Without strace both
+        stay None: the download check and the test's trace checks are then recorded as not observed."""
         if self._driver is None:
             import driver
             cmd = list(self.adapter)
-            if trace and shutil.which("strace"):
-                self.trace_path = os.path.join(self.scratch, "adapter-strace.log")
-                cmd = [shutil.which("strace"), "-f", "-qq", "-s", "4096", "-e", "trace=%file", "-e", "signal=none",
-                       "-o", self.trace_path, "--"] + cmd
+            if strace():
+                self.net_trace = os.path.join(self.scratch, "adapter-strace.log")
+                self.trace_path = self.net_trace if trace else None
+                cmd = strace_cmd(self.net_trace, files=trace) + cmd
             self._driver = driver.Driver(cmd, self.scratch)
             hello = self._driver.hello()
             proto = hello.get("protocol") if isinstance(hello, dict) else None
@@ -275,6 +355,16 @@ class T:
             while time.time() < deadline and _listening(port):
                 time.sleep(0.2)
             self.check(f"port {port} is closed after stop", not _listening(port), harness=True)
+        if self.net_trace is None:
+            self.not_observed(NET_CHECK, "strace is not installed", harness=True)
+            return
+        import observe
+        try:
+            hits = observe.net_hits(self.net_trace)
+            self.check(NET_CHECK, not hits, _short(hits[:3]) if hits else "no other computer addressed",
+                       harness=True)
+        except observe.Unmeasurable as e:
+            self.check(NET_CHECK, False, f"unmeasurable: {e}", harness=True)
 
 
 def _listening(port):
@@ -375,9 +465,14 @@ def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+STATUSES = ("not_applicable", "not_observed")
+CHECK_KEYS = {"check", "ok", "detail"}
+
+
 def known_record(r, i, n):
     """Whether record `i` of `n` has one of the shapes T._emit writes, in its place: {"declare": int or None} first,
-    {"check": str, "ok": bool, "detail": str} (with "harness": true for a runner-added check), {"end": true} last."""
+    {"check": str, "ok": bool, "detail": str} (with "harness": true for a runner-added check, and "status":
+    "not_applicable" or "not_observed", with ok true, for a check that was not made), {"end": true} last."""
     if not isinstance(r, dict):
         return False
     keys = set(r)
@@ -385,21 +480,43 @@ def known_record(r, i, n):
         return i == 0 and (r["declare"] is None or (_is_int(r["declare"]) and r["declare"] >= 0))
     if keys == {"end"}:
         return i == n - 1 and r["end"] is True
-    if keys in ({"check", "ok", "detail"}, {"check", "ok", "detail", "harness"}):
+    if CHECK_KEYS <= keys <= CHECK_KEYS | {"harness", "status"}:
         return (isinstance(r["check"], str) and isinstance(r["ok"], bool) and isinstance(r["detail"], str)
-                and r.get("harness", True) is True)
+                and r.get("harness", True) is True and r.get("status", STATUSES[0]) in STATUSES
+                and ("status" not in r or r["ok"] is True))
     return False
 
 
-def verdict(recs, timed_out, returncode, timeout, left, channel_closed):
-    """The checks for one test from its pipe records and what the runner saw. A record of another shape, or out of its
-    place, fails the test (a corrupted or tampered pipe), and is not counted as a check."""
+LABEL = {"pass": "PASS", "fail": "FAIL", "not applicable": "N/A ", "not observed": "N/O "}
+
+
+def status_of(r, strict=False, require_trace=False):
+    """(status, detail) of a check record: pass, fail, not applicable or not observed; --strict and --require-trace
+    turn the last two into failures."""
+    detail = r.get("detail") or ""
+    st = r.get("status")
+    if st == "not_applicable":
+        return ("fail", f"not applicable, a failure with --strict: {detail}") if strict else \
+            ("not applicable", f"not applicable: {detail}")
+    if st == "not_observed":
+        return ("fail", f"not observed, a failure with --require-trace: {detail}") if require_trace else \
+            ("not observed", f"not observed: {detail}")
+    return ("pass" if r.get("ok") is True else "fail"), detail
+
+
+def verdict(recs, timed_out, returncode, timeout, left, channel_closed, strict=False, require_trace=False):
+    """The checks for one test from its pipe records and what the runner saw: [{"check", "ok", "status", "detail"}],
+    status pass, fail, not applicable or not observed (ok is true only for pass). A record of another shape, or out of
+    its place, fails the test (a corrupted or tampered pipe), and is not counted as a check."""
     checks = []
+
+    def add(name, ok, detail):
+        checks.append({"check": name, "ok": ok, "status": "pass" if ok else "fail", "detail": detail})
+
     bad = [(i, r) for i, r in enumerate(recs) if not known_record(r, i, len(recs))]
     for i, r in bad:
         text = r.raw.decode("utf-8", "replace") if isinstance(r, BadLine) else json.dumps(r)
-        checks.append({"check": "the result pipe carries only the test's records", "ok": False,
-                       "detail": f"line {i + 1}: {_short(text, 200)}"})
+        add("the result pipe carries only the test's records", False, f"line {i + 1}: {_short(text, 200)}")
     recs = [r for i, r in enumerate(recs) if known_record(r, i, len(recs))]
     declared = recs[0].get("declare") if recs and isinstance(recs[0], dict) and "declare" in recs[0] else None
     ended = any(isinstance(r, dict) and r.get("end") is True for r in recs)
@@ -408,27 +525,24 @@ def verdict(recs, timed_out, returncode, timeout, left, channel_closed):
         if isinstance(r, dict) and "check" in r:
             harness = r.get("harness") is True
             counted += not harness
-            checks.append({"check": str(r.get("check")), "ok": r.get("ok") is True, "detail": r.get("detail") or ""})
+            st, detail = status_of(r, strict, require_trace)
+            checks.append({"check": str(r.get("check")), "ok": st == "pass", "status": st, "detail": detail})
     if not isinstance(declared, int) or isinstance(declared, bool):
-        checks.append({"check": "the test declares its number of checks (CHECKS)", "ok": False,
-                       "detail": "no declaration as its first record"})
+        add("the test declares its number of checks (CHECKS)", False, "no declaration as its first record")
     elif counted != declared:
-        checks.append({"check": f"the test recorded the {declared} checks it declares", "ok": False,
-                       "detail": f"{counted} recorded"})
+        add(f"the test recorded the {declared} checks it declares", False, f"{counted} recorded")
     if counted == 0:
-        checks.append({"check": "the test recorded checks", "ok": False, "detail": "no check was recorded"})
+        add("the test recorded checks", False, "no check was recorded")
     if timed_out:
-        checks.append({"check": f"finished within {timeout} s", "ok": False, "detail": "ended by the runner"})
+        add(f"finished within {timeout} s", False, "ended by the runner")
     else:
         if returncode != 0:
-            checks.append({"check": "the test process exited cleanly", "ok": False, "detail": f"exit {returncode}"})
+            add("the test process exited cleanly", False, f"exit {returncode}")
         if not ended:
-            checks.append({"check": "the test reported its end", "ok": False, "detail": "no end record"})
+            add("the test reported its end", False, "no end record")
     if not channel_closed:
-        checks.append({"check": "the result pipe closed after the test", "ok": False,
-                       "detail": "a process still holds its write end"})
-    checks.append({"check": "nothing left running after the test", "ok": not left,
-                   "detail": "; ".join(f"{pid} {cmd[:120]}" for pid, cmd in left)})
+        add("the result pipe closed after the test", False, "a process still holds its write end")
+    add("nothing left running after the test", not left, "; ".join(f"{pid} {cmd[:120]}" for pid, cmd in left))
     return checks
 
 
@@ -475,13 +589,15 @@ def run_test(meta, a, base, media, adapter):
     reader.join(10)
     with LIVE_LOCK:
         LIVE.pop(name, None)
-    checks = verdict(list(recs), timed_out, p.returncode, timeout, left, not reader.is_alive())
+    checks = verdict(list(recs), timed_out, p.returncode, timeout, left, not reader.is_alive(), a.strict,
+                     a.require_trace)
+    for c in checks:
+        c["test"] = name
     with PRINT_LOCK:
         RESULTS.extend(checks)
         for c in checks:
             detail = _short(c.get("detail") or "", 400)
-            print(f"{'PASS' if c['ok'] else 'FAIL'}  {name}: {c['check']}" + (f"  -- {detail}" if detail else ""),
-                  flush=True)
+            print(f"{LABEL[c['status']]}  {name}: {c['check']}" + (f"  -- {detail}" if detail else ""), flush=True)
         print(f"      {name}: {time.time() - t0:.1f} s, scratch {scratch}", flush=True)
     return checks
 
@@ -508,12 +624,13 @@ def _on_signal(base):
         for _, scratch in live:
             if scratch:
                 sweep(scratch)
-        passed = sum(1 for c in RESULTS if c["ok"])
+        passed = sum(1 for c in RESULTS if c["status"] == "pass")
+        judged = sum(1 for c in RESULTS if c["status"] in ("pass", "fail"))
         try:
             sys.stdout.flush()
         except Exception:  # noqa: BLE001
             pass
-        os.write(1, (f"JUDGE: interrupted by signal {signum} ({passed}/{len(RESULTS)} checks passed before it)\n"
+        os.write(1, (f"JUDGE: interrupted by signal {signum} ({passed}/{judged} checks passed before it)\n"
                      f"judge: scratch kept for inspection: {base}\n").encode())
         os._exit(1)
     return handler
@@ -543,6 +660,12 @@ def main():
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--strict", action="store_true",
+                    help="a check recorded as not applicable (its hostile input could not be made from the editor's "
+                         "saved file) fails")
+    ap.add_argument("--require-trace", action="store_true",
+                    help="a check recorded as not observed (strace is not installed) fails; with --self-test the "
+                         "trace cases must run")
     ap.add_argument("--allow-unprotected", action="store_true",
                     help="run even when the runner or a test process cannot be made non-dumpable (not Linux, or prctl "
                          "fails); the JUDGE line then says UNPROTECTED. For development only; CI never passes it")
@@ -557,7 +680,7 @@ def main():
         return child(a, unprotected)
     if a.self_test:
         import selftest
-        return selftest.main(os.path.abspath(__file__), a.scratch, a.allow_unprotected)
+        return selftest.main(os.path.abspath(__file__), a.scratch, a.allow_unprotected, a.require_trace)
 
     a.build = os.path.abspath(a.build)
     adapter = absolute_words(shlex.split(a.adapter)) if a.adapter else [
@@ -590,6 +713,9 @@ def main():
     print(f"judge: adapter {' '.join(adapter)}")
     print(f"judge: build {a.build}")
     print(f"judge: measurements with {observe.ffmpeg_version()} ({observe.FFMPEG})")
+    print(f"judge: trace with {strace() or 'nothing: strace is not installed, the trace checks are not observed'}"
+          + (" (--seccomp-bpf)" if _STRACE.get("bpf") else "")
+          + ("; --strict" if a.strict else "") + ("; --require-trace" if a.require_trace else ""))
     print(f"judge: scratch {base}", flush=True)
 
     media = os.path.join(base, "media")
@@ -619,15 +745,25 @@ def main():
     for m in bound:
         results += run_test(m, a, base, media, adapter)
 
-    passed = sum(1 for c in results if c["ok"])
-    ok = passed == len(results) and results
+    passed = sum(1 for c in results if c["status"] == "pass")
+    judged = sum(1 for c in results if c["status"] in ("pass", "fail"))
+    ok = passed == judged and judged > 0
     tests_unprotected = sum(1 for c in results if c["check"] == PROTECTED_CHECK)
     mark = ""
     if unprotected or tests_unprotected:
         mark = (" UNPROTECTED (" + ", ".join(([f"runner: {unprotected}"] if unprotected else [])
                                              + ([f"{tests_unprotected} test process(es)"] if tests_unprotected else []))
                 + ")")
-    print(f"JUDGE: {passed}/{len(results)} passed{mark}", flush=True)
+    counts = ""
+    for st in ("not applicable", "not observed"):
+        named = [c for c in results if c["status"] == st]
+        if named:
+            counts += f", {len(named)} {st}"
+            print(f"judge: {len(named)} check(s) {st} (neither passed nor failed; "
+                  + ("--strict" if st == "not applicable" else "--require-trace") + " fails them):")
+            for c in named:
+                print(f"judge:   {c['test']}: {c['check']}")
+    print(f"JUDGE: {passed}/{judged} passed{counts}{mark}", flush=True)
     if ok and not a.keep:
         shutil.rmtree(base, ignore_errors=True)
     elif not ok:

@@ -5,9 +5,10 @@ them with their own expectations. The filter chains are the ones the first-try b
 rev 4), so a value measured here and a baseline value measured there are the same measurement.
 
 The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback
-listener that must receive nothing, the host-level file-system trace (strace) of the adapter's process tree, files
-that must not appear, secrets that must not appear in any answer, and the text substitution that makes a hostile input
-from a file the editor itself wrote.
+listener that must receive nothing, the host-level trace (strace) of the adapter's process tree (its file-system calls,
+and the network calls that show a download), files that must not appear, secrets that must not appear in any answer,
+and the text substitution that makes a hostile input from a file the editor itself wrote (craft: when the file does
+not hold the value as given, the input cannot be made and the checks on it are not applicable).
 
 FFmpeg: JUDGE_FFMPEG / JUDGE_FFPROBE, else the ffmpeg / ffprobe on PATH. Heavy commands run under `nice -n 19` (when
 `nice` exists) with a timeout.
@@ -16,6 +17,7 @@ A measurement that the file makes impossible (missing file, no video stream, no 
 test then fails that check with the reason.
 """
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -497,6 +499,20 @@ class Canary:
             pass
 
 
+def media_streams(target):
+    """The codec types (["video", "audio", ...]) FFmpeg's ffprobe reads from `target`: a file, or a data: URI. Only the
+    file and data protocols are allowed, so nothing is fetched. Unmeasurable when ffprobe reads nothing."""
+    p = run([FFPROBE, "-v", "error", "-protocol_whitelist", "file,data", "-show_streams", "-of", "json", target],
+            heavy=False, timeout=60)
+    try:
+        info = json.loads(p.stdout or "{}")
+    except json.JSONDecodeError:
+        info = {}
+    if not info.get("streams"):
+        raise Unmeasurable(f"ffprobe reads no stream: {p.stderr.strip()[:300]}")
+    return [s.get("codec_type") for s in info["streams"]]
+
+
 def strace_form(text):
     """`text` as strace prints it inside a quoted string: printable ASCII as is (with \\ and \" escaped), every other
     byte as a three-digit octal escape. A non-ASCII look-alike of a host name is found in a trace only in this form."""
@@ -513,13 +529,18 @@ def strace_form(text):
     return "".join(out)
 
 
+NET_SYSCALL = re.compile(r"^\d+\s+(<\.\.\. )?(connect|sendto|sendmsg|sendmmsg)[ (]")
+
+
 def trace_lines(path):
-    """The lines of an `strace -o` log, without execve / execveat lines: what a process was started with (its argv)
-    is not observed, only what it opened, read, listed or wrote."""
+    """The file-system lines of an `strace -o` log: without execve / execveat lines (what a process was started with,
+    its argv, is not observed, only what it opened, read, listed or wrote) and without the network calls (net_hits
+    reads those; a send's data is not a file name)."""
     if not path or not os.path.isfile(path):
         raise Unmeasurable("no trace log")
     with open(path, "r", encoding="latin-1") as f:
-        return [ln.rstrip("\n") for ln in f if not re.match(r"^\d+\s+(<\.\.\. )?execve(at)?[ (]", ln)]
+        return [ln.rstrip("\n") for ln in f
+                if not re.match(r"^\d+\s+(<\.\.\. )?execve(at)?[ (]", ln) and not NET_SYSCALL.match(ln)]
 
 
 def trace_hits(path, needles, start=0):
@@ -528,6 +549,56 @@ def trace_hits(path, needles, start=0):
     forms = [strace_form(n).lower() for n in needles]
     lines = trace_lines(path)[start:]
     return [ln for ln in lines if any(f in ln.lower() for f in forms)]
+
+
+_V4 = re.compile(r'sa_family=AF_INET, sin_port=htons\((\d+)\), sin_addr=inet_addr\("([^"]*)"\)')
+_V6 = re.compile(r'sa_family=AF_INET6, sin6_port=htons\((\d+)\),.*?inet_pton\(AF_INET6, "([^"]*)"')
+_CALL = re.compile(r"^\d+\s+(connect|sendto|sendmsg|sendmmsg)\((\d+)(?:<([^:>]+):\[(.*?)\]>)?")
+_DATA = re.compile(r'(?<!inet_addr\()(?<!AF_INET6, )"(?:[^"\\]|\\.)*"')  # quoted data, not an address
+
+
+def _own(addr):
+    """Whether an IP address is this computer's own: loopback, unspecified, or an IPv4-mapped one of those."""
+    try:
+        ip = ipaddress.ip_address(addr.strip("[]"))
+    except ValueError:
+        return False
+    ip = getattr(ip, "ipv4_mapped", None) or ip
+    return ip.is_loopback or ip.is_unspecified
+
+
+def net_hits(path, start=0):
+    """Lines of an strace log (`-yy`, traced with connect, sendto, sendmsg, sendmmsg) in which a process addressed
+    another computer: a TCP connect (or one on a socket strace could not name) to an address that is not this
+    computer's own, a UDP connect to port 53 (a DNS lookup, also when it fails), or a send whose destination (its own
+    address, else the far end of the connected socket) is another computer or port 53. A UDP connect to another port
+    sends no packet (Chromium's IPv6 reachability probe is one) and is not counted; a send on that socket is. Unix
+    sockets and netlink are not network. Quoted data is never read as an address. A download needs one of these
+    calls, so a log without such a line shows that nothing was fetched, also when the network is down and the call
+    failed. Not seen: a write() on a connected UDP socket (write is not traced). Unmeasurable when there is no log."""
+    if not path or not os.path.isfile(path):
+        raise Unmeasurable("no trace log")
+    hits = []
+    with open(path, "r", encoding="latin-1") as f:
+        for i, ln in enumerate(f):
+            m = _CALL.match(ln) if i >= start else None
+            if not m:
+                continue  # another call, or the "<... resumed>" half of one (its arguments are on the first half)
+            call, proto, info = m.group(1), (m.group(3) or "").upper(), m.group(4) or ""
+            if proto.startswith(("UNIX", "NETLINK")):
+                continue
+            bare = _DATA.sub('""', ln)
+            dests = [(port, addr) for port, addr in _V4.findall(bare) + _V6.findall(bare)]
+            if call != "connect" and not dests and "->" in info:
+                host, _, port = info.split("->", 1)[1].rpartition(":")
+                dests = [(port, host)]
+            if call == "connect" and proto.startswith("UDP"):
+                bad = any(port == "53" for port, _ in dests)
+            else:
+                bad = any(port == "53" or not _own(addr) for port, addr in dests)
+            if bad:
+                hits.append(ln.rstrip("\n")[:300])
+    return hits
 
 
 def substitute(src, out, pairs):
@@ -574,6 +645,30 @@ def substitute(src, out, pairs):
     return counts
 
 
+class Crafted:
+    """A hostile input made by craft(): `path` (the file written), `counts` (replacements per pair), `applicable`
+    (whether every needed value was found) and `why` (the reason when it was not)."""
+
+    def __init__(self, path, counts, applicable, why):
+        self.path, self.counts, self.applicable, self.why = path, counts, applicable, why
+
+    def __repr__(self):
+        return f"Crafted({os.path.basename(self.path)}, {self.counts}, applicable={self.applicable})"
+
+
+def craft(src, out, pairs, what, need=None):
+    """substitute(src, out, pairs) for a hostile input, and whether it could be made. `what` names the values in words
+    ("the media path as given"); `need(counts)` says whether the counts make the input (default: every pair replaced at
+    least once). When they do not, the file the editor saved does not hold the values as the judge gave them (another
+    file format, for example): the checks on this input are then not applicable (T.check(..., needs=crafted)), not
+    failed, and they are listed by name. The file at `out` is written either way."""
+    counts = substitute(src, out, pairs)
+    ok = bool(need(counts)) if need else all(c > 0 for c in counts)
+    why = "" if ok else (f"the file the editor saved does not hold {what} (replacements {counts}), so this hostile "
+                         f"input cannot be made by substitution")
+    return Crafted(out, counts, ok, why)
+
+
 def named(root, marker):
     """Paths under `root` (files, folders and links; links are not followed) whose name holds `marker`."""
     found = []
@@ -582,6 +677,21 @@ def named(root, marker):
             if marker in n:
                 found.append(os.path.join(dirpath, n))
     return found
+
+
+def file_sizes(root):
+    """{path: size} of every file under `root` (links are not followed, and not listed)."""
+    out = {}
+    for dirpath, _, filenames in os.walk(root, followlinks=False):
+        for n in filenames:
+            p = os.path.join(dirpath, n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not os.path.islink(p):
+                out[p] = st.st_size
+    return out
 
 
 def holds_secret(text, secret, n=8):

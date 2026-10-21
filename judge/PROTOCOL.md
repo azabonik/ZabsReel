@@ -85,7 +85,14 @@ is closed after `stop`.
    inside the scratch folder (`JUDGE_TEST_SCRATCH`, or the editor's sandbox folders), and fails the test's "nothing
    left running" check if it finds one. A process that removes those values from its environment is not found.
 4. **No sound and no downloads.** Every Chromium or Electron launch passes `--mute-audio`. The adapter downloads
-   nothing, and the editor must not need to download anything for the judge's tests.
+   nothing, and it **starts the editor so that the editor downloads nothing**, whatever operation a test sends
+   (`poke_agent_tools` calls every agent tool): every model or helper program the editor would fetch on first use is
+   either switched off or named by a setting that points at a file that does not exist, so the feature refuses
+   instead of fetching. Never point such a setting at the user's own copy. On v0.2.0: `AIVE_CLIP_DISABLE=1`, and
+   `AIVE_WHISPER_BIN` / `AIVE_WHISPER_MODEL` name files in the sandbox that are never made (as the FFmpeg matrix does).
+   The judge checks this rule: the runner traces the network calls of the adapter and everything it starts (strace)
+   and fails the test's "nothing was downloaded" check on a TCP connect to another computer, a DNS lookup or a send to
+   another computer, also when the network is down and the call failed (`judge/README.md`, "Write a test").
 5. **No private shortcuts.** The adapter uses the interfaces a user or an AI client has (tools, HTTP routes, files the
    editor documents). It does not read or write the editor's internal state behind its back. One operation is the
    exception on purpose: `add_host_outside` plays an attacker who edits the editor's files (see "File surface
@@ -105,9 +112,25 @@ is closed after `stop`.
   relative path, or a path with a `..` segment. The adapter passes it to the editor unchanged and does not normalize
   it; the test checks what the editor does with it.
 
+## Files the editor saves, and the hostile copies made from them
+
+The judge makes its hostile inputs (a project or OTIO file with a URL, a network path, a `../` identifier, filter
+text in a colour or a number) by text substitution in a file the editor itself saved with `save_project`, `save` or
+`export_otio`: it needs no knowledge of the format. That works when the saved file holds the values the test gave
+the editor as plain text or JSON values: media, LUT and font paths as given, the asset, clip and text identifiers
+the adapter returned, text colours as given, and some numbers exactly once. A format that does not (one that stores
+paths relative to the project, encodes the file, or renames identifiers) is allowed: the checks on an input that
+cannot be made are then recorded as **not applicable**, each listed by name with the replacement counts, never as
+failed and never as passed. `run.py --strict` turns them into failures. The adapter does not change saved files.
+
 ## Operations
 
 An operation whose result is `{}` may return more fields; the judge ignores fields it does not know.
+
+Every operation can answer the errors in the table under "Transport": `bad_request` for arguments of the wrong shape,
+`product_error` when the editor refuses, `adapter_error` when the editor is not started or does not answer. Where an
+operation has refusals of its own, its "Errors" line below names them; the tests check that a refusal happens and
+what it leaves behind, never its message or code.
 
 ### Lifecycle
 
@@ -130,10 +153,10 @@ An operation whose result is `{}` may return more fields; the judge ignores fiel
 | `set_speed` | `{"clip", "speed"}` | `{}`: constant speed, 1 = normal. |
 | `apply_effect` | `{"clip", "effect", "amount"?, "params"?}` | `{"effect": id or null}` |
 | `apply_colour` | `{"clip", "brightness"?, "contrast"?, "saturation"?, "gamma"?, "temperature"?, "tint"?, "hue"?}` | `{}`: a colour grade. Neutral values: brightness 0, contrast 1, saturation 1, gamma 1, temperature 0, tint 0, hue 0. |
-| `apply_lut` | `{"clip", "path"}` | `{}`: applies the colour look-up table (a `.cube` file) at `path` to the clip. |
+| `apply_lut` | `{"clip", "path"}` | `{}`: applies the colour look-up table (a `.cube` file) at `path` to the clip. Errors: `bad_request` when `clip` or `path` is missing or not a string; `product_error` when the clip does not exist, or the path is not a local file the editor may read: a URL or another protocol, a path on a network computer the user has not allowed (that computer then waits for the user, see `list_hosts`), or a file of the editor's own allowed list in any spelling. |
 | `add_text` | `{"clip", "text", "style": {}}` | `{"text": id}`: a text overlay on the clip, shown for the whole clip. `style` fields, all optional: `position` (a placement name such as `bottom`, `top`, `center`), `x`, `y` (0..1), `font` (a font name or a font file path), `font_size`, `color`, `outline_color`, `outline_width`, `shadow_color`, `shadow_x`, `shadow_y`, `box` (bool), `box_color`, `box_border`. A colour is a name (`yellow`), `#rrggbb`, `#rrggbbaa`, `0xRRGGBB` or `name@alpha` (`white@0.5`). The adapter passes every value on unchanged, also one of another type: tests send hostile values on purpose, and the editor accepts or refuses each. |
-| `make_proxy` | `{"asset"}` | `{}`: makes the editor's lower-resolution working copy of the asset (in the editor's own folders). |
-| `thumbnail` | `{"asset", "time"}` | `{"path": str or null}`: makes a still image of the asset at `time` seconds, where the editor keeps such images. |
+| `make_proxy` | `{"asset"}` | `{}`: makes the editor's lower-resolution working copy of the asset (in the editor's own folders). Errors: `bad_request` when `asset` is missing; `product_error` when the asset does not exist or its media is offline, for example while it waits for its network computer. |
+| `thumbnail` | `{"asset", "time"}` | `{"path": str or null}`: makes a still image of the asset at `time` seconds, where the editor keeps such images. Errors: `bad_request` when `asset` is missing or `time` is not a number; `product_error` as for `make_proxy`. |
 | `set_project` | `{"width"?, "height"?, "fps"?}` | `{}`: the output canvas: the size and frame rate of every export and rendered frame. See "The canvas" below. |
 | `undo`, `redo` | `{}` | `{}` |
 | `get_state` | `{}` | a **State** (below) |
@@ -212,8 +235,8 @@ null, "fraction": number or null}`.
 | `http_get` | `{"route", "query": {}}` | `{"status": int, "content_type": str, "body_length": int, "body_sha256": str, "body_b64": str, "truncated": bool}` |
 | `list_hosts` | `{}` | `{"approved": [host], "pending": [host], "outside": [host]}`: `approved` the computers the user allowed; `pending` those that offline media or a refused path names, waiting for the user; `outside` the entries of the editor's allowed list that it did not make itself (see `add_host_outside`): not used until the user keeps them. |
 | `approve_host` | `{"host"}` | `{}`: allows media from network computer `host`, as the user does in the editor's window (Allow, or Keep for an entry listed outside). No agent tool may be able to do this. The editor stores the name in lower case; a name that cannot be a network computer is refused (`product_error`). |
-| `revoke_host` | `{"host", "only_if_outside"?}` | `{"removed": bool}`: removes `host` from the allowed computers, as the user does in the editor's window. With `only_if_outside` true it removes the entry only while it is still listed outside (the Remove of a Keep question): an entry the user kept meanwhile stays, and `removed` is false. |
-| `add_host_outside` | `{"host", "forged"?}` | `{"files": [path], "secrets": [str]}`: adds `host` to the editor's allowed list by editing the editor's files, not through its window: what another program or an agent with file access could do. With `forged` true the entry claims an approval it never had (for example a stamp made with a key that is not the editor's). The editor must treat it as `outside`. The result names the files that hold the allowed list and its secrets, and the secret texts (the key that stamps approvals), so a test can check that no answer of the editor holds them and that no agent operation changes the files. The adapter may create the secret when the editor has none yet, as an attacker could; call it before any approval. |
+| `revoke_host` | `{"host", "only_if_outside"?}` | `{"removed": bool}`: removes `host` from the allowed computers, as the user does in the editor's window. With `only_if_outside` true it removes the entry only while it is still listed outside (the Remove of a Keep question): an entry the user kept meanwhile stays, and `removed` is false. For a host that is not in the list, `removed` is the editor's own answer (v0.2.0 answers true); the tests do not depend on it. Errors: `bad_request` when `host` is missing or `only_if_outside` is not a boolean; `product_error` when the window refuses the name (one that cannot be a network computer); `adapter_error` when the window's interface cannot be reached (on v0.2.0 the web shell did not start or did not take its key). |
+| `add_host_outside` | `{"host", "forged"?}` | `{"files": [path], "secrets": [str]}`: adds `host` to the editor's allowed list by editing the editor's files, not through its window: what another program or an agent with file access could do. With `forged` true the entry claims an approval it never had (for example a stamp made with a key that is not the editor's). The editor must treat it as `outside`. The result names the files that hold the allowed list and its secrets, and the secret texts (the key that stamps approvals), so a test can check that no answer of the editor holds them and that no agent operation changes the files. The adapter may create the secret when the editor has none yet, as an attacker could; call it before any approval. Errors: `bad_request` when `host` is missing or `forged` is not a boolean; `adapter_error` when the editor is not started or its files cannot be written. Never `product_error`: the editor is not asked. |
 | `recheck_media` | `{}` | `{}`: the editor reads its list of allowed computers again and re-checks offline media. |
 
 `http_get` requests the editor's file surface: the HTTP routes the editor's own interface uses to read media. The
@@ -236,9 +259,9 @@ judge's tests use names under the reserved `.invalid` domain, which never resolv
 
 | op | args | result |
 |---|---|---|
-| `agent_tools` | `{}` | `{"tools": [{"name": str, "read_only": bool}], "instructions": str}`: every tool the editor offers an AI agent (on v0.2.0 its MCP tools), and the instructions it gives the agent. |
-| `poke_agent_tools` | `{}` | `{"called": int, "refused": int}`: calls every agent tool once with empty arguments; answers and refusals are only counted. It may change the project (a tool that starts a new project, for example), so tests call it last. |
-| `transcript` | `{}` | `{"texts": [str]}`: every text the editor answered through this adapter since `start`: tool results and errors, and the bodies of `http_get` and of the window's routes (images left out). Tests search it for secrets that must never reach an agent. |
+| `agent_tools` | `{}` | `{"tools": [{"name": str, "read_only": bool}], "instructions": str}`: every tool the editor offers an AI agent (on v0.2.0 its MCP tools), and the instructions it gives the agent. Errors: `adapter_error` when the editor is not started or does not list its tools. Never `product_error`. |
+| `poke_agent_tools` | `{}` | `{"called": int, "refused": int}`: calls every agent tool once with empty arguments; answers and refusals are only counted. It may change the project (a tool that starts a new project, for example), so tests call it last. A tool that refuses, fails or does not answer within the adapter's limit for one tool (v0.2.0: 120 s) counts in `refused`, not as an error of the operation. No tool may download anything (rule 4). Errors: `adapter_error` when the editor is not started or does not list its tools. |
+| `transcript` | `{}` | `{"texts": [str]}`: every text the editor answered through this adapter since `start`: tool results and errors, and the bodies of `http_get` and of the window's routes (images left out). Tests search it for secrets that must never reach an agent. Errors: none of its own; before `start` it answers an empty list. |
 
 ## Adding operations
 
