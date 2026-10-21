@@ -54,6 +54,37 @@ def bad(message):
     return OpError("bad_request", message)
 
 
+# The judge's arguments are checked here, and only these checks answer bad_request. Any other ValueError, TypeError
+# or KeyError (an editor reply that does not have the expected shape, for example) is an adapter_error.
+def arg_str(a, k, required=True):
+    v = a.get(k)
+    if v is None:
+        if required:
+            raise bad(f"missing {k!r}")
+        return None
+    if not isinstance(v, str) or not v:
+        raise bad(f"{k!r} must be a non-empty string, got {v!r}")
+    return v
+
+
+def arg_num(a, k, required=True):
+    v = a.get(k)
+    if v is None:
+        if required:
+            raise bad(f"missing {k!r}")
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise bad(f"{k!r} must be a number, got {v!r}")
+    return v
+
+
+def arg_int(a, k, required=True):
+    v = arg_num(a, k, required)
+    if v is not None and v != int(v):
+        raise bad(f"{k!r} must be a whole number, got {v!r}")
+    return None if v is None else int(v)
+
+
 # ---------------------------------------------------------------- MCP over stdio (newline-delimited JSON-RPC)
 class Mcp:
     def __init__(self, argv, env, cwd, stderr_path):
@@ -282,16 +313,12 @@ class Adapter:
         return names, ts
 
     def track_index(self, name):
+        if not isinstance(name, str):
+            raise bad(f"track must be a name such as 'v0', got {name!r}")
         names, _ = self.tracks()
         if name not in names:
             raise bad(f"no track {name!r} (tracks: {sorted(names)})")
         return names[name]
-
-    @staticmethod
-    def need(args, *keys):
-        for k in keys:
-            if k not in args:
-                raise bad(f"missing {k!r}")
 
     # ------------------------------------------------------------ lifecycle
     def op_hello(self, a):
@@ -299,10 +326,10 @@ class Adapter:
         return {"protocol": PROTOCOL, "adapter": ADAPTER, "ops": ops}
 
     def op_start(self, a):
-        self.need(a, "build", "scratch")
+        build, scratch = arg_str(a, "build"), arg_str(a, "scratch")
         if self.mcp is not None:
             raise bad("already started")
-        build, scratch = os.path.realpath(a["build"]), os.path.realpath(a["scratch"])
+        build, scratch = os.path.realpath(build), os.path.realpath(scratch)
         entry = os.path.join(build, "packages", "mcp", "dist", "index.js")
         if not os.path.isfile(entry):
             raise OpError("adapter_error", f"no MCP server build at {entry} (run npm run build)")
@@ -386,19 +413,19 @@ class Adapter:
 
     # ------------------------------------------------------------ media and timeline
     def op_import_media(self, a):
-        self.need(a, "path")
-        j = self.call("import_video", {"path": a["path"]})
+        j = self.call("import_video", {"path": arg_str(a, "path")})
         aid = find_key(j.get("asset") or j, ["id", "assetId"])
         if not aid:
             raise OpError("adapter_error", f"import_video returned no asset id: {json.dumps(j)[:300]}")
         return {"asset": aid}
 
     def op_place_clip(self, a):
-        self.need(a, "asset", "start_frame", "in_frame")
-        args = {"assetId": a["asset"], "trackIndex": self.track_index(a.get("track", "v0")),
-                "startFrame": int(a["start_frame"]), "sourceInFrame": int(a["in_frame"])}
-        if a.get("out_frame") is not None:
-            args["sourceOutFrame"] = int(a["out_frame"])
+        asset, start, src_in = arg_str(a, "asset"), arg_int(a, "start_frame"), arg_int(a, "in_frame")
+        out = arg_int(a, "out_frame", required=False)
+        args = {"assetId": asset, "trackIndex": self.track_index(a.get("track", "v0")),
+                "startFrame": start, "sourceInFrame": src_in}
+        if out is not None:
+            args["sourceOutFrame"] = out
         j = self.call("add_clip", args)
         cid = find_key(j.get("clip") or j, ["id", "clipId"])
         if not cid:
@@ -406,26 +433,23 @@ class Adapter:
         return {"clip": cid}
 
     def op_trim_clip(self, a):
-        self.need(a, "clip")
-        args = {"clipId": a["clip"]}
+        args = {"clipId": arg_str(a, "clip")}
         if a.get("in_frame") is not None:
-            args["sourceInFrame"] = int(a["in_frame"])
+            args["sourceInFrame"] = arg_int(a, "in_frame")
         if a.get("out_frame") is not None:
-            args["sourceOutFrame"] = int(a["out_frame"])
+            args["sourceOutFrame"] = arg_int(a, "out_frame")
         self.call("trim_clip", args)
         return {}
 
     def op_move_clip(self, a):
-        self.need(a, "clip", "start_frame")
-        args = {"clipId": a["clip"], "startFrame": int(a["start_frame"])}
+        args = {"clipId": arg_str(a, "clip"), "startFrame": arg_int(a, "start_frame")}
         if a.get("track") is not None:
             args["trackIndex"] = self.track_index(a["track"])
         self.call("move_clip", args)
         return {}
 
     def op_split_clip(self, a):
-        self.need(a, "clip", "at_frame")
-        j = self.call("split_clip", {"clipId": a["clip"], "atFrame": int(a["at_frame"])})
+        j = self.call("split_clip", {"clipId": arg_str(a, "clip"), "atFrame": arg_int(a, "at_frame")})
         ids = []
         for k in ("clipIds", "clips"):
             if isinstance(j.get(k), list):
@@ -440,18 +464,15 @@ class Adapter:
         return {"clips": ids}
 
     def op_remove_clip(self, a):
-        self.need(a, "clip")
-        self.call("remove_clip", {"clipId": a["clip"]})
+        self.call("remove_clip", {"clipId": arg_str(a, "clip")})
         return {}
 
     def op_set_speed(self, a):
-        self.need(a, "clip", "speed")
-        self.call("set_clip_speed", {"clipId": a["clip"], "speed": float(a["speed"])})
+        self.call("set_clip_speed", {"clipId": arg_str(a, "clip"), "speed": float(arg_num(a, "speed"))})
         return {}
 
     def op_apply_effect(self, a):
-        self.need(a, "clip", "effect")
-        args = {"clipId": a["clip"], "type": a["effect"]}
+        args = {"clipId": arg_str(a, "clip"), "type": arg_str(a, "effect")}
         if a.get("amount") is not None:
             args["amount"] = a["amount"]
         if a.get("params") is not None:
@@ -460,19 +481,19 @@ class Adapter:
         return {"effect": find_key(j, ["effectId"]) or find_key(j.get("effect"), ["id"])}
 
     def op_apply_colour(self, a):
-        self.need(a, "clip")
-        grade = {k: a[k] for k in ("brightness", "contrast", "saturation", "gamma") if a.get(k) is not None}
-        colour = {k: a[k] for k in ("temperature", "tint", "hue") if a.get(k) is not None}
+        clip = arg_str(a, "clip")
+        grade = {k: arg_num(a, k) for k in ("brightness", "contrast", "saturation", "gamma") if a.get(k) is not None}
+        colour = {k: arg_num(a, k) for k in ("temperature", "tint", "hue") if a.get(k) is not None}
         if not grade and not colour:
             raise bad("no colour field given")
         if grade:
-            self.call("color_grade", {"clipId": a["clip"], **grade})
+            self.call("color_grade", {"clipId": clip, **grade})
         if colour:
-            self.call("apply_color", {"clipId": a["clip"], **colour})
+            self.call("apply_color", {"clipId": clip, **colour})
         return {}
 
     def op_set_project(self, a):
-        args = {k: a[k] for k in ("width", "height", "fps") if a.get(k) is not None}
+        args = {k: (arg_num if k == "fps" else arg_int)(a, k) for k in ("width", "height", "fps") if a.get(k) is not None}
         if not args:
             raise bad("no project field given")
         self.call("set_project_settings", args)
@@ -519,13 +540,29 @@ class Adapter:
                 "error": j.get("error"), "fraction": j.get("fraction")}
 
     def op_export(self, a):
-        self.need(a, "path")
+        path = arg_str(a, "path")
         wait = a.get("wait", True)
-        j = self.call("export_video", {"outputPath": a["path"], **({} if wait else {"background": True})})
+        if not isinstance(wait, bool):
+            raise bad(f"'wait' must be true or false, got {wait!r}")
+        j = self.call("export_video", {"outputPath": path, **({} if wait else {"background": True})})
         job = self.job_of(j)
         if wait:
-            job["status"] = "done" if os.path.isfile(a["path"]) else "error"
-            job["path"] = job["path"] or a["path"]
+            # The editor's own word first: an error or a cancel it reports stays one, even when it left a (partial)
+            # file at the path. Done only when it reports no error and the file is there.
+            said = j.get("status")
+            if said in ("error", "canceled", "cancelled"):
+                job["status"] = "canceled" if said.startswith("cancel") else "error"
+                job["error"] = job["error"] or f"the editor reported status {said!r}"
+            elif j.get("error"):
+                job["status"] = "error"
+            elif not os.path.isfile(path):
+                job["status"] = "error"
+                job["error"] = "the editor reported no error, but there is no file at the path"
+            else:
+                job["status"] = "done"
+            if job["error"] is not None and not isinstance(job["error"], str):
+                job["error"] = json.dumps(job["error"])[:4000]
+            job["path"] = job["path"] or path
         elif job["status"] == "done" and j.get("jobId"):
             job["status"] = "running"
         return job
@@ -540,49 +577,45 @@ class Adapter:
         return {"jobs": out}
 
     def op_cancel(self, a):
-        self.need(a, "job")
-        j = self.call("cancel_job", {"jobId": a["job"]})
+        j = self.call("cancel_job", {"jobId": arg_str(a, "job")})
         return {"canceled": bool(j.get("canceled"))}
 
     def op_render_frame(self, a):
-        self.need(a, "time", "path")
-        j = self.call("get_frame", {"atSeconds": float(a["time"])})
+        at, path = float(arg_num(a, "time")), arg_str(a, "path")
+        j = self.call("get_frame", {"atSeconds": at})
         img = next((c for c in j.get("_content", []) if c.get("type") == "image"), None)
         if img is None:
             raise OpError("adapter_error", "get_frame returned no image")
-        with open(a["path"], "wb") as f:
+        with open(path, "wb") as f:
             f.write(base64.b64decode(img["data"]))
-        return {"path": a["path"]}
+        return {"path": path}
 
     # ------------------------------------------------------------ projects and interchange
     def op_save_project(self, a):
-        self.need(a, "path")
-        self.call("save_project", {"path": a["path"]})
+        self.call("save_project", {"path": arg_str(a, "path")})
         return {}
 
     def op_load_project(self, a):
-        self.need(a, "path")
-        j = self.call("load_project", {"path": a["path"]})
+        j = self.call("load_project", {"path": arg_str(a, "path")})
         return {"notice": j.get("notice")}
 
     def op_export_otio(self, a):
-        self.need(a, "path")
-        self.call("export_otio", {"path": a["path"]})
+        self.call("export_otio", {"path": arg_str(a, "path")})
         return {}
 
     def op_import_otio(self, a):
-        self.need(a, "path")
-        j = self.call("import_otio", {"path": a["path"]})
+        j = self.call("import_otio", {"path": arg_str(a, "path")})
         return {"missing": [m if isinstance(m, str) else find_key(m, ["path"]) for m in (j.get("missing") or [])]}
 
     # ------------------------------------------------------------ file surface and network computers
     def op_http_get(self, a):
-        self.need(a, "route")
-        route = a["route"]
-        if not isinstance(route, str) or not route.startswith("/") or any(ch in route for ch in "?#"):
+        route = arg_str(a, "route")
+        if not route.startswith("/") or any(ch in route for ch in "?#"):
             raise bad(f"route must be a path such as /file, got {route!r}")
         if self.token is None:
             raise OpError("adapter_error", "the editor is not started")
+        if not isinstance(a.get("query") or {}, dict):
+            raise bad(f"'query' must be an object, got {a.get('query')!r}")
         query = {str(k): str(v) for k, v in (a.get("query") or {}).items()}
         query["token"] = self.token
         url = f"http://127.0.0.1:{self.port}{route}?{urllib.parse.urlencode(query)}"
@@ -618,7 +651,106 @@ class Adapter:
         raise OpError("unsupported", "approve_host: not in the v0.2.0 adapter yet (needs the editor window's route)")
 
 
+def handle(ad, raw):
+    """One request line -> its response object. bad_request only for the judge's arguments (arg_* and the checks in
+    the operations); any other exception is the adapter's or the editor's reply's fault: adapter_error."""
+    rid = None
+    try:
+        req = json.loads(raw)
+        if not isinstance(req, dict):
+            raise bad("a request must be a JSON object")
+        rid = req.get("id")
+        op, args = req.get("op"), req.get("args") or {}
+        fn = getattr(ad, f"op_{op}", None) if isinstance(op, str) and re.fullmatch(r"[a-z_]+", op) else None
+        if fn is None:
+            raise OpError("unsupported", f"unknown operation {op!r}")
+        if not isinstance(args, dict):
+            raise bad("args must be an object")
+        return {"id": rid, "ok": True, "result": fn(args)}
+    except OpError as e:
+        err = {"code": e.code, "message": e.message}
+        if e.product_code:
+            err["product_code"] = e.product_code
+        return {"id": rid, "ok": False, "error": err}
+    except json.JSONDecodeError as e:
+        return {"id": rid, "ok": False, "error": {"code": "bad_request", "message": f"not JSON: {e}"}}
+    except Exception as e:  # noqa: BLE001
+        log("internal error:", repr(e))
+        return {"id": rid, "ok": False, "error": {"code": "adapter_error", "message": repr(e)}}
+
+
+def self_test():
+    """The adapter's own checks, with the editor replaced by canned replies (no editor starts)."""
+    import tempfile
+    failures = []
+
+    def expect(name, got, want):
+        ok = got == want
+        print(f"{'ok  ' if ok else 'FAIL'} {name}" + ("" if ok else f": got {got!r}, want {want!r}"), flush=True)
+        if not ok:
+            failures.append(name)
+
+    tmp = tempfile.mkdtemp(prefix="v020-adapter-selftest-")
+    try:
+        partial = os.path.join(tmp, "partial.mp4")
+        with open(partial, "wb") as f:
+            f.write(b"\0" * 1024)
+        absent = os.path.join(tmp, "absent.mp4")
+
+        def adapter(reply):
+            ad = Adapter()
+            ad.call = lambda name, args, timeout=MCP_TIMEOUT: reply(name, args)
+            return ad
+
+        def export(reply, path):
+            return handle(adapter(reply), json.dumps({"id": 1, "op": "export", "args": {"path": path, "wait": True}}))
+
+        r = export(lambda n, a: {"status": "error", "error": "encoder failed"}, partial)
+        expect("export: the editor's error with a partial file left is status error",
+               (r["result"]["status"], r["result"]["error"]), ("error", "encoder failed"))
+        r = export(lambda n, a: {"status": "canceled"}, partial)
+        expect("export: the editor's cancel with a partial file left is status canceled", r["result"]["status"],
+               "canceled")
+        r = export(lambda n, a: {"error": "disk full"}, partial)
+        expect("export: an error with no status is status error", (r["result"]["status"], r["result"]["error"]),
+               ("error", "disk full"))
+        r = export(lambda n, a: {"text": "Exported"}, absent)
+        expect("export: no file at the path is status error", r["result"]["status"], "error")
+        r = export(lambda n, a: {"text": "Exported"}, partial)
+        expect("export: no error and the file there is status done", (r["result"]["status"], r["result"]["error"]),
+               ("done", None))
+
+        def summary(tracks):
+            return lambda n, a: {"tracks": tracks} if n == "timeline_summary" else {"clip": {"id": "c1"}}
+
+        place = (lambda ad, args: handle(ad, json.dumps({"id": 2, "op": "place_clip", "args": args})))
+        good = {"asset": "a1", "start_frame": 0, "in_frame": 0}
+        ok_ad = adapter(summary([{"kind": "video", "trackIndex": 0}]))
+        expect("place_clip: good arguments answer ok", place(ok_ad, good).get("result"), {"clip": "c1"})
+        expect("place_clip: start_frame 'x' is bad_request",
+               place(ok_ad, {**good, "start_frame": "x"})["error"]["code"], "bad_request")
+        expect("place_clip: no asset is bad_request", place(ok_ad, {"start_frame": 0, "in_frame": 0})["error"]["code"],
+               "bad_request")
+        expect("place_clip: a track that does not exist is bad_request",
+               place(ok_ad, {**good, "track": "v1"})["error"]["code"], "bad_request")
+        broken = adapter(summary([{"kind": "video"}]))  # the editor's reply has no trackIndex
+        expect("place_clip: a malformed editor reply is adapter_error, not bad_request",
+               place(broken, good)["error"]["code"], "adapter_error")
+        notnum = adapter(lambda n, a: {"pid": "x"})
+        notnum.op_x = lambda a: int(notnum.call("x", {})["pid"])
+        expect("an unexpected ValueError inside an operation is adapter_error",
+               handle(notnum, json.dumps({"id": 3, "op": "x", "args": {}}))["error"]["code"], "adapter_error")
+        expect("an unknown operation is unsupported",
+               handle(Adapter(), json.dumps({"id": 4, "op": "nope", "args": {}}))["error"]["code"], "unsupported")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"[v020 adapter] self-test FAILED: {len(failures)} case(s)" if failures else "[v020 adapter] self-test ok")
+    return 1 if failures else 0
+
+
 def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     ad = Adapter()
     out = sys.stdout
     try:
@@ -626,35 +758,15 @@ def main():
             raw = raw.strip()
             if not raw:
                 continue
-            rid = None
-            try:
-                req = json.loads(raw)
-                rid = req.get("id")
-                op, args = req.get("op"), req.get("args") or {}
-                fn = getattr(ad, f"op_{op}", None) if isinstance(op, str) and re.fullmatch(r"[a-z_]+", op) else None
-                if fn is None:
-                    raise OpError("unsupported", f"unknown operation {op!r}")
-                if not isinstance(args, dict):
-                    raise bad("args must be an object")
-                resp = {"id": rid, "ok": True, "result": fn(args)}
-            except OpError as e:
-                err = {"code": e.code, "message": e.message}
-                if e.product_code:
-                    err["product_code"] = e.product_code
-                resp = {"id": rid, "ok": False, "error": err}
-            except (ValueError, TypeError, KeyError) as e:
-                resp = {"id": rid, "ok": False, "error": {"code": "bad_request", "message": repr(e)}}
-            except Exception as e:  # noqa: BLE001
-                log("internal error:", repr(e))
-                resp = {"id": rid, "ok": False, "error": {"code": "adapter_error", "message": repr(e)}}
-            out.write(json.dumps(resp) + "\n")
+            out.write(json.dumps(handle(ad, raw)) + "\n")
             out.flush()
     finally:
         try:
             ad.op_stop({})
         except Exception as e:  # noqa: BLE001
             log("stop on exit failed:", repr(e))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

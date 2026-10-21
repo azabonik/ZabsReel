@@ -18,8 +18,8 @@ import queue
 import subprocess
 import threading
 
-PROTOCOL = 1
-DEFAULT_TIMEOUT = 600      # seconds per request
+PROTOCOL = 1               # T.driver() fails the test when the adapter's hello names another version
+DEFAULT_TIMEOUT = 600      # seconds per request (PROTOCOL.md, "Timeouts")
 EXPORT_TIMEOUT = 1800
 
 
@@ -62,13 +62,21 @@ class Driver:
     """One adapter process for one test. Driver(cmd, scratch).start(build) ... .stop() / .close()."""
 
     def __init__(self, cmd, scratch, stderr_path=None, env=None):
-        """cmd: the adapter command (argv list). scratch: the test's empty scratch folder (absolute)."""
+        """cmd: the adapter command (argv list). scratch: the test's empty scratch folder (absolute).
+
+        The adapter runs with its current folder set to `scratch`, and JUDGE_TEST_SCRATCH=<scratch> in its
+        environment: the runner's sweep ends any process left whose environment names the scratch folder, so a
+        helper the adapter leaves running is found even when it carries none of the editor's sandbox variables. It
+        inherits no file descriptor but stdin, stdout and stderr (close_fds), so it cannot reach the test's result
+        pipe."""
         self.cmd = list(cmd)
         self.scratch = os.path.abspath(scratch)
         self.stderr_path = stderr_path or os.path.join(self.scratch, "adapter.stderr")
         self._err = open(self.stderr_path, "ab")
+        env = dict(env if env is not None else os.environ)
+        env["JUDGE_TEST_SCRATCH"] = os.path.realpath(self.scratch)
         self.p = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
-                                  env=env if env is not None else dict(os.environ), cwd=self.scratch)
+                                  env=env, cwd=self.scratch, close_fds=True)
         self._lines = queue.Queue()
         self._n = 0
         self.started = False
@@ -151,7 +159,7 @@ class Driver:
 
     def place_clip(self, asset, track="v0", start_frame=0, in_frame=0, out_frame=None):
         """Places source frames [in_frame, out_frame) of `asset` at `start_frame` on `track` ("v0" = the base video
-        track). -> clip id (str)"""
+        track). out_frame None (not sent) = to the end of the source. -> clip id (str)"""
         args = {"asset": asset, "track": track, "start_frame": int(start_frame), "in_frame": int(in_frame)}
         if out_frame is not None:
             args["out_frame"] = int(out_frame)

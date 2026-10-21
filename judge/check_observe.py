@@ -4,6 +4,7 @@ named negative or an alternative export) holds the values the baseline checker m
 SRT / OTIO sidecars). This script measures the same files with observe.py and compares, check by check.
 
     python3 -I judge/check_observe.py --briefs <briefs.json> --media <reference media dir> [--tolerance F] <run dir>...
+    python3 -I judge/check_observe.py --self-test     (the agreement rule for unmeasurable values; run.py --self-test)
 
 <briefs.json> gives each check's parameters (times, regions, bands); <reference media dir> holds the reference clips
 the frame checks compare with. Neither is part of the judge: they live with the baseline, outside the repository, so
@@ -103,7 +104,31 @@ def agree(a, b, tol):
     return a == b
 
 
+# What the baseline checker records when the file makes a check impossible: None (the check could not be measured or
+# was skipped) or its own markers for final.mp4 ("missing", "empty", "unreadable"). Only these agree with an
+# observe.Unmeasurable; any other recorded value (a size "1280x720", a number) was measured, so an Unmeasurable now
+# is a difference.
+IMPOSSIBLE = {"missing", "empty", "unreadable"}
+
+
+def unmeasurable_agrees(want):
+    return want is None or (isinstance(want, str) and want in IMPOSSIBLE)
+
+
+def self_test():
+    cases = [(None, True), ("missing", True), ("empty", True), ("unreadable", True), ("1280x720", False),
+             ("", False), (0, False), (3.0, False), ({"exit": 0}, False)]
+    bad = [(w, want) for w, want in cases if unmeasurable_agrees(w) is not want]
+    for w, want in cases:
+        print(f"{'ok  ' if unmeasurable_agrees(w) is want else 'FAIL'} an unmeasurable value "
+              f"{'agrees' if want else 'differs'} with a recorded {json.dumps(w)}")
+    print(f"[check_observe] self-test FAILED: {len(bad)} case(s)" if bad else "[check_observe] self-test ok")
+    return 1 if bad else 0
+
+
 def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--briefs", required=True)
     ap.add_argument("--media", required=True)
@@ -135,9 +160,8 @@ def main():
                 skipped[kind] = skipped.get(kind, 0) + 1
                 continue
             want = r["value"]
-            # The checker records "missing"/"unreadable"/None when the file makes a check impossible.
-            if isinstance(got, str) and got.startswith("unmeasurable") and (want is None or isinstance(want, str)):
-                ok = True
+            if isinstance(got, str) and got.startswith("unmeasurable"):
+                ok = unmeasurable_agrees(want)
             else:
                 ok = agree(got, want, a.tolerance)
             n_ok += ok

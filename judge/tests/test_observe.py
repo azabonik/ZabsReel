@@ -11,6 +11,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
+CHECKS = 26
 
 
 def run(t):

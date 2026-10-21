@@ -1,0 +1,151 @@
+name: Judge
+
+# The judge (judge/: black-box tests for the rewrite) against this build through
+# the v0.2.0 adapter. JUDGE.lock covers this file, so a change to how CI runs
+# the judge is a lock change (judge/README.md, "Threat model"). ci.yml runs the
+# lock gate on the checkout too, so deleting this file fails ci.yml.
+#
+# The judge runs from a copy made before any code from the change under test
+# runs (npm ci, the Electron install and the build all do), and the copy is
+# checked by its own copied gate before the install and again after the build.
+#
+# On a pull request the base branch's gate also checks the pull request's
+# files, and every lock-covered path that differs from the base is listed in
+# the job summary and in one warning. This catches a weakened gate only when
+# the pull request leaves this file unchanged: on pull_request events GitHub
+# runs the pull request's own copy of this workflow, so a pull request that
+# also edits it can remove that step (its diff then shows this file and
+# JUDGE.lock changed). Enforcing it needs GitHub settings (a required check
+# from a workflow the pull request cannot change, or a required review): an
+# open decision for Anthony (judge/README.md, "Threat model").
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # First, before anything from the checkout runs: judge/, the gate and this
+      # workflow, in the layout the gate expects, read-only.
+      - name: Copy the judge out of the checkout
+        run: |
+          J="$RUNNER_TEMP/judge-src"
+          mkdir -p "$J/scripts" "$J/.github/workflows"
+          cp -R judge "$J/judge"
+          cp scripts/check-judge-lock.mjs "$J/scripts/"
+          cp .github/workflows/judge.yml "$J/.github/workflows/"
+          chmod -R a-w "$J"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Pull requests only, before anything from the checkout runs. The lock's
+      # content comes from the pull request (a reviewed judge change updates
+      # it); the base branch's gate, run from $RUNNER_TEMP with --root on the
+      # checkout, fails a pull request that weakens the gate, as long as the
+      # pull request does not also change this step (this workflow comes from
+      # the pull request). A base without the gate (the pull request that adds
+      # it) is skipped with a notice.
+      - name: Base branch's judge lock gate on the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF"
+          list="$RUNNER_TEMP/judge-paths-changed.txt"
+          git diff --name-only FETCH_HEAD HEAD -- judge scripts/check-judge-lock.mjs .github/workflows/judge.yml > "$list"
+          {
+            echo "### Lock-covered paths that differ from $BASE_REF"
+            if [ -s "$list" ]; then sed 's/^/- `/; s/$/`/' "$list"; else echo "None."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$list" ]; then
+            echo "::warning title=Judge files changed::lock-covered paths that differ from $BASE_REF: $(paste -sd ' ' "$list")"
+          fi
+          if ! git cat-file -e FETCH_HEAD:scripts/check-judge-lock.mjs 2>/dev/null; then
+            echo "::notice title=No base gate::$BASE_REF has no scripts/check-judge-lock.mjs; the base gate step is skipped"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/base-gate"
+          git show FETCH_HEAD:scripts/check-judge-lock.mjs > "$RUNNER_TEMP/base-gate/check-judge-lock.mjs"
+          node "$RUNNER_TEMP/base-gate/check-judge-lock.mjs" --root "$GITHUB_WORKSPACE"
+
+      # The copied gate on the copy (its self-test works on temp copies). The
+      # step output pins the copy's lock and gate for the check after the build.
+      - name: Judge lock gate on the copy (before the install)
+        id: pin
+        run: |
+          J="$RUNNER_TEMP/judge-src"
+          node "$J/scripts/check-judge-lock.mjs" --self-test
+          node "$J/scripts/check-judge-lock.mjs"
+          echo "sum=$(cat "$J/judge/JUDGE.lock" "$J/scripts/check-judge-lock.mjs" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The runner's own tests (crash, hang, early exit, wrong check counts, a
+      # leaked process, forged results, SIGTERM) and the adapter's and
+      # check_observe.py's self-tests. No editor starts, so it runs before the
+      # install.
+      - name: Judge runner self-test
+        run: timeout -k 30 900 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --self-test --scratch "$RUNNER_TEMP/judge-selftest"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # As in ci.yml: npm ci leaves Electron's binary out; install.js fetches
+      # it (checked against the package's checksums.json).
+      - name: Install the Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Build
+        run: npm run build
+
+      # The install and the build ran code from the change under test: the
+      # copy's lock and gate must be the bytes pinned before them, and the copy
+      # must still match its lock.
+      - name: Judge lock gate on the copy (after the build)
+        env:
+          PINNED: ${{ steps.pin.outputs.sum }}
+        run: |
+          J="$RUNNER_TEMP/judge-src"
+          now="$(cat "$J/judge/JUDGE.lock" "$J/scripts/check-judge-lock.mjs" | sha256sum | cut -d' ' -f1)"
+          if [ -z "$PINNED" ] || [ "$now" != "$PINNED" ]; then
+            echo "the copy's JUDGE.lock or gate changed during the install or the build" >&2
+            exit 1
+          fi
+          node "$J/scripts/check-judge-lock.mjs"
+
+      # The judge from the copy against the checkout's build, through the
+      # v0.2.0 adapter (its MCP server over stdio, a scratch home and data
+      # folder, a free port), measured with the runner's FFmpeg (apt, on PATH).
+      # Media made with lavfi, nothing downloaded. timeout -k ends a hang as a
+      # failure; the runner also times out each test.
+      - name: Judge (v0.2.0 adapter)
+        run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build "$GITHUB_WORKSPACE" --scratch "$RUNNER_TEMP/judge-scratch"
+
+      # A failed run keeps its scratch folder: upload the logs (test.log,
+      # adapter.stderr, mcp-server.stderr, the editor's own logs), not the
+      # media or the exports.
+      - name: Upload the judge's logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-logs
+          path: |
+            ${{ runner.temp }}/judge-scratch/**/*.log
+            ${{ runner.temp }}/judge-scratch/**/*.stderr
+            ${{ runner.temp }}/judge-selftest/**/*.log
+            ${{ runner.temp }}/judge-selftest/**/*.stderr
+          if-no-files-found: ignore
+          retention-days: 14

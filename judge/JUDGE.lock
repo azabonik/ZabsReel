@@ -1,12 +1,16 @@
-# sha256 of every file under judge/ except this one, sorted by path (scripts/check-judge-lock.mjs).
+# sha256 of every file under judge/ except this one, of scripts/check-judge-lock.mjs and of
+# .github/workflows/judge.yml, sorted by path from the repository root (scripts/check-judge-lock.mjs).
 # The agents that rewrite the editor must not change the judge. A change to this file needs Anthony's review.
-aa0074037431a8ab48a65817073343dbe1c2e9d24871aac3cee74bd7e04ac9a8  PROTOCOL.md
-2d9cfd2db654c5d6e47d3c58b73f10768a03c79c26f86d1e6634da1b913ede82  README.md
-1bb9d40cc3144028b7f2651674a5dca7cbfda705d9dc81ba3a1b07230738c683  adapters/v020/adapter.py
-d623986527b34ddbe07ba3526c4bf6e11738288f9795cd9b8011e9e25659479a  check_observe.py
-29aa641912e835eb0190389fc4b73a737e22a3bc2fc36a5f56052c4eb87ba2c1  driver.py
-aa206cf36d14d7ac6d909471ae122b09a8c7bb4f03d62d3a9ef6c78a87897603  fixtures/make.sh
-9cea8511820064437d53e8a32ebfd9e12e2dafb0226073503a36f6106f9433bb  observe.py
-3c647c11d113c3cf5c05eeccd7e779d4ff4d196a230424c6232f20c6e3a4009a  run.py
-3d16618ade41db65fce6bacdadf759334ae04eadd192a81291d52ab3d0eafc9d  tests/test_import_export.py
-902f6728d143608ede0dedcc76a45f9f180133844a4991c7792c524380dbc3a1  tests/test_observe.py
+32ba9c57c57ad7c90f1e8afacb78a09d18f33bff4226c92e077c86dc2784c946  .github/workflows/judge.yml
+18b16457e1fe45d9458c716ceb204847927694cc99708f7aa6a4c609b7a63fb3  judge/PROTOCOL.md
+03bf102bd96099c28551e010b632bdab6c30b0c29542dc272143111918f19b49  judge/README.md
+d9576c517e50b4be4463f1500e97f40f239f7bbbf23f2d658a45770715e4a25b  judge/adapters/v020/adapter.py
+60d050f139e5972a2c91a5133b7fcb3a3f3d85e83fa91d2db23f68d812f80beb  judge/check_observe.py
+2294b03e0d69a82ad1804edf0e0b15e6f7f823cafa0e07856cebf916d8031e11  judge/driver.py
+aa206cf36d14d7ac6d909471ae122b09a8c7bb4f03d62d3a9ef6c78a87897603  judge/fixtures/make.sh
+9cea8511820064437d53e8a32ebfd9e12e2dafb0226073503a36f6106f9433bb  judge/observe.py
+6fcc95ab537135f746721e2a46793ed5dcfd53da1e24845d77efb6dc8da6fbcb  judge/run.py
+12ac63dec26f5de1e06e719a119517e9f9f9bc1e568734769fae7d6814180f03  judge/selftest.py
+58ba8be14907c4614f86ffe4f62274ecc975b9702e9bd615308dcf37993cf260  judge/tests/test_import_export.py
+f9413115b2e181fc93a59545324a41940cb8754188fe611d569bab0c0d1d9c13  judge/tests/test_observe.py
+1711839fb20de3f4950b5ad18e91853909d92c6d53ccabc56545c906a4c16944  scripts/check-judge-lock.mjs
