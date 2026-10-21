@@ -351,6 +351,10 @@ export async function runMattePipeline(o: PipelineOptions, signal: AbortSignal, 
     if (failure || signal.aborted) {
       decoder.kill();
       encoder.kill();
+      // Stop reading the decoder too. With the read-ahead queue full its stdout is paused, a paused stream
+      // never ends, and execa waits for the end: the run would never settle (a cancel only answered by
+      // rvm.ts's grace timer, a failure or an inline cancel never) and the worker would never exit.
+      decoder.stdout!.destroy();
     }
     stdin.end();
     const [dec, enc] = await Promise.allSettled([decoder, encoder]);
