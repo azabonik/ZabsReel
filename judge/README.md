@@ -43,6 +43,10 @@ The runner prints one line per check (`PASS`, `FAIL`, `N/A` or `N/O`, see "Statu
 `JUDGE: <passed>/<judged> passed`, followed by `, <n> not applicable` and `, <n> not observed` when there are any. It
 exits 1 when any check fails, when a test does not finish within its timeout, when there are no checks, or when the
 runner or a test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given.
+Each run makes its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch
+folder. A run that passes deletes that folder unless you give `--keep`. A run that fails keeps it, and the runner
+prints its path. Each test's folder holds `test.log`, `adapter.stderr`, `adapter-strace.log` (with strace) and the
+editor's own logs.
 
 ### Statuses
 
@@ -59,14 +63,13 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   is a security check the judge could not apply to that build, not a pass.
 - **Not observed** (`N/O`): the observation needs `strace`, which is not installed (or `JUDGE_STRACE` is set empty):
   the download check of every test that starts the editor, and `test_network_hosts`' file-system trace checks.
-  `--require-trace` makes each one a failure; `judge.yml` passes it. Each run makes
-its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch folder. A run
-that passes deletes that folder unless you give `--keep`. A run that fails keeps it, and the runner prints its path.
-Each test's folder holds `test.log`, `adapter.stderr` and the editor's own logs.
+  `--require-trace` makes each one a failure; `judge.yml` passes it.
+
+### CI
 
 CI runs the judge in its own workflow, `.github/workflows/judge.yml`, with the FFmpeg on the runner's `PATH`. Before
 the install it copies `judge/`, the gate and `judge.yml` to `$RUNNER_TEMP/judge-src` (read-only), checks the copy with
-the copied gate, and runs `run.py --self-test` from it. After `npm ci` and the build it checks that the copy's lock and
+the copied gate, and runs `run.py --self-test --require-trace` from it. After `npm ci` and the build it checks that the copy's lock and
 gate are the bytes it pinned before the install and that the copy still matches its lock, then runs the judge from
 the copy with `--build "$GITHUB_WORKSPACE" --strict --require-trace`, with the FFmpeg and `strace` that it installs
 from apt. A failed run uploads the logs of its kept scratch folder (`*.log`, `*.stderr`, among them
