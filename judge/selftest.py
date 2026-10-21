@@ -659,8 +659,12 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
                   label="the adapter writes a partial line everywhere it can, then starts a DNS lookup and "
                         "overwrites its port in place: the hit is still seen")
             s.inject()
+            # Two shapes, both a failed run with the download check failed on the ended trace. strace 5.x leaves the
+            # adapter running when strace ends: the test runs to its end (3/4). strace 6.x with --seccomp-bpf implies
+            # --kill-on-exit (PTRACE_O_EXITKILL: a seccomp filter cannot be removed, so an untraced tracee would get
+            # ENOSYS), so ending strace also kills the adapter (code -9) and the test fails early (2/6).
             s.run("driver", 1, [fail.format("driver", net + r".*  -- the trace ended before the editor was asked to "
-                                            r"stop"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                                            r"stop"), r"^JUDGE: (3/4|2/6) passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 killstrace",
                   label="the adapter ends strace, then starts a DNS lookup: the download check fails")
             # A traced child that outlives stop: the trace ends only after it has ended. Found by the sweep (it
