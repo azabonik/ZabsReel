@@ -17,7 +17,9 @@
  *     frame is the source frame the mapping predicts, frame count = footprint.
  *  4. Audio "stretch": length within a frame of the video, pitch kept (440 Hz
  *     tone stays 440 Hz, Goertzel), no clicks at chunk joins, burst positions
- *     follow the curve (within a frame); "mute" is silent.
+ *     follow the curve (within a frame); "mute" is silent. Each chunk's
+ *     timestamps come from its sample count after its last trim (graph text,
+ *     both join paths).
  *  5. Bleeps on a ramped clip land on the (mapped) words: the original is
  *     silent under the window, the 1 kHz beep plays there, add_bleep by
  *     timeline time maps through the curve; renderer mirror == core.
@@ -569,6 +571,28 @@ async function main(): Promise<void> {
     check(rms(s, 0, s.length) < 1e-4 && near(s.length / 48000, fp / FPS, 1 / FPS), `audio "mute": silent for the clip's ${fp / FPS} s`);
     await call("set_speed_ramp", { clipId: clip.id, audio: "stretch" });
     check(clipById(clip.id).effects?.speedRamp?.preset === "hero" && !clipById(clip.id).effects?.speedRamp?.audio, "audio-only change keeps the curve");
+  }
+
+  // After its last trim each stretch chunk is retimed from its sample count (asetpts=N/SR/TB), not from its first
+  // frame's timestamp: FFmpeg 7.x's adelay can send the lead silence frame with none, and the mixed joins' fades
+  // then landed late at random (smoke-ffcompat's 3 exports of one ramp differed on 7.1).
+  console.log("\naudio: stretch chunks are timed by their sample count");
+  {
+    const canvas = { width: 160, height: 90, fps: FPS };
+    const points = presetRampPoints("montage", 1, 5);
+    const outDuration = clipFootprintFrames({ sourceInFrame: 30, sourceOutFrame: 150, effects: { speedRamp: { points } } }, FPS) / FPS;
+    const want = rampAudioChunks({ points }, 1, 4, 48000).length;
+    for (const mixCrossfade of [false, true]) {
+      const clip = goldenClip({ outDuration, effects: { speedRamp: { points }, ...(mixCrossfade ? { audioCaps: { mixCrossfade } } : {}) } });
+      const args = buildRenderCommand([clip], canvas, join(dir, "chunks.mp4"), EXPORT_PROFILE).args;
+      const chains = args[args.indexOf("-filter_complex") + 1].split(";").filter((p) => /\[ra0c\d+\]$/.test(p));
+      const resets = chains.map((p) => /,atrim=start_sample=\d+:end_sample=\d+,([^,]+),apad=whole_len=\d+\[ra0c\d+\]$/.exec(p)?.[1] ?? "(no reset)");
+      check(
+        want > 1 && chains.length === want && resets.every((r) => r === "asetpts=N/SR/TB"),
+        `${mixCrossfade ? "mixed joins (6.1 – 7.x)" : "acrossfade joins"}: all ${chains.length} chunks (of ${want}) restart at their first sample after the last trim`,
+        [...new Set(resets)].join(" "),
+      );
+    }
   }
 
   // ---- 5. bleeps on a ramped clip -------------------------------------------

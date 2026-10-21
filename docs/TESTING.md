@@ -538,7 +538,8 @@ npx tsx packages/core/scripts/smoke-locks.ts
 # constant speed exactly as before, round trips, monotonic, ∫ds/speed), every
 # preset exported with frame-index-coded media (each frame = the mapped source
 # frame, exact footprint), audio stretch (length within a frame, 440 Hz pitch
-# kept, click-free joins, bursts on the curve) and mute, bleeps on the mapped
+# kept, click-free joins, bursts on the curve, each chunk timed by its sample
+# count) and mute, bleeps on the mapped
 # words, split / cut_range / trim keep the curve, cuts in a slow section snap to
 # their source frame (pieces and the next clip stay butted, tracks stay in sync),
 # splits add up EXACTLY at every split point of every preset and of flat 0.1x /
