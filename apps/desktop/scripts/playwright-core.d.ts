@@ -10,6 +10,7 @@ declare module "playwright-core" {
   export interface Dialog {
     message(): string;
     accept(): Promise<void>;
+    dismiss(): Promise<void>;
   }
   export interface Request {
     url(): string;
@@ -50,6 +51,7 @@ declare module "playwright-core" {
     press(key: string): Promise<void>;
     focus(): Promise<void>;
     click(options?: { position?: { x: number; y: number }; force?: boolean; timeout?: number }): Promise<void>;
+    dblclick(options?: { timeout?: number }): Promise<void>;
     isEnabled(): Promise<boolean>;
     isDisabled(): Promise<boolean>;
     isChecked(): Promise<boolean>;

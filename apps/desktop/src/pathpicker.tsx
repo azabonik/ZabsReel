@@ -176,11 +176,16 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
     request.resolve(files.map(pathOf));
   };
 
+  // Save writes into `listing.path`, the folder shown, so it waits until the
+  // path bar names that folder too. While a folder is being listed, after a
+  // folder failed to list, and while the bar holds a path not yet listed with
+  // Enter, the bar names one folder and the list shows another. Save is
+  // disabled then, and confirmSave (the button, Enter in the name field, a
+  // double-click on a file) does nothing.
+  const folderReady = !!listing && !loading && !error && pathInput.trim() === listing.path;
+
   const confirmSave = (typed: string = name) => {
-    // While a folder is being listed the path bar already names it, but
-    // `listing` is still the folder shown before: saving now would write
-    // there. Wait for the listing (Save is disabled meanwhile).
-    if (!listing || loading) return;
+    if (!listing || !folderReady) return;
     let n = typed.trim();
     if (!n) return;
     if (isAbsolute(n)) {
@@ -280,7 +285,8 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
   };
 
   const selectedFiles = selected.filter((n) => visible.some((v) => v.name === n && !v.dir)).length;
-  const canConfirm = save ? !!name.trim() && !!listing && !loading : selected.length > 0;
+  const canConfirm = save ? !!name.trim() && folderReady : selected.length > 0;
+  const saveHint = save && listing && !loading && !error && !folderReady ? "Press Enter in the path bar to open that folder first" : undefined;
 
   return (
     <>
@@ -346,7 +352,15 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
             aria-busy={loading}
             onKeyDown={onListKey}
           >
-            {error && <div className="picker-error"><Alert size={14} /> {error}</div>}
+            {error && (
+              <div className="picker-error">
+                <Alert size={14} />
+                <span>
+                  {error}
+                  {save && <><br />Save is off until a folder opens. Fix the path and press Enter, or open another folder.</>}
+                </span>
+              </div>
+            )}
             {!error && listing && visible.length === 0 && (
               <div className="picker-empty">No {filter && !filter.extensions.includes("*") ? `${filter.name.toLowerCase()} files` : "files"} in this folder.</div>
             )}
@@ -393,7 +407,7 @@ function PathPicker({ request, config }: { request: PendingPick; config: WebConf
           )}
           <div className="picker-actions">
             <button className="btn btn-ghost" onClick={cancel}>Cancel</button>
-            <button className="btn btn-primary" onClick={confirm} disabled={!canConfirm}>{request.confirmLabel}</button>
+            <button className="btn btn-primary" onClick={confirm} disabled={!canConfirm} title={saveHint}>{request.confirmLabel}</button>
           </div>
         </div>
       </div>

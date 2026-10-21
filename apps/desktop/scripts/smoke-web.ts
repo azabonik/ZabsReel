@@ -15,10 +15,11 @@
 // in-app alertdialog (focus on Keep offline, Tab stays inside, Esc keeps it
 // offline, Allow allows it, the clips come online); Save As with a project
 // named \\zr-evil.invalid\s\x starts the picker with x.aive and saves in the
-// folder listed (not before a typed folder's listing lands); an entry added
-// outside ZedMix gets the Keep dialog (focus on Remove, Esc removes it, Keep
-// stamps it), and with two pages Keep in one then Esc in the other leaves it
-// allowed. Both processes run under a trace
+// folder listed (not before a typed folder's listing lands, nor while the
+// path bar names a folder not listed or one that failed to list); an entry
+// added outside ZedMix gets the Keep dialog (focus on Remove, Esc removes it,
+// Keep stamps it), and with two pages Keep in one then Esc in the other leaves
+// it allowed. Both processes run under a trace
 // preload (every fs and child_process call that names a test server): nothing
 // touches a server before it is allowed, and the shell only lists the folder
 // the picker was sent to.
@@ -594,8 +595,10 @@ async function networkComputers(o: {
     expect(await waitFor("project x", async () => (await a.locator(".proj-name").innerText().catch(() => "")).trim().startsWith("x")),
       `a project named \\\\zr-evil.invalid\\s\\x opens as "${(await a.locator(".proj-name").innerText().catch(() => "")).trim()}"`);
     const saveDir = join(root, "saved");
-    // A folder row the picker shows once it lists saveDir (the start folder has none named so).
+    // A folder row the picker shows once it lists saveDir (the start folder has none named so), and a project file
+    // to double-click there.
     mkdirSync(join(saveDir, "listed-here"), { recursive: true });
+    writeFileSync(join(saveDir, "old.aive"), "{}");
     await a.getByRole("button", { name: /Project/ }).click().catch(() => {});
     await a.getByRole("menuitem", { name: /^Save As/ }).click().catch(() => {});
     const picker = a.getByRole("dialog", { name: "Save project as" });
@@ -626,6 +629,44 @@ async function networkComputers(o: {
     release();
     await a.unroute(fsList);
     expect(await waitFor("listing", async () => (await picker.locator('.picker-row[title="listed-here"]').count()) === 1, 10000), "…then lists it");
+    // A folder typed into the bar but not listed, then one that fails to list: saveDir stays on screen while the bar
+    // names the other folder, and Save must not write into saveDir. The listing is routed to fail.
+    // MUTATION: drop `error` and the path bar check from pathpicker.tsx's folderReady → x.aive goes into saveDir here,
+    // and the typed-only row fails. Skip confirmSave's check only when activate() calls it → the double-click asks
+    // "Replace it?" and this row fails.
+    const missing = join(root, "zr-missing");
+    await pathBar.fill(missing).catch(() => {});
+    const typedOnly = await saveButton.isDisabled().catch(() => false);
+    expect(typedOnly, `…Save waits while the path bar names a folder not listed yet (Save ${typedOnly ? "disabled" : "enabled"})`);
+    let refused = 0;
+    await a.route(fsList, async (route) => {
+      refused++;
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false, error: `Not found: ${missing}` }) }).catch(() => {});
+    });
+    await pathBar.press("Enter").catch(() => {});
+    const pickerError = picker.locator(".picker-error");
+    await waitFor("listing error", async () => (await pickerError.count()) === 1, 5000);
+    const errorText = (await pickerError.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    const failedOff = await saveButton.isDisabled().catch(() => false);
+    // A double-click on a file saves over it, after a "Replace it?" confirm (dismissed here, so nothing is written).
+    const asked: string[] = [];
+    a.on("dialog", (d) => { asked.push(d.message()); d.dismiss().catch(() => {}); });
+    await saveButton.click({ force: true, timeout: 1000 }).catch(() => {});
+    await nameField.press("Enter").catch(() => {});
+    const oldFile = picker.locator('.picker-row[title="old.aive"]');
+    const fileShown = (await oldFile.count()) === 1;
+    await oldFile.dblclick({ timeout: 1000 }).catch(() => {});
+    const stillOpen = (await picker.count()) === 1;
+    await a.unroute(fsList);
+    expect(refused > 0 && failedOff && stillOpen && fileShown && asked.length === 0 && !existsSync(join(saveDir, "x.aive"))
+      && errorText.includes(`Not found: ${missing}`) && errorText.includes("Fix the path and press Enter"),
+      `…nor after the folder typed fails to list, with an error that says what to do ("${errorText}"; Save ${failedOff ? "disabled" : "enabled"}, picker ${stillOpen ? "open" : "closed"}${fileShown ? "" : ", no old.aive row to double-click"}${asked.length ? `, asked "${asked.join(" | ")}"` : ""})`);
+    // The double-click's first click put old.aive in the name field.
+    await nameField.fill("x.aive").catch(() => {});
+    await pathBar.fill(saveDir).catch(() => {});
+    await pathBar.press("Enter").catch(() => {});
+    expect(await waitFor("listed again", async () => (await pickerError.count()) === 0 && (await saveButton.isEnabled().catch(() => false)), 10000),
+      "…and a folder that lists clears the error and turns Save back on");
     await saveButton.click().catch(() => {});
     expect(await waitFor("saved", () => existsSync(join(saveDir, "x.aive")), 10000), "Save writes x.aive into the folder listed");
     expect(picked.every((b) => !b.includes("zr-evil.invalid")) && !listed("zr-evil.invalid"), `/api/media-servers/picked got no zr-evil.invalid path (${picked.join(" | ") || "no call"}); the store is unchanged`);
