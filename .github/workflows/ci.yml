@@ -137,6 +137,12 @@ jobs:
       - name: Smoke — security (token auth + /file allowlist, real paths)
         run: npx tsx packages/core/scripts/smoke-security.ts
 
+      # A core that gets SIGTERM while a client is in the middle of a request
+      # closes that connection and exits at once (a kept-alive connection used
+      # to keep it serving until its keep-alive timeout, about 5 s).
+      - name: Smoke — core shutdown with a request in progress (core process, temp HOME)
+        run: timeout -k 10 300 npx tsx packages/core/scripts/smoke-shutdown.ts
+
       - name: Smoke — jobs (background export, progress, cancel)
         run: npx tsx packages/core/scripts/smoke-jobs.ts
 

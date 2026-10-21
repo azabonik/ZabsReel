@@ -122,6 +122,12 @@ node scripts/check-brand.mjs --self-test
 # drop when outside the data dir; a symlinked proxies/ is still served; self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
 
+# Core shutdown (temp HOME, no media): a core started from src/cli.ts that gets
+# SIGTERM while a client is in the middle of a request closes that connection
+# without answering it and exits with code 0 within 3 s (a kept-alive
+# connection used to keep it serving until its keep-alive timeout)
+npx tsx packages/core/scripts/smoke-shutdown.ts
+
 # Untrusted .aive / .otio: crafted ids stay inside the data dir, URL/protocol media
 # is refused on load/import (and a refused open leaves the open project, its path,
 # dirty state and undo history unchanged), the executor refuses protocol inputs and

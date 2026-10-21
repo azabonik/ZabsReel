@@ -239,7 +239,12 @@ export class EditorServer {
   async stop(): Promise<void> {
     for (const ws of this.clients) ws.close();
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
-    await new Promise<void>((resolve) => this.http.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      this.http.close(() => resolve());
+      // close() drops only idle connections. One with a request still arriving or being answered would be
+      // served on and kept alive, and would hold the callback (and so the core's exit) until its keep-alive timeout.
+      this.http.closeAllConnections();
+    });
   }
 
   // ---- WebSocket -------------------------------------------------------------
