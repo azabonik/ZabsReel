@@ -612,7 +612,7 @@ async function networkComputers(o: {
     await waitFor("start folder", async () => (await pathBar.inputValue().catch(() => "")) !== "", 10000);
     await pathBar.fill(saveDir).catch(() => {});
     // Hold saveDir's listing: until it lands the picker still shows the start folder, and Save must not write there.
-    // MUTATION: drop `loading` from pathpicker.tsx confirmSave and canConfirm → x.aive goes to the start folder here.
+    // The path bar check alone catches this row (the bar names saveDir); the double-click row below catches `loading`.
     let release = () => {};
     const held = new Promise<void>((r) => { release = r; });
     let parked = false;
@@ -629,6 +629,51 @@ async function networkComputers(o: {
     release();
     await a.unroute(fsList);
     expect(await waitFor("listing", async () => (await picker.locator('.picker-row[title="listed-here"]').count()) === 1, 10000), "…then lists it");
+    // A double-click on a folder row lists it, and the bar keeps the folder shown until that listing lands: only
+    // `loading` (while it is held), then only `error` (when it fails), keep Save from writing into saveDir.
+    // MUTATION: drop `!loading` from pathpicker.tsx's folderReady → x.aive goes into saveDir in the held row.
+    // Drop `!error` from it → x.aive goes into saveDir in the failed row.
+    const folderRow = picker.locator('.picker-row[title="listed-here"]');
+    const inner = join(saveDir, "listed-here");
+    const pickerError = picker.locator(".picker-error");
+    const backToSaveDir = async () => {
+      await waitFor("bar settled", async () => (await pathBar.inputValue().catch(() => "")) !== "", 5000);
+      await pathBar.fill(saveDir).catch(() => {});
+      await pathBar.press("Enter").catch(() => {});
+      return waitFor("saveDir again", async () => (await pickerError.count()) === 0 && (await folderRow.count()) === 1
+        && (await pathBar.inputValue().catch(() => "")) === saveDir, 10000);
+    };
+    let releaseRow = () => {};
+    const heldRow = new Promise<void>((r) => { releaseRow = r; });
+    let rowParked = false;
+    await a.route(fsList, async (route) => { rowParked = true; await heldRow; await route.continue().catch(() => {}); });
+    await folderRow.dblclick({ timeout: 2000 }).catch(() => {});
+    await waitFor("folder row requested", () => rowParked, 5000);
+    const barKept = (await pathBar.inputValue().catch(() => "")) === saveDir;
+    const rowOff = await saveButton.isDisabled().catch(() => false);
+    await nameField.press("Enter").catch(() => {});
+    await sleep(300);
+    expect(rowParked && barKept && rowOff && (await picker.count()) === 1 && !existsSync(join(saveDir, "x.aive")) && !existsSync(join(inner, "x.aive")),
+      `…Save waits while a double-clicked folder is being listed (${rowParked ? "" : "no listing asked for; "}bar ${barKept ? "kept" : "changed"}, Save ${rowOff ? "disabled" : "enabled"}, picker ${(await picker.count()) === 1 ? "open" : "closed"})`);
+    releaseRow();
+    await a.unroute(fsList);
+    await waitFor("folder row listed", async () => (await pathBar.inputValue().catch(() => "")).endsWith("listed-here"), 10000);
+    expect(await backToSaveDir(), "…and lists saveDir again");
+    let rowRefused = 0;
+    await a.route(fsList, async (route) => {
+      rowRefused++;
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false, error: `Not found: ${inner}` }) }).catch(() => {});
+    });
+    await folderRow.dblclick({ timeout: 2000 }).catch(() => {});
+    await waitFor("folder row error", async () => (await pickerError.count()) === 1, 5000);
+    const rowBarKept = (await pathBar.inputValue().catch(() => "")) === saveDir;
+    const rowErrOff = await saveButton.isDisabled().catch(() => false);
+    await nameField.press("Enter").catch(() => {});
+    await sleep(300);
+    await a.unroute(fsList);
+    expect(rowRefused > 0 && (await pickerError.count()) === 1 && rowBarKept && rowErrOff && (await picker.count()) === 1 && !existsSync(join(saveDir, "x.aive")),
+      `…nor after a double-clicked folder fails to list (bar ${rowBarKept ? "kept" : "changed"}, Save ${rowErrOff ? "disabled" : "enabled"}, picker ${(await picker.count()) === 1 ? "open" : "closed"})`);
+    expect(await backToSaveDir(), "…and a folder that lists clears that error");
     // A folder typed into the bar but not listed, then one that fails to list: saveDir stays on screen while the bar
     // names the other folder, and Save must not write into saveDir. The listing is routed to fail.
     // MUTATION: drop `error` and the path bar check from pathpicker.tsx's folderReady → x.aive goes into saveDir here,
@@ -644,7 +689,6 @@ async function networkComputers(o: {
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false, error: `Not found: ${missing}` }) }).catch(() => {});
     });
     await pathBar.press("Enter").catch(() => {});
-    const pickerError = picker.locator(".picker-error");
     await waitFor("listing error", async () => (await pickerError.count()) === 1, 5000);
     const errorText = (await pickerError.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
     const failedOff = await saveButton.isDisabled().catch(() => false);
@@ -669,6 +713,31 @@ async function networkComputers(o: {
       "…and a folder that lists clears the error and turns Save back on");
     await saveButton.click().catch(() => {});
     expect(await waitFor("saved", () => existsSync(join(saveDir, "x.aive")), 10000), "Save writes x.aive into the folder listed");
+    // An absolute path in the name field does not use the folder shown: it saves to exactly that path even while
+    // the bar names a folder that failed to list.
+    // MUTATION: make confirmSave and canConfirm in pathpicker.tsx wait for folderReady whatever the name → this row fails.
+    const absDir = join(root, "abs-out");
+    mkdirSync(absDir, { recursive: true });
+    const absPath = join(absDir, "y.aive");
+    expect(await waitFor("picker closed", async () => (await picker.count()) === 0, 10000), "…and closes the picker");
+    await a.getByRole("button", { name: /Project/ }).click().catch(() => {});
+    await a.getByRole("menuitem", { name: /^Save As/ }).click().catch(() => {});
+    expect(await waitFor("picker again", async () => (await picker.count()) === 1 && (await pathBar.inputValue().catch(() => "")) !== "", 10000), "Save As opens the picker again");
+    let absRefused = 0;
+    await a.route(fsList, async (route) => {
+      absRefused++;
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false, error: `Not found: ${missing}` }) }).catch(() => {});
+    });
+    await pathBar.fill(missing).catch(() => {});
+    await pathBar.press("Enter").catch(() => {});
+    await waitFor("listing error again", async () => (await pickerError.count()) === 1, 5000);
+    await a.unroute(fsList);
+    await nameField.fill(absPath).catch(() => {});
+    const absOn = await saveButton.isEnabled().catch(() => false);
+    await nameField.press("Enter").catch(() => {});
+    expect(absRefused > 0 && absOn && await waitFor("saved by path", () => existsSync(absPath), 10000)
+      && !existsSync(join(saveDir, "y.aive")),
+      `…and an absolute path typed in the name field saves to exactly that path while the bar's folder fails to list (Save ${absOn ? "enabled" : "disabled"}, ${existsSync(absPath) ? "written" : "not written"})`);
     expect(picked.every((b) => !b.includes("zr-evil.invalid")) && !listed("zr-evil.invalid"), `/api/media-servers/picked got no zr-evil.invalid path (${picked.join(" | ") || "no call"}); the store is unchanged`);
 
     // Plan 9.6 step 6: added outside ZedMix.

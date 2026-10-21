@@ -553,8 +553,10 @@ async function main(): Promise<void> {
   check(Number.isFinite(ANLMDN_PROBE_TIMEOUT_MS) && ANLMDN_PROBE_TIMEOUT_MS > 0 && (envMs !== undefined || ANLMDN_PROBE_TIMEOUT_MS === 15_000),
     `the anlmdn probe has a time limit: ${ANLMDN_PROBE_TIMEOUT_MS} ms (${envMs === undefined ? "the default, 15 s" : `AIVE_ANLMDN_PROBE_TIMEOUT_MS=${envMs}`})`);
   const notDefault = ["", "0", "-1", "99", "600001", "1.5", "abc", "Infinity"].filter((s) => anlmdnProbeTimeoutMs(s) !== 15_000);
-  check(anlmdnProbeTimeoutMs(undefined) === 15_000 && anlmdnProbeTimeoutMs("500") === 500 && notDefault.length === 0,
-    `…AIVE_ANLMDN_PROBE_TIMEOUT_MS is used only as a whole 100 – 600,000 ms, 0 and anything else give 15 s (pure${notDefault.length ? `; not 15 s: ${notDefault.map((s) => JSON.stringify(s)).join(", ")}` : ""})`);
+  // MUTATION: change `ms >= 100` to `ms > 100`, or `ms <= 600_000` to `ms < 600_000`, in executor.ts → this row fails.
+  const ends = ["100", "600000"].filter((s) => anlmdnProbeTimeoutMs(s) !== Number(s));
+  check(anlmdnProbeTimeoutMs(undefined) === 15_000 && anlmdnProbeTimeoutMs("500") === 500 && notDefault.length === 0 && ends.length === 0,
+    `…AIVE_ANLMDN_PROBE_TIMEOUT_MS is used only as a whole 100 – 600,000 ms, 0 and anything else give 15 s (pure${notDefault.length ? `; not 15 s: ${notDefault.map((s) => JSON.stringify(s)).join(", ")}` : ""}${ends.length ? `; ends not used: ${ends.join(", ")}` : ""})`);
   // MUTATION: drop the probe's timeout, or its killSignal (execa then waits 5 s before SIGKILL) → the probeAnlmdn row
   // fails. Have anlmdnWorks() pass no time limit (or 0) to probeAnlmdn → the anlmdnWorks row fails ("still waiting").
   if (process.platform !== "win32") {
