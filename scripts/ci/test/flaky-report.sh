@@ -65,14 +65,16 @@ ok "says nothing flaked" 'grep -q "no flaky suites" "$W/$c/out.txt"'
 c=nonflaky; echo "== $c: files hold other lines only"; flaky 7.1 'MATRIX shard 1/3: 17/17 passed' 'FAIL x (first exit 1, rerun 1)'; run $c
 ok "exit 0, no issue call" '[ "$(last)" = "exit 0" ] && [ "$(calls)" = 0 ]'
 
-c=existing; echo "== $c: an open tracking issue exists"; flaky 9.0 "$L90"; flaky 7.1 "$L71"; : > "$W/$c/in/flaky-4.4.txt"
+c=existing; echo "== $c: an open tracking issue exists (9.0 has two flaky suites among other lines)"
+flaky 9.0 'MATRIX shard 2/3: 17/17 passed' "$L90" "$L71"; flaky 7.1 "$L71"; : > "$W/$c/in/flaky-4.4.txt"
 run $c STUB_ISSUES="$OPEN12"
 ok "exit 0" '[ "$(last)" = "exit 0" ]'
 ok "lists open issues once, creates none" '[ "$(called list)" = 1 ] && [ "$(called create)" = 0 ]'
 ok "comments on #12 once" '[ "$(called comment)" = 1 ] && grep -q "^issue comment 12 --repo o/r " "$W/$c/state/calls.txt"'
 ok "list asks for open issues only" 'grep -q "^issue list --repo o/r --state open " "$W/$c/state/calls.txt"'
-ok "comment counts 2 suites" 'body | grep -q "^\*\*2 flaky suites\*\* in \[FFmpeg matrix run 7\](https://github.com/o/r/actions/runs/7) on \`0123456\` (push, "'
-ok "lines carry their version, in version order" '[ "$(body | grep "^FFmpeg ")" = "$(printf "FFmpeg 7.1: %s\nFFmpeg 9.0: %s" "$L71" "$L90")" ]'
+ok "comment counts 3 suites" 'body | grep -q "^\*\*3 flaky suites\*\* in \[FFmpeg matrix run 7\](https://github.com/o/r/actions/runs/7) on \`0123456\` (push, "'
+ok "lines carry their version, in version order" '[ "$(body | grep "^FFmpeg ")" = "$(printf "FFmpeg 7.1: %s\nFFmpeg 9.0: %s\nFFmpeg 9.0: %s" "$L71" "$L90" "$L71")" ]'
+ok "keeps every FLAKY line of a file, drops its other lines" '[ "$(body | grep -c "^FFmpeg 9.0: ")" = 2 ] && ! body | grep -q "MATRIX shard"'
 ok "comment names the logs" 'body | grep -q "ffmpeg-matrix-<version>"'
 
 c=one; echo "== $c: one suite"; flaky 6.1 "$L71"; run $c STUB_ISSUES="$OPEN12"

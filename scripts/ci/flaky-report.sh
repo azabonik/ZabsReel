@@ -42,7 +42,7 @@ open="$("$GH" issue list --repo "$GH_REPO" --state open --limit 200 --json numbe
 num="$(printf '%s\n' "$open" | grep -E '^[0-9]+$' | sort -n | head -1)"
 if [ -z "$num" ]; then
   cat > "$W/intro.md" <<'EOF'
-The FFmpeg matrix (`.github/workflows/ffmpeg-matrix.yml`) reruns a failed suite once. A suite that passes its rerun is FLAKY: the job stays green, and each run on main (push or the weekly run) adds a comment here naming every flaky suite, with its FFmpeg version and the run. Every flaky suite is investigated; close this issue when none is left open.
+The FFmpeg matrix (`.github/workflows/ffmpeg-matrix.yml`) reruns a failed suite once. A suite that passes its rerun is FLAKY: the job stays green, and each run on main (a push, the weekly run or a manual run) adds a comment here naming every flaky suite, with its FFmpeg version and the run. Every flaky suite is investigated; close this issue when none is left open.
 EOF
   url="$("$GH" issue create --repo "$GH_REPO" --title "$TITLE" --body-file "$W/intro.md")" || { echo "flaky-report: creating the issue failed"; exit 1; }
   num="${url##*/}"
