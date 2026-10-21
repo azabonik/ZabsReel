@@ -19,6 +19,7 @@ Every check is recorded on every path, so CHECKS is exact.
 import os
 
 import driver as drv
+from driver import refused
 import observe
 
 PORT_BOUND = True
@@ -29,15 +30,6 @@ PICK = "zr-pick.invalid"
 ASK = "zr-ask.invalid"
 KEEP = "zr-keep.invalid"
 REMOVE = "zr-remove.invalid"
-
-
-def refused(fn):
-    """(refused?, what happened): refused = the editor answered with an error (product_error or bad_request)."""
-    try:
-        r = fn()
-        return False, f"accepted: {str(r)[:200]}"
-    except (drv.ProductError, drv.BadRequest) as e:
-        return True, f"refused: {e.message[:200]}"
 
 
 def asset_of(d, path):
@@ -82,7 +74,8 @@ def run(t):
             and not any(x != x.lower() for x in h["approved"]), h)
     d.recheck_media()
     x = asset_of(d, net_path)
-    t.check("after a re-check its media no longer waits", x is not None and not x.get("waiting_host"), x, needs=cr)
+    t.check("after a re-check its media no longer waits", x is not None and "waiting_host" in x
+            and x["waiting_host"] is None, x, needs=cr)
     d.approve_host(PICK)
     h = d.list_hosts()
     t.check("allowing it again keeps one entry", h["approved"].count(PICK) == 1, h)

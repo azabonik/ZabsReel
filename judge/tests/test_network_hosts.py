@@ -5,8 +5,8 @@ packages/core/scripts/smoke-unc-e2e.ts (judge/PORTING.md has the map of its sect
 The computers are under the reserved .invalid domain (zr-evil-N.invalid, never resolvable). On Linux a path such as
 //zr-evil-1.invalid/s/a1.mp4 is also a local path that does not exist, so the only sign that the editor tried to open
 it is the file-system call itself: the adapter and everything it starts run under `strace -f -e trace=%file`
-(t.driver(trace=True)), and the test searches that trace for the computers' names (observe.trace_hits; argv is never
-looked at). Without strace on the system the trace checks are recorded as not observed (run.py --require-trace fails
+(t.driver(trace=True)), and the test searches that trace for the computers' names (observe.trace_hits on t.trace, the
+lines the test process read while the editor ran; argv is never looked at). Without strace on the system the trace checks are recorded as not observed (run.py --require-trace fails
 them).
 
 The hostile project is the editor's own saved project with its media paths replaced by network paths
@@ -23,11 +23,13 @@ import shutil
 import time
 
 import driver as drv
+from driver import refused
 import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
 CHECKS = 41
+ABSENT = "(no waiting_host)"  # an asset without the field (PROTOCOL.md: a check that needs it fails)
 BIG = 1 << 20  # a new file this large during the agent tool calls is a download (models are 13 to 150 MB)
 
 
@@ -46,30 +48,23 @@ LOOKALIKES = [f"\\\\{x}\\s\\a.mp4" for x in LOOKALIKE_HOSTS]
 FRAMES_Q = {"from": "0", "count": "1", "w": "8", "h": "8", "fps": "30"}
 
 
-def refused(fn):
-    """(refused?, what happened): refused = the editor answered with an error (product_error or bad_request)."""
-    try:
-        r = fn()
-        return False, f"accepted: {str(r)[:160]}"
-    except (drv.ProductError, drv.BadRequest) as e:
-        return True, f"refused: {e.message[:160]}"
-
-
 def sha(paths):
     return {p: (observe.sha256(p) if os.path.isfile(p) else None) for p in paths}
 
 
 class Trace:
-    """The adapter tree's file-system trace, or not observed when strace is missing."""
+    """The adapter tree's file-system trace (t.trace: the lines the test process read while the editor ran), or not
+    observed when strace is missing. When the trace cannot be trusted (a line not of strace's form, or the trace ended
+    before stop: TraceTail.tampered), every trace check fails with that reason."""
 
     def __init__(self, t):
-        self.path = t.trace_path
+        self.src = t.trace
 
     def mark(self):
-        return len(observe.trace_lines(self.path)) if self.path else 0
+        return len(observe.trace_lines(self.src)) if self.src else 0
 
     def hits(self, names, start=0):
-        return observe.trace_hits(self.path, names, start) if self.path else []
+        return observe.trace_hits(self.src, names, start) if self.src else []
 
     def settle(self, d, limit=30):
         """Waits (at most `limit` s) until the editor runs no job and the trace stops growing for a second: work the
@@ -84,8 +79,10 @@ class Trace:
         return False
 
     def check(self, t, name, ok_fn, detail_fn, needs=()):
-        if not self.path:
-            t.not_observed(name, "strace is not installed")
+        if not self.src:
+            t.not_observed(name, t.trace_why or "strace is not installed")
+        elif self.src.tampered:
+            t.check(name, False, self.src.tampered, needs=needs)
         else:
             t.check(name, ok_fn(), detail_fn(), needs=needs)
 
@@ -143,11 +140,12 @@ def run(t):
     t.check("the crafted project loads", loaded, str(notice)[:300], needs=cr)
     st = d.get_state()
     by_path = {a.get("path"): a for a in st.get("assets", [])}
-    waits = {n: (by_path.get(net[n]) or {}).get("waiting_host") for n in SPELL}
+    waits = {n: (by_path.get(net[n]) or {}).get("waiting_host", ABSENT) for n in SPELL}
     loc = by_path.get(local) or {}
     t.check("each network asset waits for its own computer; the local one waits for none",
             all(waits[n] == H(n) and (by_path.get(net[n]) or {}).get("offline") is True for n in SPELL)
-            and loc.get("waiting_host") is None and loc.get("offline") is False, f"{waits}; local {loc}", needs=cr)
+            and loc.get("waiting_host", ABSENT) is None and loc.get("offline") is False, f"{waits}; local {loc}",
+            needs=cr)
     h = d.list_hosts()
     t.check("each computer is pending once, nothing is allowed",
             all(h["pending"].count(H(n)) == 1 for n in SPELL) and not h["approved"], h, needs=cr)
@@ -309,7 +307,7 @@ def run(t):
     d.recheck_media()
     st = d.get_state()
     by_path = {a.get("path"): a for a in st.get("assets", [])}
-    waits = {n: (by_path.get(net[n]) or {}).get("waiting_host") for n in SPELL}
+    waits = {n: (by_path.get(net[n]) or {}).get("waiting_host", ABSENT) for n in SPELL}
     t.check(f"after the user allows {H(1)} and a re-check, its asset no longer waits; the others still do",
             waits == {1: None, 2: H(2), 3: H(3), 4: H(4)}, waits, needs=cr)
     a1_id = (by_path.get(net[1]) or {}).get("id", "")
@@ -326,7 +324,7 @@ def run(t):
     by_path = {a.get("path"): a for a in st.get("assets", [])}
     h = d.list_hosts()
     t.check(f"keeping {H(3)} in the window brings its asset online; {H(4)} (forged) still waits and stays outside",
-            (by_path.get(net[3]) or {}).get("waiting_host") is None
+            (by_path.get(net[3]) or {}).get("waiting_host", ABSENT) is None
             and (by_path.get(net[4]) or {}).get("waiting_host") == H(4) and h["outside"] == [H(4)]
             and H(4) not in h["approved"], f"{h}", needs=cr)
 
@@ -334,7 +332,7 @@ def run(t):
     if not refused(lambda: d.import_otio(otio5))[0]:
         d.approve_host(H(5))
         d.recheck_media()
-        w5 = [a.get("waiting_host") for a in d.get_state().get("assets", [])]
+        w5 = [a.get("waiting_host", ABSENT) for a in d.get_state().get("assets", [])]
     t.check(f"the OTIO's placeholders stop waiting once {H(5)} is allowed", len(w5) >= 5 and not any(w5), w5,
             needs=cr5)
 

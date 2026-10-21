@@ -145,6 +145,18 @@
       ],
       "count": 8,
       "reason": "smoke-brand checks the LEGACY block in all three brand files and the ~/.zabsreel/data fallback."
+    },
+    {
+      "id": "A15",
+      "file": "judge/adapters/v020/adapter.py",
+      "literal": [
+        "x-zabsreel-shell"
+      ],
+      "patterns": [
+        "zabsreel"
+      ],
+      "count": 2,
+      "reason": "The judge's v0.2.0 adapter sends the web shell's key under the v0.2.0 release's header name too (its docstring and SHELL_HEADERS)."
     }
   ]
 }

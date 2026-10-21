@@ -25,7 +25,8 @@ web shell (<build>/apps/desktop/web/server.cjs --port 0 --no-open) with the sand
 the running core's port, so it attaches to that core; it refuses to go on when the shell reports another core or a
 core of its own. The shell needs the renderer built (apps/desktop/dist/renderer: `npm run build` makes it). Its key
 header was renamed with the product, so every request sends the key as x-zedmix-shell and as x-zabsreel-shell (the
-v0.2.0 release's name). Only the shell's JSON "ready" line is read; its port comes back in the operation's `ports`.
+v0.2.0 release's name). Only the shell's JSON "ready" line is read; its port comes back in the `ports` of the
+operation's answer, or of the next ok answer (stop's included) when that operation was refused.
 add_host_outside writes the editor's allowed-computers store (<data>/trust/hosts.json, and hosts.key when there is
 none yet) the way a hand edit would: on purpose, as the attacker that PROTOCOL.md describes.
 """
@@ -308,6 +309,7 @@ class Adapter:
         self.shell = None        # the web shell (Popen) once approve_host / revoke_host started it
         self.shell_port = None
         self.shell_key = None
+        self.unreported_ports = []  # ports opened during an operation whose answer was not ok (handle() reports them)
         self.texts = []          # every text the editor answered since start (transcript)
 
     def note(self, text):
@@ -706,9 +708,10 @@ class Adapter:
     # v0.2.0 allows a network computer only from its window (the desktop app, or the web shell with its shell key); no
     # MCP tool can. approve_host and revoke_host go through the web shell, started on first use (see the docstring).
     def _shell_start(self):
-        """Starts the web shell attached to the running core. Returns the list of ports it opened ([] if running)."""
+        """Starts the web shell attached to the running core. Its port goes on unreported_ports, which handle() puts in
+        the next ok answer of any operation (stop's too), also when the operation that started it was refused."""
         if self.shell is not None and self.shell.poll() is None:
-            return []
+            return
         if self.mcp is None or self.env is None:
             raise OpError("adapter_error", "the editor is not started")
         server = os.path.join(self.build, "apps", "desktop", "web", "server.cjs")
@@ -757,7 +760,7 @@ class Adapter:
             self.shell = None
             raise
         self.shell_port, self.shell_key = ready["port"], key
-        return [self.shell_port]
+        self.unreported_ports.append(self.shell_port)
 
     def _shell_post(self, route, body):
         """POST to the web shell with its key: (status, parsed JSON body or {})."""
@@ -790,22 +793,22 @@ class Adapter:
 
     def op_approve_host(self, a):
         host = arg_str(a, "host")
-        ports = self._shell_start()
+        self._shell_start()
         status, j = self._shell_post("/api/media-servers/approve", {"host": host})
         self._shell_answer("/api/media-servers/approve", status, j)
-        return {"ports": ports}
+        return {}
 
     def op_revoke_host(self, a):
         host = arg_str(a, "host")
         only = a.get("only_if_outside", False)
         if not isinstance(only, bool):
             raise bad(f"'only_if_outside' must be true or false, got {only!r}")
-        ports = self._shell_start()
+        self._shell_start()
         status, j = self._shell_post("/api/media-servers/revoke", {"host": host, **({"onlyIfOutside": True} if only else {})})
         self._shell_answer("/api/media-servers/revoke", status, j)
         if not isinstance(j.get("removed"), bool):
             raise OpError("adapter_error", f"revoke answered no 'removed': {json.dumps(j)[:300]}")
-        return {"removed": j["removed"], "ports": ports}
+        return {"removed": j["removed"]}
 
     def op_add_host_outside(self, a):
         """The attacker's edit: an entry in the allowed-computers store that the window did not make. forged: the entry
@@ -929,7 +932,13 @@ def handle(ad, raw):
             raise OpError("unsupported", f"unknown operation {op!r}")
         if not isinstance(args, dict):
             raise bad("args must be an object")
-        return {"id": rid, "ok": True, "result": fn(args)}
+        result = fn(args)
+        if ad.unreported_ports and isinstance(result, dict) and op != "start":
+            # Ports opened by this operation or by an earlier one that was refused (PROTOCOL.md, "Ports"); start's
+            # own ports are its whole list, which the judge reads separately.
+            result = {**result, "ports": list(result.get("ports") or []) + ad.unreported_ports}
+            ad.unreported_ports = []
+        return {"id": rid, "ok": True, "result": result}
     except OpError as e:
         err = {"code": e.code, "message": e.message}
         if e.product_code:
@@ -1038,11 +1047,11 @@ def self_test():
 
         def shell(status, body):
             ad = adapter(lambda n, a: {})
-            ad._shell_start = lambda: []
+            ad._shell_start = lambda: None
             ad._shell_post = lambda route, b: (status, body)
             return ad
         expect("approve_host: 200 answers ok", op(shell(200, {"ok": True}), "approve_host", {"host": "nas"}).get("result"),
-               {"ports": []})
+               {})
         expect("approve_host: a 400 refusal is product_error",
                op(shell(400, {"ok": False, "error": "Not a network computer name."}), "approve_host",
                   {"host": "nas@SSL"})["error"]["code"], "product_error")
@@ -1050,7 +1059,14 @@ def self_test():
                op(shell(401, {"ok": False}), "approve_host", {"host": "nas"})["error"]["code"], "adapter_error")
         expect("revoke_host: removed is passed on",
                op(shell(200, {"ok": True, "removed": False}), "revoke_host", {"host": "nas", "only_if_outside": True})
-               .get("result"), {"removed": False, "ports": []})
+               .get("result"), {"removed": False})
+        ad = shell(400, {"ok": False, "error": "Not a network computer name."})
+        ad._shell_start = lambda: ad.unreported_ports.append(4321)  # the shell starts, then the host is refused
+        first = op(ad, "approve_host", {"host": "nas@SSL"})
+        later = op(ad, "stop", {})
+        expect("a shell started by a refused approve_host: its port comes back in the next ok answer (stop's), once",
+               (first["error"]["code"], later.get("result", {}).get("ports"), ad.unreported_ports),
+               ("product_error", [4321], []))
         class FakeMcp:
             def request(self, method, params, timeout=None):
                 err = params["name"] == "bad"

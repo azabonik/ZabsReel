@@ -18,11 +18,24 @@ started and prints the interrupted JUDGE line. A relative --adapter path works (
 Statuses: a check recorded as not applicable (directly, or through T.check(needs=...) on an input observe.craft could
 not make) passes the run and is counted on the JUDGE line, and fails it with --strict; a check recorded as not
 observed passes and is counted, and fails with --require-trace. The download tripwire: an adapter that starts a DNS
-lookup (a UDP connect to 192.0.2.1 port 53; a UDP connect sends no packet) fails the run's "nothing was downloaded"
-check; one that connects only to 127.0.0.1 and makes a UDP connect elsewhere on another port (a reachability probe,
-no packet) passes it; with strace switched off (JUDGE_STRACE empty) the check is not observed, a failure with
---require-trace. The cases that need strace are skipped without it, unless --require-trace
-is given (judge.yml): then a missing strace fails the self-test.
+lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1 port 9 and writes with write(), sends
+with sendto() to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1 port 80 fails the run's "nothing was
+downloaded" check. The adapter cannot reach the trace: one that starts a DNS lookup and at stop rewrites, empties or
+deletes every file it can reach (the scratch folder, and the logs next to it with the copy of the trace), or one
+that writes a partial strace line to every descriptor it holds, to strace's descriptors through /proc and to those
+files and then overwrites the lookup's port in those files, still fails the check on the lookup itself, and its open
+of strace's trace channel (a socket) through /proc is refused (ENXIO). One that ends strace fails the check (the
+trace ended before stop). One that leaves a traced child running at stop that starts a DNS lookup once strace no
+longer traces it fails the run: the test process's sweep ends it (left running after stop), or, with an empty
+environment the sweep cannot read, the trace does not end and the download check fails. A line that is not of strace's form (text
+joined to an strace line, a line cut short) fails the line check; real strace lines pass it. An adapter that asks
+for an io_uring is refused one (strace injects ENOSYS). One that makes a UDP connect to 127.0.0.1 and Chromium's IPv6
+probe ([2001:4860:4860::8888]:443, no packet) passes the check. With strace switched off (JUDGE_STRACE empty) the
+check is not observed, a failure with --require-trace; a JUDGE_STRACE that runs its command without tracing it is
+not used (the check is not observed), and with --require-trace it fails the run, as does a JUDGE_STRACE that is a
+symbolic link in a folder this user can write (without --require-trace its real path runs). The cases that need
+strace are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the
+self-test.
 """
 import json
 import os
@@ -101,10 +114,19 @@ TESTS = {
 # the descriptors it holds, then tries to open every descriptor of the test process (its nearest ancestor started
 # with --child; strace may sit between them) and of the runner (that process's parent) for writing through
 # /proc/<pid>/fd, writes a passing record through any it opens, and reports each attempt in procfd.json in its scratch
-# folder; "connect" starts a DNS lookup at start (a UDP connect to 192.0.2.1, TEST-NET-1, port 53: a UDP connect sends
-# no packet) and "loopback" makes a UDP connect to 127.0.0.1 and one to 192.0.2.1 port 443 (a reachability probe, which
-# observe.net_hits does not count).
-FAKE = r'''import json, os, socket, subprocess, sys
+# folder. At start, "connect" starts a DNS lookup (a UDP connect to 192.0.2.1, TEST-NET-1, port 53), "udp" makes a UDP
+# connect to 192.0.2.1 port 9 and sends with write() (not a traced call), "udpsend" sends with sendto() to 192.0.2.1
+# port 9 on an unconnected socket, "tcp" starts a non-blocking TCP connect to 192.0.2.1 port 80, "uring" asks for an
+# io_uring and refuses start when it gets one, "rewrite", "truncate" and "unlink" start a DNS lookup and at stop
+# rewrite every file under the scratch folder and every log next to it (the test process's copy of the trace) without
+# it (padded to more than its old length), empty them or delete them, "inject" writes a partial strace line to every
+# descriptor it holds (but 0 and 1), to strace's descriptors through /proc and to those files, then starts a DNS
+# lookup and overwrites its port in place in those files, "killstrace" ends strace (its parent) and then starts a
+# DNS lookup, "outlive" and "outlivehidden" leave a child running at stop (OUTLIVE) that waits until strace no longer
+# traces it and then starts a DNS lookup ("outlivehidden" with an empty environment, which the sweep cannot find), and
+# "loopback" makes a UDP connect to 127.0.0.1 and one to [2001:4860:4860::8888]:443 (Chromium's reachability
+# probe, which observe.net_hits allows).
+FAKE = r'''import errno, json, os, socket, subprocess, sys, time
 proto, mode = int(sys.argv[1]), sys.argv[2]
 scratch = None
 FORGED = json.dumps({"check": "forged", "ok": True, "detail": ""}) + "\n"
@@ -170,6 +192,148 @@ def procfd():
     with open("procfd.json", "w") as f:
         json.dump(report, f)
 
+def udp(family, addr, send=None):
+    try:
+        s = socket.socket(family, socket.SOCK_DGRAM)
+    except OSError:
+        return  # no IPv6 here
+    try:
+        if send is None:
+            s.connect(addr)
+            if mode == "udp":
+                os.write(s.fileno(), b"x")  # write() on a connected UDP socket: not a traced call
+        else:
+            s.sendto(send, addr)
+    except OSError:
+        pass  # no route (a network namespace without one): the call is still traced
+    s.close()
+
+def logs():
+    """Every file under the scratch folder, and every log next to it (the test process's copy of the trace)."""
+    found = [os.path.join(d, n) for d, _, files in os.walk(scratch) for n in files]
+    parent = os.path.dirname(scratch)
+    return found + [os.path.join(parent, n) for n in os.listdir(parent) if n.endswith(".log")]
+
+def tamper(mode):
+    """At stop: every file the adapter can reach (logs()) rewritten without the DNS lookup's line (padded to more than
+    its old length), emptied, or deleted."""
+    for log in logs():
+        try:
+            if mode == "unlink":
+                os.unlink(log)
+                continue
+            with open(log, "r", encoding="latin-1") as f:
+                kept = [ln for ln in f if "htons(53)" not in ln]
+            with open(log, "w", encoding="latin-1") as f:
+                if mode == "rewrite":
+                    f.write("".join(kept) + "0 getpid() = 0\n" * 400)
+        except OSError:
+            pass
+
+PARTIAL = b'0 open(""'  # a line strace never ends this way: the next line written after it would join it
+
+def strace_fds():
+    """Descriptors of the processes between this adapter and the test process (strace), as /proc paths; not 0 and 1
+    (the protocol's pipes)."""
+    out, pid = [], os.getppid()
+    while pid > 1:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"--child" in f.read().split(b"\0"):
+                break
+        out += [f"/proc/{pid}/fd/{n}" for n in range(2, 64)]
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            pid = int(f.read().rsplit(b")", 1)[1].split()[1])
+    return out
+
+def inject():
+    """Before the DNS lookup: PARTIAL, without a newline, written to every place the adapter can reach: its own
+    descriptors but 0 and 1, strace's descriptors through /proc, and logs(). What it reached is in inject.json."""
+    reached = {}
+    for fd in range(2, 64):
+        try:
+            os.write(fd, PARTIAL)
+            reached[f"fd {fd}"] = "written"
+        except OSError as e:
+            reached[f"fd {fd}"] = errno.errorcode.get(e.errno, type(e).__name__)
+    for path in strace_fds() + logs():
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK)
+        except OSError as e:
+            reached[path] = errno.errorcode.get(e.errno, type(e).__name__)
+            continue
+        try:
+            os.write(fd, PARTIAL)
+            reached[path] = "written"
+        except OSError as e:
+            reached[path] = errno.errorcode.get(e.errno, type(e).__name__)
+        os.close(fd)
+    with open(os.path.join(scratch, "inject.json"), "w") as f:
+        json.dump(reached, f)
+
+def overwrite():
+    """After the DNS lookup: its port, overwritten in place (same size) in every file the adapter can reach."""
+    for log in logs():
+        try:
+            with open(log, "r+b") as f:
+                data = f.read()
+                if b"htons(53)" in data:
+                    f.seek(0)
+                    f.write(data.replace(b"htons(53)", b"htons(54)"))
+        except OSError:
+            pass
+
+def net(mode):
+    if mode == "killstrace":  # strace (this adapter's parent) ended: the lookup after it is not traced
+        os.kill(os.getppid(), 9)
+        time.sleep(0.5)
+        udp(socket.AF_INET, ("192.0.2.1", 53))
+    elif mode in ("connect", "rewrite", "truncate", "unlink", "inject"):
+        if mode == "inject":
+            inject()
+        udp(socket.AF_INET, ("192.0.2.1", 53))
+        if mode == "inject":
+            for _ in range(50):  # the copy of the trace gets the line a moment after the call
+                overwrite()
+                time.sleep(0.01)
+    elif mode == "loopback":
+        udp(socket.AF_INET, ("127.0.0.1", 443))
+        udp(socket.AF_INET6, ("2001:4860:4860::8888", 443))
+    elif mode == "udp":
+        udp(socket.AF_INET, ("192.0.2.1", 9))
+    elif mode == "udpsend":
+        udp(socket.AF_INET, ("192.0.2.1", 9), send=b"x")
+    elif mode == "tcp":
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setblocking(False)
+        try:
+            s.connect(("192.0.2.1", 80))
+        except OSError:
+            pass  # in progress, or no route: the call is still traced
+        s.close()
+    elif mode == "uring":
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        params = ctypes.create_string_buffer(120)
+        fd = libc.syscall(425, 1, params)  # io_uring_setup (x86_64 and aarch64)
+        if fd >= 0:
+            os.close(fd)
+            return "got an io_uring: the trace did not refuse it"
+
+# A child left running at stop: it waits until strace no longer traces it (strace ended), then starts a DNS lookup.
+OUTLIVE = """import socket, time
+deadline = time.time() + 120
+while time.time() < deadline:
+    with open("/proc/self/status") as f:
+        if [ln for ln in f if ln.startswith("TracerPid:")][0].split()[1] == "0":
+            break
+    time.sleep(0.1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("192.0.2.1", 53))
+except OSError:
+    pass
+"""
+
 for line in sys.stdin:
     req = json.loads(line)
     op, args = req["op"], req.get("args") or {}
@@ -182,18 +346,22 @@ for line in sys.stdin:
             forge()
         if mode == "procfd":
             procfd()
-        targets = {"connect": [("192.0.2.1", 53)], "loopback": [("127.0.0.1", 443), ("192.0.2.1", 443)]}
-        for addr in targets.get(mode, []):
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                s.connect(addr)
-            except OSError:
-                pass  # no route (a network namespace without one): the call is still traced
-            s.close()
+        why = net(mode)
+        if why:
+            print(json.dumps({"id": req["id"], "ok": False, "error": {"code": "product_error", "message": why}}),
+                  flush=True)
+            continue
     elif op == "stop":
         res = {}
+        if mode in ("rewrite", "truncate", "unlink"):
+            tamper(mode)
         if mode == "leak":
             subprocess.Popen(["sleep", "300"], start_new_session=True)  # inherits this adapter's environment
+        if mode in ("outlive", "outlivehidden"):
+            c = subprocess.Popen([sys.executable, "-I", "-c", OUTLIVE], start_new_session=True,
+                                 env={} if mode == "outlivehidden" else None)
+            with open(os.path.join(scratch, mode + ".pid"), "w") as f:
+                f.write(str(c.pid))
         if mode == "forge":
             forge()
     else:
@@ -205,6 +373,10 @@ if mode == "forge":
 '''
 
 FAKE_ADAPTER = "fake_adapter.py"
+# A fake strace: it skips its options and runs the command after "--" without tracing it (what a build step could name
+# through JUDGE_STRACE in $GITHUB_ENV).
+FAKE_STRACE = "fake_strace.sh"
+FAKE_STRACE_SH = '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n'
 
 
 def _alive(pid):
@@ -215,11 +387,26 @@ def _alive(pid):
         return False
 
 
-def strace_here():
-    """Whether the runner will trace (run.strace(): JUDGE_STRACE, else strace on PATH, and it can trace a child)."""
+def run_strace_path():
+    """The real path of the strace the runner uses (run.strace())."""
     sys.path.insert(0, JUDGE)
     import run
-    return run.strace() is not None
+    return run.strace(False)
+
+
+def run_left():
+    """The name of the test process's check on processes left running after stop (run.LEFT_CHECK)."""
+    sys.path.insert(0, JUDGE)
+    import run
+    return run.LEFT_CHECK
+
+
+def strace_here(require_trace=False):
+    """Whether the runner will trace (run.strace(): JUDGE_STRACE, else strace on PATH, it records a child's network
+    call, and with --require-trace this user cannot write it)."""
+    sys.path.insert(0, JUDGE)
+    import run
+    return run.strace(require_trace) is not None
 
 
 class SelfTest:
@@ -234,6 +421,10 @@ class SelfTest:
                 f.write(HEAD + body)
         with open(os.path.join(self.tmp, FAKE_ADAPTER), "w", encoding="utf-8") as f:
             f.write(FAKE)
+        self.fake_strace = os.path.join(self.tmp, FAKE_STRACE)
+        with open(self.fake_strace, "w", encoding="utf-8") as f:
+            f.write(FAKE_STRACE_SH)
+        os.chmod(self.fake_strace, 0o755)
         self.failures = 0
 
     def runner(self, case, adapter=None, extra=()):
@@ -295,6 +486,32 @@ class SelfTest:
         if not ok:
             self.failures += 1
 
+    def inject(self):
+        """The inject adapter's report: strace's trace channel (its stderr, a socket) refused every open through /proc
+        (ENXIO), and nothing the adapter wrote reached the trace (the case above: the hit comes first)."""
+        rep = None
+        for d, _, files in os.walk(os.path.join(self.tmp, "scratch")):
+            if os.path.basename(d) == "test_driver" and "inject.json" in files:
+                with open(os.path.join(d, "inject.json"), encoding="utf-8") as f:
+                    rep = json.load(f)
+        problems = []
+        if rep is None:
+            problems.append("no inject.json report")
+        else:
+            fd2 = {k: v for k, v in rep.items() if k.startswith("/proc/") and k.endswith("/fd/2")}
+            if not fd2 or any(v != "ENXIO" for v in fd2.values()):
+                problems.append(f"strace's stderr through /proc: {fd2}")
+        ok = not problems
+        print(f"{'ok  ' if ok else 'FAIL'} the adapter cannot open strace's trace channel through /proc"
+              + (f"; {problems}" if problems else ""), flush=True)
+        if not ok:
+            self.failures += 1
+
+    def unit(self, name, ok, detail=""):
+        print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f"; {detail}" if not ok and detail else ""), flush=True)
+        if not ok:
+            self.failures += 1
+
     def pids_in(self, case, name):
         for d, _, files in os.walk(os.path.join(self.tmp, "scratch")):
             if os.path.basename(d) == f"test_{case}" and name in files:
@@ -350,7 +567,7 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
     s = SelfTest(run_py, parent, allow_unprotected)
     py = f"{shlex.quote(sys.executable)} -I -B"
     fail = r"^FAIL  test_{}: {}"
-    traced = strace_here()
+    traced = strace_here(require_trace)
     net = re.escape("nothing was downloaded: ")
 
     def drv(passed, total):
@@ -390,7 +607,8 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
         s.run("driver", 1, [fail.format("driver", "the adapter speaks protocol 1  -- hello says protocol 2"),
                             fail.format("driver", "the test ran to its end")],
               adapter=f"{py} {FAKE_ADAPTER} 2 plain", label="adapter speaks protocol 2")
-        out = s.run("driver", 1, [fail.format("driver", "nothing left running after the test  -- \\d+ sleep 300")],
+        left = fail.format("driver", "nothing (the adapter started is )?left running after (the test|stop)  -- ")
+        out = s.run("driver", 1, [left + "\\d+ sleep 300"],
                     adapter=f"{py} {FAKE_ADAPTER} 1 leak", label="adapter leaves a process at stop")
         s.still_running("adapter leak", [int(x) for x in re.findall(r"-- (\d+) sleep 300", out)])
         s.run("forge", 1, [fail.format("forge", "a check the editor fails"), drv(2, 3)],
@@ -420,19 +638,105 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
                                 r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 connect",
                   label="the adapter starts a DNS lookup: the download check fails")
+            for mode, dest, what in (
+                    ("udp", r"htons\(9\).*192\.0\.2\.1", "a UDP connect to 192.0.2.1 port 9 and a write()"),
+                    ("udpsend", r"sendto\(.*htons\(9\).*192\.0\.2\.1", "a UDP sendto() to 192.0.2.1 port 9"),
+                    ("tcp", r"htons\(80\).*192\.0\.2\.1", "a TCP connect to 192.0.2.1 port 80")):
+                s.run("driver", 1, [fail.format("driver", net + ".*" + dest), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                      adapter=f"{py} {FAKE_ADAPTER} 1 {mode}", label=f"the adapter makes {what}: the download check fails")
+            # The adapter cannot reach the trace: whatever it does to the files it can reach, the check fails on the
+            # DNS lookup itself (the detail starts with the hit, no other reason comes first).
+            hit = net + r"[^\n]*?  -- \[\"\d+ connect\([^\n]*htons\(53\)[^\n]*192\.0\.2\.1"
+            for mode, what in (
+                    ("rewrite", "rewrites every file it can reach without the line, padded"),
+                    ("truncate", "empties every file it can reach"),
+                    ("unlink", "deletes every file it can reach")):
+                s.run("driver", 1, [fail.format("driver", hit), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                      adapter=f"{py} {FAKE_ADAPTER} 1 {mode}",
+                      label=f"the adapter starts a DNS lookup and at stop {what}: the hit is still seen")
+            s.run("driver", 1, [fail.format("driver", hit), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 inject", extra=("--keep",),
+                  label="the adapter writes a partial line everywhere it can, then starts a DNS lookup and "
+                        "overwrites its port in place: the hit is still seen")
+            s.inject()
+            s.run("driver", 1, [fail.format("driver", net + r".*  -- the trace ended before the editor was asked to "
+                                            r"stop"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 killstrace",
+                  label="the adapter ends strace, then starts a DNS lookup: the download check fails")
+            # A traced child that outlives stop: the trace ends only after it has ended. Found by the sweep (it
+            # carries the scratch folder), it is ended and named; with an empty environment it is not found, and the
+            # trace that does not end fails the download check. Either way the DNS lookup it starts once strace no
+            # longer traces it cannot pass the run.
+            s.run("driver", 1, [fail.format("driver", re.escape(run_left()) + r"  -- \d+ \S+ -I -c ")],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 outlive", extra=("--keep",),
+                  label="the adapter leaves a traced child at stop: the test's sweep ends it and the run fails")
+            s.still_running("outliving child", s.pids_in("driver", "outlive.pid"))
+            s.run("driver", 1, [fail.format("driver", net + r".*  -- the trace did not end within \d+ s of stop: a "
+                                            r"traced process outlived stop"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 outlivehidden", extra=("--keep",),
+                  label="the adapter leaves a traced child with an empty environment at stop: the trace does not "
+                        "end and the download check fails")
+            s.still_running("outliving child with an empty environment", s.pids_in("driver", "outlivehidden.pid"))
+            s.run("driver", 0, [r"^PASS  test_driver: the fixture editor started", r"^PASS  test_driver: " + net,
+                                r"^JUDGE: 4/4 passed( UNPROTECTED|$)"], adapter=f"{py} {FAKE_ADAPTER} 1 uring",
+                  label="the adapter asks for an io_uring: strace refuses it (the fixture refuses start if it gets one)")
             s.run("driver", 0, [r"^PASS  test_driver: " + net, r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 loopback",
-                  label="the adapter connects to 127.0.0.1 and makes a UDP probe that sends no packet: the check passes")
+                  label="the adapter makes a UDP connect to 127.0.0.1 and Chromium's IPv6 probe: the check passes")
+            # JUDGE_STRACE through a symbolic link in a folder this user can write: with --require-trace it is not
+            # used (the link could be pointed elsewhere after the check); without, its real path is what runs.
+            link = os.path.join(s.tmp, "strace-link")
+            os.symlink(run_strace_path(), link)
+            s.run("driver", 1, [fail.format("driver", net + ".*a failure with --require-trace: strace .*strace-link is "
+                                            "not used with --require-trace: .*strace-link is a symbolic link in a "
+                                            "folder this user can write"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", env={"JUDGE_STRACE": link}, extra=("--require-trace",),
+                  label="a JUDGE_STRACE symbolic link in a folder this user can write, with --require-trace: refused")
+            s.run("driver", 0, [r"^judge: trace with " + re.escape(run_strace_path()) + r"( |$)",
+                                r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", env={"JUDGE_STRACE": link},
+                  label="a JUDGE_STRACE symbolic link without --require-trace: its real path runs")
         else:
             print(f"{'FAIL' if require_trace else 'skip'} the download tripwire cases: strace is not installed"
                   + (" (--require-trace)" if require_trace else ""), flush=True)
             s.failures += bool(require_trace)
+        # The form of an strace line (observe.strace_line_problem): text joined to strace's own line in front or in
+        # the middle cannot hide a call.
+        sys.path.insert(0, JUDGE)
+        import observe
+        real = ('1234 connect(3<UDP:[5]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("192.0.2.1")}, '
+                '16) = 0')
+        good = [real, '7 openat(AT_FDCWD</a>, "/dev/null", O_RDONLY) = 3</dev/null<char 1:3>>',
+                '7 openat(AT_FDCWD</a>, "a\\"b<c>d 12 connect(\\\\x\\n", O_RDWR) = 3</a/a\\"b\\74c\\76d 12 connect(>',
+                '7 sendto(3<UDP:[10.0.0.2:5->192.0.2.1:53]>, "x", 1, 0, NULL, 0) = 1',
+                '7 read(3,  <unfinished ...>', '7 mkdir("/a", 0777 <unfinished ...>', '7 <... read resumed>"", 1) = 0',
+                '7 sendto(5<UNIX-STREAM:[1->2]>, "x", 1, MSG_NOSIGNAL, NULL, 0 <unfinished ...>', '7 exit_group(0) = ?',
+                '7 io_uring_setup(1, 0x7f) = -1 ENOSYS (Function not implemented) (INJECTED)']
+        bad = ['0 open(""' + real, '0 open("' + real, '0 read(3<' + real, '0 x(' + real, real[:70],
+               '0 x(7 <... io_uring_setup resumed>) = 3<anon_inode:[io_uring]>',
+               '0 strace: Process 5 attached', '0 ' + real[5:].replace("connect", "Connect")]
+        s.unit("a real strace line passes the line check",
+               all(observe.strace_line_problem(ln) is None for ln in good),
+               [(ln, observe.strace_line_problem(ln)) for ln in good if observe.strace_line_problem(ln)])
+        s.unit("text joined to an strace line, or a line cut short, fails the line check",
+               all(observe.strace_line_problem(ln) for ln in bad),
+               [ln for ln in bad if not observe.strace_line_problem(ln)])
         s.run("driver", 0, [r"^N/O   test_driver: " + net + ".*not observed: strace is not installed",
                             r"^JUDGE: 3/3 passed, 1 not observed( UNPROTECTED|$)"], adapter=f"{py} {FAKE_ADAPTER} 1 connect",
               env={"JUDGE_STRACE": ""}, label="no strace: the download check is not observed, the run passes")
         s.run("driver", 1, [fail.format("driver", net + ".*a failure with --require-trace"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
               adapter=f"{py} {FAKE_ADAPTER} 1 connect", env={"JUDGE_STRACE": ""}, extra=("--require-trace",),
               label="no strace with --require-trace: the run fails")
+        s.run("driver", 0, [r"^N/O   test_driver: " + net + ".*not observed: strace .*fake_strace\\.sh does not trace a "
+                            r"child here: it did not record the probe's UDP connect",
+                            r"^JUDGE: 3/3 passed, 1 not observed( UNPROTECTED|$)"],
+              adapter=f"{py} {FAKE_ADAPTER} 1 connect", env={"JUDGE_STRACE": s.fake_strace},
+              label="a JUDGE_STRACE that does not trace: not used (its probe fails), the check is not observed")
+        s.run("driver", 1, [fail.format("driver", net + ".*a failure with --require-trace: strace .*fake_strace\\.sh "
+                                        "is not used with --require-trace"),
+                            r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+              adapter=f"{py} {FAKE_ADAPTER} 1 connect", env={"JUDGE_STRACE": s.fake_strace}, extra=("--require-trace",),
+              label="a JUDGE_STRACE this user can write, with --require-trace: the run fails")
         # The protection fails open nowhere: a runner or test process that is not non-dumpable fails the run unless
         # --allow-unprotected is given, and then the JUDGE line says UNPROTECTED.
         force = "JUDGE_FORCE_UNPROTECTED"

@@ -69,8 +69,9 @@ judge can add optional fields to an operation without breaking older adapters.
 ### Ports
 
 Any result may carry `"ports": [int]`: TCP ports the editor started listening on during that operation (a server it
-starts on first use, for example). The judge adds them to the ports of `start`, and the runner checks that every one
-is closed after `stop`.
+starts on first use, for example). A port opened during an operation that answered with an error goes in the next
+result that succeeds (`stop`'s included), so it is reported once in every case. The judge adds them to the ports of
+`start`, and the runner checks that every one is closed after `stop`.
 
 ## Rules for every adapter
 

@@ -148,8 +148,8 @@ jobs:
         run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build "$GITHUB_WORKSPACE" --scratch "$RUNNER_TEMP/judge-scratch" --strict --require-trace
 
       # A failed run keeps its scratch folder: upload the logs (test.log,
-      # adapter.stderr, mcp-server.stderr, adapter-strace.log, the editor's own
-      # logs), not the media or the exports.
+      # adapter.stderr, mcp-server.stderr, <test>.adapter-strace.log, the
+      # editor's own logs), not the media or the exports.
       - name: Upload the judge's logs
         if: failure()
         uses: actions/upload-artifact@v4

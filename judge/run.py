@@ -30,9 +30,17 @@ is printed with its name and the JUDGE line counts them ("JUDGE: 150/150 passed,
 observed"). --strict turns not applicable into a failure, --require-trace turns not observed into a failure.
 
 Downloads: every test that starts the editor runs its adapter under strace (JUDGE_STRACE names it; empty means none,
-else the strace on PATH), with the network calls traced, and the runner adds the check "nothing was downloaded": no
-process of the adapter's tree addressed another computer (observe.net_hits). Without strace that check is not
-observed.
+else the strace on PATH), with the network calls traced and io_uring refused, and the runner adds the check "nothing
+was downloaded": no process of the adapter's tree addressed another computer (observe.net_hits on the lines the test
+process read while the editor ran from a socket that only it and strace hold, TraceTail; a line not of strace's form,
+a trace that ended before stop, or one that did not end after it, fails the check). After stop the test process
+waits for strace to exit (it exits when the last process it traces has ended); when it does not, the test process
+sweeps the scratch folder itself (but strace), fails "nothing the adapter started is left running after stop" on
+what it finds, and a trace that still does not end within 10 s is incomplete (a traced process outlived stop). An
+strace is used only when it records a UDP connect that a
+child makes (strace_probe), and with --require-trace only when the runner's user cannot write it or any folder above
+it and no symbolic link on the way to it sits in a folder that user can write; its real path is what runs. Without a
+usable strace that check is not observed.
 
 Each test file judge/tests/test_*.py has a function run(t), sets CHECKS (the number of checks run(t) records) and may
 set PORT_BOUND (default True: it starts the editor) and TIMEOUT. Each test runs in its own session under its
@@ -57,6 +65,8 @@ import ctypes
 import importlib.util
 import json
 import os
+import re
+import select
 import shlex
 import shutil
 import signal
@@ -140,12 +150,13 @@ def _ancestors():
     return out
 
 
-def scratch_pids(folder):
-    """Process ids whose environment has a value inside `folder` (Linux /proc; elsewhere none are found)."""
+def scratch_pids(folder, skip=()):
+    """Process ids whose environment has a value inside `folder` (Linux /proc; elsewhere none are found), but this
+    process, its ancestors and the ids in `skip`."""
     if not os.path.isdir("/proc"):
         return []
     root = os.path.realpath(folder).encode()
-    skip = _ancestors()
+    skip = _ancestors() | set(skip)
     found = []
     for name in os.listdir("/proc"):
         if not name.isdigit() or int(name) in skip:
@@ -187,11 +198,12 @@ def end_pids(pids, grace=5.0):
             pass
 
 
-def sweep(folder):
-    """Ends every process left whose environment names `folder`. Returns [(pid, cmdline)] of what it found."""
+def sweep(folder, skip=()):
+    """Ends every process left whose environment names `folder` (but those in `skip`). Returns [(pid, cmdline)] of
+    what it found."""
     left = []
     for _ in range(3):
-        pids = scratch_pids(folder)
+        pids = scratch_pids(folder, skip)
         if not pids:
             break
         left += [(p, cmdline(p)) for p in pids]
@@ -200,42 +212,306 @@ def sweep(folder):
 
 
 # ---------------------------------------------------------------- strace (file-system trace and the download tripwire)
-NET_CALLS = "connect,sendto,sendmsg,sendmmsg"  # every way a process addresses another computer (observe.net_hits)
+NET_CALLS = "connect,sendto,sendmsg,sendmmsg,io_uring_setup"  # the calls observe.net_hits reads (see its docstring)
 NET_CHECK = "nothing was downloaded: no process of the adapter or the editor addressed another computer"
+LEFT_CHECK = "nothing the adapter started is left running after stop"
 _STRACE = {}
+REQUIRE_TRACE = False  # --require-trace (the runner's flag; the runner passes it on to each test process)
+# The first process strace starts. strace writes its trace to its stderr, which is the trace channel (TraceTail); this
+# process inherits it as its own stderr, points its stderr at the adapter's stderr file ($0) and then runs the
+# adapter, so no process of the adapter's tree holds the channel.
+TRACEE = ["/bin/sh", "-c", 'exec 2>>"$0"; exec "$@"']
 
 
-def strace():
-    """The strace to run the adapter under, or None: JUDGE_STRACE when set (empty: none), else strace on PATH. A
-    strace that cannot trace a child here (a test run of `true`) counts as none."""
-    if "path" not in _STRACE:
+def _not_writable(path):
+    """None when neither `path` (made real) nor any folder above it can be written by this user: each is owned by root
+    or by another user (in a user namespace root's files belong to the overflow user), this user cannot write it, and
+    it has no group or other write bit. Else why not."""
+    p = os.path.realpath(path)
+    me = os.geteuid()
+    while True:
+        try:
+            st = os.stat(p)
+        except OSError as e:
+            return f"{p}: {e}"
+        if st.st_uid == me and me != 0:
+            return f"{p} belongs to this user"
+        if st.st_mode & 0o022:
+            return f"{p} can be written by its group or by others"
+        if me != 0 and os.access(p, os.W_OK):  # root can write any file: for root, ownership and mode decide
+            return f"{p} can be written by this user"
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def _links_not_writable(path):
+    """None when no symbolic link met while resolving `path` (as given, before it is made real) sits in a folder that
+    this user can write (_not_writable on that folder), else why not. Such a link could be pointed elsewhere between
+    the check of the real file and its start."""
+    parts = [p for p in (path if os.path.isabs(path) else os.path.join(os.getcwd(), path)).split(os.sep) if p]
+    cur, links = os.sep, 0
+    while parts:
+        part = parts.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, part)
+        if not os.path.islink(nxt):
+            cur = nxt
+            continue
+        links += 1
+        if links > 40:
+            return f"{path}: too many symbolic links"
+        why = _not_writable(cur)
+        if why:
+            return f"{nxt} is a symbolic link in a folder this user can write ({why})"
+        target = os.readlink(nxt)
+        parts = [p for p in target.split(os.sep) if p] + parts
+        if os.path.isabs(target):
+            cur = os.sep
+    return None
+
+
+def strace_probe(st, bpf):
+    """None when strace `st` traces a child here: run as the tests run it (TraceTail, TRACEE), it must record the
+    child's UDP connect to 192.0.2.1 port 53 (observe.net_hits finds exactly that line), and every line it writes must
+    have the form of an strace line. Else why not. A program that runs its command without tracing it, or traces
+    nothing, fails this."""
+    import observe
+    tmp = tempfile.mkdtemp(prefix="judge-strace-probe-")
+    child = [sys.executable, "-I", "-S", "-c",
+             "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ntry:\n"
+             "    s.connect(('192.0.2.1', 53))\nexcept OSError:\n    pass\n"]
+    tail = None
+    try:
+        tail = TraceTail(os.path.join(tmp, "probe.log"))
+        p = subprocess.Popen(strace_words(st, bpf, NET_CALLS) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tail.writer, close_fds=True)
+        tail.started()
+        tail.stopping()
+        try:
+            rc = p.wait(60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            return "it did not end within 60 s"
+        tail.close(wait=5)
+        if rc != 0:
+            return f"exit {rc}: {_short(tail.lines(), 200)}"
+        if tail.tampered:
+            return tail.tampered
+        hits = observe.net_hits(tail)
+        if len(hits) != 1 or "htons(53)" not in hits[0] or "192.0.2.1" not in hits[0]:
+            return ("it did not record the probe's UDP connect to 192.0.2.1 port 53 ("
+                    + (f"found {_short(hits, 200)}" if hits else "it wrote no such line") + ")")
+        return None
+    except (OSError, observe.Unmeasurable) as e:
+        return f"{type(e).__name__}: {e}"
+    finally:
+        if tail is not None:
+            tail.close(wait=0)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def strace(require_trace=None):
+    """The strace to run the adapter under, as its real path, or None (strace_why() says why): JUDGE_STRACE when set
+    (empty: none), else strace on PATH. The path is made real once, here, and that real path is what runs. With
+    --require-trace (REQUIRE_TRACE) an strace whose real file, or a folder above it, this user can write is not used,
+    and neither is one named through a symbolic link that sits in a folder this user can write: a build step could
+    have named it through $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. An strace that
+    fails strace_probe is not used."""
+    if require_trace is None:
+        require_trace = REQUIRE_TRACE
+    key = bool(require_trace)
+    if key not in _STRACE:
         env = os.environ.get("JUDGE_STRACE")
         st = (env or None) if env is not None else shutil.which("strace")
-        if st and not (os.path.isfile(st) and os.access(st, os.X_OK)):
-            st = None
-        _STRACE["path"], _STRACE["bpf"] = st, False
-        if st:
-            def works(extra):
-                try:
-                    return subprocess.run([st, *extra, "-f", "-qq", "-e", "trace=connect", "-o", os.devnull, "--",
-                                           "true"], stdin=subprocess.DEVNULL, capture_output=True,
-                                          timeout=60).returncode == 0
-                except (OSError, subprocess.TimeoutExpired):
-                    return False
-            if works(["--seccomp-bpf"]):
-                _STRACE["bpf"] = True   # stops only at the traced calls: the network-only trace costs almost nothing
-            elif not works([]):
-                _STRACE["path"] = None
-    return _STRACE["path"]
+        real = os.path.realpath(st) if st else None
+        why, bpf = None, False
+        if not st:
+            why = "strace is not installed" + (" (JUDGE_STRACE is empty)" if env == "" else "")
+        elif not (os.path.isfile(real) and os.access(real, os.X_OK)):
+            why = f"strace {st} is not an executable file"
+        elif require_trace and (_links_not_writable(st) or _not_writable(real)):
+            why = f"strace {st} is not used with --require-trace: {_links_not_writable(st) or _not_writable(real)}"
+        else:
+            bad = strace_probe(real, True)
+            if bad is None:
+                bpf = True  # stops only at the traced calls: the network-only trace costs almost nothing
+            else:
+                plain = strace_probe(real, False)
+                if plain is not None:
+                    why = f"strace {st} does not trace a child here: {plain}"
+        _STRACE[key] = (None if why else real, bpf, why)
+    path, bpf, why = _STRACE[key]
+    _STRACE["path"], _STRACE["bpf"], _STRACE["why"] = path, bpf, why
+    return path
 
 
-def strace_cmd(log, files):
-    """The strace words that run a command with the network calls (and with files=True, the file calls) traced to
-    `log`, following every process it starts. -yy names each socket (TCP, UDP, UNIX, ...) and the ends of a connected
-    one, which observe.net_hits needs."""
-    calls = ("%file," if files else "") + NET_CALLS
-    return ([strace(), "-f"] + (["--seccomp-bpf"] if _STRACE.get("bpf") else [])
-            + ["-qq", "-yy", "-s", "4096", "-e", f"trace={calls}", "-e", "signal=none", "-o", log, "--"])
+def strace_why():
+    """Why strace() found no strace (after a call), else None."""
+    return _STRACE.get("why")
+
+
+def strace_words(st, bpf, calls):
+    """The strace words that run a command under strace `st` with `calls` traced to strace's stderr (the trace
+    channel, TraceTail), following every process it starts: -yy names each socket (TCP, UDP, UNIX, ...) and the ends
+    of a connected one, which observe.net_hits needs, and every io_uring_setup is refused with ENOSYS (io_uring
+    connect and send operations are not system calls strace sees; Node's libuv then uses epoll). The command after
+    them is TRACEE and then the adapter."""
+    return ([st, "-f"] + (["--seccomp-bpf"] if bpf else [])
+            + ["-qq", "-yy", "-s", "4096", "-e", f"trace={calls}", "-e", "inject=io_uring_setup:error=ENOSYS",
+               "-e", "signal=none", "--"])
+
+
+def strace_cmd(stderr_path, files):
+    """The words that run a command under strace with the network calls (and with files=True, the file calls) traced
+    (strace_words), started through TRACEE with its stderr appended to `stderr_path`."""
+    return (strace_words(strace(), _STRACE.get("bpf"), ("%file," if files else "") + NET_CALLS)
+            + TRACEE + [stderr_path])
+
+
+_PID = re.compile(r"^\[pid +(\d+)\] (.*)$", re.S)
+
+
+class TraceTail:
+    """The adapter tree's strace trace, read while the editor runs by the test process (non-dumpable, so the editor
+    cannot reach this memory). strace writes its trace to its stderr, which is one end of a UNIX socket pair (`writer`,
+    given to strace as its stderr); this process holds the other end. No process of the adapter's tree holds either
+    end (TRACEE points the first one's stderr elsewhere before the adapter runs), and a socket cannot be opened again
+    through /proc/<pid>/fd (ENXIO), so a process of the same user can neither add a line to the trace nor take one
+    out of it. (Through a pipe or a file it could do both: a pipe's end opened through /proc reads strace's lines
+    before this reader does.) Taking strace's descriptor with pidfd_getfd or attaching to strace needs ptrace rights
+    over it, which Yama's ptrace_scope 1 gives only to strace's own ancestors.
+
+    A thread reads every line as strace writes it and keeps it here; lines() first reads whatever is new. strace
+    prefixes a line with "[pid N] " only while it traces more than one process: each line is kept as "N <call>", and
+    a line with no prefix as "0 <call>", the form observe.py reads. Each line must have the form of an strace line
+    (observe.strace_line_problem); the first one that does not, or an end of the trace before stopping() (strace ended
+    while the editor ran), sets `tampered`, and every check on the trace then fails. The test process also writes each
+    line it keeps to `copy_path`, outside the test's scratch folder, for people and for CI's log upload; the checks
+    never read that file."""
+
+    def __init__(self, copy_path):
+        self._r, self.writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._r.setblocking(False)
+        self.copy_path = copy_path
+        self._copy = open(copy_path, "x", encoding="latin-1", newline="\n")
+        self._lock = threading.Lock()
+        self._lines, self._rest = [], b""
+        self._tampered = None
+        self._eof = self._stopping = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def started(self):
+        """Closes this process's copy of the write end, once strace holds it: the reader then sees the end of the
+        trace when strace exits."""
+        if self.writer is not None:
+            self.writer.close()
+            self.writer = None
+
+    def stopping(self):
+        """The editor is about to be asked to stop: from here the end of the trace is expected."""
+        with self._lock:
+            self._stopping = True
+
+    def _keep(self, raw):
+        import observe
+        m = _PID.match(raw)
+        ln = f"{m.group(1)} {m.group(2)}" if m else f"0 {raw}"
+        why = observe.strace_line_problem(ln)
+        if why and not self._tampered:
+            self._tampered = f"the trace holds a line that strace does not write ({why}): {_short(ln, 200)}"
+        self._lines.append(ln)
+        self._copy.write(ln + "\n")
+
+    def _pull(self):
+        """Reads what is new (under the lock)."""
+        if self._r is None or self._eof:
+            return
+        got = False
+        while True:
+            try:
+                chunk = self._r.recv(1 << 20)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError as e:
+                chunk = b""
+                self._tampered = self._tampered or f"the trace cannot be read: {e}"
+            if not chunk:
+                self._eof = True
+                if not self._stopping:
+                    self._tampered = self._tampered or ("the trace ended before the editor was asked to stop "
+                                                        "(strace exited or was ended while the editor ran)")
+                break
+            got = True
+            parts = (self._rest + chunk).split(b"\n")
+            self._rest = parts.pop()
+            for p in parts:
+                self._keep(p.decode("latin-1"))
+        if got:
+            self._copy.flush()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._r], [], [], 0.05)
+            except (OSError, ValueError):
+                return
+            if ready:
+                with self._lock:
+                    self._pull()
+                    if self._eof:
+                        return
+
+    @property
+    def tampered(self):
+        """None, or why the trace cannot be trusted (after reading what is new)."""
+        with self._lock:
+            self._pull()
+            return self._tampered
+
+    def lines(self):
+        """Every complete line read so far (after reading what is new)."""
+        with self._lock:
+            self._pull()
+            return list(self._lines)
+
+    def close(self, wait=5):
+        """Stops the reader after a last read: waits up to `wait` s for the end of the trace (strace exits when the
+        last process it traces has ended); the last line counts even without a newline. A trace that does not end
+        within `wait` is incomplete: a process strace traces still runs (it outlived stop, and the sweep before this
+        did not find it), and a call it makes after this read is never seen. That sets `tampered`, so every check on
+        the trace fails."""
+        self.started()
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            with self._lock:
+                self._pull()
+                if self._eof or self._r is None:
+                    break
+            time.sleep(0.02)
+        with self._lock:
+            if self._r is not None and not self._eof:
+                self._tampered = self._tampered or (f"the trace did not end within {wait} s of stop: a traced "
+                                                    "process outlived stop (strace still traces it)")
+        self._stop.set()
+        self._thread.join(5)
+        with self._lock:
+            self._pull()
+            if self._rest:
+                self._keep(self._rest.decode("latin-1"))
+                self._rest = b""
+            if self._r is not None:
+                self._r.close()
+                self._r = None
+                self._copy.close()
 
 
 # ---------------------------------------------------------------- the test's side (child process)
@@ -247,8 +523,10 @@ class T:
         self._out = out  # the write end of the runner's result pipe
         self._driver = None
         self.n_checks = 0
-        self.trace_path = None  # the file-system trace: set by driver(trace=True) when strace runs
-        self.net_trace = None   # the adapter tree's strace log (network calls, and file calls with trace=True)
+        self.trace_path = None  # the copy of the trace's lines (for people; no check reads it): driver(trace=True)
+        self.trace = None       # its lines (TraceTail): what observe.trace_hits reads; None without trace=True
+        self.trace_why = None   # why there is no trace (strace_why()), set by driver() when strace is not usable
+        self.net_trace = None   # the adapter tree's strace trace (TraceTail: network calls, and file calls with trace=True)
 
     def _emit(self, rec):
         self._out.write(json.dumps(rec) + "\n")
@@ -298,7 +576,7 @@ class T:
         return self._record(name, True, why, harness, "not_applicable")
 
     def not_observed(self, name, why, harness=False):
-        """Records a check whose observation is not available here (strace is not installed): neither passed nor
+        """Records a check whose observation is not available here (no usable strace): neither passed nor
         failed, listed by name and counted on the JUDGE line; a failure with run.py --require-trace."""
         return self._record(name, True, why, harness, "not_observed")
 
@@ -319,18 +597,29 @@ class T:
         adapter must answer hello with this judge's protocol version first.
 
         When strace is available (strace()), the adapter always runs under `strace -f` with the network calls traced
-        to self.net_trace, for the runner's download check (NET_CHECK, after stop). trace=True (on the first call)
-        traces the file-system calls too, so every file-system call of the adapter, the editor and every process
-        they start is logged, and self.trace_path names the log (observe.trace_hits reads it). Without strace both
-        stay None: the download check and the test's trace checks are then recorded as not observed."""
+        to a channel only this process reads while the editor runs (self.net_trace, a TraceTail), for the runner's
+        download check (NET_CHECK, after stop). trace=True (on the first call) traces the file-system calls too, so
+        every file-system call of the adapter, the editor and every process they start is in it; self.trace is then
+        the same TraceTail (observe.trace_hits reads its lines) and self.trace_path names the copy this process writes
+        of those lines (<test>.adapter-strace.log next to the scratch folder, for people and CI's log upload; no check
+        reads it). Without strace all three stay None: the download check and the test's trace checks are then
+        recorded as not observed."""
         if self._driver is None:
             import driver
             cmd = list(self.adapter)
+            stderr_path = os.path.join(self.scratch, "adapter.stderr")
             if strace():
-                self.net_trace = os.path.join(self.scratch, "adapter-strace.log")
-                self.trace_path = self.net_trace if trace else None
-                cmd = strace_cmd(self.net_trace, files=trace) + cmd
-            self._driver = driver.Driver(cmd, self.scratch)
+                if self.net_trace is None:
+                    copy = os.path.join(os.path.dirname(self.scratch), f"{self.name}.adapter-strace.log")
+                    self.net_trace = TraceTail(copy)  # its reader runs before strace (and the adapter) starts
+                if trace:
+                    self.trace, self.trace_path = self.net_trace, self.net_trace.copy_path
+                cmd = strace_cmd(stderr_path, files=trace) + cmd
+                self._driver = driver.Driver(cmd, self.scratch, stderr_path, stderr_fd=self.net_trace.writer.fileno())
+                self.net_trace.started()
+            else:
+                self.trace_why = strace_why()
+                self._driver = driver.Driver(cmd, self.scratch, stderr_path)
             hello = self._driver.hello()
             proto = hello.get("protocol") if isinstance(hello, dict) else None
             if not self.check(f"the adapter speaks protocol {driver.PROTOCOL}", proto == driver.PROTOCOL,
@@ -343,28 +632,42 @@ class T:
         d = self._driver
         if d is None:
             return
+        if self.net_trace is not None:
+            self.net_trace.stopping()
+        exited = False
         try:
             if d.started:
                 d.stop()
         except Exception as e:  # noqa: BLE001
             self.check("the editor stops when asked", False, str(e), harness=True)
         finally:
-            d.close()
+            # Under strace, d's process is strace: it exits when the last process it traces has ended. It is not
+            # killed here: that would end the trace while a traced process still runs (TraceTail.close below).
+            exited = d.close(kill=self.net_trace is None)
+        if not exited and self.net_trace is not None:
+            # A process of the adapter's tree outlived stop. The sweep ends each one whose environment names the
+            # scratch folder (not strace itself), so the trace can end; one it cannot find keeps the trace open, and
+            # TraceTail.close then marks the trace as not ended.
+            left = sweep(self.scratch, skip=(d.p.pid,))
+            if left:
+                self.check(LEFT_CHECK, False, "; ".join(f"{pid} {cmd[:120]}" for pid, cmd in left), harness=True)
         for port in d.ports:
             deadline = time.time() + 10
             while time.time() < deadline and _listening(port):
                 time.sleep(0.2)
             self.check(f"port {port} is closed after stop", not _listening(port), harness=True)
         if self.net_trace is None:
-            self.not_observed(NET_CHECK, "strace is not installed", harness=True)
+            self.not_observed(NET_CHECK, strace_why() or "strace is not installed", harness=True)
             return
         import observe
-        try:
-            hits = observe.net_hits(self.net_trace)
-            self.check(NET_CHECK, not hits, _short(hits[:3]) if hits else "no other computer addressed",
-                       harness=True)
-        except observe.Unmeasurable as e:
-            self.check(NET_CHECK, False, f"unmeasurable: {e}", harness=True)
+        self.net_trace.close(wait=10)
+        if d.p.poll() is None:  # strace still runs: the trace is already marked as not ended
+            d.p.kill()
+            d.p.wait(10)
+        hits = observe.net_hits(self.net_trace)
+        bad = self.net_trace.tampered
+        detail = "; ".join(([bad] if bad else []) + ([_short(hits[:3])] if hits else []))
+        self.check(NET_CHECK, not hits and not bad, detail or "no other computer addressed", harness=True)
 
 
 def _listening(port):
@@ -570,7 +873,8 @@ def run_test(meta, a, base, media, adapter):
             p = subprocess.Popen([sys.executable, "-I", "-B", os.path.abspath(__file__), "--child", meta["path"],
                                   "--scratch", scratch, "--results-fd", str(w), "--media", media, "--build", a.build,
                                   "--adapter-json", json.dumps(adapter)]
-                                 + (["--allow-unprotected"] if a.allow_unprotected else []),
+                                 + (["--allow-unprotected"] if a.allow_unprotected else [])
+                                 + (["--require-trace"] if a.require_trace else []),
                                  stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=scratch, env=env, pass_fds=(w,))
         finally:
@@ -664,7 +968,7 @@ def main():
                     help="a check recorded as not applicable (its hostile input could not be made from the editor's "
                          "saved file) fails")
     ap.add_argument("--require-trace", action="store_true",
-                    help="a check recorded as not observed (strace is not installed) fails; with --self-test the "
+                    help="a check recorded as not observed (no usable strace) fails; with --self-test the "
                          "trace cases must run")
     ap.add_argument("--allow-unprotected", action="store_true",
                     help="run even when the runner or a test process cannot be made non-dumpable (not Linux, or prctl "
@@ -676,6 +980,8 @@ def main():
     ap.add_argument("--media", help=argparse.SUPPRESS)
     ap.add_argument("--adapter-json", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    global REQUIRE_TRACE
+    REQUIRE_TRACE = a.require_trace
     if a.child:
         return child(a, unprotected)
     if a.self_test:
@@ -713,7 +1019,7 @@ def main():
     print(f"judge: adapter {' '.join(adapter)}")
     print(f"judge: build {a.build}")
     print(f"judge: measurements with {observe.ffmpeg_version()} ({observe.FFMPEG})")
-    print(f"judge: trace with {strace() or 'nothing: strace is not installed, the trace checks are not observed'}"
+    print(f"judge: trace with {strace() or f'nothing ({strace_why()}): the trace checks are not observed'}"
           + (" (--seccomp-bpf)" if _STRACE.get("bpf") else "")
           + ("; --strict" if a.strict else "") + ("; --require-trace" if a.require_trace else ""))
     print(f"judge: scratch {base}", flush=True)

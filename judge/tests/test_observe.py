@@ -119,8 +119,19 @@ def side_effects(t):
         "sendto addr": '24 sendto(4<UDP:[9]>, "x", 1, 0, {sa_family=AF_INET, sin_port=htons(9), '
                        'sin_addr=inet_addr("192.0.2.1")}, 16) = 1',
         "unknown socket": '25 connect(8, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("192.0.2.9")}, 16) = 0',
+        "udp connect": '26 connect(6<UDP:[9]>, {sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("192.0.2.1")}, 16)'
+                       ' = 0',
+        "udp6 other port": '27 connect(6<UDPv6:[9]>, {sa_family=AF_INET6, sin6_port=htons(444), sin6_flowinfo=htonl(0), '
+                           'inet_pton(AF_INET6, "2001:4860:4860::8888", &sin6_addr), sin6_scope_id=0}, 28) = 0',
+        "io_uring": '28 io_uring_setup(8, {flags=0, sq_thread_cpu=0, sq_thread_idle=0}) = 5<anon_inode:[io_uring]>',
+        "io_uring resumed": '28 <... io_uring_setup resumed>, sq_entries=8, cq_entries=16}) = 7',
+        "io_uring refused": '28 io_uring_setup(256, {flags=0x10000, sq_thread_cpu=0, sq_thread_idle=0}) = -1 ENOSYS '
+                            '(Function not implemented) (INJECTED)',
+        "io_uring unfinished": '28 io_uring_setup(256, {flags=0x10000, sq_thread_cpu=0, sq_thread_idle=0} <unfinished ...>',
         "udp probe": '30 connect(19<UDPv6:[9]>, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), '
                      'inet_pton(AF_INET6, "2001:4860:4860::8888", &sin6_addr), sin6_scope_id=0}, 28) = 0',
+        "udp loopback": '29 connect(6<UDP:[9]>, {sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, '
+                        '16) = 0',
         "loopback": '31 connect(4<TCP:[9]>, {sa_family=AF_INET, sin_port=htons(4791), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
         "loopback6": '32 sendto(4<TCPv6:[[::1]:5->[::1]:6]>, "hi", 2, 0, NULL, 0) = 2',
         "unix": '33 connect(5<UNIX-STREAM:[9]>, {sa_family=AF_UNIX, sun_path="/run/x"}, 110) = 0',
@@ -132,9 +143,11 @@ def side_effects(t):
     with open(net, "w", encoding="latin-1") as f:
         f.write("\n".join(lines.values()) + "\n")
     found = {k for k, v in lines.items() if any(h == v for h in observe.net_hits(net))}
-    want = {"tcp out", "tcp6 out", "dns", "udp send", "sendto addr", "unknown socket"}
-    t.check("network search: a TCP connect, a DNS lookup or a send to another computer is found; a UDP connect "
-            "elsewhere (no packet), loopback, unix sockets and quoted data are not", found == want,
+    want = {"tcp out", "tcp6 out", "dns", "udp send", "sendto addr", "unknown socket", "udp connect", "udp6 other port",
+            "io_uring", "io_uring resumed"}
+    t.check("network search: a TCP or UDP connect to another computer, a DNS lookup, a send to another computer or an "
+            "io_uring setup that made a ring is found; a refused or unfinished io_uring setup, the exact Chromium probe (a UDP connect to [2001:4860:4860::8888]:443), loopback, "
+            "unix sockets and quoted data are not", found == want,
             sorted(found ^ want) or sorted(found))
     src = t.path("side", "saved.json")
     with open(src, "w", encoding="utf-8") as f:

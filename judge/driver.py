@@ -52,6 +52,16 @@ class BadRequest(JudgeError):
     code = "bad_request"
 
 
+def refused(fn, n=200):
+    """(refused?, what happened) of calling fn(): refused = the editor answered with an error (ProductError or
+    BadRequest); what happened is its message or the answer, cut to `n` characters."""
+    try:
+        r = fn()
+        return False, f"accepted: {str(r)[:n]}"
+    except (ProductError, BadRequest) as e:
+        return True, f"refused: {e.message[:n]}"
+
+
 class AdapterError(JudgeError):
     code = "adapter_error"
 
@@ -69,8 +79,11 @@ def path_arg(path):
 class Driver:
     """One adapter process for one test. Driver(cmd, scratch).start(build) ... .stop() / .close()."""
 
-    def __init__(self, cmd, scratch, stderr_path=None, env=None):
-        """cmd: the adapter command (argv list). scratch: the test's empty scratch folder (absolute).
+    def __init__(self, cmd, scratch, stderr_path=None, env=None, stderr_fd=None):
+        """cmd: the adapter command (argv list). scratch: the test's empty scratch folder (absolute). The command's
+        stderr goes to `stderr_path` (default adapter.stderr in the scratch folder), or to the descriptor `stderr_fd`
+        when given (run.py gives strace its trace channel there; strace's first process then appends its stderr to
+        `stderr_path` itself, run.TRACEE).
 
         The adapter runs with its current folder set to `scratch`, and JUDGE_TEST_SCRATCH=<scratch> in its
         environment: the runner's sweep ends any process left whose environment names the scratch folder, so a
@@ -80,11 +93,12 @@ class Driver:
         self.cmd = list(cmd)
         self.scratch = os.path.abspath(scratch)
         self.stderr_path = stderr_path or os.path.join(self.scratch, "adapter.stderr")
-        self._err = open(self.stderr_path, "ab")
+        self._err = open(self.stderr_path, "ab") if stderr_fd is None else None
         env = dict(env if env is not None else os.environ)
         env["JUDGE_TEST_SCRATCH"] = os.path.realpath(self.scratch)
-        self.p = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
-                                  env=env, cwd=self.scratch, close_fds=True)
+        self.p = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=self._err if stderr_fd is None else stderr_fd, env=env, cwd=self.scratch,
+                                  close_fds=True)
         self._lines = queue.Queue()
         self._n = 0
         self.started = False
@@ -132,18 +146,25 @@ class Driver:
             cls = ERRORS.get(err.get("code"), AdapterError)
             raise cls(str(err.get("message", "no message")), err.get("product_code"), op=op)
 
-    def close(self, wait=30):
-        """Closes stdin (the adapter then stops what it started and exits); kills the adapter after `wait` s."""
+    def close(self, wait=30, kill=True):
+        """Closes stdin (the adapter then stops what it started and exits) and waits up to `wait` s for the command
+        to exit; then kills it, unless kill=False (run.py: the command is strace, which must outlive what it traces).
+        Returns whether it exited within `wait`."""
         try:
             self.p.stdin.close()
         except OSError:
             pass
+        exited = True
         try:
             self.p.wait(wait)
         except subprocess.TimeoutExpired:
-            self.p.kill()
-            self.p.wait(10)
-        self._err.close()
+            exited = False
+            if kill:
+                self.p.kill()
+                self.p.wait(10)
+        if self._err is not None:
+            self._err.close()
+        return exited
 
     # ------------------------------------------------------------ lifecycle
     def hello(self):

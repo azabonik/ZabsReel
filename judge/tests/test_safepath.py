@@ -23,6 +23,7 @@ import secrets
 import shutil
 
 import driver as drv
+from driver import refused
 import observe
 
 PORT_BOUND = True
@@ -40,15 +41,6 @@ TEXT_STYLE = {"color": "#c0ffee", "box": True, "box_color": "#0a0b0c99", "box_bo
 GRADE = {"brightness": 0.0123, "contrast": 1.0123, "saturation": 1.0234, "gamma": 1.0345}
 COLOUR = {"temperature": 0.123, "tint": -0.0456, "hue": 7.89}
 BLUR, VIGNETTE, SIMILARITY, BLEND, SPEED = 2.345, 0.4567, 0.1234, 0.0567, 1.25
-
-
-def refused(fn):
-    """(refused?, what happened): refused = the editor answered with an error (product_error or bad_request)."""
-    try:
-        r = fn()
-        return False, f"accepted: {str(r)[:160]}"
-    except (drv.ProductError, drv.BadRequest) as e:
-        return True, f"refused: {e.message[:160]}"
 
 
 def shape(st):

@@ -45,8 +45,8 @@ exits 1 when any check fails, when a test does not finish within its timeout, wh
 runner or a test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given.
 Each run makes its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch
 folder. A run that passes deletes that folder unless you give `--keep`. A run that fails keeps it, and the runner
-prints its path. Each test's folder holds `test.log`, `adapter.stderr`, `adapter-strace.log` (with strace) and the
-editor's own logs.
+prints its path. Each test's folder holds `test.log`, `adapter.stderr` and the editor's own logs; next to it, with
+strace, `<test>.adapter-strace.log` is the test process's copy of the trace lines it read (no check reads it).
 
 ### Statuses
 
@@ -61,7 +61,9 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   counts. `--strict` makes each one a failure. `judge.yml` passes `--strict` while the judge grades v0.2.0, whose
   format every crafted input comes from. A rewrite's run without `--strict` lists its not-applicable checks: each one
   is a security check the judge could not apply to that build, not a pass.
-- **Not observed** (`N/O`): the observation needs `strace`, which is not installed (or `JUDGE_STRACE` is set empty):
+- **Not observed** (`N/O`): the observation needs `strace`, which is not installed, not usable (it failed the
+  runner's test of it, or under `--require-trace` it can be written by the runner's user or is named through a
+  symbolic link in a folder that user can write), or `JUDGE_STRACE` is set empty:
   the download check of every test that starts the editor, and `test_network_hosts`' file-system trace checks.
   `--require-trace` makes each one a failure; `judge.yml` passes it.
 
@@ -72,8 +74,8 @@ the install it copies `judge/`, the gate and `judge.yml` to `$RUNNER_TEMP/judge-
 the copied gate, and runs `run.py --self-test --require-trace` from it. After `npm ci` and the build it checks that the copy's lock and
 gate are the bytes it pinned before the install and that the copy still matches its lock, then runs the judge from
 the copy with `--build "$GITHUB_WORKSPACE" --strict --require-trace`, with the FFmpeg and `strace` that it installs
-from apt. A failed run uploads the logs of its kept scratch folder (`*.log`, `*.stderr`, among them
-`adapter-strace.log`) as the `judge-logs` artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting
+from apt. A failed run uploads the logs of its kept scratch folder (`*.log`, `*.stderr`, among them each test's
+`<test>.adapter-strace.log`) as the `judge-logs` artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting
 `judge.yml` or the gate fails `ci.yml`.
 
 On a pull request, `judge.yml` also fetches the base branch, writes the base branch's copy of the gate to
@@ -92,10 +94,25 @@ that writes passing results into its scratch folder, lines on the result pipe th
 without exec that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and
 a clean test must pass. A not-applicable check (also one made through `needs=` on an input that could not be
 crafted) and a not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`.
-A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53, which sends no packet) must fail the
-download check, one that connects to 127.0.0.1 and makes a UDP probe elsewhere (no packet) must pass it, and with strace switched off (`JUDGE_STRACE=`) the
-check must be not observed, a failure with `--require-trace`. The cases that need strace are skipped without it,
-unless `--self-test --require-trace` is given (`judge.yml` does): then a missing strace fails the self-test. On Linux an adapter that tries to open the test's and the runner's descriptors through
+A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1
+port 9 and sends with `write()`, sends with `sendto()` to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1
+port 80 must fail the download check. The adapter must not reach the trace: one that starts a DNS lookup and at stop
+rewrites, empties or deletes every file it can reach (its scratch folder and the logs next to it, among them the copy
+of the trace), or that writes a partial strace line to every descriptor it holds, to strace's descriptors through
+`/proc` and to those files and then overwrites the lookup's port in them, must still fail the check on the lookup
+itself, and its open of strace's trace channel through `/proc` must be refused (`ENXIO`). One that ends strace must
+fail the check (the trace ended before stop). One that at stop leaves a child running that waits until strace no
+longer traces it and then starts a DNS lookup must fail the run: when the child carries the scratch folder in its
+environment, the test process's sweep ends it and fails "nothing the adapter started is left running after stop";
+when its environment is cleared (the sweep cannot find it), the download check fails (the trace did not end). Real strace lines must pass the line check, and text joined to an
+strace line or a line cut short must fail it. One that asks for an io_uring must be refused it, and one that makes a UDP connect to
+127.0.0.1 and Chromium's IPv6 probe must pass the check. With strace switched off (`JUDGE_STRACE=`) the check must
+be not observed, a failure with `--require-trace`; a fake `JUDGE_STRACE` (a script that runs its command without
+tracing it) must not be used, and with `--require-trace` it must fail the run, as must a `JUDGE_STRACE` that is a
+symbolic link in a folder the runner's user can write (without `--require-trace` its real path runs). The cases that
+need strace are
+skipped without it, unless `--self-test --require-trace` is given (`judge.yml` does): then a missing strace fails
+the self-test. On Linux an adapter that tries to open the test's and the runner's descriptors through
 `/proc/<pid>/fd` for writing must be refused every time, with the verdict unchanged, and a fork child that writes
 through the result pipe's descriptor number must get EBADF. A runner or a test process that cannot be made
 non-dumpable (forced with `JUDGE_FORCE_UNPROTECTED=runner` or `child`) must fail the run, and with
@@ -148,14 +165,23 @@ def run(t):
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
 - `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
 - `t.driver()` runs the adapter, and so the editor and everything they start, under `strace -f -yy` with the
-  network calls traced (`connect`, `sendto`, `sendmsg`, `sendmmsg`) when strace is available (`JUDGE_STRACE`, else
-  `strace` on `PATH`). After `stop` the runner adds the check "nothing was downloaded" (`observe.net_hits`): no TCP
-  connect to an address that is not this computer's own, no DNS lookup, and no send to another computer. A UDP
-  connect elsewhere sends no packet and is not counted (Chromium's IPv6 reachability probe makes one). The check
-  sees an attempt also when the network is down. `t.driver(trace=True)` traces the file-system calls (`%file`) too;
-  `t.trace_path` is then the log (`adapter-strace.log` in the test's scratch folder, which a failed CI run uploads
-  with the other logs), and `observe.trace_hits` searches it for names (never in a process's argv or a send's data).
-  Without strace, `t.trace_path` is None and the test records its trace checks with `t.not_observed`.
+  network calls traced (`connect`, `sendto`, `sendmsg`, `sendmmsg`, `io_uring_setup`) when strace is available
+  (`JUDGE_STRACE`, else `strace` on `PATH`; see "A download during a run" under "Threat model"). strace refuses every `io_uring_setup` with
+  `ENOSYS` (io_uring connect and send operations are not calls strace sees; Node's libuv then uses epoll). strace
+  writes the trace to a socket that only the test process reads (see "A download during a run"); the test process
+  keeps every line in its own memory while the editor runs, and writes a copy to `<test>.adapter-strace.log` next to
+  the test's scratch folder, which a failed CI run uploads with the other logs (no check reads the copy). After
+  `stop` the runner adds the check "nothing was downloaded" (`observe.net_hits` on the lines kept): no TCP or UDP
+  connect to an address that is not this computer's own, no DNS lookup, no send to another computer, and no
+  `io_uring_setup` that made a ring. One UDP connect is allowed: a connect to exactly `[2001:4860:4860::8888]:443`,
+  Chromium's IPv6 reachability probe, which sends no packet. Data that a process then sends on that socket with
+  `write()` is not a traced call and is not seen (see "What it does not defend against"). Every other UDP connect
+  counts, because `write()` on a connected UDP socket sends without a traced call. The check sees an attempt also
+  when the network is down. It fails too when a line in the trace is not of the form strace writes, or when the
+  trace ended (strace exited) before the editor was asked to stop. `t.driver(trace=True)` traces the file-system
+  calls (`%file`) too; `t.trace` is then the lines kept (`t.trace_path` names the copy), and
+  `observe.trace_hits(t.trace, names)` searches them (never in a process's argv or a send's data). Without strace, `t.trace` and `t.trace_path` are None and the test records
+  its trace checks with `t.not_observed`.
 - A hostile input (a crafted project or OTIO file) is made from a file the editor wrote, with `observe.craft`: the
   test needs no knowledge of the file format. Pass the result to every check that is about it,
   `t.check(name, ok, detail, needs=crafted)`: when a value was not found (another file format), the check is recorded
@@ -225,11 +251,34 @@ What it defends against:
 - **A killed runner**: SIGTERM or SIGINT ends the running test's session and every process found by the same sweep,
   prints `JUDGE: interrupted by signal N` and exits 1.
 - **A download during a run**: every test that starts the editor runs it under strace with the network calls traced,
-  and its "nothing was downloaded" check fails on a TCP connect to another computer, a DNS lookup or a send to another
-  computer, also when the call failed (no network). In CI `--require-trace` makes a run without strace fail, so the
-  check cannot quietly turn into not observed (for example through a `JUDGE_STRACE` value that a build step writes to
-  `$GITHUB_ENV`). `test_network_hosts` also fails when a file of 1 MiB or more appears in its folder during the agent
-  tool calls.
+  and its "nothing was downloaded" check fails on a TCP or UDP connect to another computer (except Chromium's exact
+  IPv6 probe), a DNS lookup or a send to another computer, also when the call failed (no network). strace refuses
+  io_uring rings, whose operations it cannot see. strace writes the trace to its stderr, which is one end of a UNIX
+  socket pair; the test process (non-dumpable) holds the other end and keeps every line it reads in its own memory.
+  The first process strace starts is a `/bin/sh` that points its own stderr at `adapter.stderr` and then runs the
+  adapter, so no process of the adapter's tree holds either end. A socket cannot be opened again through
+  `/proc/<pid>/fd` (`ENXIO`), and taking strace's descriptor with `pidfd_getfd` or attaching to strace needs ptrace
+  rights over strace, which Yama's `ptrace_scope` 1 (Ubuntu's default) gives only to strace's ancestors. So a process of the same user can neither add a line to the trace nor take one out of it. A
+  file would let it rewrite lines before the reader reads them, and a pipe would let it open strace's end through
+  `/proc` for reading and take lines out. Every line must also have the form strace writes (its pid, then a call,
+  a resumed call, or a `+++`/`---` line, with every quoted string and `<...>` closed and no second call inside), so
+  text joined to an strace line fails the check instead of hiding a call. The check also fails when the trace ends
+  before the editor is asked to stop: a process that ends strace (same user, so it can send it a signal) stops the
+  trace, and what it does after that would not be seen. The trace must also end after stop: strace exits when the
+  last process it traces has ended, and the test process waits for that instead of killing strace (which would end
+  the trace while a traced process still runs, and that process's later calls would not be seen). When strace does
+  not exit within 30 s of stop, the test process ends every process whose environment names the scratch folder (but
+  strace) and fails "nothing the adapter started is left running after stop" naming them; when the trace still has
+  not ended 10 s later, a traced process the sweep could not find (one with a cleared environment) outlived stop, and
+  the check fails ("the trace did not end"). In CI `--require-trace` makes a run without a working
+  strace fail, so the check cannot quietly turn into not observed. Under `--require-trace` the runner uses an strace
+  (from `JUDGE_STRACE` or `PATH`) only when its real path and every folder above it are owned by root (or another
+  user) and cannot be written by the runner's user, and when no symbolic link met on the way to it sits in a folder
+  that user can write, so a `JUDGE_STRACE` or `PATH` entry that a build step writes to `$GITHUB_ENV` or
+  `$GITHUB_PATH` cannot name a fake one, and a link cannot be pointed elsewhere after the check. The runner makes
+  the path real once and runs that real path. Every strace is also tested before use: it must record a UDP connect to
+  192.0.2.1 port 53 made by a child, or it is not used. `test_network_hosts` also fails when a file of 1 MiB or more
+  appears in its folder during the agent tool calls.
 - **A file format that defeats the crafted inputs**: a rewrite whose saved files do not hold the values as given
   turns the checks on crafted inputs into not applicable, each listed by name and counted on the `JUDGE` line, never
   into passes; `--strict` fails them.
@@ -257,13 +306,21 @@ What it does not defend against:
   stops it. Enforcing the base gate needs GitHub settings: a required check from a workflow the pull request cannot
   change (for example one triggered by `pull_request_target`), or a required review. That is an open decision for
   Anthony.
-- The strace log (`adapter-strace.log`: the file-system trace and the network calls the download check reads) is a
-  file in the test's scratch folder, written by `strace`: the editor under test runs as the same user and could change
-  or delete it. A missing log fails the download check, but a rewritten one passes it. It is an extra observation, as
-  trustworthy as the editor's own process isolation (running the editor as another user is an open decision for
-  Anthony), not a protected one like the result pipe. The download check also does not see a `write()` on a
-  connected UDP socket (only the send calls are traced), and the 1 MiB file check sees only files that stay in the
-  test's folder. A `strace` replaced on `PATH` is the same case as a replaced `python3` (above).
+- The trace channel against a stronger process of the same user: with `ptrace_scope` 0, or as root or with
+  `CAP_SYS_PTRACE`, a process can attach to strace (or take its descriptor with `pidfd_getfd`) and add or remove
+  lines. The line check catches text joined in front of an strace line, but not every cut: a writer that could split
+  one of strace's lines in two at the right place could make two lines of the right form. strace itself is dumpable,
+  so a process of the same user can read its memory and send it signals: ending strace fails the check (the trace
+  ended before stop), but stopping it with `SIGSTOP` holds the editor's traced calls until strace runs again. The
+  copy of the trace (`<test>.adapter-strace.log`) is a file the editor can change; no check reads it. Running the
+  editor as another user (the separate-user CI job Anthony approved, the next pull request) removes the same-user
+  cases. The 1 MiB file check sees only files that stay in the test's folder.
+- Data sent on Chromium's IPv6 probe socket: a UDP connect to exactly `[2001:4860:4860::8888]:443` is allowed, and
+  `write()` on a connected socket is not a traced call, so a process could send data to that one address and port
+  without the check seeing it. Running the editor as another user does not change this; a run with the network
+  switched off does (nothing reaches that address). A hosted runner's passwordless `sudo`
+  is still out of scope here: code from the change can replace `/usr/bin/strace` itself, as it can replace
+  `python3` (above).
 - A judge change that review lets through: judge changes are reviewed by the gauntlet on their pull request (with a
   lock and leakage check), not by Anthony, and merge when CI is green. A pull request that edits the judge and
   updates the lock passes every gate; the base gate and the warning (when `judge.yml` is unchanged) only make the

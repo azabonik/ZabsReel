@@ -529,32 +529,112 @@ def strace_form(text):
     return "".join(out)
 
 
-NET_SYSCALL = re.compile(r"^\d+\s+(<\.\.\. )?(connect|sendto|sendmsg|sendmmsg)[ (]")
+NET_SYSCALL = re.compile(r"^\d+\s+(<\.\.\. )?(connect|sendto|sendmsg|sendmmsg|io_uring_setup)[ (]")
+
+# The forms of an strace line (after strace_skeleton): "<pid> name(...) = result", "<pid> name(... <unfinished ...>",
+# "<pid> <... name resumed>...) = result", "<pid> +++ ... +++" and "<pid> --- ... ---". A system call's name is any
+# lower-case word, not a list: %file gives names that differ between kernels and architectures (statx, openat2,
+# faccessat2, newfstatat), and a line of another call can never hide a network call.
+_LINE_FORM = re.compile(r"^\d+ +(?:[a-z_][a-z0-9_]*\(.*(?:\) += .+|<>)|<\.\.\.>.*= .+|\+\+\+ .* \+\+\+|--- .* ---)$")
+_CALL_START = re.compile(r"(?<![\w.])\d+ +(?:<\.\.\.>|[a-z_][a-z0-9_]*\()")
 
 
-def trace_lines(path):
-    """The file-system lines of an `strace -o` log: without execve / execveat lines (what a process was started with,
-    its argv, is not observed, only what it opened, read, listed or wrote) and without the network calls (net_hits
-    reads those; a send's data is not a file name)."""
-    if not path or not os.path.isfile(path):
+def strace_skeleton(ln):
+    """`ln` with every quoted string left as "" and every <...> (a -yy decoration, which can hold another one, as in
+    "</dev/null<char 1:3>>", or "<unfinished ...>") left as <>, and "<... name resumed>" left as <...>, or None when
+    one does not close.
+    strace escapes '"' and '\\' inside both, and '<' and '>' inside a path; a socket's decoration holds "->"."""
+    out, i, n = [], 0, len(ln)
+    while i < n:
+        c = ln[i]
+        if c == '"':
+            j = i + 1
+            while j < n and ln[j] != '"':
+                j += 2 if ln[j] == "\\" else 1
+            if j >= n:
+                return None
+            out.append('""')
+            i = j + 1
+        elif c == "<":
+            j, depth = i + 1, 1
+            while j < n:
+                if ln[j] == "<":
+                    depth += 1
+                elif ln[j] == ">" and ln[j - 1] != "-":
+                    depth -= 1
+                    if not depth:
+                        break
+                elif ln[j] == '"':
+                    j += 1
+                    while j < n and ln[j] != '"':
+                        j += 2 if ln[j] == "\\" else 1
+                j += 2 if j < n and ln[j] == "\\" else 1
+            if j >= n:
+                return None
+            out.append("<...>" if ln.startswith("<... ", i) else "<>")
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def strace_line_problem(ln):
+    """None when `ln` has the form of one line strace writes with -f (its pid first, see _LINE_FORM), else why not. A
+    line that is cut short, holds a quote or a decoration that does not close, or holds the start of a second call
+    ("<pid> name(" outside quoted strings and decorations) is not one: text added to the trace in front of strace's
+    own line, or into the middle of it, shows here, so such text cannot hide a call. The check cannot catch every
+    such text (a writer that can cut one of strace's lines in two at the right place could make two lines of this
+    form); what keeps other text out of the trace is that no process of the adapter's tree can reach it (run.py's
+    TraceTail)."""
+    skel = strace_skeleton(ln)
+    if skel is None:
+        return "a quoted string or a <...> does not close"
+    if not _LINE_FORM.match(skel):
+        return "not the form of an strace line"
+    if _CALL_START.search(skel, 1):
+        return "a second call starts inside it"
+    return None
+
+
+def _log_lines(src):
+    """The lines of an strace log: `src` is a path, a list of lines, or an object with a lines() method (run.py's
+    TraceTail, which holds every line it read while the editor ran). Unmeasurable when there is no log."""
+    if hasattr(src, "lines"):
+        return src.lines()
+    if isinstance(src, list):
+        return [ln.rstrip("\n") for ln in src]
+    if not src or not os.path.isfile(src):
         raise Unmeasurable("no trace log")
-    with open(path, "r", encoding="latin-1") as f:
-        return [ln.rstrip("\n") for ln in f
-                if not re.match(r"^\d+\s+(<\.\.\. )?execve(at)?[ (]", ln) and not NET_SYSCALL.match(ln)]
+    with open(src, "r", encoding="latin-1") as f:
+        return [ln.rstrip("\n") for ln in f]
 
 
-def trace_hits(path, needles, start=0):
+def trace_lines(src):
+    """The file-system lines of an `strace -o` log (a path, a list of lines or a TraceTail: _log_lines): without
+    execve / execveat lines (what a process was started with, its argv, is not observed, only what it opened, read,
+    listed or wrote) and without the network calls (net_hits reads those; a send's data is not a file name)."""
+    return [ln for ln in _log_lines(src)
+            if not re.match(r"^\d+\s+(<\.\.\. )?execve(at)?[ (]", ln) and not NET_SYSCALL.match(ln)]
+
+
+def trace_hits(src, needles, start=0):
     """Trace lines (from index `start` of trace_lines) that name any of `needles`, matched as strace prints them
     (strace_form) and without regard to ASCII case."""
     forms = [strace_form(n).lower() for n in needles]
-    lines = trace_lines(path)[start:]
+    lines = trace_lines(src)[start:]
     return [ln for ln in lines if any(f in ln.lower() for f in forms)]
 
 
 _V4 = re.compile(r'sa_family=AF_INET, sin_port=htons\((\d+)\), sin_addr=inet_addr\("([^"]*)"\)')
 _V6 = re.compile(r'sa_family=AF_INET6, sin6_port=htons\((\d+)\),.*?inet_pton\(AF_INET6, "([^"]*)"')
 _CALL = re.compile(r"^\d+\s+(connect|sendto|sendmsg|sendmmsg)\((\d+)(?:<([^:>]+):\[(.*?)\]>)?")
+_URING = re.compile(r"^\d+\s+(<\.\.\. )?io_uring_setup\b")
+_RESULT = re.compile(r"\) = (-?\d+|\?)")  # a call's result: a number (-yy adds "<anon_inode:[io_uring]>") or ?
 _DATA = re.compile(r'(?<!inet_addr\()(?<!AF_INET6, )"(?:[^"\\]|\\.)*"')  # quoted data, not an address
+# UDP connects that send no packet and are allowed: Chromium's IPv6 reachability probe (the only UDP connect to another
+# computer in v0.2.0's runs, with and without a network). Each entry is an exact (address, port).
+UDP_PROBES = {("2001:4860:4860::8888", "443")}
 
 
 def _own(addr):
@@ -567,37 +647,54 @@ def _own(addr):
     return ip.is_loopback or ip.is_unspecified
 
 
-def net_hits(path, start=0):
-    """Lines of an strace log (`-yy`, traced with connect, sendto, sendmsg, sendmmsg) in which a process addressed
-    another computer: a TCP connect (or one on a socket strace could not name) to an address that is not this
-    computer's own, a UDP connect to port 53 (a DNS lookup, also when it fails), or a send whose destination (its own
-    address, else the far end of the connected socket) is another computer or port 53. A UDP connect to another port
-    sends no packet (Chromium's IPv6 reachability probe is one) and is not counted; a send on that socket is. Unix
-    sockets and netlink are not network. Quoted data is never read as an address. A download needs one of these
+def net_hits(src, start=0):
+    """Lines of an strace log (`-yy`, traced with connect, sendto, sendmsg, sendmmsg and io_uring_setup; a path, a
+    list of lines or a TraceTail, see _log_lines) in which a process addressed another computer, or could have without
+    a traced call:
+    - a connect (TCP, UDP, or on a socket strace could not name) to an address that is not this computer's own. The
+      one exception is a UDP connect to an exact entry of UDP_PROBES (Chromium's IPv6 reachability probe, which sends
+      no packet). Any other UDP connect counts, because write() on a connected UDP socket sends without a traced call.
+      The exception is exactly that wide: the connect to [2001:4860:4860::8888]:443 is allowed, and data a process
+      then sends on that socket with write() is not seen (write is not traced). Running the editor as another user
+      does not change this; a run with the network switched off does;
+    - any connect to port 53 (a DNS lookup, also to this computer's own resolver, and also when it fails);
+    - a send whose destination (its own address, else the far end of the connected socket) is another computer or
+      port 53;
+    - an io_uring_setup that made a ring: io_uring connect and send operations are not system calls strace sees.
+      run.py makes strace refuse every io_uring_setup (ENOSYS, which Node's libuv and others take as "no io_uring";
+      Node 24 asks for a ring at every start), so a ring that was made means the refusal did not apply. A refused
+      setup ("= -1 ... (INJECTED)") and the "<unfinished ...>" half of a call (no result) do not count; a result of
+      "?" (the process ended in the call) counts.
+    Unix sockets and netlink are not network. Quoted data is never read as an address. A download needs one of these
     calls, so a log without such a line shows that nothing was fetched, also when the network is down and the call
-    failed. Not seen: a write() on a connected UDP socket (write is not traced). Unmeasurable when there is no log."""
-    if not path or not os.path.isfile(path):
-        raise Unmeasurable("no trace log")
+    failed. Unmeasurable when there is no log."""
     hits = []
-    with open(path, "r", encoding="latin-1") as f:
-        for i, ln in enumerate(f):
-            m = _CALL.match(ln) if i >= start else None
-            if not m:
-                continue  # another call, or the "<... resumed>" half of one (its arguments are on the first half)
-            call, proto, info = m.group(1), (m.group(3) or "").upper(), m.group(4) or ""
-            if proto.startswith(("UNIX", "NETLINK")):
-                continue
-            bare = _DATA.sub('""', ln)
-            dests = [(port, addr) for port, addr in _V4.findall(bare) + _V6.findall(bare)]
-            if call != "connect" and not dests and "->" in info:
-                host, _, port = info.split("->", 1)[1].rpartition(":")
-                dests = [(port, host)]
-            if call == "connect" and proto.startswith("UDP"):
-                bad = any(port == "53" for port, _ in dests)
-            else:
-                bad = any(port == "53" or not _own(addr) for port, addr in dests)
-            if bad:
-                hits.append(ln.rstrip("\n")[:300])
+    for i, ln in enumerate(_log_lines(src)):
+        if i < start:
+            continue
+        if _URING.match(ln):
+            r = _RESULT.findall(ln)
+            if r and not r[-1].startswith("-"):
+                hits.append(ln[:300])  # a ring was made: the refusal (run.py's inject) did not apply
+            continue
+        m = _CALL.match(ln)
+        if not m:
+            continue  # another call, or the "<... resumed>" half of one (its arguments are on the first half)
+        call, proto, info = m.group(1), (m.group(3) or "").upper(), m.group(4) or ""
+        if proto.startswith(("UNIX", "NETLINK")):
+            continue
+        bare = _DATA.sub('""', ln)
+        dests = [(port, addr) for port, addr in _V4.findall(bare) + _V6.findall(bare)]
+        if call != "connect" and not dests and "->" in info:
+            host, _, port = info.split("->", 1)[1].rpartition(":")
+            dests = [(port, host)]
+        if call == "connect" and proto.startswith("UDP"):
+            bad = any(port == "53" or not (_own(addr) or (addr.strip("[]"), port) in UDP_PROBES)
+                      for port, addr in dests)
+        else:
+            bad = any(port == "53" or not _own(addr) for port, addr in dests)
+        if bad:
+            hits.append(ln[:300])
     return hits
 
 
