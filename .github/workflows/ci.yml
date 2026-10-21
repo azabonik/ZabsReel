@@ -156,6 +156,12 @@ jobs:
           ffmpeg -version | head -1
           npx tsx packages/core/scripts/smoke-ffcompat.ts
 
+      # FFmpeg 9.0's -progress out_time goes back when an audio stream ends
+      # ahead of the video; runFfmpeg must not report a lower fraction. A stub
+      # FFmpeg prints that sequence, so the runner's FFmpeg and load do not matter.
+      - name: Smoke — FFmpeg progress never goes backwards (stub FFmpeg, no media)
+        run: npx tsx packages/core/scripts/smoke-ffmpeg-progress.ts
+
       - name: Smoke — speed ramps (synthesized media)
         run: npx tsx packages/core/scripts/smoke-ramps.ts
 
