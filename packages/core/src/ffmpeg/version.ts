@@ -20,7 +20,8 @@
  *  - afftfilt was rewritten in 5.1 (libavfilter 8.28): sqrt-Hann analysis and
  *    synthesis windows, latency win_size − hop ({@link hasAfftfiltV2},
  *    effects/audio.ts robotSteps).
- *  - anlmdn crashes in FFmpeg 9.0 (executor.ts anlmdnWorks).
+ *  - anlmdn crashes in FFmpeg 9.0, and now and then deadlocks (executor.ts
+ *    probeAnlmdn, anlmdnWorks).
  *  - acrossfade drops audio when its second input ends first in 6.1 – 7.x and
  *    pre-8.0 git builds ({@link acrossfadeUnreliable}).
  *  - xfade drops the outgoing clip's last frame before 7.0 ({@link xfadeNeedsEofPad}).

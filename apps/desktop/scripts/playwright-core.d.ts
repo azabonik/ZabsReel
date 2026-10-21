@@ -10,6 +10,7 @@ declare module "playwright-core" {
   export interface Dialog {
     message(): string;
     accept(): Promise<void>;
+    dismiss(): Promise<void>;
   }
   export interface Request {
     url(): string;
@@ -23,6 +24,7 @@ declare module "playwright-core" {
   }
   export interface Route {
     fulfill(response: { status?: number; contentType?: string; body?: string }): Promise<void>;
+    continue(): Promise<void>;
   }
   export interface Box {
     x: number;
@@ -48,7 +50,8 @@ declare module "playwright-core" {
     fill(value: string): Promise<void>;
     press(key: string): Promise<void>;
     focus(): Promise<void>;
-    click(options?: { position?: { x: number; y: number } }): Promise<void>;
+    click(options?: { position?: { x: number; y: number }; force?: boolean; timeout?: number }): Promise<void>;
+    dblclick(options?: { timeout?: number }): Promise<void>;
     isEnabled(): Promise<boolean>;
     isDisabled(): Promise<boolean>;
     isChecked(): Promise<boolean>;
@@ -75,7 +78,8 @@ declare module "playwright-core" {
     locator(selector: string, options?: { hasText?: string | RegExp; has?: Locator }): Locator;
     getByRole(role: string, options?: RoleOptions): Locator;
     reload(): Promise<unknown>;
-    route(url: string, handler: (route: Route) => unknown, options?: { times?: number }): Promise<void>;
+    route(url: string | RegExp, handler: (route: Route) => unknown, options?: { times?: number }): Promise<void>;
+    unroute(url: string | RegExp): Promise<void>;
     mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void>; down(): Promise<void>; up(): Promise<void> };
     keyboard: { press(key: string): Promise<void>; down(key: string): Promise<void>; up(key: string): Promise<void> };
     isClosed(): boolean;

@@ -29,7 +29,9 @@
  *   - alpha modes (8.1+): premultiply → alphamerge → unpremultiply (the trails /
  *     alphaSafe shape) keeps a translucent colour, and the graph adapter's rewrite;
  *   - afftdn (rewritten in 5.0): the noise reduction chain adds no latency and
- *     still lowers a noise floor; heavy mode runs (anlmdn crashes 9.0);
+ *     still lowers a noise floor; heavy mode runs (anlmdn crashes 9.0, and now
+ *     and then deadlocks it: the anlmdn probe has a time limit, and stops a run
+ *     that never exits, through probeAnlmdn and through anlmdnWorks());
  *   - afftfilt (rewritten in 5.1): an impulse shows which afftfilt this build
  *     has (5.1+ delays it by win_size − hop), and the robot effect in graph.ts's
  *     clip-chain shape matches a model of 4.4's robot — sample for sample on
@@ -49,12 +51,12 @@
  */
 import { execa } from "execa";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, adaptFfmpegArgs, anlmdnWorks, checkBinaries, ffmpegVersion,
-  filterScriptFlagInUse, hasAlphaModes, runFfmpeg, runFfmpegStdoutBuffer, setFilterScriptFlag,
+  ANLMDN_PROBE_TIMEOUT_MS, FFMPEG_BIN, FFPROBE_BIN, INLINE_FILTERGRAPH_MAX, adaptFfmpegArgs, anlmdnProbeTimeoutMs, anlmdnWorks,
+  checkBinaries, ffmpegVersion, filterScriptFlagInUse, hasAlphaModes, probeAnlmdn, runFfmpeg, runFfmpegStdoutBuffer, setFilterScriptFlag,
 } from "../src/ffmpeg/executor.js";
 import {
   TESTED_FFMPEG_MAJORS, acrossfadeUnreliable, adaptFilterGraph, hasAfftdnV2, hasAfftfiltV2, parseFfmpegVersion, passthroughFlag, preferredFilterScriptFlag,
@@ -543,6 +545,76 @@ async function main(): Promise<void> {
     console.error(`     ${String(e).slice(0, 300)}`);
   }
   check(heavyOk && !!heavyCaps?.noAnlmdn === !works, `heavy noise reduction runs (anlmdn ${works ? "works" : "crashes this FFmpeg: skipped"})`);
+  // FFmpeg 9.0's anlmdn deadlocks about 1 run in 2,400 (all threads asleep): without a time limit the probe, and the
+  // export waiting on it, never finished (this suite hung here on CI). The fake FFmpeg ignores SIGTERM, as a
+  // deadlocked FFmpeg does, and never exits.
+  // MUTATION: set the probe's default time limit to 0 in executor.ts (execa then has none) → the first row fails.
+  const envMs = process.env.AIVE_ANLMDN_PROBE_TIMEOUT_MS;
+  check(Number.isFinite(ANLMDN_PROBE_TIMEOUT_MS) && ANLMDN_PROBE_TIMEOUT_MS > 0 && (envMs !== undefined || ANLMDN_PROBE_TIMEOUT_MS === 15_000),
+    `the anlmdn probe has a time limit: ${ANLMDN_PROBE_TIMEOUT_MS} ms (${envMs === undefined ? "the default, 15 s" : `AIVE_ANLMDN_PROBE_TIMEOUT_MS=${envMs}`})`);
+  const notDefault = ["", "0", "-1", "99", "600001", "1.5", "abc", "Infinity"].filter((s) => anlmdnProbeTimeoutMs(s) !== 15_000);
+  // MUTATION: change `ms >= 100` to `ms > 100`, or `ms <= 600_000` to `ms < 600_000`, in executor.ts → this row fails.
+  const ends = ["100", "600000"].filter((s) => anlmdnProbeTimeoutMs(s) !== Number(s));
+  check(anlmdnProbeTimeoutMs(undefined) === 15_000 && anlmdnProbeTimeoutMs("500") === 500 && notDefault.length === 0 && ends.length === 0,
+    `…AIVE_ANLMDN_PROBE_TIMEOUT_MS is used only as a whole 100 – 600,000 ms, 0 and anything else give 15 s (pure${notDefault.length ? `; not 15 s: ${notDefault.map((s) => JSON.stringify(s)).join(", ")}` : ""}${ends.length ? `; ends not used: ${ends.join(", ")}` : ""})`);
+  // MUTATION: drop the probe's timeout, or its killSignal (execa then waits 5 s before SIGKILL) → the probeAnlmdn row
+  // fails. Have anlmdnWorks() pass no time limit (or 0) to probeAnlmdn → the anlmdnWorks row fails ("still waiting").
+  if (process.platform !== "win32") {
+    const fakeDir = mkdtempSync(join(tmpdir(), "aive-anlmdn-"));
+    const fake = (name: string, body: string) => {
+      const p = join(fakeDir, name);
+      writeFileSync(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return p;
+    };
+    /** A fake FFmpeg that writes its pid to `<name>.pid`, ignores SIGTERM and never exits. */
+    const hangs = (name: string) => {
+      const pidFile = join(fakeDir, `${name}.pid`);
+      return { bin: fake(name, `echo $$ > '${pidFile}'\ntrap '' TERM\nexec sleep 600`), pidFile };
+    };
+    /** Whether the fake ran and is still running; one still running is killed here (by its exact pid). */
+    const reap = (pidFile: string) => {
+      const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : NaN;
+      let alive = false;
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          alive = true;
+          process.kill(pid, "SIGKILL");
+        } catch { /* gone */ }
+      }
+      return { ran: Number.isInteger(pid) && pid > 0, alive, says: !(pid > 0) ? "never ran" : alive ? "still running" : "killed" };
+    };
+    const hung = hangs("hung");
+    const t0 = Date.now();
+    let guard: NodeJS.Timeout | undefined;
+    const got = await Promise.race([probeAnlmdn(hung.bin, 500), new Promise<string>((r) => { guard = setTimeout(r, 5000, "still waiting"); })]);
+    clearTimeout(guard);
+    const ms = Date.now() - t0;
+    const k = reap(hung.pidFile);
+    check(got === false && k.ran && !k.alive,
+      `an anlmdn probe whose FFmpeg never exits counts as broken at its time limit, and that FFmpeg is killed (${got} after ${ms} ms, ${k.says})`);
+    // anlmdnWorks() itself, with that FFmpeg as FFMPEG_BIN: a child process, since FFMPEG_BIN and the time limit are
+    // read when executor.ts loads (and the result is cached per process). 500 ms through the test-only variable; the
+    // child gives up after 5 s and exits, which a probe still waiting would otherwise keep from happening.
+    const hung2 = hangs("hung-works");
+    const code = `const m = await import(process.argv[1]);
+      const t0 = Date.now();
+      const got = await Promise.race([m.anlmdnWorks(), new Promise((r) => setTimeout(r, 5000, "still waiting"))]);
+      console.log(JSON.stringify({ bin: m.FFMPEG_BIN, limit: m.ANLMDN_PROBE_TIMEOUT_MS, got, ms: Date.now() - t0 }));
+      process.exit(0);`;
+    const child = await execa(process.execPath, ["--import", "tsx", "-e", code, join(import.meta.dirname, "../src/ffmpeg/executor.ts")], {
+      env: { ...process.env, AIVE_FFMPEG: hung2.bin, AIVE_ANLMDN_PROBE_TIMEOUT_MS: "500" }, reject: false, timeout: 60_000, killSignal: "SIGKILL",
+    });
+    const line = /\{.*\}/.exec(child.stdout)?.[0];
+    const w = (line ? JSON.parse(line) : {}) as { bin?: string; limit?: number; got?: unknown; ms?: number };
+    const k2 = reap(hung2.pidFile);
+    check(w.bin === hung2.bin && w.limit === 500 && w.got === false && w.ms !== undefined && w.ms >= 400 && w.ms < 5000 && k2.ran && !k2.alive,
+      `…and anlmdnWorks() with it as FFMPEG_BIN (time limit ${w.limit ?? "?"} ms) resolves false, and that FFmpeg is killed (${line ? `${w.got} after ${w.ms} ms${w.bin === hung2.bin ? "" : `, ran ${w.bin}`}` : `no result: ${(child.stderr || `exit ${child.exitCode}`).split("\n")[0]}`}, ${k2.says})`);
+    // A crash is a run ended by a signal; SIGKILL here, since a fake that segfaults would leave a core dump.
+    const ok = await probeAnlmdn(fake("ok", "exit 0"), 5000);
+    const crashed = await probeAnlmdn(fake("crash", "kill -KILL $$"), 5000);
+    check(ok && !crashed, `…an FFmpeg whose run exits 0 has a working anlmdn, one killed by a signal does not (${ok}, ${crashed})`);
+  }
   // vibrato: primed with silence, so the first output samples are never heap leftovers.
   const uw = audioEffectFilterSteps([{ type: "underwater", params: { muffle: 1500, wobble: 1 } }]);
   let worst = -Infinity;

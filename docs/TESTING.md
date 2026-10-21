@@ -496,7 +496,8 @@ npx tsx packages/core/scripts/smoke-voicefx.ts
 # file with -filter_complex_script / -/filter_complex (9.0 has only the second,
 # 4.4 only the first) and the fallback between them, alpha-mode retagging (8.1+),
 # afftdn latency + strength (rewritten in 5.0), heavy noise reduction (anlmdn
-# crashes 9.0), the robot against a model of 4.4's afftfilt (rewritten in 5.1)
+# crashes 9.0; its probe kills a fake FFmpeg that never exits), the robot
+# against a model of 4.4's afftfilt (rewritten in 5.1)
 # plus an impulse that checks which afftfilt this build has, vibrato's primed
 # delay line, vibrance's pinned luma weights (8.0 swapped the defaults), a
 # stereo export mix after a mono first clip, the last frame of clips with
@@ -872,7 +873,7 @@ Differences between the versions, and what the core does about them:
 | Alpha modes (straight or premultiplied) are negotiated per link | 8.1+ | The executor retags frames around `premultiply` / `unpremultiply` with `setparams`. Without this, FFmpeg undid them: an `add` blend at 60 % opacity came out at 100 %, and trails, glow and rgbsplit darkened translucent pixels. |
 | afftdn was rewritten: 25 ms output delay, a different noise-floor scale, noise tracking that barely works | 5.0+ | Each pass is trimmed by its delay, and the noise floor offset is recalibrated with tracking off. Noise reduction and enhance_voice match 4.4 within about 1.5 dB on smoke-voice's speech. |
 | afftfilt was rewritten: sqrt-Hann on input and output, win_size − hop latency. The robot came out quieter, duller, 8–32 ms late, and lost isolated transients. | 5.1+ | The robot runs afftfilt with `win_func=rect`, and its expression rebuilds 4.4's Hann spectrum from the neighbouring bins. The latency is padded and trimmed off, the 3 pre-roll frames are gated, and the input is padded to a whole hop (4.4 rounds its output up to one, so a robot after *normalize* keeps its tail). It matches 4.4 within −65 dB at 0.0 dB level, and the live preview matches it too. |
-| `anlmdn` crashes on any input | 9.0 | Probed once at run time. *Reduce noise* with *Extra pass* skips the non-local-means stage. |
+| `anlmdn` crashes on any input, and about 1 run in 2,400 deadlocks (never exits) | 9.0 | Probed once at run time; a probe run still going after 15 s is killed and counts as a crash (`AIVE_ANLMDN_PROBE_TIMEOUT_MS`, a whole number from 100 to 600000, changes the 15 s; for tests only). *Reduce noise* with *Extra pass* skips the non-local-means stage. |
 | `acrossfade` ends its output as soon as its second input has ended, even while the first is still playing. Speed-ramp chunks and transitions come from one source, so the next piece is often complete first: on 6.1 a speed ramp's audio lost its end (silence), on 7.x it came out cut short or empty at random | 6.1 – 7.x (and git builds of libavfilter 9 and 11) | Speed-ramp chunks and transitions are joined by fading the pieces and mixing them at their sample positions. |
 | `vibrance` defaults: red and blue luma weights swapped | 8.0+ | The weights from 4.4 (which the preview shader uses) are passed explicitly. |
 | A `scale` in `-filter_complex` without `flags` is bilinear in 4.4 and bicubic from 5.0 | 5.0+ | The motion-graphics scale names `flags=bilinear`. |

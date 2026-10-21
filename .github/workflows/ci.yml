@@ -29,6 +29,11 @@ jobs:
       - name: Matrix rerun harness (stubs)
         run: timeout -k 10 180 bash scripts/ci/test/matrix-retry.sh
 
+      # The FFmpeg matrix's flaky-report (scripts/ci/flaky-report.sh): which
+      # tracking-issue calls it makes, on a stub gh. No network.
+      - name: Flaky-report harness (stub gh)
+        run: timeout -k 5 60 bash scripts/ci/test/flaky-report.sh
+
       # The clean-room runtime (packages/motion/cleanroom: runtime/, test/,
       # NOTES.md) is changed only by a clean-room session: its files must match
       # CLEANROOM.lock (the self-test proves a changed, added or deleted file
