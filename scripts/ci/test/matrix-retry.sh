@@ -21,7 +21,7 @@ grep -v '^#' "$HERE/checkout.txt" | while IFS= read -r f; do mkdir -p "$W/wt/$(d
 for f in a.mp4 b.mp4 c640.mp4 m.mp3; do : > "$W/media/$f"; done
 BIN="$HERE/bin"
 
-# job <case> [VAR=value ...]: matrix-job.sh (CI=<dir> picks the scripts' copy) on the fake checkout, output in
+# job <case> [VAR=value ...]: matrix-job.sh (MATRIX_SCRIPTS=<dir> picks the scripts' copy; not CI, which GitHub sets to true) on the fake checkout, output in
 # runs/<case>/out.txt (its last line "exit N"). OUTDIR=<dir> reuses an outdir instead of a fresh runs/<case>/job.
 job() {
   local c="$1" R; shift
@@ -29,7 +29,7 @@ job() {
   env -i HOME="$R/home" REAL_HOME="$R/home" PATH="$BIN:/usr/bin:/bin" TMPDIR="$R/tmp" LANG=C.UTF-8 \
     AIVE_FFMPEG="$BIN/ffmpeg" AIVE_FFPROBE="$BIN/ffprobe" FF_SOURCE=btbn SKIP_BUILD=1 JOBS=4 \
     STUB_STATE="$R/state" GITHUB_STEP_SUMMARY="$R/summary.md" GITHUB_ACTIONS=true "$@" \
-    timeout -k 5 120 bash "${CI:-$W/ci}/matrix-job.sh" "$W/wt" "${OUTDIR:-$R/job}" "$W/media" 6.1 > "$R/out.txt" 2>&1
+    timeout -k 5 120 bash "${MATRIX_SCRIPTS:-$W/ci}/matrix-job.sh" "$W/wt" "${OUTDIR:-$R/job}" "$W/media" 6.1 > "$R/out.txt" 2>&1
   echo "exit $?" >> "$R/out.txt"
 }
 PASS=0; FAILN=0
@@ -96,7 +96,7 @@ job $c STUB_HANG_ONCE="core-smoke-cutout"
 ok "job exit 0, FLAKY core-smoke-cutout (first exit 124, rerun 0)" '[ "$(out | tail -1)" = "exit 0" ] && out | grep -qx "FLAKY core-smoke-cutout (first exit 124, rerun 0)" && out | grep -qxF "MATRIX shard 2/3: 17/17 passed, 1 flaky $MX"'
 
 c=realtimeout; echo "== $c: a real timeout kill (copy with a 3 s suite timeout): cutout sleeps 60 s on its first run"
-CI="$W/ci-fast" job $c STUB_SLEEP_ONCE="core-smoke-cutout"
+MATRIX_SCRIPTS="$W/ci-fast" job $c STUB_SLEEP_ONCE="core-smoke-cutout"
 ok "job exit 0, FLAKY core-smoke-cutout (first exit 124, rerun 0)" '[ "$(out | tail -1)" = "exit 0" ] && out | grep -qx "FLAKY core-smoke-cutout (first exit 124, rerun 0)"'
 ok "first log ends at the sleep" '[ "$(tail -1 $(J)/m6.1-2/logs/core-smoke-cutout.log)" = "stub core-smoke-cutout: sleeping" ]'
 
