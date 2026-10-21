@@ -640,6 +640,11 @@ class Adapter:
         self.call("save_project", {"path": arg_str(a, "path")})
         return {}
 
+    def op_save(self, a):
+        """The plain Save: v0.2.0's save tool writes the project to its current file (refused when there is none)."""
+        self.call("save", {})
+        return {}
+
     def op_load_project(self, a):
         j = self.call("load_project", {"path": arg_str(a, "path")})
         return {"notice": j.get("notice")}
@@ -1015,6 +1020,10 @@ def self_test():
         expect("add_text: style fields are renamed and passed on unchanged; unknown ones are dropped",
                (r.get("result"), seen.get("fontSize"), seen.get("box"), "nope" in seen),
                ({"text": "text_1"}, "12,x", True, False))
+        tools_called = []
+        r = op(adapter(lambda n, a: tools_called.append((n, a)) or {"text": "Saved"}), "save", {})
+        expect("save: the plain Save is v0.2.0's save tool, with no arguments", (r.get("result"), tools_called),
+               ({}, [("save", {})]))
         r = op(adapter(lambda n, a: {"text": "generate_thumbnail → rendered frame (/d/thumbnails/a1.jpg):"}),
                "thumbnail", {"asset": "a1", "time": 0.5})
         expect("thumbnail: the path in v0.2.0's prose answer", r.get("result"), {"path": "/d/thumbnails/a1.jpg"})

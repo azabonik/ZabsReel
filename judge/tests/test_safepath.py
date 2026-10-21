@@ -7,6 +7,8 @@ Observations, all made by the judge itself:
   hostile input names it;
 - files that must not appear: a marker in crafted identifiers that must never become a file name, and payload files
   that a filter option smuggled into a render would write;
+- files that must not change: a refused project and OTIO file, hashed before the refusals (the plain Save after them
+  must write the user's project);
 - refusals, the project the editor reports (get_state), what its file surface serves, and exports.
 
 Every hostile file is the editor's own saved project (or OTIO export) with values replaced by text substitution
@@ -22,10 +24,15 @@ import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
-CHECKS = 31
+CHECKS = 34
 
 LUT_TEXT = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n"
 LEGIT_COLOURS = ["#ffe14d", "#000000cc", "0xFFE14D", "yellow", "white@0.5", "black@0.55"]
+# Distinctive text style values (none of them elsewhere in the project), each later given filter text (section 8,
+# from a file). The two numbers must occur once in the saved project: small numbers such as an edit counter can
+# take the same value.
+TEXT_STYLE = {"color": "#c0ffee", "box": True, "box_color": "#0a0b0c99", "box_border": 117, "outline_width": 2,
+              "outline_color": "#1b2c3d", "shadow_x": 3, "shadow_y": 3, "shadow_color": "#2c3d4e", "font_size": 113}
 # Distinctive values of the full-featured project, each later given a filter payload (section 10).
 GRADE = {"brightness": 0.0123, "contrast": 1.0123, "saturation": 1.0234, "gamma": 1.0345}
 COLOUR = {"temperature": 0.123, "tint": -0.0456, "hue": 7.89}
@@ -118,14 +125,15 @@ def body(t, canary):
     r, what = refused(lambda: d.import_otio(url_otio))
     t.check("importing an OTIO file whose media is an http URL is refused", ok and r, f"{why}; {what}")
 
-    # A refused open leaves the open project as it was: its edits, its undo history, and the file it saves to.
-    other = t.path("projects", "other.aive")
-    shutil.copyfile(legit, other)
+    # A refused open leaves the open project as it was: its edits, its undo history, and the file it saves to. The
+    # file is observed through the plain Save after an edit made once both refusals are over: the edit must land in
+    # the user's project, and neither refused file may change.
     d.load_project(legit)
     d.move_clip(first_clip(), 30)
     before = shape(d.get_state())
+    refused_files = {p: observe.sha256(p) for p in (url_proj, url_otio)}
     r1, w1 = refused(lambda: d.load_project(url_proj))
-    t.check("after a refused project open the open project is unchanged (with its unsaved edit)",
+    t.check("after a refused project open the open project is unchanged (with its edit)",
             r1 and shape(d.get_state()) == before, w1)
     r2, w2 = refused(lambda: d.import_otio(url_otio))
     t.check("after a refused OTIO import the open project is unchanged", r2 and shape(d.get_state()) == before, w2)
@@ -133,11 +141,18 @@ def body(t, canary):
     starts = [c.get("start_frame") for c in d.clips("v0")]
     d.redo()
     t.check("…and its undo history works (undo puts the clip back at frame 0)", starts == [0], starts)
-    d.load_project(other)  # opening another project first saves the open one's unsaved edits to its own file
+    d.move_clip(first_clip(), 45)  # an edit made after the refusals
+    r3, w3 = refused(d.save)
+    starts = []
+    if not r3:
+        d.load_project(legit)
+        starts = [c.get("start_frame") for c in d.clips("v0")]
+    t.check("…and Save then writes the user's own project: reopened, it has the edit made after the refusals",
+            not r3 and starts == [45], f"{w3}; {starts}")
+    changed = [os.path.basename(p) for p, h in refused_files.items() if observe.sha256(p) != h]
+    t.check("…and neither refused file was written (the project and the OTIO file are unchanged)", not changed,
+            changed)
     d.load_project(legit)
-    starts = [c.get("start_frame") for c in d.clips("v0")]
-    t.check("…and the next open saves the unsaved edit into the user's own project, not the refused file",
-            starts == [30], starts)
     d.move_clip(first_clip(), 0)  # the legitimate project as it was, for the sections below
     d.save_project(legit)
 
@@ -214,6 +229,34 @@ def body(t, canary):
     bad = [c for c in LEGIT_COLOURS if refused(lambda c=c: d.add_text(cl, "c", color=c, box=True, box_color=c))[0]]
     t.check("the documented colour forms (#rrggbb, #rrggbbaa, 0xRRGGBB, a name, name@alpha) are accepted", not bad,
             bad)
+
+    # ---- 8, from a file. The same kind of values read from a project file, where no tool's input check runs first:
+    # a text styled with distinctive values, saved, and each value given filter text by substitution.
+    d.load_project(legit)
+    d.add_text(first_clip(), "styled", **TEXT_STYLE)
+    styled = t.path("projects", "styled.aive")
+    d.save_project(styled)
+    pwn8f = t.path("pwn", "text-style-file.txt")
+    pay8 = f",metadata=mode=print:file={pwn8f}"
+    pairs = [(TEXT_STYLE["color"], TEXT_STYLE["color"] + pay8),
+             (TEXT_STYLE["box_color"], f"{TEXT_STYLE['box_color']}:x=0,movie={canary.url('box.mp4')}"),
+             (TEXT_STYLE["outline_color"], TEXT_STYLE["outline_color"] + pay8),
+             (TEXT_STYLE["shadow_color"], f"{TEXT_STYLE['shadow_color']}:y=0,movie={canary.url('shadow.mp4')}"),
+             (TEXT_STYLE["font_size"], f"{TEXT_STYLE['font_size']}{pay8}"),
+             (TEXT_STYLE["box_border"], f"{TEXT_STYLE['box_border']}{pay8}")]
+    out = t.path("projects", "text-style.aive")
+    counts = observe.substitute(styled, out, pairs)
+    ok = all(c > 0 for c in counts[:4]) and counts[4:] == [1, 1]  # a number found elsewhere too would alter that
+    harmless, what = refused(lambda: d.load_project(out))  # refused at open, or opened and exported below
+    if not harmless:
+        try:
+            job = d.export(t.path("out", "text-style.mp4"))
+            harmless, what = job.get("status") == "done", f"opened; export {job.get('status')}: {job.get('error')}"
+        except drv.JudgeError as e:
+            what = f"opened; export refused: {str(e)[:300]}"
+    t.check("a project whose text colours, size and box border carry filter text is refused at open, or opens and "
+            "its export finishes", ok and harmless, f"replacements {counts}; {what}")
+    t.check("no file was written through a text style value in a project", not os.path.exists(pwn8f), pwn8f)
 
     # ---- 11. a project using the rendering features saves and loads unchanged, and renders the same
     d.load_project(legit)

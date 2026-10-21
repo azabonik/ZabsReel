@@ -8,6 +8,11 @@ text substitution in a project the editor saved (observe.substitute), so the tes
 format. approve_host / revoke_host are the window's own actions (PROTOCOL.md); add_host_outside is an edit of the
 editor's files that the window did not make.
 
+Only the editor's side of a Keep question's Remove is judged here: the test itself asks for a removal limited to an
+entry still outside (revoke_host with only_if_outside), and the editor must leave a computer kept meanwhile allowed.
+That the window's Remove (and Esc) asks for that limited removal is the window's side; it stays with smoke-savename.ts
+until the UI overhaul (judge/PORTING.md).
+
 Every check is recorded on every path, so CHECKS is exact.
 """
 import os
@@ -109,14 +114,15 @@ def run(t):
             KEEP in h["approved"] and KEEP not in h["outside"], h)
     removed = d.revoke_host(KEEP, only_if_outside=True)
     h = d.list_hosts()
-    t.check("the Remove of a Keep question removes nothing once the computer was kept",
+    t.check("a removal limited to outside entries (the Remove of a Keep question) removes nothing once the computer "
+            "was kept",
             removed is False and KEEP in h["approved"], f"removed {removed}; {h}")
     d.add_host_outside(REMOVE)
     d.recheck_media()
     removed = d.revoke_host(REMOVE, only_if_outside=True)
     d.recheck_media()
     h = d.list_hosts()
-    t.check(f"the Remove of a Keep question removes an entry still outside ({REMOVE})",
+    t.check(f"a removal limited to outside entries removes an entry still outside ({REMOVE})",
             removed is True and REMOVE not in h["outside"] and REMOVE not in h["approved"], f"removed {removed}; {h}")
 
     # Opening the computer's paths again never allows it.

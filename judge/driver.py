@@ -266,6 +266,10 @@ class Driver:
         """Saves the project as `path`."""
         return self.request("save_project", {"path": path if raw else path_arg(path)})
 
+    def save(self):
+        """The plain Save: writes the project to its current file, the one it was last saved as or opened from."""
+        return self.request("save", {})
+
     def load_project(self, path, raw=False):
         """Opens the project at `path`. -> {"notice": str or None}"""
         return self.request("load_project", {"path": path if raw else path_arg(path)})

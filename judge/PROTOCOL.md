@@ -199,7 +199,8 @@ null, "fraction": number or null}`.
 
 | op | args | result |
 |---|---|---|
-| `save_project` | `{"path"}` | `{}`: save as `path`. |
+| `save_project` | `{"path"}` | `{}`: save as `path`. `path` becomes the project's current file. |
+| `save` | `{}` | `{}`: the plain Save: writes the project to its current file, the one it was last saved as (`save_project`) or opened from (`load_project`). A project that has no current file is refused (`product_error`). A refused `load_project` or `import_otio` does not change the current file. |
 | `load_project` | `{"path"}` | `{"notice": str or null}`: opens the project. `notice` is what the editor tells the user about it (offline media, for example). |
 | `export_otio` | `{"path"}` | `{}`: the timeline as an OpenTimelineIO file. |
 | `import_otio` | `{"path"}` | `{"missing": [str]}`: opens the OTIO file as the project. `missing` lists the media paths the editor could not find. |
