@@ -12,7 +12,8 @@
 # rerun too fails the job. A suite whose rerun passes is FLAKY: the job stays green, its "FLAKY <suite> (first exit N,
 # rerun 0)" line goes to the log and the job summary (on GitHub Actions also as a warning annotation), and both logs
 # are kept for the investigation (logs/<suite>.log, logs/<suite>.retry.log).
-# Prints each shard's output (its MATRIX, FAIL and FLAKY lines) and the real [ffmpeg-guard] refusal count. Do not grep
+# Prints each shard's output (its MATRIX, FAIL and FLAKY lines) and the real [ffmpeg-guard] refusal count (first runs;
+# a rerun's lines are counted apart, "(reruns: N more)"). Do not grep
 # "guard"+"refus": smoke-safepath prints expected "ok ... refuses" lines, which gives a misleading 46.
 # With GITHUB_STEP_SUMMARY set, each shard's MATRIX, FAIL and FLAKY lines go to the job summary as soon as that shard
 # ends (so a job stopped by its timeout still shows the shards that finished), then the counts and any DOWNLOAD lines.
@@ -54,7 +55,8 @@ for k in 1 2 3; do
   grep -q '^MATRIX' "$OUT/m$V-$k.log" || { echo "MATRIX shard $k/3: no result (exit $rc)" | tee -a "$OUT/m$V-$k.log"; bad=1; }
   # One closed block per shard: a job stopped later still has a well-formed summary of the shards before.
   { echo '```'; grep -E '^(MATRIX|FAIL |FLAKY )' "$OUT/m$V-$k.log"; echo '```'; } >> "$SUMMARY"
-  [ -n "${GITHUB_ACTIONS:-}" ] && grep '^FLAKY ' "$OUT/m$V-$k.log" | sed "s|^|::warning title=FFmpeg $V: flaky suite::|; s|\$| (both logs in the artifact: m$V-$k/logs/<suite>.log and <suite>.retry.log)|"
+  [ -n "${GITHUB_ACTIONS:-}" ] && grep '^FLAKY ' "$OUT/m$V-$k.log" |
+    sed -E "s|^FLAKY ([^ ]+)(.*)|::warning title=FFmpeg $V: flaky suite::FLAKY \1\2 (logs in the artifact: m$V-$k/logs/\1.log, m$V-$k/logs/\1.retry.log)|"
 done
 # Suites with a result row across the shards, against the recorded floor in matrix-suites.txt.
 rows="$(cat "$OUT"/m"$V"-*/results-*.tsv 2>/dev/null | wc -l)"
@@ -70,7 +72,10 @@ fi
 echo "$suites"
 flaky="flaky $V: $(cat "$OUT"/m"$V"-*/flaky-*.tsv 2>/dev/null | wc -l) (failed, then passed the rerun)"
 echo "$flaky"
-guard="$(cat "$OUT"/m"$V"-*/logs/*.log 2>/dev/null | grep -c '\[ffmpeg-guard\]')"
+# First runs only (a rerun's log would count its suite's guard lines twice); the reruns' count follows in brackets.
+guard="$(find "$OUT"/m"$V"-*/logs -name '*.log' ! -name '*.retry.log' -exec cat {} + 2>/dev/null | grep -c '\[ffmpeg-guard\]')"
+rguard="$(find "$OUT"/m"$V"-*/logs -name '*.retry.log' -exec cat {} + 2>/dev/null | grep -c '\[ffmpeg-guard\]')"
+[ "$rguard" = 0 ] || guard="$guard (reruns: $rguard more)"
 echo "guard lines $V: $guard"
 find "$HOME/.aive" -type f 2>/dev/null | sort > "$OUT/aive-after.txt"
 {

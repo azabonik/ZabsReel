@@ -117,6 +117,9 @@ export RES RR
 run_one() {
   local name="${1%%|*}" cmd="${1#*|}" log="$OUT/logs/${1%%|*}${2:-}.log" rows="$RES"
   [ -z "${2:-}" ] || rows="$RR"
+  # A first run removes the suite's rerun log from an earlier run in a reused outdir (one suite, one shard: never
+  # another shard's live log), so the download tripwire and an investigation read only this run's reruns.
+  [ -n "${2:-}" ] || rm -f "$OUT/logs/$name.retry.log"
   timeout -k 10 900 npx tsx $cmd > "$log" 2>&1
   local rc=$?
   printf '%s\t%s\t%s\n' "$rc" "$name" "$(tail -1 "$log" | tr '\t' ' ' | cut -c1-160)" >> "$rows"

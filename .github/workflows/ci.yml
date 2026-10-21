@@ -24,6 +24,11 @@ jobs:
           node scripts/check-brand.mjs --self-test
           node scripts/check-brand.mjs
 
+      # The FFmpeg matrix's rerun logic (scripts/ci/matrix-job.sh, run-matrix.sh)
+      # on stubs: no suite, FFmpeg or install runs, so it runs before them all.
+      - name: Matrix rerun harness (stubs)
+        run: timeout -k 10 180 bash scripts/ci/test/matrix-retry.sh
+
       # The clean-room runtime (packages/motion/cleanroom: runtime/, test/,
       # NOTES.md) is changed only by a clean-room session: its files must match
       # CLEANROOM.lock (the self-test proves a changed, added or deleted file
