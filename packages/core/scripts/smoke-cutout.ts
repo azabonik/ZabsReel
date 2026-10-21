@@ -31,7 +31,10 @@
  *     library and its file and proxy out of the trash until the cutout goes.
  *  7. AIVE_RVM_INLINE=1 runs the same pipeline on the calling thread and writes
  *     an identical matte; cancel_job stops a run promptly, its worker thread
- *     and ffmpeg children are gone within 2 s, and it leaves no files.
+ *     and ffmpeg children are gone within 2 s, and it leaves no files. The
+ *     same holds for runs stopped while their read-ahead queue is full (the
+ *     encoder held with SIGSTOP): a cancel in a worker and inline, and a run
+ *     whose encoder dies (it fails with the encoder's error).
  *  8. A cutout shows its colour source's colours, read as the clip without its
  *     background removal reads them (the gray matte's own description — full
  *     range on FFmpeg 7+, untagged before — said nothing about them): tagged
@@ -51,6 +54,7 @@ import { runFfmpeg, FFMPEG_BIN, FFPROBE_BIN } from "../src/ffmpeg/executor.js";
 import { referencedManagedPaths } from "../src/storage.js";
 import { segmentKey } from "../src/ffmpeg/segments.js";
 import { previewColorFix } from "../src/ffmpeg/colorspace.js";
+import { matteVideo } from "../src/matting/rvm.js";
 import type { MediaAsset, ResolvedRenderClip } from "../src/types.js";
 import workerThreads from "node:worker_threads";
 import { syncBuiltinESMExports } from "node:module";
@@ -619,6 +623,74 @@ async function main(): Promise<void> {
     await new Promise((res) => setTimeout(res, 300));
     const after = readdirSync(bakedDir).filter((f) => f.includes(cl.id)).length;
     check(after === before, "no partial matte or proxy left behind");
+
+    // 7b. A run whose encoder falls behind (here: stopped with SIGSTOP) waits on its write while the decoder fills
+    // the 3-frame read-ahead queue, so the decoder's stdout is paused when the run stops. The stop must not wait
+    // for that stream to end: then a cancel was only answered by the 5 s grace timer and its worker never exited,
+    // and an inline cancel or a failure (no grace timer) never settled at all.
+    console.log("7b. runs stopped with a full read-ahead queue: cancel (worker, inline) and an encoder that dies...");
+    const wait = (ms: number) => new Promise((res) => setTimeout(res, ms));
+    const answer = (p: Promise<unknown>) =>
+      Promise.race([p.then(() => "resolved", (err: Error) => err.message), wait(10_000).then(() => "no answer in 10 s")]);
+    const childrenOf = async (out: string) =>
+      (await execa("ps", ["--ppid", String(process.pid), "-o", "pid=,args="], { reject: false })).stdout
+        .split("\n")
+        .filter((l) => /ffmpeg/.test(l) && (l.includes(long) || l.includes(out)));
+    const fullQueueRun = async (tag: string, inline: boolean) => {
+      const outPath = join(dir, `full-${tag.replace(/ /g, "-")}.mkv`);
+      const ac = new AbortController();
+      const liveBefore = new Set(workers.live);
+      const createdBefore = workers.created;
+      if (inline) process.env.AIVE_RVM_INLINE = "1";
+      const p = matteVideo({ input: long, sourceIn: 0, span: 60, srcW: 1280, srcH: 720, fps: 30, withAudio: false, outPath, signal: ac.signal, stubMatte: true });
+      delete process.env.AIVE_RVM_INLINE;
+      p.catch(() => {});
+      let kids = await childrenOf(outPath);
+      for (let i = 0; i < 100 && kids.length < 2; i++) {
+        await wait(100);
+        kids = await childrenOf(outPath);
+      }
+      const encoder = Number(kids.find((l) => l.includes(outPath))?.trim().split(/\s+/)[0]);
+      check(kids.length === 2 && encoder > 0, `${tag}: the run has its two ffmpeg children`, kids);
+      if (encoder > 0) process.kill(encoder, "SIGSTOP");
+      await wait(1000); // the decoder fills the queue meanwhile, then waits
+      /** This run's worker threads still alive and ffmpeg children still running, given up to 2 s to go. */
+      const leftovers = async () => {
+        const mine = () => [...workers.live].filter((w) => !liveBefore.has(w)).length;
+        let left = await childrenOf(outPath);
+        for (let i = 0; i < 20 && (mine() || left.length); i++) {
+          await wait(100);
+          left = await childrenOf(outPath);
+        }
+        return { workers: mine(), children: left };
+      };
+      return { outPath, ac, p, encoder, leftovers, createdBefore };
+    };
+    for (const inline of [false, true]) {
+      const tag = inline ? "inline cancel" : "worker cancel";
+      const r = await fullQueueRun(tag, inline);
+      check(workers.created === r.createdBefore + (inline ? 0 : 1), `${tag}: runs ${inline ? "on the calling thread" : "in a worker"}`,
+        { created: workers.created - r.createdBefore });
+      const t0 = performance.now();
+      r.ac.abort();
+      const outcome = await answer(r.p);
+      const took = performance.now() - t0;
+      check(outcome === "Background removal canceled" && took < 3000, `${tag}: answered promptly (${took.toFixed(0)} ms: ${outcome})`);
+      const left = await r.leftovers();
+      check(left.workers === 0 && left.children.length === 0, `${tag}: no worker thread or ffmpeg child of the run is left within 2 s`, left);
+      await wait(300);
+      check(!existsSync(r.outPath), `${tag}: no partial matte left behind`);
+    }
+    {
+      const tag = "encoder dies";
+      const r = await fullQueueRun(tag, false);
+      if (r.encoder > 0) process.kill(r.encoder, "SIGKILL");
+      const outcome = await answer(r.p);
+      check(outcome.startsWith("Background removal encoder failed"), `${tag}: the run fails with the encoder's error (${outcome.slice(0, 120)})`);
+      const left = await r.leftovers();
+      check(left.workers === 0 && left.children.length === 0, `${tag}: no worker thread or ffmpeg child of the run is left within 2 s`, left);
+      check(!existsSync(r.outPath), `${tag}: no partial matte left behind`);
+    }
   }
 
   // ---- 8. a cutout's colour is its colour source's -------------------------------------------

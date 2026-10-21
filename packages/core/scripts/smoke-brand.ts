@@ -28,9 +28,12 @@
  *
  * Run: npx tsx packages/core/scripts/smoke-brand.ts [--packaged <resources/app dir>]
  * (Temp dirs only; every resolver call gets an explicit HOME; cores use ports 5031-5033.)
+ * Teardown waits for the cores' graphics probes (an Electron renderer each,
+ * with its profile in the temp dir) to exit; one still running 15 s after its
+ * core stopped fails the run.
  */
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -255,6 +258,34 @@ async function stop(run: { child: ChildProcess; exited: Promise<number | null> }
 }
 
 /**
+ * Other processes whose command line names `dir` or (on Linux) whose working directory is in it, as "pid args"
+ * lines (ps); null on Windows, which has no ps. A process can hold `dir` only through its cwd, and on Linux that
+ * does not stop rmSync, so the command line alone would miss it.
+ */
+function processesNaming(dir: string): string[] | null {
+  if (process.platform === "win32") return null;
+  const ps = spawnSync("ps", ["-ww", "-eo", "pid=,args="], { encoding: "utf8" });
+  if (ps.error || ps.status !== 0) throw new Error(`ps failed: ${ps.error?.message ?? ps.stderr}`);
+  const real = process.platform === "linux" && existsSync(dir) ? realpathSync(dir) : dir; // /proc shows real paths
+  const cwdIn = (pid: number) => {
+    if (process.platform !== "linux") return false;
+    try {
+      const cwd = readlinkSync(`/proc/${pid}/cwd`);
+      return cwd === real || cwd.startsWith(real + "/");
+    } catch {
+      return false; // exited meanwhile, or not ours to read
+    }
+  };
+  return ps.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => {
+      const pid = Number(l.split(/\s+/)[0]);
+      return l !== "" && pid !== process.pid && (l.includes(dir) || cwdIn(pid));
+    });
+}
+
+/**
  * Child mode for part 4: the MCP server's connection logic, with this
  * process's HOME and env. Prints what it connected to on stdout.
  */
@@ -357,7 +388,27 @@ async function main() {
     runResolverCases(join(root, "packed"), [["packed CJS", packedCjs], ["packed ESM dist/datadir.js", packedResolver]]);
   }
 
-  rmSync(root, { recursive: true, force: true });
+  // Each core started its graphics probe (cli.ts startGraphicsProbe): an Electron renderer with its profile in
+  // <home>/.zedmix/data/motion/probe-<core pid>. Stopping a core does not wait for it: it stops on its own soon
+  // after (execa's cleanup SIGTERM, its closed control pipe, its 1 s parent poll) and writes its profile until
+  // then, so removing root first fails with ENOTEMPTY or leaves files behind. Wait for every process that names
+  // root or works in it; one still running after 15 s is a leak (it fails the run and is killed by its pid).
+  const waitFrom = Date.now();
+  let left = processesNaming(root);
+  while (left?.length && Date.now() - waitFrom < 15_000) {
+    await sleep(100);
+    left = processesNaming(root);
+  }
+  if (left) check(left.length === 0, `no process of the stopped cores is left (waited ${Date.now() - waitFrom} ms)`, left);
+  for (const line of left ?? []) {
+    try {
+      process.kill(Number(line.split(/\s+/)[0]), "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  // Retries for the last writes of a renderer's helpers, which can trail its main process by a moment.
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   if (failures) {
     console.error(`\n${failures} check(s) FAILED`);
     process.exit(1);
