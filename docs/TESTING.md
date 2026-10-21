@@ -122,6 +122,12 @@ node scripts/check-brand.mjs --self-test
 # drop when outside the data dir; a symlinked proxies/ is still served; self-synthesizes media)
 npx tsx packages/core/scripts/smoke-security.ts
 
+# Core shutdown (temp HOME, no media): a core started from src/cli.ts that gets
+# SIGTERM while a client is in the middle of a request closes that connection
+# without answering it and exits with code 0 within 3 s (a kept-alive
+# connection used to keep it serving until its keep-alive timeout)
+npx tsx packages/core/scripts/smoke-shutdown.ts
+
 # Untrusted .aive / .otio: crafted ids stay inside the data dir, URL/protocol media
 # is refused on load/import (and a refused open leaves the open project, its path,
 # dirty state and undo history unchanged), the executor refuses protocol inputs and
@@ -538,7 +544,8 @@ npx tsx packages/core/scripts/smoke-locks.ts
 # constant speed exactly as before, round trips, monotonic, ∫ds/speed), every
 # preset exported with frame-index-coded media (each frame = the mapped source
 # frame, exact footprint), audio stretch (length within a frame, 440 Hz pitch
-# kept, click-free joins, bursts on the curve) and mute, bleeps on the mapped
+# kept, click-free joins, bursts on the curve, each chunk timed by its sample
+# count) and mute, bleeps on the mapped
 # words, split / cut_range / trim keep the curve, cuts in a slow section snap to
 # their source frame (pieces and the next clip stay butted, tracks stay in sync),
 # splits add up EXACTLY at every split point of every preset and of flat 0.1x /

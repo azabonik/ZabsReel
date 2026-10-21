@@ -1,6 +1,6 @@
 # The number of suites one FFmpeg job runs across its 3 shards: the local matrix kit's list without the download and
-# opt-in suites (60 on 2026-10-20: 17 + 17 + 26). matrix-job.sh fails the job when fewer suites gave a result row,
+# opt-in suites (61 on 2026-10-21: 17 + 17 + 27). matrix-job.sh fails the job when fewer suites gave a result row,
 # so a suite that run-matrix.sh skips without a trace (a moved or renamed file behind one of its [ -f ] guards)
 # fails the job instead of leaving it green. When a suite is added or removed on purpose, change the number here in
 # the same commit (the job summary prints the count each run makes).
-60
+61

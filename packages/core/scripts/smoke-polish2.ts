@@ -174,20 +174,30 @@ async function maskGc(dir: string) {
   check(live.every((n) => keep.has(n)), "referencedMaskNames covers the staged masks");
 
   const old = new Date(Date.now() - 3 * 3600_000);
+  for (const n of live) utimesSync(join(masksDir, n), old, old);
+  // pruneDataDir's own checks run on copies in a folder no engine uses: the export above started the engine's GC
+  // pass on dd without waiting for it, and that pass (with a keep set) can delete the old orphan below before the
+  // no-keepMasks check reads masks/. The engine-level checks further down stay on dd.
+  const gd = join(dir, "d3gc");
+  const gcMasks = join(gd, "masks");
+  mkdirSync(gcMasks, { recursive: true });
+  for (const n of live) {
+    writeFileSync(join(gcMasks, n), readFileSync(join(masksDir, n)));
+    utimesSync(join(gcMasks, n), old, old);
+  }
   const mk = (name: string, ageOld: boolean) => {
-    const p = join(masksDir, name);
+    const p = join(gcMasks, name);
     writeFileSync(p, "x");
     if (ageOld) utimesSync(p, old, old);
   };
   mk("mask-aaaaaaaaaaaaaaaaaaaaaaaa.png", true); // orphan, old -> pruned
   mk("mask-bbbbbbbbbbbbbbbbbbbbbbbb.png", false); // orphan, fresh -> kept (grace)
   mk("notes.txt", true); // not a mask -> kept
-  for (const n of live) utimesSync(join(masksDir, n), old, old);
 
-  const rNo = await pruneDataDir(dd);
-  check(readdirSync(masksDir).includes("mask-aaaaaaaaaaaaaaaaaaaaaaaa.png"), "no keepMasks -> masks/ untouched", `freed ${rNo.freedBytes}`);
-  await pruneDataDir(dd, { keepMasks: keep });
-  const after = readdirSync(masksDir);
+  const rNo = await pruneDataDir(gd);
+  check(readdirSync(gcMasks).includes("mask-aaaaaaaaaaaaaaaaaaaaaaaa.png"), "no keepMasks -> masks/ untouched", `freed ${rNo.freedBytes}`);
+  await pruneDataDir(gd, { keepMasks: keep });
+  const after = readdirSync(gcMasks);
   check(!after.includes("mask-aaaaaaaaaaaaaaaaaaaaaaaa.png"), "old orphan mask pruned");
   check(after.includes("mask-bbbbbbbbbbbbbbbbbbbbbbbb.png"), "fresh orphan kept (grace)");
   check(after.includes("notes.txt"), "non-mask file kept");

@@ -894,7 +894,10 @@ function emitRampAudioParts(filterParts: string[], clip: ResolvedRenderClip, inp
     const lead = Math.abs(ch.tempo - 1) > 1e-6 ? atempoLeadSamples(ch.tempo) : 0;
     const start = Math.round((ch.srcStart - a) / ch.tempo) - lead;
     if (start < 0) steps.push(`adelay=delays=${-start}S:all=1`);
-    steps.push(`atrim=start_sample=${Math.max(0, start)}:end_sample=${Math.max(0, start) + n}`, "asetpts=PTS-STARTPTS", `apad=whole_len=${n}`);
+    // Timestamps from the sample count, not from the first frame's (PTS-STARTPTS): on FFmpeg 7.x adelay's
+    // silence frame can come out with no timestamp, the reset then starts at the next frame, and the
+    // mixed joins' afade (which places a fade by timestamp) fades this chunk out `-start` samples late.
+    steps.push(`atrim=start_sample=${Math.max(0, start)}:end_sample=${Math.max(0, start) + n}`, "asetpts=N/SR/TB", `apad=whole_len=${n}`);
     const label = `${tag}c${k}`;
     filterParts.push(`[${split[k]}]${steps.join(",")}[${label}]`);
     parts.push(`[${label}]`);

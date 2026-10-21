@@ -115,6 +115,9 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** How long stop() waits for WebSocket clients to answer the close frame before it drops them. */
+const WS_CLOSE_GRACE_MS = 1000;
+
 /**
  * The persistent local backend. Hosts the EditorEngine and exposes it over:
  *  - HTTP POST /rpc       — used by the MCP server (the AI).
@@ -237,9 +240,24 @@ export class EditorServer {
   }
 
   async stop(): Promise<void> {
-    for (const ws of this.clients) ws.close();
+    // Stop serving HTTP first. close() drops only idle connections. One with a request still arriving or being
+    // answered would be served on and kept alive, and would hold the callback (and so the core's exit) until its
+    // keep-alive timeout. The callback also waits for the WebSocket sockets, which are closed below.
+    const httpClosed = new Promise<void>((resolve) => this.http.close(() => resolve()));
+    this.http.closeAllConnections();
+    // A client that does not answer the close frame would hold wss.close() (and the exit) for ws's 30 s close
+    // timeout: give the clients a short time to answer, then drop the ones still open.
+    const open = [...this.wss.clients];
+    for (const ws of open) ws.close();
+    const answered = Promise.all(
+      open.map((ws) => (ws.readyState === WebSocket.CLOSED ? undefined : new Promise<void>((r) => ws.once("close", () => r())))),
+    );
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([answered, new Promise<void>((r) => (timer = setTimeout(r, WS_CLOSE_GRACE_MS)))]);
+    clearTimeout(timer);
+    for (const ws of open) if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
-    await new Promise<void>((resolve) => this.http.close(() => resolve()));
+    await httpClosed;
   }
 
   // ---- WebSocket -------------------------------------------------------------

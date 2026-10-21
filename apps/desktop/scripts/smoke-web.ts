@@ -360,7 +360,12 @@ async function main() {
       blockedCoreGone = await request(corePortBlocked, "/health").then(() => false, () => true);
       if (!blockedCoreGone) await new Promise((r) => setTimeout(r, 200));
     }
+    // The polls above go through one kept-alive connection: a core that keeps serving it after SIGTERM fails that row
+    // (smoke-shutdown.ts checks the core's side without load). This row is section 8's: the process, not only its port.
     check("…and stops the core it started", blockedCoreGone);
+    const blockedDir = join(root, "data-blocked-core");
+    const blockedPid = corePidIn(blockedDir);
+    check("…its process exits, not only its port", blockedPid !== null && (await waitFor("blocked core process exit", () => !isCoreOf(blockedPid, blockedDir), 10000)), `pid ${blockedPid}`);
   } finally {
     await registry.stop();
     if (shell.exitCode === null) shell.kill("SIGKILL");
