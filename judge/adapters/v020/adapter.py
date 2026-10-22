@@ -736,7 +736,187 @@ class Adapter:
         return {}
 
     def op_set_speed(self, a):
-        self.call("set_clip_speed", {"clipId": arg_str(a, "clip"), "speed": float(arg_num(a, "speed"))})
+        self.call("set_clip_speed", {"clipId": arg_str(a, "clip"), "speed": float(arg_num(a, "speed")),
+                                     **self._ripple(a)})
+        return {}
+
+    # ------------------------------------------------------------ edits, speed and time effects (batch 3a)
+    RIPPLES = ("track", "all", "none")
+
+    def _ripple(self, a):
+        """{"ripple": mode} when the judge sent one ("track", "all" or "none"), else {} (the editor's default)."""
+        r = a.get("ripple")
+        if r is None:
+            return {}
+        if r not in self.RIPPLES:
+            raise bad(f"'ripple' must be one of {list(self.RIPPLES)}, got {r!r}")
+        return {"ripple": r}
+
+    @staticmethod
+    def _bool(a, k):
+        v = a.get(k)
+        if v is not None and not isinstance(v, bool):
+            raise bad(f"{k!r} must be true or false, got {v!r}")
+        return v
+
+    def _fps(self):
+        _, ts = self.tracks()
+        fps = (ts.get("canvas") or {}).get("fps") or ts.get("fps")
+        if not isinstance(fps, (int, float)) or fps <= 0:
+            raise OpError("adapter_error", f"timeline_summary has no frame rate: {json.dumps(ts)[:200]}")
+        return float(fps)
+
+    def op_insert_clip(self, a):
+        asset, start, src_in = arg_str(a, "asset"), arg_int(a, "start_frame"), arg_int(a, "in_frame", required=False)
+        out = arg_int(a, "out_frame", required=False)
+        args = {"assetId": asset, "trackIndex": self.track_index(a.get("track", "v0")), "startFrame": start}
+        if src_in is not None:
+            args["sourceInFrame"] = src_in
+        if out is not None:
+            args["sourceOutFrame"] = out
+        j = self.call("insert_clip", args)
+        cid = find_key(j.get("clip") or j, ["id", "clipId"])
+        if not cid:
+            raise OpError("adapter_error", f"insert_clip returned no clip id: {json.dumps(j)[:300]}")
+        return {"clip": cid}
+
+    def op_cut_range(self, a):
+        self.call("cut_range", {"clipId": arg_str(a, "clip"), "startFrame": arg_int(a, "start_frame"),
+                                "endFrame": arg_int(a, "end_frame")})
+        return {}
+
+    def op_ripple_delete(self, a):
+        ranges = a.get("ranges")
+        if not isinstance(ranges, list) or not ranges or not all(isinstance(r, dict) for r in ranges):
+            raise bad(f"'ranges' must be a non-empty list of objects, got {ranges!r}")
+        names, _ = self.tracks()
+        out = []
+        for r in ranges:
+            name = r.get("track")
+            if name not in names:
+                raise bad(f"no track {name!r} (tracks: {sorted(names)})")
+            out.append({"trackIndex": names[name], "startFrame": arg_int(r, "start_frame"),
+                        "endFrame": arg_int(r, "end_frame")})
+        self.call("ripple_delete_ranges", {"ranges": out})
+        return {}
+
+    def op_set_track(self, a):
+        args = {"trackIndex": self.track_index(a.get("track"))}
+        name = arg_str(a, "name", required=False)
+        if name is not None:
+            args["name"] = name
+        for k in ("locked", "muted", "hidden"):
+            v = self._bool(a, k)
+            if v is not None:
+                args[k] = v
+        if len(args) == 1:
+            raise bad("no track setting given")
+        self.call("set_track_properties", args)
+        return {}
+
+    def op_remove_track(self, a):
+        self.call("remove_track", {"trackIndex": self.track_index(a.get("track"))})
+        return {}
+
+    def op_link_clips(self, a):
+        clips = a.get("clips")
+        if not isinstance(clips, list) or len(clips) < 2 or not all(isinstance(c, str) and c for c in clips):
+            raise bad(f"'clips' must be a list of two or more clip ids, got {clips!r}")
+        self.call("link_clips", {"clipIds": clips})
+        return {}
+
+    def op_unlink_clip(self, a):
+        self.call("unlink_clip", {"clipId": arg_str(a, "clip")})
+        return {}
+
+    def op_set_transition(self, a):
+        self.call("set_transition", {"clipId": arg_str(a, "clip"), "type": arg_str(a, "kind"),
+                                     "durationFrames": arg_int(a, "frames")})
+        return {}
+
+    def op_set_markers(self, a):
+        markers = a.get("markers")
+        if not isinstance(markers, list) or not all(isinstance(m, dict) for m in markers):
+            raise bad(f"'markers' must be a list of objects, got {markers!r}")
+        out = []
+        for m in markers:
+            name = arg_str(m, "name", required=False)
+            out.append({"frame": arg_int(m, "frame"), **({"name": name} if name is not None else {})})
+        self.call("set_markers", {"frames": out})
+        return {}
+
+    def op_set_speed_ramp(self, a):
+        args = {"clipId": arg_str(a, "clip")}
+        preset = arg_str(a, "preset", required=False)
+        if preset is not None:
+            args["preset"] = preset
+        points = a.get("points")
+        if points is not None:
+            if not isinstance(points, list) or not all(isinstance(p, dict) for p in points):
+                raise bad(f"'points' must be a list of objects, got {points!r}")
+            args["points"] = [{"src": float(arg_num(p, "src")), "speed": float(arg_num(p, "speed"))} for p in points]
+        audio = arg_str(a, "audio", required=False)
+        if audio is not None:
+            if audio not in ("stretch", "mute"):
+                raise bad(f"'audio' must be 'stretch' or 'mute', got {audio!r}")
+            args["audio"] = audio
+        self.call("set_speed_ramp", {**args, **self._ripple(a)})
+        return {}
+
+    def op_clear_speed_ramp(self, a):
+        self.call("clear_speed_ramp", {"clipId": arg_str(a, "clip"), **self._ripple(a)})
+        return {}
+
+    def op_clear_effects(self, a):
+        self.call("clear_clip_effects", {"clipId": arg_str(a, "clip"), **self._ripple(a)})
+        return {}
+
+    def op_freeze_frame(self, a):
+        """v0.2.0's freeze_frame takes seconds: the frame position and the length are sent as frames / fps (the canvas),
+        which v0.2.0 turns back into the same frames."""
+        clip, at, frames = arg_str(a, "clip"), arg_int(a, "at_frame"), arg_int(a, "frames")
+        if at < 0 or frames <= 0:
+            raise bad(f"'at_frame' must be >= 0 and 'frames' > 0, got {at!r}, {frames!r}")
+        fps = self._fps()
+        j = self.call("freeze_frame", {"clipId": clip, "atSeconds": at / fps, "durationSeconds": frames / fps,
+                                       **self._ripple(a)})
+        still = j.get("stillClipId")
+        return {"still": still if isinstance(still, str) and still else None}
+
+    def _bake(self, tool, args, a):
+        """A bake (reverse, smooth slow motion): with wait (the default) it returns when done; without it v0.2.0's
+        background job, whose id `jobs` and `cancel` take."""
+        wait = self._bool(a, "wait")
+        wait = True if wait is None else wait
+        j = self.call(tool, {**args, **({} if wait else {"background": True})})
+        if wait:
+            return {"job": None}
+        jid = j.get("jobId")
+        if not isinstance(jid, str) or not jid:
+            raise OpError("adapter_error", f"{tool} in the background returned no job id: {json.dumps(j)[:300]}")
+        return {"job": jid}
+
+    def op_reverse_clip(self, a):
+        args = {"clipId": arg_str(a, "clip")}
+        audio = arg_str(a, "audio", required=False)
+        if audio is not None:
+            if audio not in ("reverse", "mute"):
+                raise bad(f"'audio' must be 'reverse' or 'mute', got {audio!r}")
+            args["audio"] = audio
+        linked = self._bool(a, "linked")
+        if linked is not None:
+            args["linked"] = linked
+        return self._bake("reverse_clip", args, a)
+
+    def op_smooth_slow_motion(self, a):
+        mode = arg_str(a, "mode", required=False) or "blend"
+        if mode not in ("blend", "flow"):
+            raise bad(f"'mode' must be 'blend' or 'flow', got {mode!r}")
+        return self._bake("smooth_slow_motion", {"clipId": arg_str(a, "clip"),
+                                                 "mode": "optical-flow" if mode == "flow" else "blend"}, a)
+
+    def op_render_preview(self, a):
+        self.call("render_preview", {})
         return {}
 
     def op_apply_effect(self, a):
@@ -834,6 +1014,11 @@ class Adapter:
                     for f in fx if isinstance(f, dict)]
                 texts[c.get("id")] = [{"id": o.get("id"), "text": o.get("text")} for o in c.get("overlays") or []
                                       if isinstance(o, dict) and isinstance(o.get("text"), str)]
+        def transition_of(c):  # v0.2.0: {"type", "durationFrames"} on the clip it enters
+            tr = c.get("transition")
+            if not isinstance(tr, dict):
+                return None
+            return {"kind": tr.get("type"), "frames": tr.get("durationFrames")}
         tracks = []
         for kind, prefix in (("video", "v"), ("audio", "a")):
             kt = sorted((t for t in ts.get("tracks", []) if t.get("kind") == kind), key=lambda t: t["trackIndex"])
@@ -843,12 +1028,17 @@ class Adapter:
                     clips.append({"id": c.get("clipId"), "asset": c.get("assetId"), "start_frame": c.get("startFrame"),
                                   "in_frame": c.get("sourceInFrame"), "out_frame": c.get("sourceOutFrame"),
                                   "length_frames": c.get("durationFrames"),
-                                  "speed": speed_of(c), "graphics": overlays.get(c.get("clipId"), []),
+                                  "speed": speed_of(c), "ramp": isinstance((c.get("effects") or {}).get("speedRamp"),
+                                                                           dict),
+                                  "transition": transition_of(c), "graphics": overlays.get(c.get("clipId"), []),
                                   "effects": effects.get(c.get("clipId"), []),
                                   "texts": texts.get(c.get("clipId"), [])})
-                tracks.append({"track": f"{prefix}{n}", "clips": clips})
+                tracks.append({"track": f"{prefix}{n}", "name": t.get("name"), "locked": bool(t.get("locked")),
+                               "muted": bool(t.get("muted")), "hidden": bool(t.get("hidden")), "clips": clips})
+        markers = [{"frame": m.get("frame"), "name": m.get("name")} if isinstance(m, dict) else {"frame": m, "name": None}
+                   for m in ts.get("markers") or []]
         out = {"canvas": {"width": canvas.get("width"), "height": canvas.get("height"), "fps": canvas.get("fps")},
-               "length_frames": ts.get("totalFrames"), "assets": assets, "tracks": tracks}
+               "length_frames": ts.get("totalFrames"), "assets": assets, "tracks": tracks, "markers": markers}
         if isinstance(st.get("graphicsRenderer"), str):  # v0.2.0: "remotion" (the add-on) or the product's own name
             out["graphics"] = {"renderer": "addon" if st["graphicsRenderer"] == "remotion" else "builtin",
                                "ready": st.get("graphics") == "ready"}
@@ -1593,6 +1783,107 @@ def self_test():
                ([{"id": "fx_1", "effect": "vignette", "enabled": True, "amount": 1.5},
                  {"id": "fx_2", "effect": "colorkey", "enabled": False, "params": {"similarity": 0.1},
                   "color": "0x808080"}], [{"id": "text_1", "text": "Hi"}]))
+        # Edits, speed and time effects (batch 3a operations), on canned replies.
+        sent = []
+        tracks3 = [{"kind": "video", "trackIndex": 0}, {"kind": "audio", "trackIndex": 1},
+                   {"kind": "video", "trackIndex": 2}]
+
+        def edit_reply(n, a):
+            sent.append((n, a))
+            if n == "timeline_summary":
+                return {"tracks": tracks3, "canvas": {"width": 64, "height": 64, "fps": 29.97}}
+            if n == "insert_clip":
+                return {"clip": {"id": "clip_ins"}}
+            if n == "freeze_frame":
+                return {"stillClipId": "clip_still", "assetId": "asset_png"}
+            if a.get("background"):
+                return {"jobId": "job_9", "status": "running"}
+            return {"ok": True}
+        ad = adapter(edit_reply)
+        calls = [("insert_clip", {"asset": "a1", "track": "v1", "start_frame": 5, "in_frame": 0, "out_frame": 9}),
+                 ("cut_range", {"clip": "c1", "start_frame": 2, "end_frame": 7}),
+                 ("ripple_delete", {"ranges": [{"track": "v0", "start_frame": 1, "end_frame": 3},
+                                               {"track": "a0", "start_frame": 1, "end_frame": 3}]}),
+                 ("set_track", {"track": "a0", "name": "Music", "locked": True, "muted": False}),
+                 ("remove_track", {"track": "v1"}),
+                 ("link_clips", {"clips": ["c1", "c2"]}),
+                 ("unlink_clip", {"clip": "c1"}),
+                 ("set_transition", {"clip": "c2", "kind": "dissolve", "frames": 15}),
+                 ("set_markers", {"markers": [{"frame": 30, "name": "early"}, {"frame": 120}]}),
+                 ("set_speed", {"clip": "c1", "speed": 2, "ripple": "all"}),
+                 ("set_speed_ramp", {"clip": "c1", "points": [{"src": 0, "speed": 10}], "audio": "mute",
+                                     "ripple": "none"}),
+                 ("clear_speed_ramp", {"clip": "c1", "ripple": "all"}),
+                 ("clear_effects", {"clip": "c1"}),
+                 ("freeze_frame", {"clip": "c1", "at_frame": 30, "frames": 6, "ripple": "track"}),
+                 ("reverse_clip", {"clip": "c1", "audio": "mute", "linked": False, "wait": False}),
+                 ("reverse_clip", {"clip": "c1"}),
+                 ("smooth_slow_motion", {"clip": "c1", "mode": "flow", "wait": False}),
+                 ("smooth_slow_motion", {"clip": "c1"}),
+                 ("render_preview", {})]
+        results = [op(ad, n, a).get("result") for n, a in calls]
+        expect("insert_clip ... render_preview: the batch 3a operations answer as PROTOCOL.md says",
+               results, [{"clip": "clip_ins"}] + [{}] * 12 + [{"still": "clip_still"}, {"job": "job_9"},
+                                                               {"job": None}, {"job": "job_9"}, {"job": None}, {}])
+        tools = [x for x in sent if x[0] != "timeline_summary"]
+        expect("...and map to v0.2.0's tools (track names to trackIndex, freeze frames to seconds at the canvas's "
+               "fps, flow to optical-flow, wait false to background)", tools,
+               [("insert_clip", {"assetId": "a1", "trackIndex": 2, "startFrame": 5, "sourceInFrame": 0,
+                                 "sourceOutFrame": 9}),
+                ("cut_range", {"clipId": "c1", "startFrame": 2, "endFrame": 7}),
+                ("ripple_delete_ranges", {"ranges": [{"trackIndex": 0, "startFrame": 1, "endFrame": 3},
+                                                     {"trackIndex": 1, "startFrame": 1, "endFrame": 3}]}),
+                ("set_track_properties", {"trackIndex": 1, "name": "Music", "locked": True, "muted": False}),
+                ("remove_track", {"trackIndex": 2}),
+                ("link_clips", {"clipIds": ["c1", "c2"]}),
+                ("unlink_clip", {"clipId": "c1"}),
+                ("set_transition", {"clipId": "c2", "type": "dissolve", "durationFrames": 15}),
+                ("set_markers", {"frames": [{"frame": 30, "name": "early"}, {"frame": 120}]}),
+                ("set_clip_speed", {"clipId": "c1", "speed": 2.0, "ripple": "all"}),
+                ("set_speed_ramp", {"clipId": "c1", "points": [{"src": 0.0, "speed": 10.0}], "audio": "mute",
+                                    "ripple": "none"}),
+                ("clear_speed_ramp", {"clipId": "c1", "ripple": "all"}),
+                ("clear_clip_effects", {"clipId": "c1"}),
+                ("freeze_frame", {"clipId": "c1", "atSeconds": 30 / 29.97, "durationSeconds": 6 / 29.97,
+                                  "ripple": "track"}),
+                ("reverse_clip", {"clipId": "c1", "audio": "mute", "linked": False, "background": True}),
+                ("reverse_clip", {"clipId": "c1"}),
+                ("smooth_slow_motion", {"clipId": "c1", "mode": "optical-flow", "background": True}),
+                ("smooth_slow_motion", {"clipId": "c1", "mode": "blend"}),
+                ("render_preview", {})])
+        expect("a ripple, an audio mode or a mode of another name, a flag that is not a boolean, one clip to link, "
+               "a freeze of 0 frames, a track that does not exist: bad_request",
+               [op(adapter(edit_reply), n, a)["error"]["code"] for n, a in (
+                   ("set_speed", {"clip": "c1", "speed": 2, "ripple": "sideways"}),
+                   ("reverse_clip", {"clip": "c1", "audio": "loud"}),
+                   ("smooth_slow_motion", {"clip": "c1", "mode": "magic"}),
+                   ("set_track", {"track": "v0", "locked": "yes"}),
+                   ("set_track", {"track": "v0"}),
+                   ("link_clips", {"clips": ["c1"]}),
+                   ("freeze_frame", {"clip": "c1", "at_frame": 3, "frames": 0}),
+                   ("ripple_delete", {"ranges": [{"track": "v7", "start_frame": 1, "end_frame": 3}]}))],
+               ["bad_request"] * 8)
+
+        def edit_state(n, a):
+            if n == "timeline_summary":
+                return {"tracks": [{"kind": "video", "trackIndex": 0, "name": "V1", "locked": True, "muted": False,
+                                    "hidden": True, "clips": [
+                                        {"clipId": "c1", "assetId": "a1", "startFrame": 0, "durationFrames": 74,
+                                         "sourceInFrame": 1, "sourceOutFrame": 91,
+                                         "effects": {"speedRamp": {"preset": "montage", "points": []}}},
+                                        {"clipId": "c2", "assetId": "a1", "startFrame": 64, "durationFrames": 60,
+                                         "sourceInFrame": 100, "sourceOutFrame": 160,
+                                         "transition": {"type": "dissolve", "durationFrames": 10}}]}],
+                        "canvas": {"width": 64, "height": 64, "fps": 30}, "totalFrames": 124,
+                        "markers": [{"frame": 30, "name": "early"}, 120]}
+            return {"assets": [], "tracks": []}
+        st = op(adapter(edit_state), "get_state", {})["result"]
+        tr = st["tracks"][0]
+        expect("get_state: each track's name and locked, muted, hidden; each clip's ramp and transition; the markers",
+               ((tr["name"], tr["locked"], tr["muted"], tr["hidden"]),
+                [(c["ramp"], c["transition"]) for c in tr["clips"]], st["markers"]),
+               (("V1", True, False, True), [(True, None), (False, {"kind": "dissolve", "frames": 10})],
+                [{"frame": 30, "name": "early"}, {"frame": 120, "name": None}]))
         # The command-line installer: the world, and the installer's environment, on a fake build.
         scratch = os.path.realpath(os.path.join(tmp, "scratch"))
         build = os.path.join(tmp, "build")

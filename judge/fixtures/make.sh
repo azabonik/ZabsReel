@@ -24,6 +24,16 @@
 #   fx-mover.mp4     a white 40x40 box at y 70, x = 20 + 100 t, on black 320x180
 #   fx-ramp.mp4      a grey ramp, 0 at the left to 255 at the right, 320x180, 1 s
 #   fx-greensq.mp4   a 0x606060 60x60 square at y 60, x = 100 + 30 t, on 0x00FF00 320x180, 1 s
+# and the edit tests' media (test_cuts, test_speed_*, test_locks, test_freeze, test_reverse_slowmo), whose every frame
+# shows its own index: nine vertical stripes of 20 pixels, stripe b bright (luma 220) when bit b of the frame's index is
+# set, dark (30) when not (observe.frame_indexes); their sound is a chirp, 0.25 sin(2 pi (200 t + 100 t^2)), whose
+# frequency 200 + 200 t Hz says the source moment (observe.chirp_time):
+#   idx.mp4      stripes 180x90 30 fps 16 s + the chirp 16 s            H.264 crf 12 (GOP 15) + AAC-LC mono 48 kHz 192 kb/s
+#   idx2997.mp4  stripes 180x90 30000/1001 fps 16 s on a 1/30000 timebase, no audio
+#   skew.mp4     stripes 180x90 30 fps 3.0 s + the chirp 3.5 s (the sound outlasts the picture)
+#   cutout.mkv   stripes 180x90 30 fps 2 s, the top half transparent     FFV1 yuva420p, no audio
+#   move.mp4     testsrc2 320x180 30 fps 3 s + sine 440 Hz               H.264 crf 12 + AAC-LC mono 48 kHz
+#   tone300.m4a  sine 300 Hz 10 s                                        AAC-LC mono 48 kHz
 # The tones are at amplitude 1/8 (peak about -18 dBFS). The frame rate is the source's (rate=30), never -r.
 # Usage: make.sh <outdir>   env: FFMPEG / FFPROBE (default: the ffmpeg / ffprobe on PATH)
 # Then checks each file with ffprobe (codecs, size, rate, frame count, channels) and prints what it made.
@@ -76,6 +86,30 @@ still fx-mover.mp4 "color=c=black:s=320x180:r=30[b];color=c=white:s=40x40:r=30[w
 still fx-ramp.mp4 "color=c=gray:s=320x180:r=30,format=gray,geq=lum='X/320*255'" 1
 still fx-greensq.mp4 "color=c=0x00FF00:s=320x180:r=30[b];color=c=0x606060:s=60x60:r=30[q];[b][q]overlay=x='100+t*30':y=60:eval=frame" 1
 
+# The edit tests' frame-index pictures and chirp (see the top).
+STRIPES="geq=lum='if(gt(mod(floor(N/pow(2\,floor(X*9/W)))\,2)\,0)\,220\,30)':cb=128:cr=128"
+CHIRP="aevalsrc=exprs='0.25*sin(2*PI*(200*t+100*t*t))':sample_rate=48000"
+X264="-c:v libx264 -preset medium -crf 12 -pix_fmt yuv420p -g 15"
+# shellcheck disable=SC2086
+"$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=180x90:r=30:d=16,format=yuv420p,$STRIPES" \
+  -f lavfi -i "$CHIRP:duration=16" -map 0:v -map 1:a $X264 -c:a aac -b:a 192k -ac 1 -ar 48000 "$OUT/idx.mp4"
+# shellcheck disable=SC2086
+"$FF" -nostdin -hide_banner -loglevel error -y \
+  -f lavfi -i "color=c=gray:s=180x90:r=30000/1001:d=16,format=yuv420p,$STRIPES" $X264 -video_track_timescale 30000 \
+  "$OUT/idx2997.mp4"
+# shellcheck disable=SC2086
+"$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=180x90:r=30:d=3,format=yuv420p,$STRIPES" \
+  -f lavfi -i "$CHIRP:duration=3.5" -map 0:v -map 1:a $X264 -c:a aac -b:a 192k -ac 1 -ar 48000 "$OUT/skew.mp4"
+"$FF" -nostdin -hide_banner -loglevel error -y \
+  -f lavfi -i "color=c=gray:s=180x90:r=30:d=2,format=yuva420p,$STRIPES:a='if(lt(Y\,H/2)\,0\,255)'" \
+  -c:v ffv1 -pix_fmt yuva420p "$OUT/cutout.mkv"
+# shellcheck disable=SC2086
+"$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=320x180:rate=30:duration=3" \
+  -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3" -map 0:v -map 1:a $X264 \
+  -c:a aac -b:a 128k -ac 1 -ar 48000 "$OUT/move.mp4"
+"$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=300:sample_rate=48000:duration=10" \
+  -c:a aac -b:a 128k -ac 1 -ar 48000 "$OUT/tone300.m4a"
+
 # probe <file> <stream> <entries>: the stream's values, comma-separated, in ffprobe's order.
 probe() { "$FP" -v error -select_streams "$2" -show_entries "stream=$3" -of csv=p=0 "$OUT/$1"; }
 # expect <file> <stream> <entries> <values>
@@ -107,6 +141,17 @@ for f in fx-white fx-bars fx-ramp; do
   [ -z "$(probe "$f.mp4" a "codec_type")" ] || { echo "make.sh: $f.mp4 has an audio stream" >&2; exit 1; }
 done
 [ "$(sed -n 1p "$OUT/look.cube")" = "LUT_3D_SIZE 2" ] || { echo "make.sh: look.cube is not a LUT" >&2; exit 1; }
+expect idx.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,180,90,yuv420p,30/1,480
+expect idx.mp4 a:0 codec_name,profile,sample_rate,channels aac,LC,48000,1
+expect idx2997.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,time_base,nb_frames \
+  h264,180,90,yuv420p,30000/1001,1/30000,480
+[ -z "$(probe idx2997.mp4 a "codec_type")" ] || { echo "make.sh: idx2997.mp4 has an audio stream" >&2; exit 1; }
+expect skew.mp4 v:0 codec_name,width,height,r_frame_rate,nb_frames h264,180,90,30/1,90
+expect skew.mp4 a:0 codec_name,sample_rate,channels,duration aac,48000,1,3.500000
+expect cutout.mkv v:0 codec_name,width,height,pix_fmt,r_frame_rate ffv1,180,90,yuva420p,30/1
+expect move.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,90
+expect move.mp4 a:0 codec_name,sample_rate,channels aac,48000,1
+expect tone300.m4a a:0 codec_name,sample_rate,channels aac,48000,1
 for f in a.mp4 b.mp4 c640.mp4 m.mp3 gap.m4a tiny.mp4; do
   printf '%-9s %s s, %s bytes\n' "$f" "$("$FP" -v error -show_entries format=duration -of csv=p=0 "$OUT/$f")" "$(stat -c %s "$OUT/$f")"
 done

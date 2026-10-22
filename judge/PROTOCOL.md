@@ -162,7 +162,16 @@ what it leaves behind, never its message or code.
 | `move_clip` | `{"clip", "start_frame", "track"?}` | `{}` |
 | `split_clip` | `{"clip", "at_frame"}` | `{"clips": [left id, right id]}`: `at_frame` counts from the clip's start on the timeline. |
 | `remove_clip` | `{"clip"}` | `{}` |
-| `set_speed` | `{"clip", "speed"}` | `{}`: constant speed, 1 = normal. |
+| `set_speed` | `{"clip", "speed", "ripple"?}` | `{}`: constant speed, 1 = normal. See "Speed and time" below for its range, `ripple` and its refusals. |
+| `insert_clip` | `{"asset", "track"?, "start_frame", "in_frame"?, "out_frame"?}` | `{"clip": id}`: as `place_clip`, but first every clip of `track` that starts at or after `start_frame` moves right by the new clip's length, so nothing is overwritten. Errors: `product_error` when the track is locked. |
+| `cut_range` | `{"clip", "start_frame", "end_frame"}` | `{}`: removes the clip's part `[start_frame, end_frame)`, counted in frames from the clip's start on the timeline; the rest of the clip and every later clip on its track close up (they move left by what was removed). On a clip that is slowed, ramped or at a constant speed other than 1x, 2x, 3x or 4x, each end of the cut moves to where its source frame starts playing; a piece left on either side keeps at least one frame, and a side too short to hold one source frame goes with the cut: no gap is ever left. Errors: `product_error` when the clip's track is locked. |
+| `ripple_delete` | `{"ranges": [{"track", "start_frame", "end_frame"}]}` | `{}`: removes the timeline frames `[start_frame, end_frame)` of each listed track and closes each gap (the later clips on that track move left). The same range on several tracks removes the same frames from each; a range end inside a slowed or ramped clip moves as for `cut_range`, so a range shorter than one source frame can remove nothing. Errors: `bad_request` for a track that does not exist; `product_error` when a listed track is locked (nothing changes). |
+| `set_track` | `{"track", "name"?, "locked"?, "muted"?, "hidden"?}` | `{}`: changes the track's settings as the user does; only the fields sent change. `name` is its label (the State's `name`; the track keeps its `track` name). `muted`: its sound is left out of the mix. `hidden`: its picture is left out of the composite. `locked`: its clips are protected: an edit that would add, remove, move, trim or change a clip on it, directly or by a ripple (an insert, a cut, a ripple delete, a freeze, a speed change, a reverse, the change of a linked clip), is refused and changes nothing, its undo history included; renaming, unlocking or removing the track and an fps change stay allowed, and so does a speed change or freeze with ripple `none` that leaves the track alone. Errors: `bad_request` for a track that does not exist, a flag that is not a boolean, or no field. |
+| `remove_track` | `{"track"}` | `{}`: removes the track and its clips (a locked one too). The tracks above it of its kind take the names below (removing `v1` makes `v2` the new `v1`). Errors: `product_error` for the last video track. |
+| `link_clips` | `{"clips": [id, id, ...]}` | `{}`: links the clips (a picture and its sound on another track, for example): they move and split and are removed together, and a speed change, a freeze or a reverse of one applies to the others that play the same moment (see "Speed and time"). Errors: `bad_request` for fewer than two clips. |
+| `unlink_clip` | `{"clip"}` | `{}`: unlinks the clip and the rest of its link group. |
+| `set_transition` | `{"clip", "kind", "frames"}` | `{}`: a transition of `frames` frames entering `clip` from the clip before it on its track: the clip and every later clip on the track move left by `frames`, so the two overlap by that much and cross there. `kind`: `dissolve` and `fade` are the ones the tests use. Errors: `product_error` for a track's first clip. |
+| `set_markers` | `{"markers": [{"frame", "name"?}]}` | `{}`: replaces the timeline's markers (an empty list removes them). |
 | `apply_effect` | `{"clip", "effect", "amount"?, "params"?, "color"?, "enabled"?, "effect_id"?}` | `{"effect": id or null}`: adds the effect `effect` (see "Effects" below) at the end of the clip's effects. With `effect_id` (an effect of this clip) it changes that effect in place instead: `amount`, `params` and `color` are replaced by what is sent, and `enabled` alone (false: bypassed, kept but not rendered; true: on again) changes nothing else. Values are passed on unchanged: the editor clamps a value outside its range (get_state then shows the clamped value) or refuses it. Errors: `bad_request` when `enabled` is not a boolean or a field has the wrong type; `product_error` when the editor refuses: an effect it does not have, a param the effect does not have, an amount or a colour for an effect that takes none, a colour it cannot read or the effect does not take, an `effect_id` the clip does not have. |
 | `remove_effect` | `{"clip", "effect"}` | `{}`: removes the effect (an id from `apply_effect`). Errors: `product_error` when the clip does not have it. |
 | `reorder_effect` | `{"clip", "effect", "to_index"}` | `{}`: moves the effect to position `to_index` of the clip's effects (0 is the first, rendered first); a position past the end puts it last. One undo step. Errors: `product_error` when the clip does not have it. |
@@ -184,15 +193,22 @@ State:
   "length_frames": 90,
   "assets": [{"id": "...", "path": "/abs/a.mp4", "offline": false, "waiting_host": null}],
   "tracks": [
-    {"track": "v0", "clips": [
+    {"track": "v0", "name": "V1", "locked": false, "muted": false, "hidden": false, "clips": [
       {"id": "...", "asset": "...", "start_frame": 0, "in_frame": 30, "out_frame": 120, "length_frames": 90,
-       "speed": 1, "graphics": [], "texts": [{"id": "...", "text": "Hello"}],
+       "speed": 1, "ramp": false, "transition": null, "graphics": [], "texts": [{"id": "...", "text": "Hello"}],
        "effects": [{"id": "...", "effect": "vignette", "enabled": true, "amount": 1.5}]}
     ]}
   ],
+  "markers": [{"frame": 30, "name": "early"}],
   "graphics": {"renderer": "builtin", "ready": true}
 }
 ```
+
+A track's `name` is its label (`set_track`), and `locked`, `muted` and `hidden` its settings. A clip's `ramp` says
+whether it plays a speed ramp (`set_speed_ramp`; its `speed` is then 1), and its `transition` is the transition that
+enters it (`{"kind", "frames"}`, see `set_transition`) or null. `markers` are the timeline's markers in frame order,
+each with its `name` or null. An adapter whose State has no such field leaves it out; the tests that need it then
+fail.
 
 ### The canvas
 
@@ -252,14 +268,58 @@ Only the keys (and `lens` with fill 0) make pixels transparent. A clip smaller t
 is fitted in the middle, and the rest of the canvas is transparent: the tracks below show there, also under any
 effect.
 
+### Speed and time
+
+A clip's speed, its speed ramp, a freeze, a reverse and smooth slow motion, as the user sees them. Positions and
+lengths are frames, as everywhere; a ramp's points are in seconds of the source.
+
+**Ripple.** When a clip's length changes (`set_speed`, `set_speed_ramp`, `clear_speed_ramp`, `clear_effects`,
+`freeze_frame`), `ripple` says what moves from its old end:
+
+- `track` (what the editor does when `ripple` is not sent): the later clips on its track, and on the tracks of the
+  linked clips that change with it, move by its change in length (sped up, they pull in and leave no gap; slowed
+  down, they move out and do not overlap; gaps and transition overlaps after it are kept). A later clip's own linked
+  clips on other tracks (its sound, a recording linked to it) move with it, together with the clips after them. The
+  other tracks (titles, music) and the markers stay.
+- `all`: every other track's clips that start at or after the old end move too, and so do the markers there. A clip
+  that straddles that point stays, and so does a clip that would break the edit by moving: one entering a clip that
+  stays through a transition, one butted to it, one that would run into it, one linked to a clip that stays.
+- `none`: nothing moves; the clip's length changes in place.
+
+A ripple that would start a clip before frame 0, run a clip into another, break a transition or split a linked pair
+is refused and changes nothing, and so is a speed-up that leaves the clip no longer than a transition into or out of
+it. Clips linked to the clip that play the same moment (its sound on another track, another recording of the same
+moment, a copy of the same footage showing the same frame at the same time) take the same speed or ramp (another
+recording moved by its offset to the same moment); a linked clip of other footage (a cutaway), the other half of a
+split pair and a freeze's still keep theirs. A linked sound's J-cut head or L-cut tail (its part before or after the
+picture) changes length with it; one that would run into another clip or start before frame 0 is cut to fit, and one
+that gets shorter leaves a short silence. Called on a linked sound, the change applies to its picture, which keeps
+its start. One undo step undoes the change and its ripple.
+
+| op | args | result |
+|---|---|---|
+| `set_speed` | `{"clip", "speed", "ripple"?}` | `{}`: constant speed 0.25..4 (1 = normal): the clip's length becomes its source range / speed, and the timeline ripples. Replaces a ramp. Errors: `bad_request` for a `ripple` of another name; `product_error` for a refused ripple and a locked track. |
+| `set_speed_ramp` | `{"clip", "preset"?, "points"?, "audio"?, "ripple"?}` | `{}`: a speed that changes over the clip: a `preset` (below) spread over the clip's source range, or `points`, `[{"src": seconds of the source, "speed": 0.1..10}]`, linear between them and constant before the first and after the last. The clip's length becomes the time its source range takes at that speed, and the timeline ripples. `audio`: `stretch` (the sound follows the curve, its pitch kept) or `mute` (silent, and the linked sound too). With neither `preset` nor `points` only the audio of the ramp the clip has changes (nothing moves). Errors: as for `set_speed`, and a ramp on a pair whose sound plays at another constant speed than its picture (`smooth_slow_motion`). |
+| `clear_speed_ramp` | `{"clip", "ripple"?}` | `{}`: removes the ramp: the clip and its linked sound play at 1x again, and the timeline ripples. |
+| `clear_effects` | `{"clip", "ripple"?}` | `{}`: removes every effect of the clip (its speed and ramp, its visual effects, its colour and volume); a change of length ripples as above. |
+| `freeze_frame` | `{"clip", "at_frame", "frames", "ripple"?}` | `{"still": id or null}`: holds the frame the clip shows `at_frame` frames after its start (its speed, ramp and trim respected) for `frames` frames: the clip is split there and a still clip (that exact frame as a picture, with the clip's look and no sound) goes between the halves; the held frame is also the right half's first. Ripple `track`: the clip's track and its linked clips' tracks move right by the still (a linked sound is split at the same point and is silent under the still); `all` as above; `none`: the still overwrites the clip from that frame for up to `frames` frames, never past its end, and nothing moves. `at_frame` 0 puts the still before the clip; at or past its end the last frame inside its source range is held. Freezing a linked sound clip freezes its picture. `still` is the adapter's word; the tests find the still in get_state. Errors: `product_error` for a sound clip with no linked picture, a freeze point inside the next clip's transition overlap, a refused ripple, a locked track. |
+| `reverse_clip` | `{"clip", "audio"?, "linked"?, "wait"?}` | `{"job": id or null}`: plays the clip's source range backwards: the editor makes a reversed copy (every frame once, in reverse order; its sound reversed, or silent with `audio` `mute`) and the clip plays it at the same place and length. The linked clips that play the same moment are reversed with it (`linked` false: only this clip); a linked sound that started before the picture (a J-cut) then ends after it (an L-cut) and the other way round, which is refused when it would run into another clip. Called on a reversed clip, it plays the original forwards again (no new copy), with a trim made since mapped back. One undo step. `wait` false: it returns at once with the job that makes the copy (`jobs`, `cancel`; a canceled copy leaves no file); `job` is null when `wait` is true. Errors: `product_error` for those refusals and a locked track; a track locked, or a spot taken, while the copy is made ends the job with status `error`, the project unchanged. |
+| `smooth_slow_motion` | `{"clip", "mode"?, "wait"?}` | `{"job": id or null}`: for a clip slowed below 1x at a constant speed: the editor makes a copy with in-between frames (`mode` `blend`, the default: blended frames; `flow`: motion-interpolated ones) and the clip plays it at 1x, at the same place and length, its sound slowed with its pitch kept. A linked sound of the same footage and span is moved onto the copy too; another linked clip keeps its speed and place, and a later speed change keeps the ratio between them. `wait` as for `reverse_clip`. Errors: `product_error` at 1x or faster, on a ramped clip, on a locked track. |
+
+The presets of `set_speed_ramp`, by the product's names: `montage` (pulses: 1x, 3x, 0.5x, 3x, 0.5x, 1x), `hero` (3x,
+with 0.3x for the middle tenth), `bullet` (real time, 0.15x through the middle, real time again), `jump_cut` (real
+time with an 8x jump through the middle fifth), `flash_in` (from 8x down to real time by 30 %), `flash_out` (real time
+until 70 %, then up to 8x at the end). Another editor's adapter maps them to its own.
+
 ### Output and jobs
 
 | op | args | result |
 |---|---|---|
 | `export` | `{"path", "wait": true}` | a **Job**. With `wait` true, the call returns when the export has finished. With `wait` false, it returns at once with a running job. See "Exports" below. |
-| `jobs` | `{}` | `{"jobs": [Job]}` |
+| `jobs` | `{}` | `{"jobs": [Job]}`: the exports, and the copies `reverse_clip` and `smooth_slow_motion` make. |
 | `cancel` | `{"job"}` | `{"canceled": bool}` |
-| `render_frame` | `{"time", "path"}` | `{"path"}`: one composited frame of the timeline at `time` seconds, written as a PNG at `path`. |
+| `render_frame` | `{"time", "path"}` | `{"path"}`: one composited frame of the timeline at `time` seconds, written as a PNG at `path`. A time past the end shows the last frame. |
+| `render_preview` | `{}` | `{}`: renders the editor's preview of the whole timeline, where the editor keeps it (the user's playback); `render_frame` may then be served from it, and must show the same frames. |
 
 Job: `{"job": id or null, "status": "running" | "done" | "error" | "canceled", "path": str or null, "error": str or
 null, "fraction": number or null}`.

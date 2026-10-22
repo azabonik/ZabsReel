@@ -568,8 +568,138 @@ def silences(path, noise_db, min_len):
     return spans
 
 
+# ---------------------------------------------------------------- frame-index pictures and the chirp
+# The edit tests' media (fixtures/make.sh: idx.mp4, idx2997.mp4, skew.mp4, cutout.mkv) show their own frame index:
+# STRIPES vertical stripes of equal width across the picture, stripe b bright (luma 220) when bit b of the source
+# frame's index is set and dark (30) when it is not. A frame of an export is read back to the source frame it shows,
+# so a test sees which source frame lands on which timeline frame without any model of the editor. A black frame (a
+# gap) reads 0, like source frame 0, so the tests place no source frame 0 where a gap must show.
+# Their sound is a chirp, sin(2 pi (CHIRP_F0 t + CHIRP_K t^2)): its frequency at source time t is CHIRP_F0 +
+# 2 CHIRP_K t Hz (200 Hz at 0 s, 3400 Hz at 16 s), so the pitch heard at a moment of an export says which source moment
+# plays there (chirp_time), whatever the speed (the editor keeps the pitch when it changes the tempo) or the direction.
+STRIPES = 9
+STRIPE_SIZE = (180, 90)
+CHIRP_F0 = 200.0
+CHIRP_K = 100.0
+RATE = 48000
+
+
+def frame_indexes(path, t=None, frames=None, bits=STRIPES, size=STRIPE_SIZE, row=None):
+    """The source frame index each decoded video frame of `path` shows (see above): every frame, or `frames` frames
+    from the first at or after `t` s. Each frame is scaled to `size` (nearest neighbour) as grey, and stripe b is read
+    at its middle on the middle row, or on `row` (bright: luma over 125). A rendered frame (a PNG) reads as one
+    frame."""
+    w, h = size
+    if video_stream(path) is None:
+        raise Unmeasurable(f"{os.path.basename(path)} has no video stream")
+    seek = [] if t is None else ["-ss", f"{float(t):.4f}"]
+    limit = [] if frames is None else ["-frames:v", str(int(frames))]
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + seek + src.words() + ["-map", "0:v:0"] + limit
+                + ["-vf", f"scale={w}:{h}:flags=neighbor,format=gray", "-f", "rawvideo", "-"], fds=[src.fd],
+                text=False)
+    if p.returncode != 0:
+        raise Unmeasurable(f"decoding {os.path.basename(path)} failed: "
+                           f"{p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
+    fs, row = w * h, (h >> 1 if row is None else int(row)) * w
+    xs = [int((b + 0.5) * w / bits) for b in range(bits)]
+    out = []
+    for k in range(len(p.stdout) // fs):
+        base = k * fs + row
+        out.append(sum(1 << b for b, x in enumerate(xs) if p.stdout[base + x] > 125))
+    return out
+
+
+def grey_frames(path, size=(160, 90)):
+    """Every decoded video frame of `path` as grey bytes of `size` (bilinear scale): [bytes]."""
+    w, h = size
+    if video_stream(path) is None:
+        raise Unmeasurable(f"{os.path.basename(path)} has no video stream")
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + src.words() + ["-map", "0:v:0", "-vf",
+                f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"], fds=[src.fd], text=False)
+    if p.returncode != 0:
+        raise Unmeasurable(f"decoding {os.path.basename(path)} failed: "
+                           f"{p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
+    fs = w * h
+    return [p.stdout[k * fs:(k + 1) * fs] for k in range(len(p.stdout) // fs)]
+
+
+def mean_abs_diff(a, b):
+    """The mean absolute difference (0..255) of two grey frames of the same size (bytes)."""
+    n = min(len(a), len(b))
+    return sum(abs(x - y) for x, y in zip(a[:n], b[:n])) / max(1, n)
+
+
+def samples(path, rate=RATE):
+    """The first audio stream of `path` decoded to mono 32-bit float samples at `rate` Hz, from its start (as an
+    export's own timeline: sample i plays at i / rate s): array('f')."""
+    import array
+    import sys
+    if audio_stream(path) is None:
+        raise Unmeasurable("no audio stream")
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + src.words()
+                + ["-map", "0:a:0", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"], fds=[src.fd], text=False)
+    if p.returncode != 0:
+        raise Unmeasurable(f"audio decode failed: {p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
+    a = array.array("f")
+    a.frombytes(p.stdout[:len(p.stdout) - len(p.stdout) % 4])
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a
+
+
+def rms(s, t0, t1, rate=RATE):
+    """The root mean square (0..1) of samples `s` over [t0, t1) s; 0.0 where there are none."""
+    i0, i1 = max(0, int(round(t0 * rate))), min(len(s), int(round(t1 * rate)))
+    if i1 <= i0:
+        return 0.0
+    return math.sqrt(sum(v * v for v in s[i0:i1]) / (i1 - i0))
+
+
+def pitch(s, t0, t1, rate=RATE):
+    """The frequency (Hz) of samples `s` over [t0, t1) s, from its zero crossings (each one placed between its two
+    samples), or None where it is quiet (mean power under 1e-4) or holds fewer than 3 crossings."""
+    i0, i1 = max(1, int(round(t0 * rate))), min(len(s), int(round(t1 * rate)))
+    xs, e = [], 0.0
+    for i in range(i0, i1):
+        a, b = s[i - 1], s[i]
+        e += b * b
+        if (a < 0) != (b < 0):
+            xs.append(i - 1 + a / (a - b))
+    if i1 <= i0 or e / (i1 - i0) < 1e-4 or len(xs) < 3:
+        return None
+    return (len(xs) - 1) / 2 / ((xs[-1] - xs[0]) / rate)
+
+
+def chirp_time(s, t, half=0.012, rate=RATE):
+    """The source moment (s) that the chirp heard at `t` s of samples `s` comes from: its pitch over [t - half,
+    t + half) mapped back through the chirp's frequency (CHIRP_F0 + 2 CHIRP_K t). None where it is quiet."""
+    f = pitch(s, t - half, t + half, rate)
+    return None if f is None else (f - CHIRP_F0) / (2 * CHIRP_K)
+
+
+def chirp_freq(source_t):
+    """The chirp's frequency (Hz) at source moment `source_t` s."""
+    return CHIRP_F0 + 2 * CHIRP_K * source_t
+
+
+def media_magic(head):
+    """Whether `head` (a file's first bytes) starts like a media file: MP4 / QuickTime (ftyp, moov, mdat, free, wide at
+    byte 4), Matroska / WebM, PNG, JPEG, RIFF (WAV, AVI, WebP), Ogg, FLAC, MP3, NUT, MPEG-TS / PS, or an H.264 / HEVC
+    stream (a start code)."""
+    if head is None:
+        return False
+    if len(head) >= 8 and head[4:8] in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):
+        return True
+    return head.startswith((b"\x1a\x45\xdf\xa3", b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"OggS", b"fLaC", b"ID3",
+                            b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"nut/", b"\x47", b"\x00\x00\x01\xba",
+                            b"\x00\x00\x00\x01", b"\x00\x00\x01"))
+
+
 # ---------------------------------------------------------------- sidecar files
-SRT_TIME = r"(\d{1,2}):([0-5]\d):([0-5]\d),(\d{3})"
+SRT_TIME =r"(\d{1,2}):([0-5]\d):([0-5]\d),(\d{3})"
 SRT_TIMING = re.compile(rf"^{SRT_TIME}\s+-->\s+{SRT_TIME}(\s+.*)?$")
 
 

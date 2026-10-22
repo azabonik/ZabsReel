@@ -231,9 +231,120 @@ class Driver:
         """Removes the clip from the timeline."""
         return self.request("remove_clip", {"clip": clip})
 
-    def set_speed(self, clip, speed):
-        """Sets a constant playback speed (1 = normal)."""
-        return self.request("set_speed", {"clip": clip, "speed": float(speed)})
+    def set_speed(self, clip, speed, ripple=None):
+        """Sets a constant playback speed (1 = normal). ripple: "track" (the editor's default when not sent), "all" or
+        "none" (PROTOCOL.md, "Speed and ripple")."""
+        args = {"clip": clip, "speed": float(speed)}
+        if ripple is not None:
+            args["ripple"] = ripple
+        return self.request("set_speed", args)
+
+    def insert_clip(self, asset, track="v0", start_frame=0, in_frame=0, out_frame=None):
+        """Places source frames [in_frame, out_frame) of `asset` at `start_frame` on `track` and moves the clips of that
+        track that start at or after it right by the new clip's length. -> clip id (str)"""
+        args = {"asset": asset, "track": track, "start_frame": int(start_frame), "in_frame": int(in_frame)}
+        if out_frame is not None:
+            args["out_frame"] = int(out_frame)
+        return self.request("insert_clip", args)["clip"]
+
+    def cut_range(self, clip, start_frame, end_frame):
+        """Removes the clip's frames [start_frame, end_frame) (counted from the clip's start on the timeline); the rest
+        of its track closes up."""
+        return self.request("cut_range", {"clip": clip, "start_frame": int(start_frame), "end_frame": int(end_frame)})
+
+    def ripple_delete(self, ranges):
+        """Removes timeline frames [start_frame, end_frame) of each track named in `ranges` ([(track, start_frame,
+        end_frame)]) and closes the gaps."""
+        return self.request("ripple_delete", {"ranges": [{"track": tr, "start_frame": int(s), "end_frame": int(e)}
+                                                         for tr, s, e in ranges]})
+
+    def set_track(self, track, name=None, locked=None, muted=None, hidden=None):
+        """Changes a track's settings as the user does: its name, locked, muted, hidden (only what is given)."""
+        args = {"track": track}
+        for k, v in (("name", name), ("locked", locked), ("muted", muted), ("hidden", hidden)):
+            if v is not None:
+                args[k] = v
+        return self.request("set_track", args)
+
+    def remove_track(self, track):
+        """Removes the track and its clips (the tracks above it of its kind take the names below)."""
+        return self.request("remove_track", {"track": track})
+
+    def link_clips(self, clips):
+        """Links the clips (a picture and its sound on another track, say): they move, trim, split and go together."""
+        return self.request("link_clips", {"clips": list(clips)})
+
+    def unlink_clip(self, clip):
+        """Unlinks the clip and its whole link group."""
+        return self.request("unlink_clip", {"clip": clip})
+
+    def set_transition(self, clip, kind, frames):
+        """A transition of `frames` frames entering `clip` from the clip before it on its track (they overlap by that
+        much: the clip and what follows it on the track move left)."""
+        return self.request("set_transition", {"clip": clip, "kind": kind, "frames": int(frames)})
+
+    def set_markers(self, markers):
+        """Replaces the timeline's markers: [(frame, name or None)] or [frame]."""
+        out = []
+        for m in markers:
+            frame, name = (m if isinstance(m, (tuple, list)) else (m, None))
+            out.append({"frame": int(frame), **({"name": name} if name is not None else {})})
+        return self.request("set_markers", {"markers": out})
+
+    def set_speed_ramp(self, clip, preset=None, points=None, audio=None, ripple=None):
+        """A speed ramp (curve): a `preset` by product name, or `points` [(source seconds, speed)]; `audio` "stretch"
+        or "mute"; neither preset nor points: only the audio mode of the ramp the clip has changes."""
+        args = {"clip": clip}
+        if preset is not None:
+            args["preset"] = preset
+        if points is not None:
+            args["points"] = [{"src": float(s), "speed": float(v)} for s, v in points]
+        for k, v in (("audio", audio), ("ripple", ripple)):
+            if v is not None:
+                args[k] = v
+        return self.request("set_speed_ramp", args)
+
+    def clear_speed_ramp(self, clip, ripple=None):
+        """Removes the clip's speed ramp: it plays at normal speed again."""
+        return self.request("clear_speed_ramp", {"clip": clip, **({"ripple": ripple} if ripple is not None else {})})
+
+    def clear_effects(self, clip, ripple=None):
+        """Removes every effect of the clip, its speed and speed ramp included."""
+        return self.request("clear_effects", {"clip": clip, **({"ripple": ripple} if ripple is not None else {})})
+
+    def freeze_frame(self, clip, at_frame, frames, ripple=None):
+        """Holds the frame the clip shows `at_frame` frames after its start for `frames` frames (a still clip).
+        -> the still clip's id as the adapter reports it, or None (tests find the still in get_state)"""
+        args = {"clip": clip, "at_frame": int(at_frame), "frames": int(frames)}
+        if ripple is not None:
+            args["ripple"] = ripple
+        return self.request("freeze_frame", args).get("still")
+
+    def reverse_clip(self, clip, audio=None, linked=None, wait=True):
+        """Plays the clip backwards (a reversed copy the editor makes), or forwards again when it is reversed.
+        audio "reverse" or "mute"; linked False: only this clip. wait False: returns at once. -> job id or None"""
+        args = {"clip": clip, "wait": bool(wait)}
+        if audio is not None:
+            args["audio"] = audio
+        if linked is not None:
+            args["linked"] = bool(linked)
+        return self.request("reverse_clip", args).get("job")
+
+    def smooth_slow_motion(self, clip, mode="blend", wait=True):
+        """Makes the slowed clip's in-between frames (mode "blend" or "flow") instead of repeating frames.
+        wait False: returns at once. -> job id or None"""
+        return self.request("smooth_slow_motion", {"clip": clip, "mode": mode, "wait": bool(wait)}).get("job")
+
+    def render_preview(self):
+        """Renders the editor's preview of the whole timeline (where the editor keeps it)."""
+        return self.request("render_preview", {})
+
+    def track_of(self, clip, state=None):
+        """The name of the track that holds `clip` (from get_state, or `state`), or None."""
+        for t in (state or self.get_state()).get("tracks", []):
+            if any(c.get("id") == clip for c in t.get("clips", [])):
+                return t.get("track")
+        return None
 
     def apply_effect(self, clip, effect, amount=None, params=None, color=None, enabled=None, effect_id=None):
         """Adds a visual effect (by product-level name, PROTOCOL.md "Effects"), or with effect_id changes that effect
@@ -277,8 +388,9 @@ class Driver:
 
     def get_state(self):
         """-> State: {"canvas": {width, height, fps}, "length_frames", "assets": [{id, path, offline, waiting_host}],
-        "tracks": [{"track": "v0", "clips": [{id, asset, start_frame, in_frame, out_frame, length_frames, speed,
-        graphics}]}], "graphics": {"renderer", "ready"}}"""
+        "tracks": [{"track": "v0", "name", "locked", "muted", "hidden", "clips": [{id, asset, start_frame, in_frame,
+        out_frame, length_frames, speed, ramp, transition, graphics}]}], "markers": [{frame, name}],
+        "graphics": {"renderer", "ready"}}"""
         return self.request("get_state", {})
 
     def clips(self, track="v0"):
