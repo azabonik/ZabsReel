@@ -474,10 +474,14 @@ class Canary:
     whether the editor, or anything it starts (FFmpeg, a browser), ever connects: every accepted connection is counted,
     whatever its protocol, with the first bytes it sent. An HTTP client gets a 404 and the connection is closed.
     `host` binds another loopback address (Linux answers all of 127.0.0.0/8): 127.0.0.2 is this computer too, but
-    not an address a graphic's page may reach (PROTOCOL.md, "Motion graphics")."""
+    not an address a graphic's page may reach (PROTOCOL.md, "Motion graphics").
+    With `answer` (bytes) every connection gets `200 OK` with that body as text/plain and no cross-origin permission
+    (no Access-Control-Allow-Origin header): a page of another origin may send it a request but must not read the
+    answer (the browser's same-origin policy)."""
 
-    def __init__(self, host="127.0.0.1"):
+    def __init__(self, host="127.0.0.1", answer=None):
         self.host = host
+        self.answer = answer
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((host, 0))
         self.sock.listen(16)
@@ -500,8 +504,13 @@ class Canary:
                     first = b""
                 with self._lock:
                     self.hits.append(first.split(b"\r\n", 1)[0].decode("latin-1")[:200] or "(connected, sent nothing)")
+                if self.answer is None:
+                    reply = b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+                else:
+                    reply = (b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n"
+                             b"Content-Length: %d\r\n\r\n" % len(self.answer)) + self.answer
                 try:
-                    conn.sendall(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    conn.sendall(reply)
                 except OSError:
                     pass
             finally:

@@ -1,18 +1,22 @@
 """The graphics add-on's browser and media downloads: a motion graphic's page reaches no other computer and no address
-of this one but its own, the render is muted, and no media a graphic names is downloaded or opened. Port of
-packages/core/scripts/smoke-chromeguard.ts (judge/PORTING.md has the map of its sections).
+of this one but its own, keeps the browser's same-origin policy and reads no file, the render is muted, and no media a
+graphic names is downloaded or opened. Port of packages/core/scripts/smoke-chromeguard.ts (judge/PORTING.md has the
+map of its sections).
 
 Observed from outside, never through the add-on's internals: listeners the test runs (one on 127.0.0.2, an address of
-this computer that a graphic's page must not reach; one on 127.0.0.1, for the detail only), the frame a graphic draws
-(its code picks the colour it draws once its requests have settled, which shows that it ran), the rendered graphic's
-streams (ffprobe of its asset, which the State names), the refusals, and the file-system calls of the editor and of
-everything it started (strace, t.driver(trace=True); never argv). Hosts are under the reserved .invalid domain; the
+this computer that a graphic's page must not reach; two on 127.0.0.1, which it may reach: one for the detail only, and
+one that answers a token with no cross-origin permission, so the page must not be able to read it), a file holding
+another token that the page must not read either, the frame a graphic draws (its code picks the colour it draws once
+its requests have settled, which shows that it ran and what it could read), the rendered graphic's streams (ffprobe
+of its asset, which the State names), the refusals, and the file-system calls of the editor and of everything it
+started (strace, t.driver(trace=True); never argv). Hosts are under the reserved .invalid domain; the
 runner's own "nothing was downloaded" check fails on any DNS lookup or connection to another computer.
 
 Everything here is about the graphics add-on: without one given to the judge (run.py --graphics-addon) every check is
 recorded as not applicable (run.py --strict fails them). Every check is recorded on every path, so CHECKS is exact.
 """
 import os
+import secrets as rnd
 
 import driver as drv
 from driver import refused
@@ -46,6 +50,39 @@ export default function Probe() {
       .then(() => { setDone(true); continueRender(handle); });
   }, [handle]);
   return <AbsoluteFill style={{ background: done ? "#00ff00" : "#ff0000" }}><img src="IMG_OTHER" /></AbsoluteFill>;
+}
+"""
+
+# The page tries to read, by fetch (CORS mode) and by XMLHttpRequest, the answer of a listener on 127.0.0.1 at another
+# port (another origin than its own server's) that gives no cross-origin permission, and a file of this computer. Once
+# both have settled it draws green, plus red when it read the listener's token and blue when it read the file's.
+READ = """import React, { useEffect, useState } from "react";
+import { AbsoluteFill, continueRender, delayRender } from "remotion";
+export default function Read() {
+  const [handle] = useState(() => delayRender("read"));
+  const [colour, setColour] = useState("rgb(0,0,0)");
+  useEffect(() => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const byFetch = (u) => fetch(u).then((r) => r.text()).then((x) => x, () => "");
+    const byXhr = (u) => new Promise((ok) => {
+      try {
+        const x = new XMLHttpRequest();
+        x.onload = () => ok(String(x.responseText || ""));
+        x.onerror = x.onabort = x.ontimeout = () => ok("");
+        x.open("GET", u);
+        x.send();
+      } catch { ok(""); }
+    });
+    const read = (u) => Promise.race([Promise.all([byFetch(u), byXhr(u)]).then((a) => a.join(" ")),
+                                      wait(5000).then(() => "")]);
+    Promise.all([read("OTHER_ORIGIN"), read("FILE_URL")])
+      .then(([o, f]) => {
+        setColour(`rgb(${o.includes("LISTENER_TOKEN") ? 255 : 0},255,${f.includes("FILE_TOKEN") ? 255 : 0})`);
+        return wait(1000);
+      })
+      .then(() => continueRender(handle));
+  }, [handle]);
+  return <AbsoluteFill style={{ background: colour }} />;
 }
 """
 
@@ -102,6 +139,9 @@ NAMES = [
     "a graphic that requests 127.0.0.2 and a .invalid computer (fetch, an image, a WebSocket, window.open) renders",
     "…and its code ran past its requests: its frame shows the colour it draws after them",
     "…and the rendered graphic has no audio stream (renders are muted)",
+    "a graphic that reads a listener on 127.0.0.1 at another port (another origin) and a file of this computer renders",
+    "…and its page could not read the listener's answer, which gives no cross-origin permission (its frame's colour)",
+    "…and its page could not read the file (its frame's colour)",
     f"a graphic whose <Audio> plays a data: playlist (a segment on {M5_HOST}) is refused",
     f"a graphic whose <Audio> plays an http: URL on 127.0.0.2 or an https: URL on {AUDIO_HOST} is refused",
     f"a graphic that reports a same-as media source on {SAME_AS['asset']} to the renderer is refused",
@@ -111,6 +151,7 @@ NAMES = [
     "the refused graphics added nothing to the project (no clip, asset or graphic)",
     "the 127.0.0.2 listener received nothing (the probe's requests and the http: <Audio> named it)",
     "no file-system call of the editor or of anything it started named a computer these graphics named",
+    "no file-system call of the editor or of anything it started named the folder of the file the page tried to read",
     "control: the trace saw the editor write the probe graphic's rendered file",
 ]
 CHECKS = len(NAMES)
@@ -160,15 +201,18 @@ def run(t):
         for name in NAMES:
             t.not_applicable(name, t.graphics_addon_why)
         return
+    token = f"zr-page-{rnd.token_hex(8)}"
     other, control = observe.Canary("127.0.0.2"), observe.Canary("127.0.0.1")
+    reader = observe.Canary("127.0.0.1", answer=f"{token}-listener\n".encode())
     try:
-        _run(t, other, control)
+        _run(t, other, control, reader, token)
     finally:
         other.close()
         control.close()
+        reader.close()
 
 
-def _run(t, other, control):
+def _run(t, other, control, reader, token):
     d = t.driver(trace=True, graphics_addon=True)
     d.set_project(width=160, height=90, fps=30)
     ok, what = refused(lambda: d.set_graphics_renderer("addon"))
@@ -191,35 +235,55 @@ def _run(t, other, control):
     else:
         t.check(NAMES[3], False, f"the State names no file for the probe graphic's asset ({probe})")
 
+    # ---- M1 (its outcome): the page keeps the browser's same-origin policy and reads no file
+    secret = t.path(f"judge-page-{rnd.token_hex(4)}", "secret.txt")
+    with open(secret, "w", encoding="utf-8") as f:
+        f.write(f"{token}-file\n")
+    os.chmod(secret, 0o644)  # the editor's user can read it: a failed read is the browser's, not the file system's
+    code = (READ.replace("OTHER_ORIGIN", reader.url("read")).replace("FILE_URL", "file://" + secret)
+            .replace("LISTENER_TOKEN", f"{token}-listener").replace("FILE_TOKEN", f"{token}-file"))
+    page, said = rendered(d, code)
+    t.check(NAMES[4], page is not None, f"{page or ''} {said}".strip())
+    colour, how = frame_colour(t, d, page["clip"], "read") if page else (None, "not rendered")
+    settled = colour is not None and colour[1] >= 128
+    why = (f"{colour} at {how} (green: its reads settled; red: it read the listener's answer; blue: it read the file); "
+           f"the listener got {reader.count()} request(s)")
+    t.check(NAMES[5], settled and colour[0] < 128, why)
+    t.check(NAMES[6], settled and colour[2] < 128, why)
+
     # ---- M2, M3, M6a: media a graphic names is never fetched or opened
     before = snapshot(d)
     r, said = add(d, AUDIO.replace("SRC", PLAYLIST))
-    t.check(NAMES[4], r is None, r or said)
-    rs = [add(d, AUDIO.replace("SRC", src)) for src in (other.url("a.m3u8"), f"https://{AUDIO_HOST}/v.mp4")]
-    t.check(NAMES[5], all(r is None for r, _ in rs), [r or s for r, s in rs])
-    r, said = add(d, REPORTED.replace("SRC", same_as(SAME_AS["asset"], "a.m3u8")))
-    t.check(NAMES[6], r is None, r or said)
-    r, said = add(d, OFFTHREAD.replace("SRC", same_as(SAME_AS["offthread"], "a.mp4")))
     t.check(NAMES[7], r is None, r or said)
+    rs = [add(d, AUDIO.replace("SRC", src)) for src in (other.url("a.m3u8"), f"https://{AUDIO_HOST}/v.mp4")]
+    t.check(NAMES[8], all(r is None for r, _ in rs), [r or s for r, s in rs])
+    r, said = add(d, REPORTED.replace("SRC", same_as(SAME_AS["asset"], "a.m3u8")))
+    t.check(NAMES[9], r is None, r or said)
+    r, said = add(d, OFFTHREAD.replace("SRC", same_as(SAME_AS["offthread"], "a.mp4")))
+    t.check(NAMES[10], r is None, r or said)
     after = snapshot(d)
     r, said = add(d, PROXY.replace("SRC", same_as(SAME_AS["proxy"], "a.mp4")))
     colour, how = frame_colour(t, d, r["clip"], "proxy") if r else (None, said)
-    t.check(NAMES[8], r is None or observe.colour_is(colour, GREEN),
+    t.check(NAMES[11], r is None or observe.colour_is(colour, GREEN),
             said if r is None else f"rendered; {colour} at {how} (green: the request was refused; red: served)")
-    t.check(NAMES[9], after == before, f"{before} -> {after}")
+    t.check(NAMES[12], after == before, f"{before} -> {after}")
 
-    t.check(NAMES[10], other.count() == 0, f"127.0.0.2 saw {other.seen()[:3] or 'nothing'}; the 127.0.0.1 listener "
+    t.check(NAMES[13], other.count() == 0, f"127.0.0.2 saw {other.seen()[:3] or 'nothing'}; the 127.0.0.1 listener "
                                            f"(this computer's own address, which the page may reach) saw "
                                            f"{control.count()} request(s)")
+    traced = NAMES[14:17]
     if not t.trace:
-        t.not_observed(NAMES[11], t.trace_why or "strace is not installed")
-        t.not_observed(NAMES[12], t.trace_why or "strace is not installed")
+        for name in traced:
+            t.not_observed(name, t.trace_why or "strace is not installed")
     elif t.trace.tampered:
-        t.check(NAMES[11], False, t.trace.tampered)
-        t.check(NAMES[12], False, t.trace.tampered)
+        for name in traced:
+            t.check(name, False, t.trace.tampered)
     else:
         hits = observe.trace_hits(t.trace, HOSTS)
-        t.check(NAMES[11], not hits, hits[:3] or f"none of {len(observe.trace_lines(t.trace))} lines names {HOSTS}")
+        t.check(NAMES[14], not hits, hits[:3] or f"none of {len(observe.trace_lines(t.trace))} lines names {HOSTS}")
+        folder = os.path.basename(os.path.dirname(secret))
+        hits = observe.trace_hits(t.trace, [folder])
+        t.check(NAMES[15], not hits, hits[:3] or f"none of {len(observe.trace_lines(t.trace))} lines names {folder}")
         base = os.path.basename(path or "") or "(no rendered file in the State)"
         seen = observe.trace_hits(t.trace, [base]) if path else []
-        t.check(NAMES[12], bool(seen), f"{base}: {len(seen)} line(s)")
+        t.check(NAMES[16], bool(seen), f"{base}: {len(seen)} line(s)")

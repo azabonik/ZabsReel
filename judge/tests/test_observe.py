@@ -16,7 +16,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 37
+CHECKS = 38
 
 
 def run(t):
@@ -103,6 +103,23 @@ def side_effects(t):
                 and other.url("ws", "ws") == f"ws://127.0.0.2:{other.port}/ws", other.seen())
     finally:
         other.close()
+    reader = observe.Canary(answer=b"zr-token-42\n")  # the graphics test's listener whose answer a page must not read
+    try:
+        c = socket.create_connection(("127.0.0.1", reader.port), timeout=5)
+        c.sendall(b"GET /r HTTP/1.1\r\nHost: x\r\nOrigin: http://127.0.0.1:1\r\n\r\n")
+        got = b""
+        while True:
+            part = c.recv(4096)
+            if not part:
+                break
+            got += part
+        c.close()
+        head, _, body = got.partition(b"\r\n\r\n")
+        t.check("a listener with an answer serves it (200, the body) with no cross-origin permission, and counts it",
+                head.startswith(b"HTTP/1.0 200 ") and body == b"zr-token-42\n"
+                and b"access-control-" not in head.lower() and reader.count() == 1, [got[:200], reader.seen()])
+    finally:
+        reader.close()
     png = t.path("colour", "magenta.png")
     p = observe.run([observe.FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i",
                      "color=c=0xff00ff:size=64x36,format=rgb24", "-frames:v", "1", png], heavy=False, timeout=60)

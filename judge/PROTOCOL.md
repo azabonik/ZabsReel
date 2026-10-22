@@ -302,7 +302,9 @@ this computer). An adapter whose editor has no renderer setting leaves it out, a
 Every graphic is rendered muted (no sound reaches the speakers, and the rendered graphic has no audio stream), and the
 renderer gives the graphic no network: the only computer its page may reach is this one at `127.0.0.1` or
 `localhost` (the add-on's own server runs there), and no request may make the renderer open a network path or a file
-the graphic names.
+the graphic names. The page keeps the browser's same-origin policy: it cannot read the answer of a server of another
+origin (another port of `127.0.0.1` included) that gives it no cross-origin permission, and it cannot read a file of
+this computer by its `file://` URL.
 
 ### What an AI agent is offered
 
