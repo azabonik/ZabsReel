@@ -62,7 +62,7 @@ jobs:
       # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
       # strace: smoke-unc row 16 traces FFmpeg on files that name a test server.
       - name: Install FFmpeg
-        run: bash scripts/ci/apt-install.sh ffmpeg strace
+        run: bash scripts/ci/apt-install.sh --no-install-recommends ffmpeg strace
 
       - name: Install dependencies
         run: npm ci
