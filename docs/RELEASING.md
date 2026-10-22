@@ -196,8 +196,8 @@ that it renders.
 
 `generate_release_notes` writes the list of changes. Add the text below to the
 top of the Release body (edit the Release on GitHub after the workflow
-publishes it) for the first version that ships the network-computer approvals.
-Leave it out of later releases.
+publishes it) for the first version that ships the network-computer approvals,
+which is also the first ZedMix release. Leave it out of later releases.
 
 > **Media on network computers now waits for your OK.** When a project uses
 > files on a network computer (`\\nas\video\…`) that you have not allowed,
@@ -217,6 +217,11 @@ Leave it out of later releases.
 > Map that folder to a drive letter, or use the computer's plain name
 > (`xn--…` for an international name), then change the path in the `.aive`
 > file (a text file) and open the project again.
+>
+> **Projects from v0.2.0 come over as OpenTimelineIO.** To bring a v0.2.0
+> project (`.aive`) to ZedMix, open it in v0.2.0, export it with
+> `export_otio`, and import that `.otio` in ZedMix with `import_otio`. It
+> opens as it did in v0.2.0.
 
 ---
 

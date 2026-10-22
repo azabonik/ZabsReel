@@ -393,7 +393,8 @@ npx tsx packages/core/scripts/smoke-loudnorm.ts
 npx tsx packages/core/scripts/smoke-adjustment.ts
 npx tsx packages/core/scripts/smoke-polish.ts
 
-# OpenTimelineIO interop: lossless export→import round-trip + foreign OTIO import
+# OpenTimelineIO interop: lossless export→import round-trip + foreign OTIO import,
+# and v0.2.0's own exports (fixtures/v020-otio, metadata.synthcut) open as in v0.2.0
 npx tsx packages/core/scripts/smoke-otio.ts
 
 # Core editing + render, multi-track compositing, and the full MCP path
