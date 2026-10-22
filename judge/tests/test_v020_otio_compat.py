@@ -8,16 +8,20 @@ replaced by a token. manifest.json says what each must open as; v0.2.0 opened ea
 and from its own export) before it was checked in.
 
 For each file the test points it at this run's media (judge/fixtures/make.sh made them: a.mp4, b.mp4, c640.mp4,
-m.mp3, look.cube), opens it with import_otio, and checks:
+m.mp3, look.cube, and the flat pictures fx-pair.mp4, fx-redblue.mp4, fx-gray128.mp4), opens it with import_otio, and
+checks:
 - what the editor reports (get_state): the canvas, the length, which tracks hold clips, each clip's media file,
-  position, source range, length on the timeline and speed, and the effects (with their amounts) and texts on it;
-  every media file online and none missing;
+  position, source range, length on the timeline and speed, and the effects (with their amounts, their params, their
+  colour read as a hex colour, and whether each is on or bypassed) and texts on it; every media file online and none
+  missing;
 - an export of it (observe.py): its length, size and frame rate; frames at known times against the source media
   frame they must show (SSIM, best of the source frame and its neighbours, and closer to it than to the frames half
   a second away), a gap that is black, a 4:3 clip of an upper track fitted over the track below it (regions), the
-  looks the file carries (grayscale, a grade, vignette 2 and 0, the red-blue LUT, a text, a warm white balance,
-  invert), measured against references made from the source frame with FFmpeg's own filters (negate, a channel swap)
-  or against the source frame's own statistics; and the tones of the clips' audio and of an audio track.
+  looks the file carries (grayscale, a grade, vignette 2 and 0, the red-blue LUT, a text in its colour on its box, a
+  warm white balance, invert; a grade's saturation on a flat colour, colorhold's colour, exposure's black point, a
+  bypassed vignette), measured against references made from the source frame with FFmpeg's own filters (negate, a
+  channel swap) or against the source frame's own statistics; and the tones of the clips' audio and of an audio
+  track. A colour grade is not in the State (protocol 1), so it is observed on the export only.
 Nothing is read from the editor's own files: what it reports and what it exports are the observations.
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact; it
 is counted from the manifest.
@@ -79,7 +83,8 @@ def shape(st, media):
                           "start_frame": c.get("start_frame"), "in_frame": c.get("in_frame"),
                           "out_frame": c.get("out_frame"), "length_frames": c.get("length_frames"),
                           "speed": c.get("speed"),
-                          "effects": [{"effect": e.get("effect"), "amount": e.get("amount")}
+                          "effects": [{"effect": e.get("effect"), "amount": e.get("amount"), "params": e.get("params"),
+                                       "color": e.get("color"), "enabled": e.get("enabled")}
                                       for e in c.get("effects") or []],
                           "texts": [x.get("text") for x in c.get("texts") or []]})
         if clips:
@@ -93,6 +98,17 @@ def place(c):
 
 def same_number(a, b):
     return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) < 1e-6
+
+
+def same_effect(got, want):
+    """Whether an effect the editor reports is the manifest's: its name and amount, each param the manifest names (the
+    editor may report more), its colour as a hex colour (observe.hex_colour: any spelling), and whether it is on."""
+    params = got.get("params") or {}
+    return (got.get("effect") == want["effect"]
+            and (got.get("amount") == want["amount"] or same_number(got.get("amount"), want["amount"]))
+            and all(same_number(params.get(k), v) for k, v in (want.get("params") or {}).items())
+            and ("color" not in want or observe.hex_colour(got.get("color")) == observe.hex_colour(want["color"]))
+            and got.get("enabled") is want.get("enabled", True))
 
 
 def run(t):
@@ -147,11 +163,11 @@ def one_file(t, d, media, frames, e):
         for i, c in enumerate(clips):
             g = have[i] if i < len(have) else {"effects": None, "texts": None}
             fx_ok = g["effects"] is not None and len(g["effects"]) == len(c["effects"]) and all(
-                x["effect"] == y["effect"] and (x["amount"] == y["amount"] or same_number(x["amount"], y["amount"]))
-                for x, y in zip(g["effects"], c["effects"]))
+                same_effect(x, y) for x, y in zip(g["effects"], c["effects"]))
             if not fx_ok or g["texts"] != c["texts"]:
                 bad.append(f"{k}[{i}]: effects {g['effects']} texts {g['texts']} (want {c['effects']}, {c['texts']})")
-    t.check(f"{name}: each clip has the effects (with their amounts) and texts v0.2.0 exported",
+    t.check(f"{name}: each clip has the effects (with their amounts, params, colours and bypass) and texts v0.2.0 "
+            "exported",
             opened and not bad, "; ".join(bad)[:900] if opened else "not opened")
 
     out = t.path("out", name.replace(".otio", ".mp4"))
@@ -199,14 +215,21 @@ def describe(p):
     raise ValueError(k)
 
 
+TEXT_CHANGE = 200   # a pixel the text changed: its R+G+B differs from the source's by this much (and it is bright)
+BOX_ROWS = 60       # rows of the bottom third the box turns black (v0.2.0's 64-pixel text: 97; without a box: 16-18)
 LOOKS = {
     "grayscale": "in grayscale",
-    "brighter": "brighter (its grade: brightness 0.15, saturation 1.4)",
+    "brighter": "brighter (its grade's brightness 0.15; its saturation 1.4 is measured in params.otio)",
     "vignette": "with darker corners and the middle unchanged",
     "red_blue_swapped": "with red and blue swapped (the LUT)",
     "text_at_bottom": "with a text at the bottom and the top unchanged",
+    "text_yellow": "with the text in its colour, yellow (#ffe14d)",
+    "text_box": "with the text on its black box, as tall as for 64-pixel text",
     "warmer": "warmer (more red against blue)",
     "inverted": "inverted",
+    "graded_dull": "brighter and more saturated (its grade: brightness 0.15, saturation 1.4)",
+    "red_held": "with its red held and its blue turned grey (colorhold #e02020)",
+    "lifted": "with its black point lifted (exposure, black 0.1)",
 }
 SOURCE_FPS = 30
 CORNERS = [f"crop=48:48:{x}:{y}" for x, y in (("0", "0"), ("iw-48", "0"), ("0", "ih-48"), ("iw-48", "ih-48"))]
@@ -288,4 +311,66 @@ def look(frames, src, out, p, size):
         g, s = observe.signalstats(got), observe.signalstats(ref)
         dg, ds = g["VAVG"] - g["UAVG"], s["VAVG"] - s["UAVG"]
         return dg >= ds + 8, f"V - U {dg:.1f} vs the source's {ds:.1f} (want +8)"
+    if lk in ("text_yellow", "text_box"):
+        return text(src, out, p, size, lk)
+    # a flat picture's 16x16 blocks (the source scaled to the canvas, as the editor fits it): the middle of the left
+    # half, of the right half, and of the picture
+    left, right, mid = (w // 4 - 8, h // 2 - 8), (3 * w // 4 - 8, h // 2 - 8), (w // 2 - 8, h // 2 - 8)
+
+    def block(path, at, xy):
+        b = observe.pixels(path, at, f"{scale},crop=16:16:{xy[0]}:{xy[1]},scale=1:1:flags=area")
+        if len(b) < 3:
+            raise observe.Unmeasurable(f"no colour read from {os.path.basename(path)} at {at}s")
+        return tuple(b[:3])
+    if lk == "graded_dull":  # fx-pair's left half, a dull red (0x806060)
+        g, s = block(out, p["t"], left), block(src, p["source_t"], left)
+        return luma(g) >= luma(s) + 12 and spread(g) >= 1.2 * spread(s), \
+            f"the dull red {g}: luma {luma(g):.1f}, spread {spread(g)} vs the source's {s}: {luma(s):.1f}, " \
+            f"{spread(s)} (want luma +12, spread x1.2)"
+    if lk == "red_held":  # fx-redblue: 0xE02020 on the left, 0x2020E0 on the right
+        a, b = block(out, p["t"], left), block(out, p["t"], right)
+        return a[0] > 180 and a[0] - a[1] > 120 and spread(b) <= 16, \
+            f"left {a} (want red > 180, red - green > 120), right {b} (want spread <= 16)"
+    if lk == "lifted":  # fx-gray128
+        g, s = block(out, p["t"], mid), block(src, p["source_t"], mid)
+        return abs(luma(g) - 114) <= 6 and luma(s) >= 122, f"luma {luma(g):.1f} (want 114 +- 6), the source's " \
+            f"{luma(s):.1f}"
     raise ValueError(lk)
+
+
+def luma(c):
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+
+def spread(c):
+    return max(c) - min(c)
+
+
+def text(src, out, p, size, lk):
+    """The text in the bottom third of the export's frame against the source frame (both at the canvas's size, rgb24):
+    text_yellow, the mean colour of the pixels the text changed (R+G+B by TEXT_CHANGE or more, and bright: a channel
+    over 100); text_box, how many rows of it the box turned black (100 pixels or more of a row whose colour changed by
+    60 or more to black: every channel under 40)."""
+    w, h = size
+    h3 = h // 3
+    chain = f"scale={w}:{h}:flags=bicubic,crop={w}:{h3}:0:{h - h3}"
+    g, s = observe.pixels(out, p["t"], chain), observe.pixels(src, p["source_t"], chain)
+    if min(len(g), len(s)) < w * h3 * 3:
+        raise observe.Unmeasurable("a short frame")
+    changed, rows = [], [0] * h3
+    for k in range(w * h3):
+        a, b = g[k * 3:k * 3 + 3], s[k * 3:k * 3 + 3]
+        d = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
+        if d >= TEXT_CHANGE and max(a) > 100:
+            changed.append(a)
+        elif d >= 60 and max(a) < 40:
+            rows[k // w] += 1
+    if lk == "text_box":
+        n = sum(1 for r in rows if r >= 100)
+        return n >= BOX_ROWS, f"{n} rows of the bottom third turned black (want {BOX_ROWS} or more; v0.2.0: 97)"
+    if len(changed) < 500:
+        return False, f"{len(changed)} pixels changed by the text (want 500 or more)"
+    m = [sum(c[i] for c in changed) / len(changed) for i in range(3)]
+    return m[0] - m[2] >= 80 and m[1] - m[2] >= 60, \
+        f"{len(changed)} pixels changed by the text, mean ({m[0]:.0f}, {m[1]:.0f}, {m[2]:.0f}) (want red - blue " \
+        f">= 80, green - blue >= 60)"

@@ -5,7 +5,8 @@ them with their own expectations. The filter chains are the ones the first-try b
 rev 4), so a value measured here and a baseline value measured there are the same measurement.
 
 mean_rgb reads the mean colour of a picture (a test lets a graphic's code pick the colour it draws, to see that it
-ran); pixels and block_rgb read raw pixels and a block's mean colour of a video's frame (the effects' looks).
+ran); pixels and block_rgb read raw pixels and a block's mean colour of a video's frame (the effects' looks);
+hex_colour reads a colour that get_state reports in a hex spelling (no file).
 
 The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback listener
 that must receive nothing (on 127.0.0.1, or on another address of this computer such as 127.0.0.2), the host-level trace
@@ -473,6 +474,16 @@ def block_rgb(path, t, x, y, size=8):
 def colour_is(rgb, want, tol=40):
     """Whether the colour `rgb` is within `tol` of `want` in each channel."""
     return rgb is not None and all(abs(int(a) - int(b)) <= tol for a, b in zip(rgb, want))
+
+
+def hex_colour(value):
+    """The colour a hex spelling names, as 0xRRGGBB (an int): `0xRRGGBB` or `#rrggbb`, in any case, red first. None
+    for anything else (a name, rgb(), a number, another length). A colour that get_state reports is read with this
+    and compared with the colour a test gave, whatever spelling each has (PROTOCOL.md, "State")."""
+    if not isinstance(value, str):
+        return None
+    m = re.fullmatch(r"(?:0[xX]|#)([0-9a-fA-F]{6})", value.strip())
+    return int(m.group(1), 16) if m else None
 
 
 # ---------------------------------------------------------------- audio

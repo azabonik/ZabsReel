@@ -214,8 +214,11 @@ ids of the motion graphics shown over it (`add_graphic` with `clip`), and the St
 the user chose for motion graphics and whether it can render now (see "Motion graphics" below). A clip's `texts` are
 its text overlays (`add_text`: their ids and texts), and its `effects` are its visual effects in the order they are
 rendered: each one's id, its name (see "Effects"), whether it is on (`enabled` false: bypassed), and, when it has
-them, its `amount`, its `params` (an object of numbers) and its `color` (in the editor's own spelling, which the tests
-only compare with itself). Values the editor clamped are shown clamped.
+them, its `amount`, its `params` (an object of numbers) and its `color`. A colour that is a hex colour is reported as
+`0xRRGGBB` or `#rrggbb` (any case, red first): the tests read its value (observe.hex_colour) and compare it with the
+colour they gave, so a colour given as `#e02020` must come back as that red in either spelling. An adapter whose editor
+stores colours another way converts them to one of these (v0.2.0's adapter passes on the editor's own `0xRRGGBB`).
+Values the editor clamped are shown clamped.
 
 ### Effects
 

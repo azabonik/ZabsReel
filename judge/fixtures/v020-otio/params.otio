@@ -1,0 +1,416 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "Untitled Project",
+  "global_start_time": {
+    "OTIO_SCHEMA": "RationalTime.1",
+    "rate": 30,
+    "value": 0
+  },
+  "metadata": {
+    "synthcut": {
+      "schemaVersion": 4,
+      "width": 640,
+      "height": 360,
+      "fps": 30,
+      "assets": [
+        {
+          "id": "asset_lcsrzg6ja8",
+          "path": "@JUDGE_MEDIA@/fx-pair.mp4",
+          "name": "fx-pair.mp4",
+          "duration": 2,
+          "width": 320,
+          "height": 180,
+          "fps": 30,
+          "hasVideo": true,
+          "hasAudio": false,
+          "videoCodec": "h264",
+          "color": {
+            "codedHeight": 180
+          },
+          "addedAt": 1792678477714
+        },
+        {
+          "id": "asset_e5y0teoush",
+          "path": "@JUDGE_MEDIA@/fx-redblue.mp4",
+          "name": "fx-redblue.mp4",
+          "duration": 2,
+          "width": 320,
+          "height": 180,
+          "fps": 30,
+          "hasVideo": true,
+          "hasAudio": false,
+          "videoCodec": "h264",
+          "color": {
+            "codedHeight": 180
+          },
+          "addedAt": 1792678477746
+        },
+        {
+          "id": "asset_x5rtqbh498",
+          "path": "@JUDGE_MEDIA@/fx-gray128.mp4",
+          "name": "fx-gray128.mp4",
+          "duration": 2,
+          "width": 320,
+          "height": 180,
+          "fps": 30,
+          "hasVideo": true,
+          "hasAudio": false,
+          "videoCodec": "h264",
+          "color": {
+            "codedHeight": 180
+          },
+          "addedAt": 1792678477772
+        },
+        {
+          "id": "asset_lol11j3bs9",
+          "path": "@JUDGE_MEDIA@/a.mp4",
+          "name": "a.mp4",
+          "duration": 6,
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "hasVideo": true,
+          "hasAudio": true,
+          "videoCodec": "h264",
+          "audioCodec": "aac",
+          "color": {
+            "codedHeight": 720
+          },
+          "addedAt": 1792678477810
+        }
+      ]
+    }
+  },
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "name": "tracks",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "V1",
+        "kind": "Video",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "name": "fx-pair.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 60
+              }
+            },
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "file://@JUDGE_MEDIA@/fx-pair.mp4",
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 0
+                  },
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 60
+                  }
+                },
+                "metadata": {
+                  "synthcut": {
+                    "asset": {
+                      "id": "asset_lcsrzg6ja8",
+                      "path": "@JUDGE_MEDIA@/fx-pair.mp4",
+                      "name": "fx-pair.mp4",
+                      "duration": 2,
+                      "width": 320,
+                      "height": 180,
+                      "fps": 30,
+                      "hasVideo": true,
+                      "hasAudio": false,
+                      "videoCodec": "h264",
+                      "color": {
+                        "codedHeight": 180
+                      },
+                      "addedAt": 1792678477714
+                    }
+                  }
+                }
+              }
+            },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "metadata": {
+              "synthcut": {
+                "clip": {
+                  "id": "clip_92yt34ge5p",
+                  "assetId": "asset_lcsrzg6ja8",
+                  "startFrame": 0,
+                  "sourceInFrame": 0,
+                  "sourceOutFrame": 60,
+                  "effects": {
+                    "color": {
+                      "brightness": 0.15,
+                      "saturation": 1.4
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "name": "fx-redblue.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 60
+              }
+            },
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "file://@JUDGE_MEDIA@/fx-redblue.mp4",
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 0
+                  },
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 60
+                  }
+                },
+                "metadata": {
+                  "synthcut": {
+                    "asset": {
+                      "id": "asset_e5y0teoush",
+                      "path": "@JUDGE_MEDIA@/fx-redblue.mp4",
+                      "name": "fx-redblue.mp4",
+                      "duration": 2,
+                      "width": 320,
+                      "height": 180,
+                      "fps": 30,
+                      "hasVideo": true,
+                      "hasAudio": false,
+                      "videoCodec": "h264",
+                      "color": {
+                        "codedHeight": 180
+                      },
+                      "addedAt": 1792678477746
+                    }
+                  }
+                }
+              }
+            },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "metadata": {
+              "synthcut": {
+                "clip": {
+                  "id": "clip_e2n21vbb8w",
+                  "assetId": "asset_e5y0teoush",
+                  "startFrame": 60,
+                  "sourceInFrame": 0,
+                  "sourceOutFrame": 60,
+                  "effects": {
+                    "filters": [
+                      {
+                        "id": "fx_yu3oy7gtu1",
+                        "type": "colorhold",
+                        "color": "0xE02020",
+                        "params": {
+                          "similarity": 0.3,
+                          "blend": 0.1
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "name": "fx-gray128.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 60
+              }
+            },
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "file://@JUDGE_MEDIA@/fx-gray128.mp4",
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 0
+                  },
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 60
+                  }
+                },
+                "metadata": {
+                  "synthcut": {
+                    "asset": {
+                      "id": "asset_x5rtqbh498",
+                      "path": "@JUDGE_MEDIA@/fx-gray128.mp4",
+                      "name": "fx-gray128.mp4",
+                      "duration": 2,
+                      "width": 320,
+                      "height": 180,
+                      "fps": 30,
+                      "hasVideo": true,
+                      "hasAudio": false,
+                      "videoCodec": "h264",
+                      "color": {
+                        "codedHeight": 180
+                      },
+                      "addedAt": 1792678477772
+                    }
+                  }
+                }
+              }
+            },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "metadata": {
+              "synthcut": {
+                "clip": {
+                  "id": "clip_61qdmn55q4",
+                  "assetId": "asset_x5rtqbh498",
+                  "startFrame": 120,
+                  "sourceInFrame": 0,
+                  "sourceOutFrame": 60,
+                  "effects": {
+                    "filters": [
+                      {
+                        "id": "fx_xa0ywx54q1",
+                        "type": "exposure",
+                        "amount": 0,
+                        "params": {
+                          "black": 0.1
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "name": "a.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 60
+              }
+            },
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "file://@JUDGE_MEDIA@/a.mp4",
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 0
+                  },
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 30,
+                    "value": 180
+                  }
+                },
+                "metadata": {
+                  "synthcut": {
+                    "asset": {
+                      "id": "asset_lol11j3bs9",
+                      "path": "@JUDGE_MEDIA@/a.mp4",
+                      "name": "a.mp4",
+                      "duration": 6,
+                      "width": 1280,
+                      "height": 720,
+                      "fps": 30,
+                      "hasVideo": true,
+                      "hasAudio": true,
+                      "videoCodec": "h264",
+                      "audioCodec": "aac",
+                      "color": {
+                        "codedHeight": 720
+                      },
+                      "addedAt": 1792678477810
+                    }
+                  }
+                }
+              }
+            },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "metadata": {
+              "synthcut": {
+                "clip": {
+                  "id": "clip_ss5gxetq3r",
+                  "assetId": "asset_lol11j3bs9",
+                  "startFrame": 180,
+                  "sourceInFrame": 0,
+                  "sourceOutFrame": 60,
+                  "effects": {
+                    "filters": [
+                      {
+                        "id": "fx_fbay4tuwad",
+                        "type": "vignette",
+                        "amount": 2,
+                        "enabled": false
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "metadata": {
+          "synthcut": {
+            "index": 0
+          }
+        }
+      }
+    ]
+  }
+}

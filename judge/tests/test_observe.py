@@ -16,7 +16,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 38
+CHECKS = 39
 
 
 def run(t):
@@ -130,6 +130,14 @@ def side_effects(t):
     t.check("colour: a magenta picture reads as magenta, not as green",
             observe.colour_is(rgb, (255, 0, 255)) and not observe.colour_is(rgb, (0, 255, 0))
             and not observe.colour_is(None, (255, 0, 255)), rgb)
+    spellings = {s: observe.hex_colour(s) for s in ("0xE02020", "#e02020", "0Xe02020", " #E02020 ", "0x2020E0",
+                                                    "e02020", "#e020", "red", "rgb(224,32,32)", 0xE02020)}
+    t.check("hex colour: 0xE02020, #e02020 in any case are the same red (red first), 0x2020E0 is blue, and a name, "
+            "rgb(), a bare or short hex and a number are not read",
+            [spellings[s] for s in ("0xE02020", "#e02020", "0Xe02020", " #E02020 ")] == [0xE02020] * 4
+            and spellings["0x2020E0"] == 0x2020E0
+            and all(spellings[s] is None for s in ("e02020", "#e020", "red", "rgb(224,32,32)", 0xE02020)),
+            spellings)
     t.check("strace form: a non-ASCII byte as three-digit octal, a backslash doubled",
             observe.strace_form("\uff5a-x") == "\\357\\275\\232-x" and observe.strace_form("\\\\nas") == "\\\\\\\\nas",
             [observe.strace_form("\uff5a-x"), observe.strace_form("\\\\nas")])

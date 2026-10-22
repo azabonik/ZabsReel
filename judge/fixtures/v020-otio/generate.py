@@ -13,7 +13,8 @@ release opens its own export unchanged), and writes:
   place it occurs (the media paths and their file:// URLs), so the test can point the file at its own media. Nothing
   else is changed (byte for byte, as v0.2.0 wrote it).
 - manifest.json: per file, what it must open as: the canvas, the length, each track's clips (the media file, position,
-  source range, length, speed, effects with their amounts, texts), and the observations the test makes on an export
+  source range, length, speed, effects with their amounts, params, colour and whether each is on, texts), and the
+  observations the test makes on an export
   (frames that must show a source frame, a gap, a look, tones). These are the spec below, which v0.2.0's own State
   matched twice (after building and after opening the export again); the looks were measured on v0.2.0's exports by
   the test itself (run.py --build <v0.2.0> --only v020_otio_compat).
@@ -36,12 +37,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 JUDGE = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, JUDGE)
 import driver  # noqa: E402
+import observe  # noqa: E402
 
 MEDIA_TOKEN = "@JUDGE_MEDIA@"  # the media folder, in the checked-in files
 
 # Each timeline: the canvas, the tracks to add, the clips (placed in this order), the edits after placing (split,
 # trim, speed, effect, colour, lut, text), the clips it must then hold (State: per track, in timeline order), and the
-# observations on its export. Clip keys name clips; a split names its two halves.
+# observations on its export. Clip keys name clips; a split names its two halves. An effect edit is (effect, clip,
+# name, amount[, {params, color, enabled}]): enabled false bypasses it after adding it. A clip's effects in "expect"
+# are (name, amount[, params[, colour[, enabled]]]).
 TIMELINES = [
     {
         "name": "cuts",
@@ -137,8 +141,37 @@ TIMELINES = [
              "what": "vignette amount 0 leaves the picture as it is"},
             {"kind": "look", "look": "red_blue_swapped", "t": 9.0, "media": "a.mp4", "source_t": 3.0},
             {"kind": "look", "look": "text_at_bottom", "t": 11.0, "media": "b.mp4", "source_t": 1.0},
+            {"kind": "look", "look": "text_yellow", "t": 11.0, "media": "b.mp4", "source_t": 1.0},
+            {"kind": "look", "look": "text_box", "t": 11.0, "media": "b.mp4", "source_t": 1.0},
             {"kind": "look", "look": "warmer", "t": 13.0, "media": "a.mp4", "source_t": 1.0},
             {"kind": "look", "look": "inverted", "t": 15.0, "media": "a.mp4", "source_t": 5.0},
+        ],
+    },
+    {
+        "name": "params",
+        "what": "effects with params, a colour and a bypass, and a grade on a flat colour: brightness 0.15 and "
+                "saturation 1.4 on the dull and bright reds, colorhold #e02020 (similarity 0.3, blend 0.1) on the "
+                "red-blue picture, exposure 0 with its black point at 0.1 on grey 128, and a vignette 2 bypassed",
+        "canvas": [640, 360, 30],
+        "add_tracks": [],
+        "place": [("P", "fx-pair.mp4", "v0", 0, 0, 60), ("H", "fx-redblue.mp4", "v0", 60, 0, 60),
+                  ("X", "fx-gray128.mp4", "v0", 120, 0, 60), ("B", "a.mp4", "v0", 180, 0, 60)],
+        "edits": [("colour", "P", {"brightness": 0.15, "saturation": 1.4}),
+                  ("effect", "H", "colorhold", None, {"params": {"similarity": 0.3, "blend": 0.1}, "color": "#e02020"}),
+                  ("effect", "X", "exposure", 0, {"params": {"black": 0.1}}),
+                  ("effect", "B", "vignette", 2.0, {"enabled": False})],
+        "expect": {"v0": [("fx-pair.mp4", 0, 0, 60, 60, 1),
+                          ("fx-redblue.mp4", 60, 0, 60, 60, 1,
+                           [("colorhold", None, {"similarity": 0.3, "blend": 0.1}, "#e02020")]),
+                          ("fx-gray128.mp4", 120, 0, 60, 60, 1, [("exposure", 0, {"black": 0.1})]),
+                          ("a.mp4", 180, 0, 60, 60, 1, [("vignette", 2.0, None, None, False)])]},
+        "length": 240,
+        "probes": [
+            {"kind": "look", "look": "graded_dull", "t": 1.0, "media": "fx-pair.mp4", "source_t": 1.0},
+            {"kind": "look", "look": "red_held", "t": 3.0, "media": "fx-redblue.mp4", "source_t": 1.0},
+            {"kind": "look", "look": "lifted", "t": 5.0, "media": "fx-gray128.mp4", "source_t": 1.0},
+            {"kind": "source", "t": 7.0, "media": "a.mp4", "source_t": 1.0,
+             "what": "a bypassed vignette (amount 2) leaves the picture as it is"},
         ],
     },
 ]
@@ -148,13 +181,30 @@ def log(*a):
     print("[v020-otio]", *a, file=sys.stderr, flush=True)
 
 
+def colour(c):
+    """A colour in the manifest's spelling: #rrggbb when it is a hex colour (observe.hex_colour), else as given."""
+    v = observe.hex_colour(c)
+    return c if v is None else f"#{v:06x}"
+
+
+def effect_spec(name, amount, params=None, color=None, enabled=True):
+    """An effect in the manifest's terms: its name, amount and whether it is on, and its params and colour if any."""
+    out = {"effect": name, "amount": amount}
+    if params:
+        out["params"] = dict(params)
+    if color:
+        out["color"] = colour(color)
+    out["enabled"] = enabled
+    return out
+
+
 def clip_spec(row):
     """(media, start, in, out, length, speed[, effects[, texts]]) -> the manifest's clip."""
     media, start, i, o, n, speed = row[:6]
     effects = row[6] if len(row) > 6 else []
     texts = row[7] if len(row) > 7 else []
     return {"media": media, "start_frame": start, "in_frame": i, "out_frame": o, "length_frames": n, "speed": speed,
-            "effects": [{"effect": e, "amount": amt} for e, amt in effects], "texts": list(texts)}
+            "effects": [effect_spec(*e) for e in effects], "texts": list(texts)}
 
 
 def state_shape(st, media):
@@ -170,8 +220,8 @@ def state_shape(st, media):
                           "start_frame": c.get("start_frame"), "in_frame": c.get("in_frame"),
                           "out_frame": c.get("out_frame"), "length_frames": c.get("length_frames"),
                           "speed": c.get("speed"),
-                          "effects": [{"effect": e.get("effect"), "amount": e.get("amount")}
-                                      for e in c.get("effects", [])],
+                          "effects": [effect_spec(e.get("effect"), e.get("amount"), e.get("params"), e.get("color"),
+                                                  e.get("enabled")) for e in c.get("effects", [])],
                           "texts": [x.get("text") for x in c.get("texts", [])]})
         if clips:
             out["tracks"][tr["track"]] = clips
@@ -214,7 +264,10 @@ def build_one(d, tl, media):
         elif op == "speed":
             d.set_speed(clips[key], e[2])
         elif op == "effect":
-            d.apply_effect(clips[key], e[2], amount=e[3])
+            opts = e[4] if len(e) > 4 else {}
+            fx = d.apply_effect(clips[key], e[2], amount=e[3], params=opts.get("params"), color=opts.get("color"))
+            if opts.get("enabled") is False:
+                d.apply_effect(clips[key], e[2], effect_id=fx, enabled=False)
         elif op == "colour":
             d.apply_colour(clips[key], **e[2])
         elif op == "lut":

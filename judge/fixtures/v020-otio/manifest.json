@@ -306,7 +306,8 @@
       "effects": [
        {
         "effect": "grayscale",
-        "amount": null
+        "amount": null,
+        "enabled": true
        }
       ],
       "texts": []
@@ -331,7 +332,8 @@
       "effects": [
        {
         "effect": "vignette",
-        "amount": 2.0
+        "amount": 2.0,
+        "enabled": true
        }
       ],
       "texts": []
@@ -346,7 +348,8 @@
       "effects": [
        {
         "effect": "vignette",
-        "amount": 0
+        "amount": 0,
+        "enabled": true
        }
       ],
       "texts": []
@@ -393,7 +396,8 @@
       "effects": [
        {
         "effect": "invert",
-        "amount": null
+        "amount": null,
+        "enabled": true
        }
       ],
       "texts": []
@@ -445,6 +449,20 @@
     },
     {
      "kind": "look",
+     "look": "text_yellow",
+     "t": 11.0,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "text_box",
+     "t": 11.0,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
      "look": "warmer",
      "t": 13.0,
      "media": "a.mp4",
@@ -460,6 +478,118 @@
    ],
    "media_folder_replaced": 11,
    "media_url_replaced": 8
+  },
+  {
+   "file": "params.otio",
+   "what": "effects with params, a colour and a bypass, and a grade on a flat colour: brightness 0.15 and saturation 1.4 on the dull and bright reds, colorhold #e02020 (similarity 0.3, blend 0.1) on the red-blue picture, exposure 0 with its black point at 0.1 on grey 128, and a vignette 2 bypassed",
+   "canvas": [
+    640,
+    360,
+    30
+   ],
+   "length": 240,
+   "tracks": {
+    "v0": [
+     {
+      "media": "fx-pair.mp4",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "fx-redblue.mp4",
+      "start_frame": 60,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "colorhold",
+        "amount": null,
+        "params": {
+         "similarity": 0.3,
+         "blend": 0.1
+        },
+        "color": "#e02020",
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "fx-gray128.mp4",
+      "start_frame": 120,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "exposure",
+        "amount": 0,
+        "params": {
+         "black": 0.1
+        },
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 180,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "vignette",
+        "amount": 2.0,
+        "enabled": false
+       }
+      ],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "look",
+     "look": "graded_dull",
+     "t": 1.0,
+     "media": "fx-pair.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "red_held",
+     "t": 3.0,
+     "media": "fx-redblue.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "lifted",
+     "t": 5.0,
+     "media": "fx-gray128.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "source",
+     "t": 7.0,
+     "media": "a.mp4",
+     "source_t": 1.0,
+     "what": "a bypassed vignette (amount 2) leaves the picture as it is"
+    }
+   ],
+   "media_folder_replaced": 8,
+   "media_url_replaced": 4
   }
  ]
 }

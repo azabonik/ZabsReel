@@ -1,8 +1,10 @@
-"""The editor's visual effects: what apply_effect accepts, clamps and refuses, the bypass and the order of a clip's
-effects (what get_state reports), and on exports that every effect renders, keeps a smaller clip's letterbox
-transparent (the track below shows there) at its defaults and at the ends of its ranges, and that the vignette's
-amount darkens the corners in steps. Port of sections 4, 5, 6 and 8 of packages/core/scripts/smoke-registry.ts
-(judge/PORTING.md has the map of its sections; its looks, section 9, are tests/test_effect_looks.py).
+"""The editor's visual effects: what apply_effect accepts, clamps and refuses, the colour a key or hold effect keeps
+(get_state's colour read as a hex colour, red first: a colour given as #rrggbb or 0xRRGGBB must come back as that
+colour, observe.hex_colour), the bypass and the order of a clip's effects (what get_state reports), and on exports
+that every effect renders, keeps a smaller clip's letterbox transparent (the track below shows there) at its defaults
+and at the ends of its ranges, and that the vignette's amount darkens the corners in steps. Port of sections 4, 5, 6
+and 8 of packages/core/scripts/smoke-registry.ts (judge/PORTING.md has the map of its sections; its looks, section 9,
+are tests/test_effect_looks.py).
 
 The effects are the product's vocabulary (PROTOCOL.md, "Effects"), with the ranges the editor documents: EFFECTS
 below. The letterbox: the canvas is 320x180, fx-bars.mp4 is 240x180 (4:3) on the upper track v1, so the editor fits
@@ -106,19 +108,21 @@ def rules(t, d):
     set_ck = next((e for e in fx() if e.get("id") == ck), {})
     d.apply_effect(c, "colorkey", effect_id=ck, enabled=False)
     off = next((e for e in fx() if e.get("id") == ck), {})
-    check("{effect_id, enabled: false} bypasses the effect and keeps its colour and params",
-          off.get("enabled") is False and off.get("color") == set_ck.get("color") and set_ck.get("color")
+    check("{effect_id, enabled: false} bypasses the effect and keeps its colour (#80ff80, read as 0x80FF80) and params",
+          off.get("enabled") is False and observe.hex_colour(set_ck.get("color")) == 0x80FF80
+          and observe.hex_colour(off.get("color")) == 0x80FF80
           and (off.get("params") or {}).get("similarity") == 0.3, f"before {set_ck}; after {off}")
     d.apply_effect(c, "colorkey", effect_id=ck, enabled=True)
     on = next((e for e in fx() if e.get("id") == ck), {})
     check("enabled: true switches it on again, its values kept",
-          on.get("enabled") is True and on.get("color") == set_ck.get("color")
+          on.get("enabled") is True and observe.hex_colour(on.get("color")) == 0x80FF80
           and (on.get("params") or {}).get("similarity") == 0.3, on)
     d.apply_effect(c, "colorkey", effect_id=ck, enabled=False)
-    d.apply_effect(c, "colorkey", effect_id=ck, color="0x808080", params={"similarity": 0.1})
+    d.apply_effect(c, "colorkey", effect_id=ck, color="0x2060C0", params={"similarity": 0.1})
     upd = next((e for e in fx() if e.get("id") == ck), {})
-    check("changing a bypassed effect's values keeps it bypassed",
-          upd.get("enabled") is False and (upd.get("params") or {}).get("similarity") == 0.1, upd)
+    check("changing a bypassed effect's values (colour 0x2060C0, similarity 0.1) keeps it bypassed, with those values",
+          upd.get("enabled") is False and observe.hex_colour(upd.get("color")) == 0x2060C0
+          and (upd.get("params") or {}).get("similarity") == 0.1, upd)
     count = len(fx())
     r1, w1 = drv.refused(lambda: d.apply_effect(c, "blur", effect_id="fx_stale", enabled=False))
     r2, w2 = drv.refused(lambda: d.apply_effect(c, "colorkey", color="auto", effect_id="fx_stale"))
@@ -147,7 +151,8 @@ def rules(t, d):
     check("colorhold refuses colour auto and a colour it cannot read (nope)", r1 and r2, f"{w1}; {w2}")
     hold = d.apply_effect(c, "colorhold", color="#e02020", params={"similarity": 0.4})
     e = next((x for x in fx() if x.get("id") == hold), {})
-    check("colorhold takes a hex colour and its params", e.get("effect") == "colorhold" and bool(e.get("color"))
+    check("colorhold takes a hex colour (#e02020) and its params, and get_state shows that colour (0xE02020, red "
+          "first)", e.get("effect") == "colorhold" and observe.hex_colour(e.get("color")) == 0xE02020
           and (e.get("params") or {}).get("similarity") == 0.4, e)
     r, w = drv.refused(lambda: d.apply_effect(c, "grain", color="0xFF0000"))
     check("a colour for grain (it takes none) is refused", r, w)

@@ -1,13 +1,16 @@
-"""What the looks and style effects do to the picture, measured on exports: exposure, vibrance, invert, colorhold,
-grain, glow, RGB split, the lens warp (its direction, and that it fills the frame), trails, and that a keyed clip's
-background colour does not tint the subject through glow or RGB split (through trails it does on v0.2.0's export and
-this tree's: judge/PORTING.md). Port of section 9 of
+"""What the looks and style effects do to the picture, measured on exports: exposure, vibrance, invert, colorhold
+(its colour given as 0xRRGGBB and as #rrggbb), grain, glow, RGB split, the lens warp (its direction, and that it fills
+the frame), trails, and that a keyed clip's background colour does not tint the subject through glow or RGB split
+(through trails it does on v0.2.0's export and this tree's: judge/PORTING.md). Port of section 9 of
 packages/core/scripts/smoke-registry.ts (judge/PORTING.md has the map of its sections).
 
 Each case is a clip of its own on v0 (a segment of the timeline) of one of make.sh's flat test pictures (fx-*.mp4,
 320x180 at 30 fps, the canvas's size and rate, so nothing is scaled), with its effects; one export holds a timeline's
-segments (12 at a time: a timeline of many clips exports far slower), and the test samples the export where the original sampled its export: the mean colour of a small block
-(observe.block_rgb, the original's sampleBlock), a run of frames, a column. The thresholds are the original's.
+segments (12 at a time: a timeline of many clips exports far slower), and the test samples the export where the
+original sampled its export: the mean colour of a small block (observe.block_rgb, the original's sampleBlock), a run
+of frames, a column. The thresholds are the original's, but for the lens's zoom to fill: the original fails a pixel
+that is less than fully opaque, and the export has no alpha, so a pixel more than UNFILLED below the grey without the
+lens fails (a pixel left a quarter uncovered shows the black canvas through it and reads about 97 against 128).
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -17,7 +20,7 @@ import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
-CHECKS = 28
+CHECKS = 29
 
 W, H, FPS = 320, 180, 30
 LENS_GRID = [(k1, k2) for k1 in (-1, -0.5, 0, 0.3, 0.5, 1) for k2 in (-1, -0.5, 0, 0.5, 1) if (k1, k2) != (0, 0)]
@@ -32,6 +35,7 @@ SEGMENTS = [
     ("vib+1", "fx-pair.mp4", 30, [("vibrance", 1, None, None)]), ("vib-1", "fx-pair.mp4", 30, [("vibrance", -1, None, None)]),
     ("inv", "fx-blue.mp4", 30, [("invert", None, None, None)]),
     ("hold", "fx-redblue.mp4", 30, [("colorhold", None, {"similarity": 0.3, "blend": 0.1}, "0xE02020")]),
+    ("hold#", "fx-redblue.mp4", 30, [("colorhold", None, {"similarity": 0.3, "blend": 0.1}, "#e02020")]),
     ("g0", "fx-gray128.mp4", 30, []), ("g40", "fx-gray128.mp4", 30, [("grain", 40, None, None)]),
     ("g80", "fx-gray128.mp4", 30, [("grain", 80, None, None)]),
     ("box", "fx-box.mp4", 30, []), ("glow", "fx-box.mp4", 30, [("glow", 1, {"radius": 12}, None)]),
@@ -64,6 +68,25 @@ def sd(a):
 
 def fmt(c):
     return "(" + ",".join(str(int(v)) for v in c) + ")"
+
+
+UNFILLED = 8  # luma below the unwarped grey's that counts a pixel as not filled (empty or partly empty)
+
+
+def unfilled(frames, control):
+    """({name: how many pixels of the frame are more than UNFILLED below the control's median luma}, that median).
+    frames: {name: (export, time)} of lens segments of a flat grey picture; control: (export, time) of the same picture
+    without the lens. A pixel the warp leaves partly uncovered shows the black canvas through it and reads darker (one
+    left a quarter uncovered reads about 97 against 128, and the export keeps such a pixel within 1)."""
+    px = sorted(observe.pixels(*control, "null", "gray"))
+    grey = px[len(px) // 2]
+    counts = {k: sum(1 for v in observe.pixels(*f, "null", "gray") if v < grey - UNFILLED) for k, f in frames.items()}
+    return counts, grey
+
+
+def filled(v):
+    counts, grey = v
+    return grey >= 100 and not any(counts.values())
 
 
 def build(d, t, segments, track="v0"):
@@ -153,6 +176,10 @@ def run(t):
       "red > 180, red - green > 120")
     m("colorhold turns the rest grey (channel spread <= 16)", lambda: blk("hold", 0.5, 220, 80),
       lambda c: max(c) - min(c) <= 16, "spread <= 16")
+    m("colorhold given its colour as #e02020 (not 0xE02020) holds the same red and turns the blue grey",
+      lambda: (blk("hold#", 0.5, 60, 80), blk("hold#", 0.5, 220, 80)),
+      lambda v: v[0][0] > 180 and v[0][0] - v[0][1] > 120 and max(v[1]) - min(v[1]) <= 16,
+      "left: red > 180, red - green > 120; right: spread <= 16")
     # grain
     def series(name):
         return list(observe.pixels(*at(name, 0), "crop=2:2:100:80,scale=1:1:flags=area", "gray", 20))
@@ -202,12 +229,12 @@ def run(t):
     # exposure with a black point at the white point
     m("exposure EV 2 with black 0.25 still brightens left to right (not blanked or inverted)",
       lambda: (luma(blk("ramp", 0.5, 10, 80)), luma(blk("ramp", 0.5, 300, 80))), lambda v: v[0] < v[1], "left < right")
-    # lens zoom to fill: no empty (black) pixel in a flat grey picture
-    def empties(name):
-        return sum(1 for v in observe.pixels(*at(name, 1 / FPS), "null", "gray") if v < 64)
-    m(f"lens (zoom to fill, the default) leaves no pixel empty for any k1 and k2 ({len(LENS_GRID)} settings, 16:9)",
-      lambda: {f"{k1},{k2}": empties(f"lens{k1},{k2}") for k1, k2 in LENS_GRID},
-      lambda v: not any(v.values()), "0 empty pixels each")
+    # lens zoom to fill: no pixel of a flat grey picture left empty or partly empty (darker than the grey without
+    # the warp: the black canvas shows through it)
+    m(f"lens (zoom to fill, the default) leaves no pixel empty or partly empty for any k1 and k2 ({len(LENS_GRID)} "
+      f"settings, 16:9): none more than {UNFILLED} below the grey without the lens",
+      lambda: unfilled({f"{k1},{k2}": at(f"lens{k1},{k2}", 1 / FPS) for k1, k2 in LENS_GRID}, at("g0", 1 / FPS)),
+      filled, "the grey's luma >= 100, 0 pixels each")
     m("lens fill 0 leaves the corners the warp uncovers empty",
       lambda: [observe.block_rgb(*at("fill0", 1 / FPS), x, y, 2) for x, y in ((0, 0), (318, 0), (0, 178), (318, 178))],
       lambda v: all(luma(c) < 40 for c in v), "dark corners")
@@ -225,18 +252,21 @@ def run(t):
 
 
 def portrait(t, d):
-    """The lens zoom to fill on a 9:16 canvas."""
+    """The lens zoom to fill on a 9:16 canvas (ctrl: the grey without the lens)."""
     clear(d)
     d.set_project(width=180, height=320, fps=FPS)
-    segs = [(f"lens{k1},{k2}", "fx-gray128p.mp4", 3, [("lens", k1, {"k2": k2}, None)]) for k1, k2 in LENS_GRID]
+    lens = [(f"lens{k1},{k2}", "fx-gray128p.mp4", 3, [("lens", k1, {"k2": k2}, None)]) for k1, k2 in LENS_GRID]
+    segs = [("ctrl", "fx-gray128p.mp4", 3, [])] + lens
     where = export_groups(d, t, segs, "portrait")
 
+    def frame(k):
+        path, s, failed = where[k]
+        if failed:
+            raise observe.Unmeasurable(f"no export of its group: {failed}")
+        return path, s + 1 / FPS
+
     def empties():
-        out = {}
-        for k, (path, s, failed) in where.items():
-            if failed:
-                raise observe.Unmeasurable(f"no export of its group: {failed}")
-            out[k] = sum(1 for v in observe.pixels(path, s + 1 / FPS, "null", "gray") if v < 64)
-        return out
-    t.measure(f"lens (zoom to fill) leaves no pixel empty for any k1 and k2 ({len(LENS_GRID)} settings, 9:16)",
-              empties, lambda v: not any(v.values()), "0 empty pixels each")
+        return unfilled({k: frame(k) for k in where if k != "ctrl"}, frame("ctrl"))
+    t.measure(f"lens (zoom to fill) leaves no pixel empty or partly empty for any k1 and k2 ({len(LENS_GRID)} "
+              f"settings, 9:16): none more than {UNFILLED} below the grey without the lens", empties, filled,
+              "the grey's luma >= 100, 0 pixels each")
