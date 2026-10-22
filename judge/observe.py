@@ -4,11 +4,15 @@ Python 3 standard library only. Each function reads a file with FFmpeg / ffprobe
 them with their own expectations. The filter chains are the ones the first-try baseline's checker used (check.py 3
 rev 4), so a value measured here and a baseline value measured there are the same measurement.
 
-The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback
-listener that must receive nothing, the host-level trace (strace) of the adapter's process tree (its file-system calls,
-and the network calls that show a download), files that must not appear, secrets that must not appear in any answer,
-and the text substitution that makes a hostile input from a file the editor itself wrote (craft: when the file does
-not hold the value as given, the input cannot be made and the checks on it are not applicable).
+mean_rgb reads the mean colour of a picture (a test lets a graphic's code pick the colour it draws, to see that it
+ran).
+
+The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback listener
+that must receive nothing (on 127.0.0.1, or on another address of this computer such as 127.0.0.2), the host-level trace
+(strace) of the adapter's process tree (its file-system calls, and the network calls that show a download), files that
+must not appear, secrets that must not appear in any answer, and the text substitution that makes a hostile input from a
+file the editor itself wrote (craft: when the file does not hold the value as given, the input cannot be made and the
+checks on it are not applicable).
 
 FFmpeg: JUDGE_FFMPEG / JUDGE_FFPROBE, else the ffmpeg / ffprobe on PATH. Heavy commands run under `nice -n 19` (when
 `nice` exists) with a timeout.
@@ -286,6 +290,26 @@ def last_frame_stats(path):
     return vals, (int(head.group(1)) if head else None), (head.group(3) if head else None), len(blocks)
 
 
+def mean_rgb(path, region="centre"):
+    """The mean colour (r, g, b, each 0..255) of an image or of a video's first frame, over a named region (REGIONS):
+    the frame scaled down to one pixel (area average) as rgb24. A test that needs to know whether a graphic's code
+    ran to its end lets the code pick the colour it draws."""
+    if video_stream(path) is None:
+        raise Unmeasurable(f"{os.path.basename(path)} has no picture")
+    p = subprocess.run(NICE + [FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-frames:v", "1", "-vf",
+                               f"{REGIONS[region]},scale=1:1:flags=area,format=rgb24", "-f", "rawvideo", "-"],
+                       capture_output=True, timeout=120, stdin=subprocess.DEVNULL, check=False)
+    if p.returncode != 0 or len(p.stdout) < 3:
+        why = p.stderr.decode("utf-8", "replace")[-300:]
+        raise Unmeasurable(f"no colour read from {os.path.basename(path)}: {why}")
+    return tuple(p.stdout[:3])
+
+
+def colour_is(rgb, want, tol=40):
+    """Whether the colour `rgb` is within `tol` of `want` in each channel."""
+    return rgb is not None and all(abs(int(a) - int(b)) <= tol for a, b in zip(rgb, want))
+
+
 # ---------------------------------------------------------------- audio
 def mean_volume(path, af_prefix="", start=None, end=None):
     """volumedetect mean_volume in dB of the first audio stream (optionally of [start, end) s, after af_prefix);
@@ -448,11 +472,14 @@ def parse_otio(path):
 class Canary:
     """A TCP listener on 127.0.0.1 (a free port) that must receive nothing. A URL that names it in a hostile input shows
     whether the editor, or anything it starts (FFmpeg, a browser), ever connects: every accepted connection is counted,
-    whatever its protocol, with the first bytes it sent. An HTTP client gets a 404 and the connection is closed."""
+    whatever its protocol, with the first bytes it sent. An HTTP client gets a 404 and the connection is closed.
+    `host` binds another loopback address (Linux answers all of 127.0.0.0/8): 127.0.0.2 is this computer too, but
+    not an address a graphic's page may reach (PROTOCOL.md, "Motion graphics")."""
 
-    def __init__(self):
+    def __init__(self, host="127.0.0.1"):
+        self.host = host
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind((host, 0))
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
         self.hits = []
@@ -480,9 +507,9 @@ class Canary:
             finally:
                 conn.close()
 
-    def url(self, name):
-        """An http URL on the listener."""
-        return f"http://127.0.0.1:{self.port}/{name}"
+    def url(self, name, scheme="http"):
+        """A URL on the listener (http, or ws for a WebSocket)."""
+        return f"{scheme}://{self.host}:{self.port}/{name}"
 
     def count(self):
         with self._lock:
@@ -536,7 +563,7 @@ NET_SYSCALL = re.compile(r"^\d+\s+(<\.\.\. )?(connect|sendto|sendmsg|sendmmsg|io
 # lower-case word, not a list: %file gives names that differ between kernels and architectures (statx, openat2,
 # faccessat2, newfstatat), and a line of another call can never hide a network call.
 _LINE_FORM = re.compile(r"^\d+ +(?:[a-z_][a-z0-9_]*\(.*(?:\) += .+|<>)|<\.\.\.>.*= .+|\+\+\+ .* \+\+\+|--- .* ---)$")
-_CALL_START = re.compile(r"(?<![\w.])\d+ +(?:<\.\.\.>|[a-z_][a-z0-9_]*\()")
+_CALL_START = re.compile(r"(?<![\w.])\d+ +(?:<\.\.\.>|[a-z_][a-z0-9_]*\(|\?\?\?\?\()")
 
 
 def strace_skeleton(ln):
@@ -579,6 +606,12 @@ def strace_skeleton(ln):
     return "".join(out)
 
 
+# The one line strace writes for a call whose tracee had gone when strace stopped it at the call's entry: strace could
+# not read its registers (they are readable as long as the tracee lives), so it has no name, no arguments and no
+# result, and the tracee never ran the call. Seen when Chromium's and Electron's threads end together at exit.
+_VANISHED = re.compile(r"^\d+ +\?\?\?\?\( <(?:unfinished|detached) \.\.\.>$")
+
+
 def strace_line_problem(ln):
     """None when `ln` has the form of one line strace writes with -f (its pid first, see _LINE_FORM), else why not. A
     line that is cut short, holds a quote or a decoration that does not close, or holds the start of a second call
@@ -586,7 +619,11 @@ def strace_line_problem(ln):
     own line, or into the middle of it, shows here, so such text cannot hide a call. The check cannot catch every
     such text (a writer that can cut one of strace's lines in two at the right place could make two lines of this
     form); what keeps other text out of the trace is that no process of the adapter's tree can reach it (run.py's
-    TraceTail)."""
+    TraceTail). One more form is strace's own: "<pid> ????( <unfinished ...>" (or "<detached ...>"), exactly, for a
+    call whose tracee was gone at its entry (_VANISHED): it never ran, and the line holds nothing that could hide a
+    call; "????" with anything else is not accepted."""
+    if _VANISHED.match(ln):
+        return None
     skel = strace_skeleton(ln)
     if skel is None:
         return "a quoted string or a <...> does not close"

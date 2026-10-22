@@ -174,10 +174,15 @@ class Driver:
         """-> {"protocol": int, "adapter": str, "ops": [str]}: what the adapter implements."""
         return self.request("hello", {}, timeout=60)
 
-    def start(self, build):
-        """Starts the editor from `build` (a checkout or build folder) in this test's scratch folder.
+    def start(self, build, graphics_addon=None):
+        """Starts the editor from `build` (a checkout or build folder) in this test's scratch folder. graphics_addon:
+        {"root", "browser"}, the graphics add-on's files the judge gives the editor (PROTOCOL.md, "Motion graphics"),
+        or None (not sent: the editor has no add-on).
         -> {"product": {"name", "version"}, "ports": [int]}"""
-        r = self.request("start", {"build": os.path.abspath(build), "scratch": self.scratch}, timeout=300)
+        args = {"build": os.path.abspath(build), "scratch": self.scratch}
+        if graphics_addon is not None:
+            args["graphics_addon"] = {"root": graphics_addon["root"], "browser": graphics_addon["browser"]}
+        r = self.request("start", args, timeout=300)
         self.started = True
         self.ports = list(r.get("ports") or [])
         self.product = r.get("product")
@@ -257,8 +262,9 @@ class Driver:
         return self.request("redo", {})
 
     def get_state(self):
-        """-> State: {"canvas": {width, height, fps}, "length_frames", "assets": [{id, path, offline}],
-        "tracks": [{"track": "v0", "clips": [{id, asset, start_frame, in_frame, out_frame, length_frames, speed}]}]}"""
+        """-> State: {"canvas": {width, height, fps}, "length_frames", "assets": [{id, path, offline, waiting_host}],
+        "tracks": [{"track": "v0", "clips": [{id, asset, start_frame, in_frame, out_frame, length_frames, speed,
+        graphics}]}], "graphics": {"renderer", "ready"}}"""
         return self.request("get_state", {})
 
     def clips(self, track="v0"):
@@ -357,6 +363,23 @@ class Driver:
     def thumbnail(self, asset, time=0.0):
         """Makes a still image of the asset at `time` s. -> its path (where the editor put it), or None"""
         return self.request("thumbnail", {"asset": asset, "time": float(time)}).get("path")
+
+    # ------------------------------------------------------------ motion graphics
+    def set_graphics_renderer(self, renderer):
+        """Chooses the motion graphics renderer, as the user does in the editor's window: "builtin" (the editor's own)
+        or "addon" (the graphics add-on, Remotion)."""
+        return self.request("set_graphics_renderer", {"renderer": renderer})
+
+    def add_graphic(self, code=None, template=None, props=None, clip=None, duration_s=None):
+        """Renders a motion graphic (TSX `code`, sent unchanged, or a built-in `template` such as "title") and adds it:
+        over `clip` for its whole length, or as a clip of its own of `duration_s` seconds at the end of v0.
+        -> {"graphic": id or None, "clip": id, "asset": id or None}"""
+        args = {}
+        for k, v in (("code", code), ("template", template), ("props", props), ("clip", clip),
+                     ("duration_s", duration_s)):
+            if v is not None:
+                args[k] = v
+        return self.request("add_graphic", args)
 
     # ------------------------------------------------------------ what an AI agent sees
     def agent_tools(self):

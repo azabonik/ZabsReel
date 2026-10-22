@@ -100,6 +100,8 @@ result that succeeds (`stop`'s included), so it is reported once in every case. 
    either switched off or named by a setting that points at a file that does not exist, so the feature refuses
    instead of fetching. Never point such a setting at the user's own copy. On v0.2.0: `AIVE_CLIP_DISABLE=1`, and
    `AIVE_WHISPER_BIN` / `AIVE_WHISPER_MODEL` name files in the sandbox that are never made (as the FFmpeg matrix does).
+   The graphics add-on is never installed through the editor (that downloads it): a test that needs it gets the
+   judge's copy in `start`, headless shell included, so the editor never fetches a browser (see "Motion graphics").
    The judge checks this rule: the runner traces the network calls of the adapter and everything it starts (strace)
    and fails the test's "nothing was downloaded" check on a TCP connect to another computer, a DNS lookup or a send to
    another computer, also when the network is down and the call failed (`judge/README.md`, "Write a test").
@@ -147,7 +149,7 @@ what it leaves behind, never its message or code.
 | op | args | result |
 |---|---|---|
 | `hello` | `{}` | `{"protocol": 1, "adapter": str, "ops": [str]}`: the operations this adapter implements. Works before `start`. |
-| `start` | `{"build": str, "scratch": str}` | `{"product": {"name": str, "version": str}, "ports": [int]}`: `build` is the editor checkout or build to run. `ports` lists every TCP port the editor listens on; the runner checks that they are closed after `stop`. |
+| `start` | `{"build": str, "scratch": str, "graphics_addon"?: {"root": str, "browser": str}}` | `{"product": {"name": str, "version": str}, "ports": [int]}`: `build` is the editor checkout or build to run. `ports` lists every TCP port the editor listens on; the runner checks that they are closed after `stop`. `graphics_addon` (see "Motion graphics" below): the graphics add-on the judge gives this editor; left out, the editor has none. |
 | `stop` | `{}` | `{}`: every process the adapter started has exited. |
 
 ### Media and timeline
@@ -181,9 +183,10 @@ State:
   "tracks": [
     {"track": "v0", "clips": [
       {"id": "...", "asset": "...", "start_frame": 0, "in_frame": 30, "out_frame": 120, "length_frames": 90,
-       "speed": 1}
+       "speed": 1, "graphics": []}
     ]}
-  ]
+  ],
+  "graphics": {"renderer": "builtin", "ready": true}
 }
 ```
 
@@ -202,7 +205,9 @@ State:
 last clip. Tracks are listed from `v0` up, then `a0` up, with their clips in timeline order. An asset is `offline`
 when the editor cannot use its file now: it is missing, or it waits for the user to allow its network computer.
 `waiting_host` is that computer's name (lower case, as in `list_hosts`) while the asset waits for it, else null. An
-adapter whose State has no such field leaves it out; the tests that need it then fail.
+adapter whose State has no such field leaves it out; the tests that need it then fail. A clip's `graphics` lists the
+ids of the motion graphics shown over it (`add_graphic` with `clip`), and the State's `graphics` says which renderer
+the user chose for motion graphics and whether it can render now (see "Motion graphics" below).
 
 ### Output and jobs
 
@@ -264,6 +269,40 @@ signs in. Routes, by their v0.2.0 names (another editor's adapter maps each one 
 
 `host` is a computer name as it appears in a network path (`nas` in `//nas/share/clip.mp4`), in lower case. The
 judge's tests use names under the reserved `.invalid` domain, which never resolve.
+
+### Motion graphics
+
+A motion graphic is code an AI agent writes: a TSX module whose default export is a React component that uses
+[Remotion](https://www.remotion.dev)'s API (`remotion`, and `react`). The editor renders it to video. Which renderer
+does that is the user's setting, made in the editor's window, never by an agent:
+
+- `builtin`: the editor's own renderer (v0.2.0: ZedMix's renderer, in the app's Electron; the default).
+- `addon`: the **graphics add-on**, Remotion 4.0.481 itself and the Chrome headless shell it renders in. A user
+  installs it from the editor's window, which downloads it. The judge never asks the editor to install it: `start`'s
+  `graphics_addon` gives the editor the add-on's files, which the judge installed before the run (README, "The
+  graphics add-on"): `root` is a folder whose `node_modules` holds Remotion 4.0.481's packages (`remotion`,
+  `@remotion/bundler`, `@remotion/renderer`, `react`, `react-dom` and what they need, as
+  `judge/fixtures/graphics-addon/package-lock.json` pins them), and `browser` is the Chrome for Testing headless shell
+  that Remotion 4.0.481 tests with (149.0.7790.0, pinned in `judge/fixtures/graphics-addon/headless-shell.json`). The
+  adapter starts the editor so that it uses these files as its installed add-on (v0.2.0: `AIVE_REMOTION_ADDON=<root>`
+  and `AIVE_REMOTION_BROWSER=<browser>`, which a source checkout honours; another adapter may copy them where its
+  editor keeps its add-on, inside the scratch folder). Without `graphics_addon` the editor has no add-on, as for a
+  user who never installed it. The files are read-only; the editor must not need to write there.
+
+| op | args | result |
+|---|---|---|
+| `set_graphics_renderer` | `{"renderer": "builtin" \| "addon"}` | `{}`: chooses the renderer, as the user does in the editor's window (v0.2.0: Help, Graphics add-on, Graphics renderer). Errors: `bad_request` for another value; `product_error` when the window refuses it; `adapter_error` when the window's interface cannot be reached (v0.2.0: the web shell, started on first use as for `approve_host`; its port comes back in `ports`). |
+| `add_graphic` | `{"code"?: str, "template"?: str, "props"?: {}, "clip"?: id, "duration_s"?: number}` | `{"graphic": id or null, "clip": id, "asset": id or null}`: renders a motion graphic with the chosen renderer and adds it. Exactly one of `code` (the TSX module, sent unchanged: tests send hostile code on purpose) and `template` (a built-in graphic: `title`, a title card whose `props.title` is its text). `props` are the component's props. With `clip`, the graphic is shown over that clip for the clip's whole length, and `graphic` is its id (in the clip's `graphics` in the State). Without it, the graphic is a clip of its own, `duration_s` seconds long, added at the end of `v0`; `graphic` is then null. `clip` is the clip that shows it, and `asset` the project asset that holds the rendered graphic (null when the editor keeps it in no asset). That asset's file (its `path` in the State) must be readable by others, as an export is. Errors: `bad_request` when neither or both of `code` and `template` are given, or a field has the wrong type; `product_error` when the editor refuses or the render fails: the renderer cannot run, the add-on is missing on the `addon` setting, the code imports what a graphic may not, or the graphic loads media it may not. The tests check that a refusal happens and what it leaves behind (no graphic, no asset, no file, nothing contacted), never its message. |
+
+The State's `graphics` is `{"renderer": "builtin" | "addon", "ready": bool}`: the user's choice, and whether
+`add_graphic` can render with it now (false while the `addon` setting has no add-on, or the renderer cannot run on
+this computer). An adapter whose editor has no renderer setting leaves it out, and answers `unsupported` for
+`set_graphics_renderer`; the tests that need them then fail.
+
+Every graphic is rendered muted (no sound reaches the speakers, and the rendered graphic has no audio stream), and the
+renderer gives the graphic no network: the only computer its page may reach is this one at `127.0.0.1` or
+`localhost` (the add-on's own server runs there), and no request may make the renderer open a network path or a file
+the graphic names.
 
 ### What an AI agent is offered
 

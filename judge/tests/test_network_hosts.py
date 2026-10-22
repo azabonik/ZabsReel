@@ -16,8 +16,14 @@ by name; run.py --strict fails it), never as failed. add_host_outside plays an a
 the editor's allowed list without its window (one plain entry, one with a forged stamp); approve_host and revoke_host
 are the user's own actions. Every approval or revoke is followed by recheck_media.
 
+Motion graphics (the original's graphics rows in sections 2 and 4): a graphic that imports a file on a test computer,
+or the allowed list's secret file, is refused on both renderers, the graphics add-on (when the judge has one: run.py
+--graphics-addon; without it those checks are not applicable) and the built-in one, each shown to work first by an
+allowed graphic. The trace and transcript checks above and below cover what those refusals must not do.
+
 Every check is recorded on every path, so CHECKS is exact.
 """
+import json
 import os
 import shutil
 import time
@@ -28,7 +34,7 @@ import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
-CHECKS = 41
+CHECKS = 47
 ABSENT = "(no waiting_host)"  # an asset without the field (PROTOCOL.md: a check that needs it fails)
 BIG = 1 << 20  # a new file this large during the agent tool calls is a download (models are 13 to 150 MB)
 
@@ -46,6 +52,41 @@ SPELL = {  # how each crafted media path names its computer: //host/..., \\host\
 LOOKALIKE_HOSTS = ["\uff5a\uff52-evil-1.invalid", "zr\u200b-evil-1.invalid"]  # fullwidth zr; a zero-width space
 LOOKALIKES = [f"\\\\{x}\\s\\a.mp4" for x in LOOKALIKE_HOSTS]
 FRAMES_Q = {"from": "0", "count": "1", "w": "8", "h": "8", "fps": "30"}
+UP = "../" * 40  # from wherever the editor keeps a graphic's code, enough '..' to reach the root
+ALLOWED_GRAPHIC = ('import React from "react";\nimport { AbsoluteFill } from "remotion";\n'
+                   'export default () => <AbsoluteFill style={{ background: "#00ff00" }} />;')
+RENDERERS = {"addon": "the graphics add-on", "builtin": "the built-in renderer"}
+
+
+def graphic_rows(t, d, codes, control):
+    """{renderer: [(refused?, what)] for each of `codes`} on each renderer (the add-on only when the judge has one),
+    chosen in the window as the user does; `control` (a dict, filled on the first call) gets whether an allowed graphic
+    renders there. Leaves the built-in renderer chosen, as the editor starts."""
+    out = {}
+    for r in (["addon"] if t.graphics_addon else []) + ["builtin"]:
+        d.set_graphics_renderer(r)
+        if r not in control:  # tried twice: v0.2.0 picks a free port for the add-on's server and binds it later,
+            # and another process can take the port in between (the render then fails)
+            control[r] = refused(lambda: d.add_graphic(code=ALLOWED_GRAPHIC, duration_s=0.2))
+            if control[r][0]:
+                again = refused(lambda: d.add_graphic(code=ALLOWED_GRAPHIC, duration_s=0.2))
+                control[r] = (again[0], f"{again[1]} (first try {control[r][1][:120]})")
+        out[r] = [refused(lambda c=c: d.add_graphic(code=c, duration_s=1)) for c in codes]
+    d.set_graphics_renderer("builtin")
+    return out
+
+
+def graphic_checks(t, name, rows, control):
+    """One check per renderer: every code refused there, and the allowed graphic rendered there (so the refusals are
+    the renderer's own, not a renderer that cannot run). The add-on's check is not applicable without one."""
+    for r, label in RENDERERS.items():
+        title = f"{name} on {label}"
+        if r not in rows:
+            t.not_applicable(title, t.graphics_addon_why)
+            continue
+        ctl = control.get(r, (True, "not tried"))
+        t.check(title, not ctl[0] and all(ok for ok, _ in rows[r]),
+                f"control: {ctl[1][:120]}; " + " | ".join(w[:120] for _, w in rows[r]))
 
 
 def sha(t, paths):
@@ -100,7 +141,7 @@ class Trace:
 
 
 def run(t):
-    d = t.driver(trace=True)
+    d = t.driver(trace=True, graphics_addon=True)
     tr = Trace(t)
     d.set_project(width=640, height=360, fps=30)
 
@@ -240,6 +281,21 @@ def run(t):
             st5 is not None and len(w5) >= 5 and all(w == (True, H(5)) for w in w5),
             f"replacements {n5}; {w5 or what5}", needs=cr5)
 
+    # A graphic never imports a file on a network computer, on either renderer (the trace check below covers what
+    # the refusals must not have opened).
+    control = {}
+    imports = [f'import x from "//{H(6)}/s/x";\nexport default () => String(x);',
+               f'const ctx = (require as any).context("//{H(6)}/s", false, /x/);\nexport default () => String(ctx);',
+               f'import x from "file://{H(6)}/s/x.png";\nexport default () => String(x);']
+    rows = graphic_rows(t, d, imports, control)
+    for r, label in RENDERERS.items():
+        if r in control:
+            t.check(f"control: an allowed graphic renders on {label}", not control[r][0], control[r][1][:300])
+        else:
+            t.not_applicable(f"control: an allowed graphic renders on {label}", t.graphics_addon_why)
+    graphic_checks(t, f"a graphic that imports a file on {H(6)} (an import, require.context, a file:// URL) is refused",
+                   rows, control)
+
     # ---- 3. so far nothing opened a file on any test computer
     tr.check(t, "no file-system call of the editor named a test computer (before any approval)",
              lambda: not tr.hits(["-evil-"]), lambda: tr.hits(["-evil-"])[:3])
@@ -295,6 +351,12 @@ def run(t):
             served.append((route, p, d.http_get(route, {"path": p, **q})["status"]))
     t.check("the file surface serves none of them", all(not 200 <= s < 300 for _, _, s in served),
             [x for x in served if 200 <= x[2] < 300] or len(served))
+    secret_file = private[-1] if private else "/nonexistent/key"
+    rows = graphic_rows(t, d, [f"import k from {json.dumps(secret_file)};\nexport default () => String(k);",
+                               f"import k from {json.dumps(UP + secret_file.lstrip('/'))};\n"
+                               "export default () => String(k);"], control)
+    graphic_checks(t, "a graphic that imports the allowed list's secret file (its path, or a relative path to it) is "
+                      "refused", rows, control)
     listing_after = listing(t, store_dir)
     t.check("the allowed list's files are unchanged, and no file was added beside them",
             sha(t, private) == private_before and listing_after is not None and listing_after == listing_before,

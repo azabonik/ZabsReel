@@ -26,8 +26,10 @@ serves. They never import editor code, and they do not depend on its tool names,
 ## Run it
 
 Requirements: Python 3 (standard library only), FFmpeg and ffprobe on `PATH`, `strace` (CI installs it; see "Statuses"
-for a run without it), and for the v0.2.0 adapter, Node and a built checkout (`npm run build`; the adapter's
-approve_host and revoke_host start the web shell, which needs the renderer that the build makes).
+for a run without it), the graphics add-on for the graphics tests (see "The graphics add-on"; without it their checks
+are not applicable), and for the v0.2.0 adapter, Node and a built checkout (`npm run build`; the adapter's
+approve_host, revoke_host and set_graphics_renderer start the web shell, which needs the renderer that the build
+makes).
 
 ```sh
 python3 -I judge/run.py                      # the v0.2.0 adapter against this checkout
@@ -36,6 +38,7 @@ python3 -I judge/run.py --adapter "node /path/to/new-adapter.mjs" --build /path/
 python3 -I judge/run.py --only import_export --keep
 python3 -I judge/run.py --list
 python3 -I judge/run.py --strict --require-trace   # not applicable and not observed fail, as in CI
+python3 -I judge/run.py --graphics-addon /tmp/judge-addon   # the add-on that fixtures/graphics-addon/install.sh made
 python3 -I judge/run.py --as-user zjudge --scratch /srv/judge/scratch --strict --require-trace --build /home/zjudge/build
                                              # as CI runs it: the adapter and the editor as the user zjudge (below)
 python3 -I judge/run.py --allow-unprotected  # not Linux: run without the /proc protection (JUDGE line says UNPROTECTED)
@@ -79,7 +82,9 @@ folder then needs `sudo`.
 A check passes or fails, or it is not made, for one of two reasons, each printed with its name and counted on the
 `JUDGE` line (`JUDGE: 150/150 passed, 6 not applicable`), neither passed nor failed:
 
-- **Not applicable** (`N/A`): the hostile input the check is about could not be made. The judge makes a hostile
+- **Not applicable** (`N/A`), for one of two reasons. First, the graphics tests' checks on the graphics add-on, when
+  no add-on was given to the judge (`--graphics-addon`, or `JUDGE_GRAPHICS_ADDON`): a run without it cannot judge them,
+  and must not pass them. Second, the hostile input the check is about could not be made. The judge makes a hostile
   project or OTIO file by text substitution in a file the editor itself saved (`observe.craft`). That needs the file
   to hold the values as the test gave them: media and LUT paths and identifiers verbatim, colours as given, a number
   exactly once. A correct rewrite with another file format must not fail a security check for that reason, and must
@@ -101,25 +106,29 @@ from the change under test runs as the runner's user, which has passwordless `su
 pull request (see "Threat model"). Before anything from the change runs, the workflow copies `judge/`, the gate and
 `judge.yml` to `$RUNNER_TEMP/judge-src` (read-only), closes the checkout's `.git` to other users (`chmod -R go-rwx`; the
 checkout keeps no token there or anywhere else: `actions/checkout` runs with `persist-credentials: false`), checks the
-copy with the copied gate, installs FFmpeg and `strace` from apt, and makes the build user `zjudge`: no `sudo`, only its
-own group, its own home, and no cron or at jobs (it is added to `/etc/cron.deny` and `/etc/at.deny`; the step fails when
-`/etc/cron.allow` or `/etc/at.allow` is there, since either makes the deny file ignored). It makes `/srv/judge` (the
-runner's, mode 0755) for the judge's scratch folders, and runs `lockout.py` (below) for `zjudge`. Then it runs `run.py
---self-test --require-trace --as-user zjudge` from the copy. It copies the checkout without `.git` and `judge/` to
-`/home/zjudge/build`, and runs `npm ci`, the Electron install and the build there as `zjudge` (`sudo -n -u zjudge -H env
--i`, with the toolchain's `node` first on `PATH`, `zjudge`'s home and npm cache, umask 022; no npm cache is restored or
-saved). The output of those steps goes to a file of the runner's (mode 0600), which the step prints after the command
-ends between `::stop-commands::<token>` and `::<token>::`, with a token made after `zjudge`'s command ended and never
-passed to it (`ci/quiet.sh`): nothing `zjudge` prints is read as a workflow command (`::add-mask::`, `::add-matcher::`,
-`::set-output::`, ...). The judge step turns workflow commands off the same way while it runs (`ci/quiet.sh --live`),
-since its check details quote what the editor said. After the build it runs `lockout.py --kill` (`zjudge`'s crontab is
-removed and every process the build left is ended), checks that the copy's lock and gate are the bytes it pinned before
-the install and that the copy still matches its lock, then runs the judge from the copy with `--build /home/zjudge/build
---scratch /srv/judge/scratch --strict --require-trace --as-user zjudge`. A failed run first ends every `zjudge` process
-(`lockout.py --kill` with no path: by real and by effective user id, and the step fails when one is left), then root
-(`ci/collect_logs.sh`) copies only the regular files named `*.log` or `*.stderr` from the kept scratch folders (`find
--type f`, which follows no link and leaves out links, FIFOs and devices) into a new folder of the runner's, and only
-that folder is uploaded as the `judge-logs` artifact (among the files, `records/<test>.adapter-strace.log`). The
+copy with the copied gate, installs FFmpeg and `strace` from apt, installs the graphics add-on into `/srv/judge/addon`
+as the runner's user with the copy's `fixtures/graphics-addon/install.sh` (see "The graphics add-on"; it ends
+read-only), and makes the build user `zjudge`: no `sudo`, only its own group, its own home, and no cron or at jobs (it
+is added to `/etc/cron.deny` and `/etc/at.deny`; the step fails when `/etc/cron.allow` or `/etc/at.allow` is there,
+since either makes the deny file ignored). It makes `/srv/judge` (the runner's, mode 0755) for the judge's scratch
+folders, and runs `lockout.py` (below) for `zjudge`. Then it runs `run.py --self-test --require-trace --as-user zjudge`
+from the copy. It copies the checkout without `.git` and `judge/` to `/home/zjudge/build`, and runs `npm ci`, the
+Electron install and the build there as `zjudge` (`sudo -n -u zjudge -H env -i`, with the toolchain's `node` first on
+`PATH`, `zjudge`'s home and npm cache, umask 022; no npm cache is restored or saved). The output of those steps goes to
+a file of the runner's (mode 0600), which the step prints after the command ends between `::stop-commands::<token>` and
+`::<token>::`, with a token made after `zjudge`'s command ended and never passed to it (`ci/quiet.sh`): nothing `zjudge`
+prints is read as a workflow command (`::add-mask::`, `::add-matcher::`, `::set-output::`, ...). The judge step turns
+workflow commands off the same way while it runs (`ci/quiet.sh --live`), since its check details quote what the editor
+said. After the build it runs `lockout.py --kill` (`zjudge`'s crontab is removed and every process the build left is
+ended), checks that the copy's lock and gate are the bytes it pinned before the install and that the copy still matches
+its lock, lifts Ubuntu's AppArmor restriction on unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns=0`, which the editor's built-in graphics renderer needs for its sandbox,
+as in `ci.yml`), then runs the judge from the copy with `--build /home/zjudge/build --scratch /srv/judge/scratch
+--strict --require-trace --as-user zjudge --graphics-addon /srv/judge/addon`. A failed run first ends every `zjudge`
+process (`lockout.py --kill` with no path: by real and by effective user id, and the step fails when one is left), then
+root (`ci/collect_logs.sh`) copies only the regular files named `*.log` or `*.stderr` from the kept scratch folders
+(`find -type f`, which follows no link and leaves out links, FIFOs and devices) into a new folder of the runner's, and
+only that folder is uploaded as the `judge-logs` artifact (among the files, `records/<test>.adapter-strace.log`). The
 editor's sandbox is a folder of `zjudge`'s, where the kernel's link protection does not apply, so a link it planted
 there (to the checkout's `.git/config`, to `/proc/self/environ`, or to a folder of the runner's) never reaches the
 artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting `judge.yml` or the gate fails `ci.yml`.
@@ -161,8 +170,11 @@ a process left by the test or by the adapter, an adapter that speaks another pro
 passing results into its scratch folder, lines on the result pipe that are not the test's records, a fork without exec
 that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and a clean test
 must pass. A not-applicable check (also one made through `needs=` on an input that could not be crafted) and a
-not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`. A fixture adapter
-that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1 port 9 and sends with
+not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`. A fixture test
+that asks for the graphics add-on must get it in the adapter's `start` with `--graphics-addon`, and record its check as
+not applicable without it (a failure with `--strict`); a `--graphics-addon` folder with another Remotion version, or
+with no headless shell, must be refused. A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port
+53), makes a UDP connect to 192.0.2.1 port 9 and sends with
 `write()`, sends with `sendto()` to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1 port 80 must fail the
 download check. The adapter must not reach the trace: one that starts a DNS lookup and at stop rewrites, empties or
 deletes every file it can reach (its scratch folder and the logs next to it, among them the copy of the trace), or that
@@ -224,6 +236,7 @@ refusal cases are skipped.
 | `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. Also the judge's own observations of side effects: a loopback listener that must receive nothing, the search of the file-system trace, the search of the network calls for a download (`net_hits`), files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote (`craft`, which also says when it cannot). |
 | `check_observe.py` | Compares `observe.py` with the values that the baseline checker recorded for its oracle exports (a local tool: the oracles are not in the repository). |
 | `fixtures/make.sh` | Makes the test media. |
+| `fixtures/graphics-addon/` | The graphics add-on the judge gives the editor: `package.json` and `package-lock.json` (Remotion 4.0.481's packages, with their integrity hashes), `headless-shell.json` (the Chrome headless shell's URL, size and sha256) and `install.sh`, which installs both into a folder (see "The graphics add-on"). |
 | `run.py` | The runner. |
 | `lockout.py` | CI's proof that the build user cannot change what the judge relies on (see "CI"). |
 | `ci/quiet.sh`, `ci/collect_logs.sh` | `judge.yml`'s shell parts: workflow commands off around the build user's output, and the copy of the logs after a failed run (see "CI"). |
@@ -260,6 +273,10 @@ def run(t):
   that need it as failed with the reason instead of returning early. The runner fails a test whose number of checks
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
 - `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
+- `t.driver(graphics_addon=True)` gives the editor the judge's graphics add-on in `start` (see "The graphics add-on").
+  `t.graphics_addon` is it (`{"root", "browser"}`), or None when the judge has none; the test then records each of its
+  checks on the add-on with `t.not_applicable(name, t.graphics_addon_why)`. Without the argument the editor starts
+  with no add-on, as for a user who never installed it.
 - To check the editor's own files (its allowed list, what appeared in a folder), use `t.look(files=[...],
   folders=[...], walk=[...])`, not `open` or `os.listdir`: with `--as-user` the editor keeps files that the runner's
   user cannot read (mode 0600 in folders of mode 0700), and `t.look` then also looks as the editor's user. It returns
@@ -297,6 +314,35 @@ def run(t):
   feature that would fetch a model or a helper program refuses instead (PROTOCOL.md rule 4), and the runner's
   "nothing was downloaded" check fails a test whose editor addresses another computer anyway. The runner runs every
   test under a timeout, and CI runs the whole judge under `timeout -k`.
+
+## The graphics add-on
+
+On the editor's `addon` graphics setting, motion graphics are rendered by the **graphics add-on**: Remotion 4.0.481
+and the Chrome headless shell it renders in (PROTOCOL.md, "Motion graphics"). A user installs it from the editor's
+window, which downloads it. The judge downloads nothing during a test, so it installs the add-on itself before the run
+and gives the editor its files in `start` (`t.driver(graphics_addon=True)`):
+
+```sh
+bash judge/fixtures/graphics-addon/install.sh /tmp/judge-addon [<zip>]
+python3 -I judge/run.py --graphics-addon /tmp/judge-addon
+```
+
+`install.sh` runs `npm ci --ignore-scripts` on the judge's own `package-lock.json` (Remotion's packages and what they
+need, at the versions this repository's lock had for them; npm checks each tarball against its sha512, and no package
+script runs), then downloads the Chrome for Testing headless shell named in `headless-shell.json` (or takes the zip
+given as `<zip>`), checks its size and sha256 before it unpacks it into Remotion's own browser cache layout
+(`node_modules/.remotion/chrome-headless-shell/linux64/chrome-headless-shell-linux64/`), and makes the folder read-only
+for everyone. `run.py` refuses a `--graphics-addon` folder whose `@remotion/renderer` is not the version the judge pins
+or that has no headless shell, and under `--as-user` one that the other user could change. Locally, a checkout of
+this repository with Remotion's own cached shell (`node_modules/.remotion`) has the same layout and can stand in for
+it. In CI the add-on is always the judge's own install (see "CI"), never the build's copy of Remotion.
+
+The judge's `package-lock.json` is the closure of `remotion`, `@remotion/bundler`, `@remotion/renderer`, `react` and
+`react-dom` in this repository's `package-lock.json` (main at 0c4a379), with each entry's path, version and integrity
+unchanged: on Linux x64 npm installs 168 packages from it, as many as the editor's own installer puts in the add-on.
+The headless shell is the one Remotion 4.0.481 tests with (its `TESTED_VERSION`), and its sha256 is that of the zip on
+storage.googleapis.com (its MD5 matched the object's own). A change of the editor's Remotion pin is a judge change:
+the lock and `headless-shell.json` move with it.
 
 ## Update the lock
 
@@ -340,6 +386,10 @@ What it defends against:
   records, to open the descriptors of strace, sudo and the test process through `/proc`, and to signal them are all
   refused, and the child it leaves with an empty environment is ended by the user sweep.
 
+- **A graphics add-on that the change under test provides**: the add-on the editor renders with is the judge's,
+  installed by the runner's user from the judge's own pins (the lock's sha512 per package, the headless shell's
+  sha256) before any code from the change runs, read-only, under `/srv/judge`, where `lockout.py` proves `zjudge` can
+  change nothing. `run.py` refuses an add-on folder `zjudge` could change.
 - **Edits to the judge, its gate or its workflow** that do not show as a `JUDGE.lock` change: the lock gate fails in
   `ci.yml` and in `judge.yml`. An edit together with a lock update passes the gate; it is visible in the diff, where
   the gauntlet's review of the pull request (with its lock and leakage check) sees it, and nothing more stops it.
@@ -375,37 +425,40 @@ What it defends against:
   values cannot read another user's environment), whatever its environment.
 - **A killed runner**: SIGTERM or SIGINT ends the running test's session and every process found by the same sweeps,
   prints `JUDGE: interrupted by signal N` and exits 1.
-- **A download during a run**: every test that starts the editor runs it under strace with the network calls traced,
-  and its "nothing was downloaded" check fails on a TCP or UDP connect to another computer (except Chromium's exact
-  IPv6 probe), a DNS lookup or a send to another computer, also when the call failed (no network). strace refuses
-  io_uring rings, whose operations it cannot see. strace writes the trace to its stderr, which is one end of a UNIX
-  socket pair; the test process (non-dumpable) holds the other end and keeps every line it reads in its own memory.
-  The first process strace starts is a `/bin/sh` that points its own stderr at `adapter.stderr` and then runs the
-  adapter, so no process of the adapter's tree holds either end. A socket cannot be opened again through
-  `/proc/<pid>/fd` (`ENXIO`), and taking strace's descriptor with `pidfd_getfd` or attaching to strace needs ptrace
-  rights over strace, which Yama's `ptrace_scope` 1 (Ubuntu's default) gives only to strace's ancestors. So a process of the same user can neither add a line to the trace nor take one out of it. A
-  file would let it rewrite lines before the reader reads them, and a pipe would let it open strace's end through
-  `/proc` for reading and take lines out. Every line must also have the form strace writes (its pid, then a call,
-  a resumed call, or a `+++`/`---` line, with every quoted string and `<...>` closed and no second call inside), so
-  text joined to an strace line fails the check instead of hiding a call. The check also fails when the trace ends
-  before the editor is asked to stop: a process that ends strace (same user, so it can send it a signal) stops the
-  trace, and what it does after that would not be seen. The trace must also end after stop: strace exits when the
-  last process it traces has ended, and the test process waits for that instead of killing strace (which would end
-  the trace while a traced process still runs, and that process's later calls would not be seen). When strace does
-  not exit within 30 s of stop, the test process ends every process whose environment names the scratch folder (but
-  strace) and fails "nothing the adapter started is left running after stop" naming them; when the trace still has
-  not ended 10 s later, a traced process the sweep could not find (one with a cleared environment) outlived stop, and
-  the check fails ("the trace did not end"). In CI `--require-trace` makes a run without a working
-  strace fail, so the check cannot quietly turn into not observed. Under `--require-trace` the runner uses an strace
-  (from `JUDGE_STRACE` or `PATH`) only when its real path and every folder above it are owned by root (or another
-  user) and cannot be written by the runner's user, and when no symbolic link met on the way to it sits in a folder
-  that user can write, so a `JUDGE_STRACE` or `PATH` entry that a build step writes to `$GITHUB_ENV` or
-  `$GITHUB_PATH` cannot name a fake one, and a link cannot be pointed elsewhere after the check. The runner makes
-  the path real once and runs that real path. Every strace is also tested before use: it must record a UDP connect to
-  192.0.2.1 port 53 made by a child, or it is not used. `test_network_hosts` also fails when a file of 1 MiB or more
-  appears in its folder during the agent tool calls. With `--as-user` (CI) strace runs as root and starts the adapter
-  as the other user (`strace -u`; it is probed that way too), so no process of the traced tree can end, stop or attach
-  to strace, read its memory or open its descriptors, and the copy of the trace is in the runner's `records/`.
+- **A download during a run**: every test that starts the editor runs it under strace with the network calls traced, and
+  its "nothing was downloaded" check fails on a TCP or UDP connect to another computer (except Chromium's exact IPv6
+  probe), a DNS lookup or a send to another computer, also when the call failed (no network). strace refuses io_uring
+  rings, whose operations it cannot see. strace writes the trace to its stderr, which is one end of a UNIX socket pair;
+  the test process (non-dumpable) holds the other end and keeps every line it reads in its own memory. The first process
+  strace starts is a `/bin/sh` that points its own stderr at `adapter.stderr` and then runs the adapter, so no process
+  of the adapter's tree holds either end. A socket cannot be opened again through `/proc/<pid>/fd` (`ENXIO`), and taking
+  strace's descriptor with `pidfd_getfd` or attaching to strace needs ptrace rights over strace, which Yama's
+  `ptrace_scope` 1 (Ubuntu's default) gives only to strace's ancestors. So a process of the same user can neither add a
+  line to the trace nor take one out of it. A file would let it rewrite lines before the reader reads them, and a pipe
+  would let it open strace's end through `/proc` for reading and take lines out. Every line must also have the form
+  strace writes (its pid, then a call, a resumed call, or a `+++`/`---` line, with every quoted string and `<...>`
+  closed and no second call inside), so text joined to an strace line fails the check instead of hiding a call. strace's
+  own `<pid> ????( <unfinished ...>` (or `<detached ...>`), exactly, is accepted too: strace writes it when the tracee
+  had already gone at the call's entry (its registers could not be read), so the call never ran, and the line holds no
+  name or argument (the race shows when Chromium's or Electron's threads end together). The check also fails when the
+  trace ends before the editor is asked to stop: a process that ends strace (same user, so it can send it a signal)
+  stops the trace, and what it does after that would not be seen. The trace must also end after stop: strace exits when
+  the last process it traces has ended, and the test process waits for that instead of killing strace (which would end
+  the trace while a traced process still runs, and that process's later calls would not be seen). When strace does not
+  exit within 30 s of stop, the test process ends every process whose environment names the scratch folder (but strace)
+  and fails "nothing the adapter started is left running after stop" naming them; when the trace still has not ended 10
+  s later, a traced process the sweep could not find (one with a cleared environment) outlived stop, and the check fails
+  ("the trace did not end"). In CI `--require-trace` makes a run without a working strace fail, so the check cannot
+  quietly turn into not observed. Under `--require-trace` the runner uses an strace (from `JUDGE_STRACE` or `PATH`) only
+  when its real path and every folder above it are owned by root (or another user) and cannot be written by the runner's
+  user, and when no symbolic link met on the way to it sits in a folder that user can write, so a `JUDGE_STRACE` or
+  `PATH` entry that a build step writes to `$GITHUB_ENV` or `$GITHUB_PATH` cannot name a fake one, and a link cannot be
+  pointed elsewhere after the check. The runner makes the path real once and runs that real path. Every strace is also
+  tested before use: it must record a UDP connect to 192.0.2.1 port 53 made by a child, or it is not used.
+  `test_network_hosts` also fails when a file of 1 MiB or more appears in its folder during the agent tool calls. With
+  `--as-user` (CI) strace runs as root and starts the adapter as the other user (`strace -u`; it is probed that way
+  too), so no process of the traced tree can end, stop or attach to strace, read its memory or open its descriptors, and
+  the copy of the trace is in the runner's `records/`.
 - **A file format that defeats the crafted inputs**: a rewrite whose saved files do not hold the values as given
   turns the checks on crafted inputs into not applicable, each listed by name and counted on the `JUDGE` line, never
   into passes; `--strict` fails them.
@@ -430,6 +483,9 @@ What it does not defend against:
   - The lock-covered judge files (`judge/`, the gate and `judge.yml`) come from the pull request and run as the
     runner's user. Only review stops a pull request that changes them and updates the lock (see "Edits to the judge"
     above and the open decisions below).
+  - Unprivileged user namespaces: `judge.yml` allows them for every user (the editor's built-in graphics renderer runs
+    only in Chromium's namespace sandbox), so `zjudge` can make user namespaces, which puts more of the kernel in its
+    reach (as on an Ubuntu release that does not restrict them).
   - What `zjudge` can still do: read what others may read on the runner (the checkout's `.git` is closed to it, and no
     job token is stored in the checkout); use the network during the install and the build; and have a service
     other than cron and at that starts processes as it start one later (cron and at refuse it: it is in `cron.deny` and `at.deny`, and

@@ -129,10 +129,27 @@ jobs:
       - name: Install FFmpeg and strace
         run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
 
+      # The graphics add-on the judge gives the editor (judge/README.md, "The
+      # graphics add-on"), before any code from the change runs and before the
+      # build user exists: the judge copy's install.sh, as the runner's user,
+      # into /srv/judge/addon. Remotion's packages come from the judge's own
+      # lock (npm ci --ignore-scripts: every tarball is checked against its
+      # sha512, and no package script runs), and the Chrome for Testing
+      # headless shell from the judge's pin (size and sha256 checked before it
+      # is unpacked). The folder ends read-only for everyone; lockout.py then
+      # proves zjudge can change none of it (it is under /srv/judge). Nothing
+      # is downloaded during a test.
+      - name: Install the graphics add-on for the judge
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 /srv/judge
+          bash "$RUNNER_TEMP/judge-src/judge/fixtures/graphics-addon/install.sh" /srv/judge/addon
+
       # The build user, before any code from the change runs: zjudge, no sudo,
       # only its own group, and no cron or at jobs (cron.deny, at.deny; an
       # allow file would make them ignored). /srv/judge (the runner's, mode 0755)
-      # holds the judge's scratch folders, where zjudge can enter but not write.
+      # holds the judge's scratch folders, where zjudge can enter but not write,
+      # and already holds the add-on (installed above; install -d leaves it as
+      # it is and only sets /srv/judge's own owner and mode again).
       # lockout.py then takes away the write bit for others where it is set
       # (chmod o-w) on the judge's copy, this step's file-command files
       # ($GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT, $GITHUB_STEP_SUMMARY), the
@@ -247,9 +264,22 @@ jobs:
           fi
           node "$J/scripts/check-judge-lock.mjs"
 
+      # The editor's built-in graphics renderer (its own Electron) runs only in
+      # Chromium's namespace sandbox, which needs unprivileged user namespaces;
+      # Ubuntu 24.04 restricts them through AppArmor (ci.yml's motion steps
+      # lift the same restriction). The judge's graphics checks on the
+      # built-in renderer need it to run, so it is lifted here, for every
+      # user, zjudge included (judge/README.md, "Threat model").
+      - name: Allow unprivileged user namespaces (the built-in graphics renderer's sandbox)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       # The judge from the copy against zjudge's build, through the v0.2.0
       # adapter (its MCP server over stdio, a scratch home and data folder, a
-      # free port), measured with the runner's FFmpeg (apt, on PATH).
+      # free port), measured with the runner's FFmpeg (apt, on PATH). The
+      # graphics tests get the add-on installed above (--graphics-addon).
       # --as-user zjudge: the adapter, the editor and what they start run as
       # zjudge, under an strace that runs as root; after each test every zjudge
       # process is ended.
@@ -266,9 +296,10 @@ jobs:
       # token is made before any zjudge process starts and is never passed on).
       - name: Judge (v0.2.0 adapter, as zjudge)
         run: |
-          bash "$RUNNER_TEMP/judge-src/judge/ci/quiet.sh" --live timeout -k 30 1200 \
+          bash "$RUNNER_TEMP/judge-src/judge/ci/quiet.sh" --live timeout -k 30 2400 \
             python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build /home/zjudge/build \
-            --scratch /srv/judge/scratch --strict --require-trace --as-user zjudge
+            --scratch /srv/judge/scratch --strict --require-trace --as-user zjudge \
+            --graphics-addon /srv/judge/addon
 
       # A failed run keeps its scratch folder, which holds files and folders of
       # zjudge's, links among them (the editor's sandbox is zjudge's own folder,

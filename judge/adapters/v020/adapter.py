@@ -29,6 +29,14 @@ v0.2.0 release's name). Only the shell's JSON "ready" line is read; its port com
 operation's answer, or of the next ok answer (stop's included) when that operation was refused.
 add_host_outside writes the editor's allowed-computers store (<data>/trust/hosts.json, and hosts.key when there is
 none yet) the way a hand edit would: on purpose, as the attacker that PROTOCOL.md describes.
+
+Motion graphics: add_graphic is the MCP tool add_graphic. The graphics renderer is the user's setting, made in the
+window: set_graphics_renderer uses the web shell's route (POST /api/graphics-addon/renderer with the shell key, as the
+window's Graphics add-on dialog does), "remotion" for the add-on and the product's own name ("zabsreel" in the v0.2.0
+release, "zedmix" in this tree) for the built-in renderer. The graphics add-on is never installed through the window
+(that downloads it): start's graphics_addon names the judge's copy, which the editor gets as AIVE_REMOTION_ADDON (its
+root) and AIVE_REMOTION_BROWSER (its headless shell), the variables a source checkout honours (docs/TESTING.md). Without
+graphics_addon neither variable is set, so the editor has no add-on, as for a user who never installed it.
 """
 import base64
 import hashlib
@@ -311,6 +319,7 @@ class Adapter:
         self.shell_key = None
         self.unreported_ports = []  # ports opened during an operation whose answer was not ok (handle() reports them)
         self.texts = []          # every text the editor answered since start (transcript)
+        self.product_name = None  # serverInfo.name: the built-in graphics renderer's setting value ("zabsreel", ...)
 
     def note(self, text):
         """Keeps one answer of the editor for the transcript operation."""
@@ -367,6 +376,16 @@ class Adapter:
         build, scratch = arg_str(a, "build"), arg_str(a, "scratch")
         if self.mcp is not None:
             raise bad("already started")
+        addon = a.get("graphics_addon")
+        if addon is not None:
+            if not isinstance(addon, dict):
+                raise bad(f"'graphics_addon' must be an object with 'root' and 'browser', got {addon!r}")
+            addon = {"root": arg_str(addon, "root"), "browser": arg_str(addon, "browser")}
+            if not os.path.isfile(os.path.join(addon["root"], "node_modules", "@remotion", "renderer", "package.json")):
+                raise OpError("adapter_error", f"the graphics add-on root {addon['root']} has no "
+                                               f"node_modules/@remotion/renderer")
+            if not (os.path.isfile(addon["browser"]) and os.access(addon["browser"], os.X_OK)):
+                raise OpError("adapter_error", f"the graphics add-on's browser {addon['browser']} is not a program")
         build, scratch = os.path.realpath(build), os.path.realpath(scratch)
         entry = os.path.join(build, "packages", "mcp", "dist", "index.js")
         if not os.path.isfile(entry):
@@ -397,6 +416,9 @@ class Adapter:
         for k in ("AIVE_FFMPEG", "AIVE_FFPROBE"):
             if os.environ.get(k):
                 env[k] = os.environ[k]
+        if addon is not None:  # the judge's read-only copy of the add-on (PROTOCOL.md, "Motion graphics")
+            env["AIVE_REMOTION_ADDON"] = os.path.realpath(addon["root"])
+            env["AIVE_REMOTION_BROWSER"] = os.path.realpath(addon["browser"])
         for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "AIVE_DATA_DIR", "TMPDIR"):  # the sandbox rule, checked
             if not os.path.realpath(env[k]).startswith(root + os.sep):
                 raise OpError("adapter_error", f"{k} is outside the sandbox")
@@ -414,6 +436,7 @@ class Adapter:
             self.op_stop({})
             raise
         info = init.get("serverInfo") or {}
+        self.product_name = str(info.get("name", "?"))
         return {"product": {"name": str(info.get("name", "?")), "version": str(info.get("version", "?"))},
                 "ports": [self.port]}
 
@@ -573,6 +596,10 @@ class Adapter:
         def speed_of(c):  # v0.2.0 keeps a constant speed in the clip's effects
             v = (c.get("effects") or {}).get("speed", c.get("speed", 1))
             return v if isinstance(v, (int, float)) and v > 0 else 1
+        overlays = {}  # clip id -> its motion graphics' ids (get_state's clips; timeline_summary does not list them)
+        for t in st.get("tracks", []):
+            for c in t.get("clips", []) or []:
+                overlays[c.get("id")] = [g.get("id") for g in c.get("graphics") or [] if isinstance(g, dict)]
         tracks = []
         for kind, prefix in (("video", "v"), ("audio", "a")):
             kt = sorted((t for t in ts.get("tracks", []) if t.get("kind") == kind), key=lambda t: t["trackIndex"])
@@ -582,10 +609,14 @@ class Adapter:
                     clips.append({"id": c.get("clipId"), "asset": c.get("assetId"), "start_frame": c.get("startFrame"),
                                   "in_frame": c.get("sourceInFrame"), "out_frame": c.get("sourceOutFrame"),
                                   "length_frames": c.get("durationFrames"),
-                                  "speed": speed_of(c)})
+                                  "speed": speed_of(c), "graphics": overlays.get(c.get("clipId"), [])})
                 tracks.append({"track": f"{prefix}{n}", "clips": clips})
-        return {"canvas": {"width": canvas.get("width"), "height": canvas.get("height"), "fps": canvas.get("fps")},
-                "length_frames": ts.get("totalFrames"), "assets": assets, "tracks": tracks}
+        out = {"canvas": {"width": canvas.get("width"), "height": canvas.get("height"), "fps": canvas.get("fps")},
+               "length_frames": ts.get("totalFrames"), "assets": assets, "tracks": tracks}
+        if isinstance(st.get("graphicsRenderer"), str):  # v0.2.0: "remotion" (the add-on) or the product's own name
+            out["graphics"] = {"renderer": "addon" if st["graphicsRenderer"] == "remotion" else "builtin",
+                               "ready": st.get("graphics") == "ready"}
+        return out
 
     # ------------------------------------------------------------ output and jobs
     @staticmethod
@@ -845,6 +876,49 @@ class Adapter:
             secret = f.read().strip()
         return {"files": [store, keyf], "secrets": [secret]}
 
+    # ------------------------------------------------------------ motion graphics
+    def op_set_graphics_renderer(self, a):
+        """The user's renderer setting, through the web shell's route (the window's Graphics add-on dialog)."""
+        renderer = arg_str(a, "renderer")
+        if renderer not in ("builtin", "addon"):
+            raise bad(f"'renderer' must be 'builtin' or 'addon', got {renderer!r}")
+        if self.mcp is None or not self.product_name:
+            raise OpError("adapter_error", "the editor is not started")
+        value = "remotion" if renderer == "addon" else self.product_name
+        self._shell_start()
+        status, j = self._shell_post("/api/graphics-addon/renderer", {"renderer": value})
+        self._shell_answer("/api/graphics-addon/renderer", status, j)
+        return {}
+
+    def op_add_graphic(self, a):
+        code, template = a.get("code"), a.get("template")
+        if (code is None) == (template is None):
+            raise bad("give exactly one of 'code' and 'template'")
+        args = {}
+        if code is not None:
+            if not isinstance(code, str) or not code:
+                raise bad(f"'code' must be a non-empty string, got {code!r}")
+            args["code"] = code  # unchanged: tests send hostile code on purpose
+        else:
+            args["template"] = arg_str(a, "template")
+        props = a.get("props")
+        if props is not None:
+            if not isinstance(props, dict):
+                raise bad(f"'props' must be an object, got {props!r}")
+            args["props"] = props
+        clip = arg_str(a, "clip", required=False)
+        if clip is not None:
+            args["clipId"] = clip
+        dur = arg_num(a, "duration_s", required=False)
+        if dur is not None:
+            args["durationSeconds"] = dur
+        j = self.call("add_graphic", args)
+        gid, cid, aid = j.get("graphicId"), j.get("clipId"), j.get("assetId")
+        if not isinstance(cid, str) or not cid:
+            raise OpError("adapter_error", f"add_graphic returned no clip id: {json.dumps(j)[:300]}")
+        return {"graphic": gid if isinstance(gid, str) and gid else None, "clip": cid,
+                "asset": aid if isinstance(aid, str) and aid else None}
+
     # ------------------------------------------------------------ text, colour, proxies
     STYLE = {"position": "position", "x": "x", "y": "y", "font": "font", "font_size": "fontSize", "color": "color",
              "outline_color": "outlineColor", "outline_width": "outlineWidth", "shadow_color": "shadowColor",
@@ -1067,6 +1141,59 @@ def self_test():
         expect("a shell started by a refused approve_host: its port comes back in the next ok answer (stop's), once",
                (first["error"]["code"], later.get("result", {}).get("ports"), ad.unreported_ports),
                ("product_error", [4321], []))
+        # Motion graphics (batch 1b operations), on canned replies.
+        sent = []
+
+        def graphic_reply(n, a):
+            sent.append((n, a))
+            if "clipId" in a:
+                return {"graphicId": "gfx_1", "clipId": a["clipId"], "assetId": "asset_g", "standalone": False}
+            return {"clipId": "clip_new", "assetId": "asset_s", "duration": 1}
+        ad = adapter(graphic_reply)
+        r1 = op(ad, "add_graphic", {"code": "export default () => null;", "clip": "c1", "props": {"t": 1}})
+        r2 = op(ad, "add_graphic", {"template": "title", "duration_s": 1})
+        expect("add_graphic: an overlay and a standalone graphic map to v0.2.0's add_graphic and back",
+               (r1.get("result"), r2.get("result"), sent),
+               ({"graphic": "gfx_1", "clip": "c1", "asset": "asset_g"},
+                {"graphic": None, "clip": "clip_new", "asset": "asset_s"},
+                [("add_graphic", {"code": "export default () => null;", "props": {"t": 1}, "clipId": "c1"}),
+                 ("add_graphic", {"template": "title", "durationSeconds": 1})]))
+        expect("add_graphic: neither or both of code and template is bad_request",
+               [op(adapter(graphic_reply), "add_graphic", x)["error"]["code"]
+                for x in ({}, {"code": "x", "template": "title"}, {"code": 3}, {"template": "title", "props": []})],
+               ["bad_request"] * 4)
+        posted = []
+
+        def renderer_shell(status, body):
+            ad = shell(status, body)
+            ad.mcp, ad.product_name = object(), "zabsreel"
+            ad._shell_post = lambda route, b: posted.append((route, b)) or (status, body)
+            return ad
+        op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "addon"})
+        op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "builtin"})
+        expect("set_graphics_renderer: addon is remotion, builtin the product's own name, through the window's route",
+               posted, [("/api/graphics-addon/renderer", {"renderer": "remotion"}),
+                        ("/api/graphics-addon/renderer", {"renderer": "zabsreel"})])
+        expect("set_graphics_renderer: another value is bad_request; the window's 400 is product_error",
+               (op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "chrome"})["error"]["code"],
+                op(renderer_shell(400, {"ok": False, "error": "Not a graphics renderer."}), "set_graphics_renderer",
+                   {"renderer": "addon"})["error"]["code"]), ("bad_request", "product_error"))
+
+        def graphics_state(n, a):
+            if n == "timeline_summary":
+                return {"tracks": [{"kind": "video", "trackIndex": 0, "clips": [
+                    {"clipId": "c1", "assetId": "a1", "startFrame": 0, "durationFrames": 30, "sourceInFrame": 0,
+                     "sourceOutFrame": 30}]}], "canvas": {"width": 64, "height": 64, "fps": 30}, "totalFrames": 30}
+            return {"assets": [], "graphicsRenderer": "remotion", "graphics": "not-installed",
+                    "tracks": [{"clips": [{"id": "c1", "graphics": [{"id": "gfx_1"}]}]}]}
+        st = op(adapter(graphics_state), "get_state", {})["result"]
+        expect("get_state: the renderer setting, whether it is ready, and each clip's graphics",
+               (st.get("graphics"), st["tracks"][0]["clips"][0]["graphics"]),
+               ({"renderer": "addon", "ready": False}, ["gfx_1"]))
+        expect("start: a graphics_addon that is not an object with root and browser is bad_request",
+               [op(Adapter(), "start", {"build": tmp, "scratch": tmp, "graphics_addon": x})["error"]["code"]
+                for x in ("dir", {"root": tmp}, {"root": tmp, "browser": 3})], ["bad_request"] * 3)
+
         class FakeMcp:
             def request(self, method, params, timeout=None):
                 err = params["name"] == "bad"

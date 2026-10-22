@@ -16,7 +16,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 35
+CHECKS = 37
 
 
 def run(t):
@@ -92,6 +92,27 @@ def side_effects(t):
                 canary.count() == 1 and canary.seen()[0].startswith("GET /x"), canary.seen())
     finally:
         canary.close()
+    other = observe.Canary("127.0.0.2")  # another address of this computer (the graphics tests' listener)
+    try:
+        c = socket.create_connection(("127.0.0.2", other.port), timeout=5)
+        c.sendall(b"GET /y HTTP/1.0\r\n\r\n")
+        c.recv(64)
+        c.close()
+        t.check("a listener on 127.0.0.2 counts a connection there, and its URLs name it",
+                other.count() == 1 and other.seen()[0].startswith("GET /y")
+                and other.url("ws", "ws") == f"ws://127.0.0.2:{other.port}/ws", other.seen())
+    finally:
+        other.close()
+    png = t.path("colour", "magenta.png")
+    p = observe.run([observe.FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i",
+                     "color=c=0xff00ff:size=64x36,format=rgb24", "-frames:v", "1", png], heavy=False, timeout=60)
+    try:
+        rgb = observe.mean_rgb(png)
+    except observe.Unmeasurable as e:
+        rgb = f"unmeasurable: {e} ({p.stderr.strip()[:200]})"
+    t.check("colour: a magenta picture reads as magenta, not as green",
+            observe.colour_is(rgb, (255, 0, 255)) and not observe.colour_is(rgb, (0, 255, 0))
+            and not observe.colour_is(None, (255, 0, 255)), rgb)
     t.check("strace form: a non-ASCII byte as three-digit octal, a backslash doubled",
             observe.strace_form("\uff5a-x") == "\\357\\275\\232-x" and observe.strace_form("\\\\nas") == "\\\\\\\\nas",
             [observe.strace_form("\uff5a-x"), observe.strace_form("\\\\nas")])

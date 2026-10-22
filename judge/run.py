@@ -3,7 +3,7 @@
 
     python3 -I judge/run.py [--adapter "<command>"] [--build <dir>] [--only <text>] [--timeout <s>] [--jobs <n>]
                             [--scratch <dir>] [--keep] [--list] [--strict] [--require-trace] [--allow-unprotected]
-                            [--as-user <name>]
+                            [--as-user <name>] [--graphics-addon <dir>]
     python3 -I judge/run.py --self-test [--require-trace] [--as-user <name>]
 
 --adapter   the adapter command (default: this judge's v0.2.0 adapter, run with this Python). A word that names an
@@ -26,11 +26,19 @@
             job, with no sudo and no group shared with the runner's user), through `sudo -n` (see "Another user"
             below). Without it they run as the runner's user (a local run). With --self-test: the --as-user cases
             run as this user (without it they are skipped)
+--graphics-addon
+            the graphics add-on the judge gives the editor (default: $JUDGE_GRAPHICS_ADDON, else none): a folder
+            that judge/fixtures/graphics-addon/install.sh made (CI: /srv/judge/addon), or any folder in that layout:
+            Remotion's packages in node_modules (the version judge/fixtures/graphics-addon/package.json names) and the
+            Chrome headless shell in Remotion's browser cache below it (GRAPHICS_ADDON_BROWSER). A test that needs it
+            records its checks on the add-on as not applicable without it (--strict fails them). Under --as-user that
+            user must be able to read it and change none of it (the folder, its node_modules and the shell's folder)
 --self-test the runner's own tests (judge/selftest.py): each way a test can fail must fail the run
 
 Statuses: a check passes or fails, or is recorded as NOT APPLICABLE (the hostile input it needs could not be made from
-the file the editor saved, for example because the editor's file format does not hold the value as given) or NOT
-OBSERVED (the observation needs strace, which is not installed). Those two count as neither passed nor failed: each
+the file the editor saved, for example because the editor's file format does not hold the value as given; or it is a
+check on the graphics add-on and no --graphics-addon was given) or NOT OBSERVED (the observation needs strace, which is
+not installed). Those two count as neither passed nor failed: each
 is printed with its name and the JUDGE line counts them ("JUDGE: 150/150 passed, 6 not applicable, 2 not
 observed"). --strict turns not applicable into a failure, --require-trace turns not observed into a failure.
 
@@ -539,6 +547,33 @@ REQUIRE_TRACE = False  # --require-trace (the runner's flag; the runner passes i
 # adapter, so no process of the adapter's tree holds the channel.
 TRACEE = ["/bin/sh", "-c", 'exec 2>>"$0"; exec "$@"']
 
+# The graphics add-on the judge gives the editor (--graphics-addon; PROTOCOL.md, "Motion graphics"): the folder's
+# node_modules holds Remotion's packages, and the Chrome headless shell is in Remotion's own browser cache below it.
+GRAPHICS_ADDON_BROWSER = ("node_modules", ".remotion", "chrome-headless-shell", "linux64",
+                          "chrome-headless-shell-linux64", "chrome-headless-shell")
+GRAPHICS_ADDON_PIN = os.path.join(JUDGE, "fixtures", "graphics-addon")
+NO_GRAPHICS_ADDON = ("no graphics add-on was given to the judge (run.py --graphics-addon, or JUDGE_GRAPHICS_ADDON; "
+                     "judge/fixtures/graphics-addon/install.sh makes one)")
+
+
+def graphics_addon(folder):
+    """({"root", "browser"}, None) for an add-on folder in the layout PROTOCOL.md describes, with the Remotion version
+    the judge pins (judge/fixtures/graphics-addon/package.json), or (None, why not)."""
+    root = os.path.realpath(folder)
+    browser = os.path.join(root, *GRAPHICS_ADDON_BROWSER)
+    try:
+        with open(os.path.join(GRAPHICS_ADDON_PIN, "package.json"), encoding="utf-8") as f:
+            want = json.load(f)["dependencies"]["@remotion/renderer"]
+        with open(os.path.join(root, "node_modules", "@remotion", "renderer", "package.json"), encoding="utf-8") as f:
+            have = json.load(f).get("version")
+    except (OSError, ValueError, KeyError) as e:
+        return None, f"{root} holds no Remotion add-on ({e})"
+    if have != want:
+        return None, f"{root} holds @remotion/renderer {have}, not {want} (judge/fixtures/graphics-addon)"
+    if not (os.path.isfile(browser) and os.access(browser, os.X_OK)):
+        return None, f"{root} has no headless shell at {os.path.join(*GRAPHICS_ADDON_BROWSER)}"
+    return {"root": root, "browser": browser}, None
+
 
 def _not_writable(path, user=None):
     """None when neither `path` (made real) nor any folder above it can be written by this user: each is owned by root
@@ -855,8 +890,12 @@ class TraceTail:
 class T:
     """What a test's run(t) gets: its scratch folder, the media, checks, and the editor (t.driver())."""
 
-    def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None):
+    def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None, addon=None):
         self.name, self.scratch, self.media_dir, self.build, self.adapter = name, scratch, media, build, adapter
+        # The graphics add-on the judge gives the editor when a test asks for it (driver(graphics_addon=True)):
+        # {"root", "browser"}, or None, and then graphics_addon_why says why (the checks on it are not applicable).
+        self.graphics_addon = addon
+        self.graphics_addon_why = None if addon else NO_GRAPHICS_ADDON
         self._out = out  # the write end of the runner's result pipe
         # Where this process writes its copy of the trace's lines (the runner names it: next to the scratch folder, or
         # in the run's records/ under --as-user).
@@ -954,7 +993,7 @@ class T:
         self.check(name, accept(v), f"{_short(v)} (want {want})")
         return v
 
-    def driver(self, trace=False):
+    def driver(self, trace=False, graphics_addon=False):
         """The editor, started through the adapter in this test's scratch folder (started once per test). The
         adapter must answer hello with this judge's protocol version first.
 
@@ -965,7 +1004,11 @@ class T:
         the same TraceTail (observe.trace_hits reads its lines) and self.trace_path names the copy this process writes
         of those lines (<test>.adapter-strace.log next to the scratch folder, for people and CI's log upload; no check
         reads it). Without strace all three stay None: the download check and the test's trace checks are then
-        recorded as not observed."""
+        recorded as not observed.
+
+        graphics_addon=True (on the first call) gives the editor the judge's graphics add-on (self.graphics_addon, from
+        --graphics-addon) in start; without one it starts with none, and the test records its checks on the add-on
+        with t.not_applicable(name, t.graphics_addon_why). False: the editor has no add-on."""
         if self._driver is None:
             import driver
             cmd = list(self.adapter)
@@ -989,7 +1032,7 @@ class T:
             if not self.check(f"the adapter speaks protocol {driver.PROTOCOL}", proto == driver.PROTOCOL,
                               f"hello says protocol {proto!r}", harness=True):
                 raise driver.AdapterError(f"the adapter speaks protocol {proto!r}, not {driver.PROTOCOL}", op="hello")
-            self._driver.start(self.build)
+            self._driver.start(self.build, self.graphics_addon if graphics_addon else None)
         return self._driver
 
     def finish(self):
@@ -1077,7 +1120,9 @@ def child(a, unprotected):
     out = os.fdopen(fd, "w", encoding="utf-8")
     spec = importlib.util.spec_from_file_location(os.path.basename(a.child)[:-3], a.child)
     mod = importlib.util.module_from_spec(spec)
-    t = T(os.path.basename(a.child)[:-3], a.scratch, a.media, a.build, json.loads(a.adapter_json), out, a.trace_copy)
+    addon = graphics_addon(a.graphics_addon)[0] if a.graphics_addon else None  # the runner checked it
+    t = T(os.path.basename(a.child)[:-3], a.scratch, a.media, a.build, json.loads(a.adapter_json), out, a.trace_copy,
+          addon)
     try:
         spec.loader.exec_module(mod)
         t._emit({"declare": _declared(mod)})
@@ -1257,7 +1302,8 @@ def run_test(meta, a, base, media, adapter):
                                   "--adapter-json", json.dumps(adapter), "--trace-copy", trace_copy]
                                  + (["--allow-unprotected"] if a.allow_unprotected else [])
                                  + (["--require-trace"] if a.require_trace else [])
-                                 + (["--as-user", AS_USER.name] if AS_USER else []),
+                                 + (["--as-user", AS_USER.name] if AS_USER else [])
+                                 + (["--graphics-addon", a.graphics_addon] if a.graphics_addon else []),
                                  stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=scratch, env=env, pass_fds=(w,))
         finally:
@@ -1364,6 +1410,10 @@ def main():
     ap.add_argument("--as-user", metavar="NAME",
                     help="run the adapter, the editor and everything they start as this other user, through sudo -n "
                          "(judge.yml: zjudge); with --self-test, run the --as-user cases as this user")
+    ap.add_argument("--graphics-addon", metavar="DIR", default=os.environ.get("JUDGE_GRAPHICS_ADDON") or None,
+                    help="the graphics add-on to give the editor (Remotion and its headless shell, as "
+                         "judge/fixtures/graphics-addon/install.sh makes it); without it the checks that need the "
+                         "add-on are not applicable")
     ap.add_argument("--tests", default=os.path.join(JUDGE, "tests"), help=argparse.SUPPRESS)
     # child mode (one test, started by the runner)
     ap.add_argument("--child", help=argparse.SUPPRESS)
@@ -1414,6 +1464,17 @@ def main():
         os.umask(0o022)  # the fixtures and every file the tests write must be readable by the editor's user
         a.jobs = 1  # the user sweep after a test ends every process of that user: no other test may run meanwhile
 
+    addon = None
+    if a.graphics_addon:
+        addon, why = graphics_addon(a.graphics_addon)
+        if why is None and AS_USER is not None:  # the editor's user reads it and must not be able to change it
+            for d in (addon["root"], os.path.join(addon["root"], "node_modules"), os.path.dirname(addon["browser"])):
+                why = why or AS_USER.folder_problem(d)
+        if why:
+            print(f"JUDGE: refused: --graphics-addon {a.graphics_addon}: {why}", flush=True)
+            return 1
+        a.graphics_addon = addon["root"]
+
     import observe
     parent = a.scratch or tempfile.gettempdir()
     os.makedirs(parent, exist_ok=True)
@@ -1448,6 +1509,8 @@ def main():
         print("judge: note: the adapter and the editor run as this user (a local run). CI runs them as another user "
               "(--as-user zjudge), which closes the same-user gaps listed in judge/README.md, \"Threat model\"")
     print(f"judge: build {a.build}")
+    print(f"judge: graphics add-on {addon['root']} (headless shell {addon['browser']})" if addon
+          else f"judge: graphics add-on: none, so the checks on it are not applicable: {NO_GRAPHICS_ADDON}")
     print(f"judge: measurements with {observe.ffmpeg_version()} ({observe.FFMPEG})")
     print(f"judge: trace with {strace() or f'nothing ({strace_why()}): the trace checks are not observed'}"
           + (" (--seccomp-bpf)" if _STRACE.get("bpf") else "")

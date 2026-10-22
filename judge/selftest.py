@@ -16,26 +16,27 @@ or a test process cannot make itself non-dumpable (forced with JUDGE_FORCE_UNPRO
 started and prints the interrupted JUDGE line. A relative --adapter path works (the runner makes it absolute).
 
 Statuses: a check recorded as not applicable (directly, or through T.check(needs=...) on an input observe.craft could
-not make) passes the run and is counted on the JUDGE line, and fails it with --strict; a check recorded as not
-observed passes and is counted, and fails with --require-trace. The download tripwire: an adapter that starts a DNS
-lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1 port 9 and writes with write(), sends
-with sendto() to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1 port 80 fails the run's "nothing was
-downloaded" check. The adapter cannot reach the trace: one that starts a DNS lookup and at stop rewrites, empties or
-deletes every file it can reach (the scratch folder, and the logs next to it with the copy of the trace), or one
-that writes a partial strace line to every descriptor it holds, to strace's descriptors through /proc and to those
-files and then overwrites the lookup's port in those files, still fails the check on the lookup itself, and its open
-of strace's trace channel (a socket) through /proc is refused (ENXIO). One that ends strace fails the check (the
-trace ended before stop). One that leaves a traced child running at stop that starts a DNS lookup once strace no
-longer traces it fails the run: the test process's sweep ends it (left running after stop), or, with an empty
-environment the sweep cannot read, the trace does not end and the download check fails. A line that is not of strace's form (text
-joined to an strace line, a line cut short) fails the line check; real strace lines pass it. An adapter that asks
-for an io_uring is refused one (strace injects ENOSYS). One that makes a UDP connect to 127.0.0.1 and Chromium's IPv6
-probe ([2001:4860:4860::8888]:443, no packet) passes the check. With strace switched off (JUDGE_STRACE empty) the
-check is not observed, a failure with --require-trace; a JUDGE_STRACE that runs its command without tracing it is
-not used (the check is not observed), and with --require-trace it fails the run, as does a JUDGE_STRACE that is a
-symbolic link in a folder this user can write (without --require-trace its real path runs). The cases that need
-strace are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the
-self-test.
+not make) passes the run and is counted on the JUDGE line, and fails it with --strict; a check recorded as not observed
+passes and is counted, and fails with --require-trace. A test that asks for the graphics add-on gets it in the adapter's
+start with --graphics-addon (the fixture adapter writes what it got), records its check as not applicable without it (a
+failure with --strict), and a --graphics-addon folder with another Remotion version or no headless shell is refused. The
+download tripwire: an adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to
+192.0.2.1 port 9 and writes with write(), sends with sendto() to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1
+port 80 fails the run's "nothing was downloaded" check. The adapter cannot reach the trace: one that starts a DNS lookup
+and at stop rewrites, empties or deletes every file it can reach (the scratch folder, and the logs next to it with the
+copy of the trace), or one that writes a partial strace line to every descriptor it holds, to strace's descriptors
+through /proc and to those files and then overwrites the lookup's port in those files, still fails the check on the
+lookup itself, and its open of strace's trace channel (a socket) through /proc is refused (ENXIO). One that ends strace
+fails the check (the trace ended before stop). One that leaves a traced child running at stop that starts a DNS lookup
+once strace no longer traces it fails the run: the test process's sweep ends it (left running after stop), or, with an
+empty environment the sweep cannot read, the trace does not end and the download check fails. A line that is not of
+strace's form (text joined to an strace line, a line cut short) fails the line check; real strace lines pass it. An
+adapter that asks for an io_uring is refused one (strace injects ENOSYS). One that makes a UDP connect to 127.0.0.1 and
+Chromium's IPv6 probe ([2001:4860:4860::8888]:443, no packet) passes the check. With strace switched off (JUDGE_STRACE
+empty) the check is not observed, a failure with --require-trace; a JUDGE_STRACE that runs its command without tracing
+it is not used (the check is not observed), and with --require-trace it fails the run, as does a JUDGE_STRACE that is a
+symbolic link in a folder this user can write (without --require-trace its real path runs). The cases that need strace
+are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the self-test.
 
 judge.yml's parts (ci_scripts, lockout_units): ci/quiet.sh, in both forms, prints a command's output that holds
 workflow commands between ::stop-commands::<token> and ::<token>:: with a new token that is in neither the command's
@@ -131,6 +132,12 @@ TESTS = {
           "    t.check('a check on a crafted file', json.load(open(made.path))['path'] == '//h/s/a.mp4', needs=made)\n"
           "    t.check('a check whose input cannot be made', False, 'never recorded', needs=[made, lost])\n"
           "    t.not_applicable('a check recorded as not applicable', 'the reason')\n",
+    # The graphics add-on (--graphics-addon): the fixture adapter (mode addon) writes what start gave it to addon.json.
+    "addon": "import json\nCHECKS = 1\ndef run(t):\n    t.driver(graphics_addon=True)\n"
+             "    got = json.load(open(os.path.join(t.scratch, 'addon.json')))\n"
+             "    name = \"the adapter got the judge's graphics add-on in start\"\n"
+             "    if t.graphics_addon is None and got is None:\n        t.not_applicable(name, t.graphics_addon_why)\n"
+             "    else:\n        t.check(name, got is not None and got == t.graphics_addon, got)\n",
     "nobs": "PORT_BOUND = False\nCHECKS = 2\ndef run(t):\n    t.check('a passing check', True)\n"
             "    t.not_observed('a trace check', 'strace is not installed')\n",
     "interrupt": "PORT_BOUND = False\nCHECKS = 1\nTIMEOUT = 600\ndef run(t):\n"
@@ -473,6 +480,9 @@ for line in sys.stdin:
             procfd()
         if mode == "asuser":
             asuser()
+        if mode == "addon":
+            with open(os.path.join(scratch, "addon.json"), "w") as f:
+                json.dump(args.get("graphics_addon"), f)
         why = net(mode)
         if why:
             print(json.dumps({"id": req["id"], "ok": False, "error": {"code": "product_error", "message": why}}),
@@ -559,6 +569,28 @@ class SelfTest:
             f.write(FAKE_STRACE_SH)
         os.chmod(self.fake_strace, 0o755)
         self.failures = 0
+
+    def addon_fixture(self, name, version=None, shell=True):
+        """A folder in the graphics add-on's layout (run.graphics_addon): @remotion/renderer's package.json with
+        `version` (default: the one judge/fixtures/graphics-addon pins) and, with `shell`, an executable file where the
+        headless shell goes. Nothing in it runs."""
+        sys.path.insert(0, JUDGE)
+        import run
+        if version is None:
+            with open(os.path.join(run.GRAPHICS_ADDON_PIN, "package.json"), encoding="utf-8") as f:
+                version = json.load(f)["dependencies"]["@remotion/renderer"]
+        root = os.path.join(self.tmp, name)
+        pkg = os.path.join(root, "node_modules", "@remotion", "renderer")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "@remotion/renderer", "version": version}, f)
+        if shell:
+            browser = os.path.join(root, *run.GRAPHICS_ADDON_BROWSER)
+            os.makedirs(os.path.dirname(browser))
+            with open(browser, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\nexit 1\n")
+            os.chmod(browser, 0o755)
+        return root
 
     def runner(self, case, adapter=None, extra=()):
         argv = [sys.executable, "-I", "-B", self.run_py, "--tests", self.tests, "--only", f"test_{case}.py",
@@ -1232,6 +1264,27 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
         s.run("nobs", 1, [fail.format("nobs", "a trace check  -- not observed, a failure with --require-trace"),
                           r"^JUDGE: 2/3 passed( UNPROTECTED|$)"], extra=("--require-trace",),
               label="not observed with --require-trace: the run fails")
+        # The graphics add-on: start carries it when the runner has one and the test asks; without one the test's
+        # checks on it are not applicable (a failure with --strict); a folder that is not the pinned add-on is refused.
+        name = re.escape("the adapter got the judge's graphics add-on in start")
+        s.run("addon", 0, [rf"^PASS  test_addon: {name}", drv(3, 3)], adapter=f"{py} {FAKE_ADAPTER} 1 addon",
+              extra=("--graphics-addon", s.addon_fixture("addon-ok")),
+              label="--graphics-addon: the adapter gets the add-on's root and browser in start")
+        na_line = (r"^JUDGE: 3/3 passed, 1 not applicable( UNPROTECTED|$)" if traced
+                   else r"^JUDGE: 2/2 passed, 1 not applicable, 1 not observed( UNPROTECTED|$)")
+        s.run("addon", 0, [rf"^N/A   test_addon: {name}  -- not applicable: no graphics add-on was given", na_line],
+              adapter=f"{py} {FAKE_ADAPTER} 1 addon", env={"JUDGE_GRAPHICS_ADDON": ""},
+              label="no --graphics-addon: start carries none, the check is not applicable")
+        s.run("addon", 1, [fail.format("addon", f"{name}  -- not applicable, a failure with --strict")],
+              adapter=f"{py} {FAKE_ADAPTER} 1 addon", extra=("--strict",), env={"JUDGE_GRAPHICS_ADDON": ""},
+              label="no --graphics-addon with --strict: the run fails")
+        s.run("addon", 1, [r"^JUDGE: refused: --graphics-addon \S+: \S+ holds @remotion/renderer 0\.0\.1, not "],
+              adapter=f"{py} {FAKE_ADAPTER} 1 addon", extra=("--graphics-addon", s.addon_fixture("addon-old", "0.0.1")),
+              label="--graphics-addon with another Remotion version: refused")
+        s.run("addon", 1, [r"^JUDGE: refused: --graphics-addon \S+: \S+ has no headless shell at "],
+              adapter=f"{py} {FAKE_ADAPTER} 1 addon", extra=("--graphics-addon", s.addon_fixture("addon-noshell",
+                                                                                             shell=False)),
+              label="--graphics-addon without the headless shell: refused")
         # The download tripwire (strace on the adapter's tree, ptrace_scope 1 allows it: strace starts the adapter).
         if traced:
             s.run("driver", 1, [fail.format("driver", net + ".*htons\\(53\\).*192\\.0\\.2\\.1"),
@@ -1337,11 +1390,15 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
                 '7 sendto(3<UDP:[10.0.0.2:5->192.0.2.1:53]>, "x", 1, 0, NULL, 0) = 1',
                 '7 read(3,  <unfinished ...>', '7 mkdir("/a", 0777 <unfinished ...>', '7 <... read resumed>"", 1) = 0',
                 '7 sendto(5<UNIX-STREAM:[1->2]>, "x", 1, MSG_NOSIGNAL, NULL, 0 <unfinished ...>', '7 exit_group(0) = ?',
-                '7 io_uring_setup(1, 0x7f) = -1 ENOSYS (Function not implemented) (INJECTED)']
+                '7 io_uring_setup(1, 0x7f) = -1 ENOSYS (Function not implemented) (INJECTED)',
+                '7 ????( <unfinished ...>', '7 ????( <detached ...>']
         bad = ['0 open(""' + real, '0 open("' + real, '0 read(3<' + real, '0 x(' + real, real[:70],
                '0 x(7 <... io_uring_setup resumed>) = 3<anon_inode:[io_uring]>',
-               '0 strace: Process 5 attached', '0 ' + real[5:].replace("connect", "Connect")]
-        s.unit("a real strace line passes the line check",
+               '0 strace: Process 5 attached', '0 ' + real[5:].replace("connect", "Connect"),
+               '7 ????(1, 2) = 0', '7 ????( <unfinished ...>' + real, '7 ????( <unavailable>',
+               '7 ????( <detached ...>) = 0', real + ' 7 ????( <unfinished ...>']
+        s.unit("a real strace line passes the line check (also strace's own line for a call whose tracee was gone "
+               "at its entry: '<pid> ????( <unfinished ...>')",
                all(observe.strace_line_problem(ln) is None for ln in good),
                [(ln, observe.strace_line_problem(ln)) for ln in good if observe.strace_line_problem(ln)])
         s.unit("text joined to an strace line, or a line cut short, fails the line check",
