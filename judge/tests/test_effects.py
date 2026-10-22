@@ -61,8 +61,9 @@ BAND = (10, 160)                    # rows y 10..169: a column is measured as it
 # v0.2.0's and this tree's exports with FFmpeg 9.0.2-17 and 4.4, every variant the column is checked for reads within
 # 0.021 of the control at the edge columns and within 0.008 beside them; the control reads 1.004 beside the picture
 # and 0.007 or less at its edge. An edge softened by a pixel (the outermost column 20 % see-through, a fringe 20 %
-# opaque one pixel out and 5 % two out), put into those exports and encoded again as yuv420p, reads 0.078 to 0.106 at
-# the edge columns and 0.864 to 0.903 beside them (the chroma, shared by two columns, halves the shift).
+# opaque one pixel out and 5 % two out), put into those exports and encoded again as yuv420p, reads 0.078 to 0.107 at
+# the edge columns and 0.864 to 0.904 beside them with either FFmpeg (the chroma, shared by two columns, halves the
+# shift).
 EDGE_TOL = 0.045
 PICTURE_TOL = 0.015  # the picture's middle: every variant and the control read within 0.004 of 0 there
 
