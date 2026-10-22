@@ -8,8 +8,8 @@ replaced by a token. manifest.json says what each must open as; v0.2.0 opened ea
 and from its own export) before it was checked in.
 
 For each file the test points it at this run's media (judge/fixtures/make.sh made them: a.mp4, b.mp4, c640.mp4,
-m.mp3, look.cube, and the flat pictures fx-pair.mp4, fx-redblue.mp4, fx-gray128.mp4), opens it with import_otio, and
-checks:
+m.mp3, look.cube, and the flat pictures fx-pair.mp4, fx-redblue.mp4, fx-gray128.mp4, fx-ramp.mp4), opens it with
+import_otio, and checks:
 - what the editor reports (get_state): the canvas, the length, which tracks hold clips, each clip's media file,
   position, source range, length on the timeline and speed, and the effects (with their amounts, their params, their
   colour read as a hex colour, and whether each is on or bypassed) and texts on it; every media file online and none
@@ -19,9 +19,10 @@ checks:
   a second away), a gap that is black, a 4:3 clip of an upper track fitted over the track below it (regions), the
   looks the file carries (grayscale, a grade, vignette 2 and 0, the red-blue LUT, a text in its colour on its box, a
   warm white balance, invert; a grade's saturation on a flat colour, colorhold's colour, exposure's black point, a
-  bypassed vignette), measured against references made from the source frame with FFmpeg's own filters (negate, a
-  channel swap) or against the source frame's own statistics; and the tones of the clips' audio and of an audio
-  track. A colour grade is not in the State (protocol 1), so it is observed on the export only.
+  bypassed vignette; the grade's contrast, gamma, tint and hue on a grey ramp, a grey and a red and a blue),
+  measured against references made from the source frame with FFmpeg's own filters (negate, a channel swap) or
+  against the source frame's own statistics; and the tones of the clips' audio and of an audio track. A colour grade
+  is not in the State (protocol 1), so it is observed on the export only.
 Nothing is read from the editor's own files: what it reports and what it exports are the observations.
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact; it
 is counted from the manifest.
@@ -230,8 +231,24 @@ LOOKS = {
     "graded_dull": "brighter and more saturated (its grade: brightness 0.15, saturation 1.4)",
     "red_held": "with its red held and its blue turned grey (colorhold #e02020)",
     "lifted": "with its black point lifted (exposure, black 0.1)",
+    "contrast": "with more contrast (contrast 1.6: the ramp's dark end darker, its light end lighter, its middle kept)",
+    "gamma": "with its mid-tones lifted (gamma 2: the ramp's middle brighter, its ends less)",
+    "tint": "tinted magenta (tint 0.6: red and blue over green)",
+    "hue": "with its hues turned 120 degrees (hue 120: the red to green, the blue to red)",
 }
 SOURCE_FPS = 30
+# The grade fields on flat pictures (grades.otio). Where the ramp is sampled (its share of the width), and how much each
+# field must change it; v0.2.0's export of its own file (FFmpeg 9.0.2-17 and 4.4 alike) changes the ramp's luma at
+# RAMP_AT by -31, -42, -4, +35, +33 with contrast 1.6 and by +72, +74, +62, +41, +27 with gamma 2, turns grey 128
+# into (128, 96, 128) with tint 0.6, and the red and the blue into (0, 166, 0) and (182, 0, 0) with hue 120. The
+# values in brackets below are v0.2.0's for a weaker or another grade, which must fail (and does): judge/PORTING.md.
+RAMP_AT = (0.125, 0.25, 0.5, 0.75, 0.875)
+CONTRAST_STEP = 25   # contrast 1.6: the ramp's quarter points darker and lighter by this much (contrast 1.3: -22, +17)
+GAMMA_MID = 45       # gamma 2: the ramp's middle brighter by this much (gamma 1.5: +39)
+GAMMA_BEND = 10      # ... and by this much more than its three-quarter point (brightness 0.25: +73 and +65)
+KEPT = 12            # what may move where a field keeps the picture
+TINT = 20            # tint 0.6 on grey: red and blue over green (tint 0.3: 15)
+HUE = 100            # hue 120 on red and blue: the new dominant channel over the others (hue 60: none)
 CORNERS = [f"crop=48:48:{x}:{y}" for x, y in (("0", "0"), ("iw-48", "0"), ("0", "ih-48"), ("iw-48", "ih-48"))]
 
 
@@ -335,6 +352,29 @@ def look(frames, src, out, p, size):
         g, s = block(out, p["t"], mid), block(src, p["source_t"], mid)
         return abs(luma(g) - 114) <= 6 and luma(s) >= 122, f"luma {luma(g):.1f} (want 114 +- 6), the source's " \
             f"{luma(s):.1f}"
+    if lk in ("contrast", "gamma"):  # fx-ramp: black at the left to white at the right
+        at = [(int(f * w) - 8, h // 2 - 8) for f in RAMP_AT]
+        g = [round(luma(block(out, p["t"], xy)), 1) for xy in at]
+        s = [round(luma(block(src, p["source_t"], xy)), 1) for xy in at]
+        d = [round(a - b, 1) for a, b in zip(g, s)]
+        detail = f"the ramp's luma at {list(RAMP_AT)} of its width {g} vs the source's {s} (change {d})"
+        if lk == "contrast":
+            return d[0] < 0 and d[1] <= -CONTRAST_STEP and d[3] >= CONTRAST_STEP and d[4] > 0 and abs(d[2]) <= KEPT, \
+                f"{detail} (want the quarter points {CONTRAST_STEP} or more darker and lighter, the ends too, the " \
+                f"middle within {KEPT})"
+        return d[2] >= GAMMA_MID and d[1] > d[2] and d[2] - d[3] >= GAMMA_BEND and min(d) > 0, \
+            f"{detail} (want the middle {GAMMA_MID} or more brighter, the quarter more than that, the three-quarter " \
+            f"point {GAMMA_BEND} or more less, nothing darker)"
+    if lk == "tint":  # fx-gray128
+        g, s = block(out, p["t"], mid), block(src, p["source_t"], mid)
+        return min(g[0], g[2]) - g[1] >= TINT and abs(g[0] - g[2]) <= 8 and spread(s) <= 4, \
+            f"{g} vs the source's {s} (want red and blue each {TINT} or more over green and within 8 of each other; " \
+            f"the source grey)"
+    if lk == "hue":  # fx-redblue: 0xE02020 on the left, 0x2020E0 on the right
+        a, b = block(out, p["t"], left), block(out, p["t"], right)
+        return a[1] - max(a[0], a[2]) >= HUE and b[0] - max(b[1], b[2]) >= HUE, \
+            f"left {a} (want green {HUE} or more over red and blue), right {b} (want red {HUE} or more over green and " \
+            f"blue)"
     raise ValueError(lk)
 
 

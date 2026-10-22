@@ -39,10 +39,18 @@ python3 -I judge/run.py --only import_export --keep
 python3 -I judge/run.py --list
 python3 -I judge/run.py --strict --require-trace   # not applicable and not observed fail, as in CI
 python3 -I judge/run.py --graphics-addon /tmp/judge-addon   # the add-on that fixtures/graphics-addon/install.sh made
+python3 -I judge/run.py --release v0.2.0 --build /path/to/v0.2.0   # grade the v0.2.0 release (ZabsReel) as itself
 python3 -I judge/run.py --as-user zjudge --scratch /srv/judge/scratch --strict --require-trace --build /home/zjudge/build
                                              # as CI runs it: the adapter and the editor as the user zjudge (below)
 python3 -I judge/run.py --allow-unprotected  # not Linux: run without the /proc protection (JUDGE line says UNPROTECTED)
 ```
+
+`--release` names the release the build is graded as: `zedmix` (the default: this product line's current release,
+and a rewrite of it) or `v0.2.0` (the v0.2.0 release, whose product name is ZabsReel). The judge holds what each
+release is (its names, in `tests/test_cli_migrate.py`), and the tests that depend on it grade against the release
+given here, never against what the build or the adapter says it is: a build run with the default must install
+ZedMix's skill and migrate ZabsReel's configuration, so a rewrite that still installs ZabsReel's names fails. CI
+passes `--release zedmix` (the lock covers that line); a run on the v0.2.0 release passes `--release v0.2.0`.
 
 Without `--as-user` (a local run) the adapter, the editor and everything they start run as your own user, and the runner
 prints a note that says so: the judge's same-user defences apply (see "Threat model"), and so do their gaps. `--as-user
@@ -125,7 +133,7 @@ ended), checks that the copy's lock and gate are the bytes it pinned before the 
 its lock, lifts Ubuntu's AppArmor restriction on unprivileged user namespaces
 (`kernel.apparmor_restrict_unprivileged_userns=0`, which the editor's built-in graphics renderer needs for its sandbox,
 as in `ci.yml`), then runs the judge from the copy with `--build /home/zjudge/build --scratch /srv/judge/scratch
---strict --require-trace --as-user zjudge --graphics-addon /srv/judge/addon`. A failed run first ends every `zjudge`
+--strict --require-trace --as-user zjudge --graphics-addon /srv/judge/addon --release zedmix`. A failed run first ends every `zjudge`
 process (`lockout.py --kill` with no path: by real and by effective user id, and the step fails when one is left), then
 root (`ci/collect_logs.sh`) copies only the regular files named `*.log` or `*.stderr` from the kept scratch folders
 (`find -type f`, which follows no link and leaves out links, FIFOs and devices) into a new folder of the runner's, and
@@ -278,6 +286,8 @@ def run(t):
   that need it as failed with the reason instead of returning early. The runner fails a test whose number of checks
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
 - `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
+- `t.release` is the release the build is graded as (`run.py --release`: `zedmix` or `v0.2.0`). A test whose
+  expectations depend on the release takes them from it, never from what the build or the adapter reports.
 - `t.driver(graphics_addon=True)` gives the editor the judge's graphics add-on in `start` (see "The graphics add-on").
   `t.graphics_addon` is it (`{"root", "browser"}`), or None when the judge has none; the test then records each of its
   checks on the add-on with `t.not_applicable(name, t.graphics_addon_why)`. Without the argument the editor starts
@@ -479,7 +489,8 @@ What it defends against:
   inside the test's folder and check where the opened file is, so a link the installer or the editor plants there
   cannot make the runner's user read one of its own files into a check's detail (which the CI log shows). What
   `t.look` reads there as the editor's user is the editor's own word, as for its other private files. Which release's
-  names the installer is graded against comes from the skill it installs, not from the adapter.
+  names the installer is graded against is the runner's input (`--release`, which `judge.yml` passes), not the
+  adapter's or the build's: a build that installs another release's skill fails the first checks.
 
 What it does not defend against:
 

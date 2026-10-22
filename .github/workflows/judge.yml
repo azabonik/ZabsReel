@@ -293,7 +293,9 @@ jobs:
       # editor so that it fetches nothing, and every test's "nothing was
       # downloaded" check fails on any connection to another computer.
       # --require-trace: a check that needs strace fails without it (never
-      # "not observed"). --strict: while the judge grades v0.2.0, whose file
+      # "not observed"). --release zedmix: the build is graded as the current
+      # release (test_cli_migrate holds it to ZedMix's names), whatever it
+      # installs. --strict: while the judge grades v0.2.0, whose file
       # format every crafted input is made from, a check recorded as not
       # applicable fails. timeout -k ends a hang as a failure; the runner also
       # times out each test. The check details quote what the editor said, so
@@ -305,7 +307,7 @@ jobs:
           bash "$RUNNER_TEMP/judge-src/judge/ci/quiet.sh" --live timeout -k 30 2400 \
             python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build /home/zjudge/build \
             --scratch /srv/judge/scratch --strict --require-trace --as-user zjudge \
-            --graphics-addon /srv/judge/addon
+            --graphics-addon /srv/judge/addon --release zedmix
 
       # A failed run keeps its scratch folder, which holds files and folders of
       # zjudge's, links among them (the editor's sandbox is zjudge's own folder,

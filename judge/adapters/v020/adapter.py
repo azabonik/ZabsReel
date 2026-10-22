@@ -293,46 +293,155 @@ def end_processes(pids, grace=5.0):
     return done
 
 
-CLI_OUTPUT_CAP = 1 << 20  # characters kept of the installer's output
+CLI_TIMEOUT = 120  # seconds the installer may run
+CLI_OUTPUT_CAP = 1 << 20  # bytes kept of the installer's output; at the cap it is ended (its result says capped)
+CLI_DRAIN = 2.0  # seconds the output is still read after the installer itself exited, before what holds it is ended
+
+
+def holders(pid, fd_target):
+    """Process ids (not this process) in the session `pid` leads, or with a descriptor whose link reads `fd_target`
+    (the terminal's path, or "pipe:[inode]"): what can still write to the installer's output after it exited."""
+    out = []
+    if not os.path.isdir("/proc"):
+        return out
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                fields = f.read().rsplit(b")", 1)[1].split()
+            if fields[0] == b"Z":
+                continue
+            if int(fields[3]) == pid:  # its session id
+                out.append(int(name))
+                continue
+        except (OSError, IndexError, ValueError):
+            continue
+        try:
+            fds = os.listdir(f"/proc/{name}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{name}/fd/{fd}") == fd_target:
+                    out.append(int(name))
+                    break
+            except OSError:
+                pass
+    return out
+
+
+def end_holders(pid, fd_target, grace=5.0):
+    """SIGKILLs, by exact process id, every process that holds() finds, until none is left (or `grace` s pass).
+    -> the ids it ended."""
+    ended, deadline = [], time.time() + grace
+    while time.time() < deadline:
+        left = holders(pid, fd_target)
+        if not left:
+            break
+        for q in left:
+            try:
+                os.kill(q, signal.SIGKILL)
+                ended.append(q)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.05)
+    return sorted(set(ended))
+
+
+def _end_session(p):
+    """SIGKILLs the process group the installer leads (start_new_session / setsid made it the leader)."""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def run_piped(argv, env, cwd, text, timeout):
-    """(exit code, stdout and stderr together) of argv with `text` on stdin (not a terminal). A program that does not
-    end within `timeout` s is killed (exit -9)."""
+    """(exit code, stdout and stderr together, capped) of argv with `text` on stdin (not a terminal). The output is
+    read in chunks and kept up to CLI_OUTPUT_CAP bytes: at the cap the program's process group is ended and capped is
+    True. A program that does not end within `timeout` s is killed (exit -9). Once it has exited, its output is read
+    until the pipe closes, for at most CLI_DRAIN s more (never past the timeout); then every process still holding its
+    output (in its session, or with the pipe open) is ended, so nothing it left behind holds the adapter."""
+    import select
     p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                          cwd=cwd, start_new_session=True)
+    rfd, wfd = p.stdout.fileno(), p.stdin.fileno()
+    pipe = f"pipe:[{os.fstat(rfd).st_ino}]"
+    data, out, capped, deadline = text.encode("utf-8"), bytearray(), False, time.time() + timeout
+    os.set_blocking(wfd, False)
     try:
-        out, _ = p.communicate(text.encode("utf-8"), timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        out, _ = p.communicate()
-    return p.returncode, out.decode("utf-8", "replace")[:CLI_OUTPUT_CAP]
+        exited = None  # when the program was first seen to have exited
+        while True:
+            now = time.time()
+            if exited is None and p.poll() is not None:
+                exited = now
+            if now >= deadline or exited is not None and now >= min(deadline, exited + CLI_DRAIN):
+                break
+            if not data and not p.stdin.closed:
+                p.stdin.close()
+            r, w, _ = select.select([rfd], [wfd] if data else [], [], 0.05)
+            if w:
+                try:
+                    data = data[os.write(wfd, data[:65536]):]
+                except BlockingIOError:
+                    pass
+                except OSError:  # it closed its stdin
+                    data = b""
+            if r:
+                chunk = os.read(rfd, 65536)
+                if not chunk:
+                    break  # every holder of the pipe closed it
+                out.extend(chunk[:CLI_OUTPUT_CAP - len(out)])
+                if len(out) >= CLI_OUTPUT_CAP:
+                    capped = True
+                    _end_session(p)
+                    break
+        try:
+            p.wait(max(0.1, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            _end_session(p)
+        end_holders(p.pid, pipe)
+    finally:
+        for f in (p.stdin, p.stdout):
+            try:
+                f.close()
+            except OSError:
+                pass
+    return p.wait(), out.decode("utf-8", "replace"), capped
 
 
 def run_on_tty(argv, env, cwd, text, timeout, quiet=0.6):
-    """(exit code, what the terminal showed) of argv on a new pseudo-terminal (its stdin, stdout and stderr, and its
-    controlling terminal). Each line of `text` is typed once the program has printed something and then printed
-    nothing for `quiet` s (it waits for an answer), so no answer is read before its question is asked."""
+    """(exit code, what the terminal showed, capped) of argv on a new pseudo-terminal (its stdin, stdout and stderr,
+    and its controlling terminal). Each line of `text` is typed once the program has printed something and then
+    printed nothing for `quiet` s (it waits for an answer), so no answer is read before its question is asked. What the
+    terminal shows is kept up to CLI_OUTPUT_CAP bytes: at the cap the program's session is ended and capped is True. A
+    program that does not end within `timeout` s is killed (exit -9). Once it has exited, the terminal is read until
+    it closes or is quiet, for at most CLI_DRAIN s more (never past the timeout); then every process still holding the
+    terminal (in its session, or with the terminal open) is ended before this returns."""
     import pty
     import select
     import termios
     master, slave = pty.openpty()
+    tty_path = os.ttyname(slave)
 
     def own_terminal():
         os.setsid()
         import fcntl
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-    p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, preexec_fn=own_terminal,
-                         close_fds=True)
-    os.close(slave)
-    out, deadline = bytearray(), time.time() + timeout
+    try:
+        p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd,
+                             preexec_fn=own_terminal, close_fds=True)
+    finally:
+        os.close(slave)
+    out, capped, deadline = bytearray(), False, time.time() + timeout
     answers = [ln + "\n" for ln in text.splitlines()]
     last, seen = time.time(), 0
 
     def pull(wait):
-        """'data', 'idle' (nothing within `wait` s) or 'closed' (every holder of the terminal closed it)."""
-        nonlocal last
-        r, _, _ = select.select([master], [], [], wait)
+        """'data', 'idle' (nothing within `wait` s), 'closed' (every holder of the terminal closed it) or 'cap'."""
+        nonlocal last, capped
+        r, _, _ = select.select([master], [], [], max(0.0, wait))
         if not r:
             return "idle"
         try:
@@ -341,28 +450,39 @@ def run_on_tty(argv, env, cwd, text, timeout, quiet=0.6):
             return "closed"
         if not chunk:
             return "closed"
-        out.extend(chunk)
+        out.extend(chunk[:CLI_OUTPUT_CAP - len(out)])
         last = time.time()
+        if len(out) >= CLI_OUTPUT_CAP:
+            capped = True
+            return "cap"
         return "data"
-    state = "idle"
-    while state != "closed" and time.time() < deadline:
-        if answers and len(out) > seen and time.time() - last >= quiet:
-            line = answers.pop(0).encode("utf-8")
-            os.write(master, line)
-            seen = len(out) + len(line) + 1  # past the terminal's echo of the line ("\n" shown as "\r\n")
-        state = pull(0.05)
-        if state == "idle" and p.poll() is not None:
-            break
-    if p.poll() is None:
+    try:
+        state = "idle"
+        while state not in ("closed", "cap") and time.time() < deadline and p.poll() is None:
+            if answers and len(out) > seen and time.time() - last >= quiet:
+                line = answers.pop(0).encode("utf-8")
+                os.write(master, line)
+                seen = len(out) + len(line) + 1  # past the terminal's echo of the line ("\n" shown as "\r\n")
+            state = pull(0.05)
+        if state == "cap":
+            _end_session(p)
         try:
-            p.wait(max(1, deadline - time.time()))
+            p.wait(max(0.1, deadline - time.time()))
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)  # its session: setsid made it the leader
+            _end_session(p)  # its session: setsid made it the leader
             p.wait()
-    while state != "closed" and pull(0.2) == "data":  # what is left on the terminal
-        pass
-    os.close(master)
-    return p.returncode, out.decode("utf-8", "replace")[:CLI_OUTPUT_CAP]
+        drain_end = min(deadline, time.time() + CLI_DRAIN)
+        while state not in ("closed", "cap") and time.time() < drain_end:  # what is left on the terminal
+            state = pull(min(0.2, drain_end - time.time()))
+            if state == "idle":
+                break
+        end_holders(p.pid, tty_path)  # what the program left holding the terminal
+        last_read = min(deadline, time.time() + 1)
+        while state not in ("closed", "cap") and time.time() < last_read and pull(0.05) == "data":
+            pass  # nothing holds it now: EIO comes at once
+    finally:
+        os.close(master)
+    return p.returncode, out.decode("utf-8", "replace"), capped
 
 
 def _zombie(pid):
@@ -1205,9 +1325,9 @@ class Adapter:
                 raise OpError("adapter_error", f"{k} is outside the test's scratch folder")
         argv = [node, self._cli_program()] + args
         log(f"cli: {' '.join(args)} (cwd {cwd})")
-        code, out = (run_on_tty if tty else run_piped)(argv, env, cwd, text, 120)
+        code, out, capped = (run_on_tty if tty else run_piped)(argv, env, cwd, text, CLI_TIMEOUT)
         self.note(out)
-        return {"exit": code, "output": out}
+        return {"exit": code, "output": out, "capped": capped}
 
 def handle(ad, raw):
     """One request line -> its response object. bad_request only for the judge's arguments (arg_* and the checks in
@@ -1469,6 +1589,20 @@ def self_test():
             json.dump({"bin": {"x": "bin/x.mjs"}}, f)
         with open(os.path.join(inst, "bin", "x.mjs"), "w", encoding="utf-8") as f:
             f.write("import { createInterface } from 'node:readline';\n"
+                    "import { spawn } from 'node:child_process';\n"
+                    "const a = process.argv.slice(2);\n"
+                    "if (a[0] === 'flood') {  // prints without end\n"
+                    "  const s = 'x'.repeat(65536);\n"
+                    "  const w = () => { while (process.stdout.write(s)) {} process.stdout.once('drain', w); };\n"
+                    "  w(); await new Promise(() => {});\n"
+                    "}\n"
+                    "if (a[0] === 'orphan') {  // leaves a process of its own session writing to its output, exits\n"
+                    "  const code = `require('fs').writeFileSync(${JSON.stringify(a[1])}, String(process.pid));`\n"
+                    "    + `setInterval(() => process.stdout.write('.'), 20);`;\n"
+                    "  spawn(process.execPath, ['-e', code], {stdio: ['ignore', 'inherit', 'inherit'], detached: true})\n"
+                    "    .unref();\n"
+                    "  setTimeout(() => process.exit(0), 500); await new Promise(() => {});\n"
+                    "}\n"
                     "const e = process.env;\n"
                     "const out = {args: process.argv.slice(2), cwd: process.cwd(), tty: !!process.stdin.isTTY,\n"
                     "  env: Object.fromEntries(['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'APPDATA', 'PATH',\n"
@@ -1520,6 +1654,30 @@ def self_test():
         got = json.loads(line[6:])
         expect("cli with tty: the installer has a terminal, and each line is typed after its question",
                (res.get("exit"), got.get("tty"), got.get("answers")), (0, True, ["yes", "no"]))
+        for tty in (False, True):
+            how = "on a terminal" if tty else "piped"
+            t0 = time.time()
+            res = op(cli_adapter(), "cli", {"args": ["flood"], "cwd": w, "home": home, "tty": tty}).get("result") or {}
+            took = time.time() - t0
+            expect(f"cli ({how}): an installer that prints without end is ended at the output cap, well within the "
+                   f"time limit, and the result says so",
+                   (len(res.get("output", "")), res.get("capped"), res.get("exit"), took < 30),
+                   (CLI_OUTPUT_CAP, True, -9, True))
+            pidfile = os.path.join(w, f"orphan-{tty}.pid")
+            t0 = time.time()
+            res = op(cli_adapter(), "cli", {"args": ["orphan", pidfile], "cwd": w, "home": home,
+                                            "tty": tty}).get("result") or {}
+            took = time.time() - t0
+            try:
+                with open(pidfile, encoding="utf-8") as f:
+                    left = int(f.read())
+                alive = os.path.exists(f"/proc/{left}") and not _zombie(left)
+            except (OSError, ValueError):
+                alive = "no pid file"
+            expect(f"cli ({how}): a process the installer leaves writing to its output (in a session of its own) does "
+                   f"not hold the adapter: cli returns soon after the installer exits, with that process ended",
+                   (res.get("exit"), res.get("capped"), "." in res.get("output", ""), took < 15, alive),
+                   (0, False, True, True, False))
         expect("cli: a cwd, home or path folder outside the scratch folder is bad_request",
                [op(cli_adapter(), "cli", x)["error"]["code"] for x in (
                    {"args": [], "cwd": tmp, "home": home}, {"args": [], "cwd": w, "home": tmp},

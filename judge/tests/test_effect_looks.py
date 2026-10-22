@@ -10,7 +10,8 @@ segments (12 at a time: a timeline of many clips exports far slower), and the te
 original sampled its export: the mean colour of a small block (observe.block_rgb, the original's sampleBlock), a run
 of frames, a column. The thresholds are the original's, but for the lens's zoom to fill: the original fails a pixel
 that is less than fully opaque, and the export has no alpha, so a pixel more than UNFILLED below the grey without the
-lens fails (a pixel left a quarter uncovered shows the black canvas through it and reads about 97 against 128).
+lens fails (a pixel left a quarter uncovered shows the black canvas through it and reads about 97 against 128, and a
+picture left 4 % see-through reads about 123).
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -70,23 +71,34 @@ def fmt(c):
     return "(" + ",".join(str(int(v)) for v in c) + ")"
 
 
-UNFILLED = 8  # luma below the unwarped grey's that counts a pixel as not filled (empty or partly empty)
+# Luma below the unwarped grey's that counts a pixel as not filled (empty or partly empty). Every pixel of every real
+# lens setting reads the grey itself (128) on v0.2.0's and this tree's exports with FFmpeg 9.0.2-17 and 4.4, and the
+# export keeps a single darker pixel within 1 of its value; a picture 2 % see-through over the black canvas reads 125.
+UNFILLED = 2
 
 
 def unfilled(frames, control):
-    """({name: how many pixels of the frame are more than UNFILLED below the control's median luma}, that median).
-    frames: {name: (export, time)} of lens segments of a flat grey picture; control: (export, time) of the same picture
-    without the lens. A pixel the warp leaves partly uncovered shows the black canvas through it and reads darker (one
-    left a quarter uncovered reads about 97 against 128, and the export keeps such a pixel within 1)."""
+    """({name: how many pixels of the frame are more than UNFILLED below the control's median luma, for each frame that
+    has one}, that median, [the lowest luma of any frame, the frame's name]). frames: {name: (export, time)} of lens
+    segments of a flat grey picture; control: (export, time) of the same picture without the lens. A pixel the warp
+    leaves partly uncovered shows the black canvas through it and reads darker (one left a quarter uncovered reads
+    about 97 against 128, and the export keeps such a pixel within 1)."""
     px = sorted(observe.pixels(*control, "null", "gray"))
     grey = px[len(px) // 2]
-    counts = {k: sum(1 for v in observe.pixels(*f, "null", "gray") if v < grey - UNFILLED) for k, f in frames.items()}
-    return counts, grey
+    counts, lowest = {}, [256, None]
+    for k, f in frames.items():
+        got = observe.pixels(*f, "null", "gray")
+        n = sum(1 for v in got if v < grey - UNFILLED)
+        if n:
+            counts[k] = n
+        if min(got) < lowest[0]:
+            lowest = [min(got), k]
+    return counts, grey, lowest
 
 
 def filled(v):
-    counts, grey = v
-    return grey >= 100 and not any(counts.values())
+    counts, grey, _ = v
+    return grey >= 100 and not counts
 
 
 def build(d, t, segments, track="v0"):
@@ -234,7 +246,7 @@ def run(t):
     m(f"lens (zoom to fill, the default) leaves no pixel empty or partly empty for any k1 and k2 ({len(LENS_GRID)} "
       f"settings, 16:9): none more than {UNFILLED} below the grey without the lens",
       lambda: unfilled({f"{k1},{k2}": at(f"lens{k1},{k2}", 1 / FPS) for k1, k2 in LENS_GRID}, at("g0", 1 / FPS)),
-      filled, "the grey's luma >= 100, 0 pixels each")
+      filled, "no setting with such a pixel; the grey's luma >= 100")
     m("lens fill 0 leaves the corners the warp uncovers empty",
       lambda: [observe.block_rgb(*at("fill0", 1 / FPS), x, y, 2) for x, y in ((0, 0), (318, 0), (0, 178), (318, 178))],
       lambda v: all(luma(c) < 40 for c in v), "dark corners")
@@ -269,4 +281,4 @@ def portrait(t, d):
         return unfilled({k: frame(k) for k in where if k != "ctrl"}, frame("ctrl"))
     t.measure(f"lens (zoom to fill) leaves no pixel empty or partly empty for any k1 and k2 ({len(LENS_GRID)} "
               f"settings, 9:16): none more than {UNFILLED} below the grey without the lens", empties, filled,
-              "the grey's luma >= 100, 0 pixels each")
+              "no setting with such a pixel; the grey's luma >= 100")

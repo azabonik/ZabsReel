@@ -2,6 +2,7 @@
 """Makes the OpenTimelineIO files that v0.2.0 exports, for tests/test_v020_otio_compat.py (a one-time tool, not a test).
 
     python3 -I -B judge/fixtures/v020-otio/generate.py --build <a checkout of the v0.2.0 release, built> [--out DIR]
+                                                      [--only NAME ...]
 
 It makes the judge's media with judge/fixtures/make.sh in a new temporary folder, then, for each timeline in TIMELINES,
 starts the v0.2.0 editor through the judge's v0.2.0 adapter (judge/adapters/v020/adapter.py, in a sandbox of its own),
@@ -12,6 +13,10 @@ release opens its own export unchanged), and writes:
 - <name>.otio: the file v0.2.0 wrote, with one change: the temporary media folder is replaced by MEDIA_TOKEN in every
   place it occurs (the media paths and their file:// URLs), so the test can point the file at its own media. Nothing
   else is changed (byte for byte, as v0.2.0 wrote it).
+With --only, only the named timelines are made: their files are written (again) and their entries in the
+manifest.json already in --out are replaced or added, in TIMELINES' order; the other files and entries stay byte for
+byte. The media must then come from the FFmpeg the manifest names (media_ffmpeg).
+
 - manifest.json: per file, what it must open as: the canvas, the length, each track's clips (the media file, position,
   source range, length, speed, effects with their amounts, params, colour and whether each is on, texts), and the
   observations the test makes on an export
@@ -174,6 +179,26 @@ TIMELINES = [
              "what": "a bypassed vignette (amount 2) leaves the picture as it is"},
         ],
     },
+    {
+        "name": "grades",
+        "what": "the grade's other fields, one clip each: contrast 1.6 and gamma 2 on a grey ramp (black at the left to "
+                "white at the right), tint 0.6 on grey 128, hue 120 on the red-blue picture",
+        "canvas": [640, 360, 30],
+        "add_tracks": [],
+        "place": [("C", "fx-ramp.mp4", "v0", 0, 0, 30), ("G", "fx-ramp.mp4", "v0", 30, 0, 30),
+                  ("T", "fx-gray128.mp4", "v0", 60, 0, 30), ("U", "fx-redblue.mp4", "v0", 90, 0, 30)],
+        "edits": [("colour", "C", {"contrast": 1.6}), ("colour", "G", {"gamma": 2.0}), ("colour", "T", {"tint": 0.6}),
+                  ("colour", "U", {"hue": 120})],
+        "expect": {"v0": [("fx-ramp.mp4", 0, 0, 30, 30, 1), ("fx-ramp.mp4", 30, 0, 30, 30, 1),
+                          ("fx-gray128.mp4", 60, 0, 30, 30, 1), ("fx-redblue.mp4", 90, 0, 30, 30, 1)]},
+        "length": 120,
+        "probes": [
+            {"kind": "look", "look": "contrast", "t": 0.5, "media": "fx-ramp.mp4", "source_t": 0.5},
+            {"kind": "look", "look": "gamma", "t": 1.5, "media": "fx-ramp.mp4", "source_t": 0.5},
+            {"kind": "look", "look": "tint", "t": 2.5, "media": "fx-gray128.mp4", "source_t": 0.5},
+            {"kind": "look", "look": "hue", "t": 3.5, "media": "fx-redblue.mp4", "source_t": 0.5},
+        ],
+    },
 ]
 
 
@@ -283,6 +308,8 @@ def main():
     ap.add_argument("--build", required=True, help="a built checkout of the v0.2.0 release")
     ap.add_argument("--out", default=HERE)
     ap.add_argument("--keep", action="store_true", help="keep the temporary folder")
+    ap.add_argument("--only", action="append", choices=[tl["name"] for tl in TIMELINES],
+                    help="make only this timeline (again), and update its entry in --out's manifest.json")
     a = ap.parse_args()
     build = os.path.realpath(a.build)
     root = os.path.realpath(tempfile.mkdtemp(prefix="v020-otio-"))
@@ -295,11 +322,26 @@ def main():
             raise SystemExit(f"make.sh failed: {mk.stderr[-2000:]}")
         ffmpeg_line = mk.stdout.splitlines()[0] if mk.stdout else "?"
         manifest = {"token": MEDIA_TOKEN, "made_with": None, "media_ffmpeg": ffmpeg_line, "files": []}
+        kept = {}
+        if a.only:
+            with open(os.path.join(a.out, "manifest.json"), encoding="utf-8") as f:
+                old = json.load(f)
+            if old.get("media_ffmpeg") != ffmpeg_line:
+                raise SystemExit(f"--only: the media were made with {ffmpeg_line!r}, the manifest's with "
+                                 f"{old.get('media_ffmpeg')!r}: use that FFmpeg")
+            manifest = {**old, "files": []}
+            kept = {e["file"]: e for e in old["files"]}
         for tl in TIMELINES:
+            if a.only and tl["name"] not in a.only:
+                if f"{tl['name']}.otio" in kept:
+                    manifest["files"].append(kept[f"{tl['name']}.otio"])
+                continue
             log(f"{tl['name']}: building on v0.2.0")
             want = want_shape(tl)
             d = session(adapter, build, root, tl["name"])
             try:
+                if a.only and manifest["made_with"] != d.product:
+                    raise SystemExit(f"--only: this build is {d.product}, the manifest's files {manifest['made_with']}")
                 manifest["made_with"] = d.product
                 build_one(d, tl, media)
                 built = state_shape(d.get_state(), media)

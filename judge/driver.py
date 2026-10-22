@@ -403,7 +403,7 @@ class Driver:
 
     def cli(self, args, cwd, home, appdata=None, path=None, input="", tty=False):
         """Runs the editor's command-line installer with `args` in `cwd`, its home at `home` (PROTOCOL.md, cli).
-        -> {"exit": int, "output": str}"""
+        -> {"exit": int, "output": str, "capped": bool}"""
         req = {"args": list(args), "cwd": path_arg(cwd), "home": path_arg(home), "input": input, "tty": bool(tty)}
         if appdata is not None:
             req["appdata"] = path_arg(appdata)

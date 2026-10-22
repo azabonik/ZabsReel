@@ -13,10 +13,13 @@ on v1 (a segment of the timeline), an export holds 14 of them (a timeline of man
 group is exported twice, over two flat colours on v0 (fx-base.mp4, 0xE020E0, and fx-base2.mp4, 0x20C840). The share
 of the two colours' difference that a place changes by between the two exports is how much of the track below shows
 there: all of it in a transparent bar, none in an opaque picture, whatever colours the effect gives the picture (the
-original reads the alpha of its RGBA output instead). A control segment without an effect shows both. A key effect
-(chromakey, colorkey, lumakey) may make the picture transparent too, so only its bars are checked; a blur, a mosaic
-and a lens warp spread the picture's edge, so only the far edges of their bars are checked, and only at their
-defaults (as the original).
+original reads the alpha of its RGBA output instead). It is read in the bars (small samples, as the original's), in
+the bars' columns right beside the picture and in the picture's own edge columns (where an effect that softens the
+clip's transparency leaves a fringe: each such column's mean over rows 10..169, against the control's within
+EDGE_TOL), and in the picture's middle. A control segment without an effect shows both. A key effect (chromakey,
+colorkey, lumakey) may make the picture transparent too, so only its bars and the columns beside the picture are
+checked; a blur, a mosaic and a lens warp spread the picture's edge, so only the far edges of their bars are checked,
+and only at their defaults (as the original).
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -49,8 +52,19 @@ CHECKS = 1 + 26 + 1 + 2 + len(VARIANTS) + 3   # the track, the rules, the stack,
 
 W, H, FPS = 320, 180, 30
 SEG = 8          # frames per segment of the letterbox timeline
-BARS = [2, 20, 34, 284, 298, 316]   # x of 2x2 samples in the bars (the picture is x 40..279)
+BARS = [2, 20, 34, 284, 298, 316]   # x of 2x2 samples in the bars, rows 80..81 (the picture is x 40..279)
 FAR = [2, 316]
+NEAR = [38, 39, 280, 281, 282]      # the bars' columns right beside the picture (a blurred alpha leaks there)
+EDGE = [40, 279]                    # the picture's own edge columns
+BAND = (10, 160)                    # rows y 10..169: a column is measured as its mean over them (rows 80..81 are 70, 71)
+# How far a column beside or at the picture's edge may read from the control's (the share of the track below). On
+# v0.2.0's and this tree's exports with FFmpeg 9.0.2-17 and 4.4, every variant the column is checked for reads within
+# 0.021 of the control at the edge columns and within 0.008 beside them; the control reads 1.004 beside the picture
+# and 0.007 or less at its edge. An edge softened by a pixel (the outermost column 20 % see-through, a fringe 20 %
+# opaque one pixel out and 5 % two out), put into those exports and encoded again as yuv420p, reads 0.078 to 0.106 at
+# the edge columns and 0.864 to 0.903 beside them (the chroma, shared by two columns, halves the shift).
+EDGE_TOL = 0.045
+PICTURE_TOL = 0.015  # the picture's middle: every variant and the control read within 0.004 of 0 there
 
 
 def clear(d):
@@ -207,17 +221,17 @@ def variant_args(e, end):
     return out
 
 
-def row(out, ts):
-    """Row y 80..81 of the export at ts as rgb24 bytes (2 rows of W pixels)."""
-    raw = observe.pixels(out, ts, f"crop={W}:2:0:80")
-    if len(raw) < W * 2 * 3:
-        raise observe.Unmeasurable(f"a short row at {ts}s")
+def band(out, ts):
+    """Rows BAND of the export at ts as rgb24 bytes (BAND[1] rows of W pixels)."""
+    raw = observe.pixels(out, ts, f"crop={W}:{BAND[1]}:0:{BAND[0]}")
+    if len(raw) < W * BAND[1] * 3:
+        raise observe.Unmeasurable(f"a short frame at {ts}s")
     return raw
 
 
-def mean_at(raw, xs):
-    """The mean (r, g, b) of the pixels at columns `xs` of both rows."""
-    px = [raw[(y * W + x) * 3:(y * W + x) * 3 + 3] for y in (0, 1) for x in xs]
+def mean_at(raw, xs, rows=(80 - BAND[0], 81 - BAND[0])):
+    """The mean (r, g, b) of the pixels at columns `xs` of `rows` of the band (y 80 and 81 unless said)."""
+    px = [raw[(y * W + x) * 3:(y * W + x) * 3 + 3] for y in rows for x in xs]
     return [sum(p[k] for p in px) / len(px) for k in range(3)]
 
 
@@ -275,21 +289,28 @@ def letterbox(t, d, upper):
             all(dec is not None and dec["clean"] and abs(dec["video_frames"] - n * SEG) <= 1 for n, _, dec in decoded),
             [(st, dec and {k: dec[k] for k in ("exit", "video_frames", "clean", "stderr")}) for _, st, dec in decoded])
 
-    def measure(i, xs):
-        """({x: how much of the base shows in the bar at x}, how much shows in the picture's middle)."""
+    rows = range(BAND[1])
+
+    def measure(i, xs, cols):
+        """({x: how much of the base shows in the bar's 2x2 sample at x}, {x: how much shows in the column x (its mean
+        over BAND)}, how much shows in the picture's middle)."""
         outs, ts = where[i]
         if None in outs:
             raise observe.Unmeasurable("no export of its group")
-        a, b = row(outs[0], ts), row(outs[1], ts)
+        a, b = band(outs[0], ts), band(outs[1], ts)
         bars_ = {x: round(shows_base(mean_at(a, [x, x + 1]), mean_at(b, [x, x + 1])), 3) for x in xs}
-        return bars_, round(shows_base(mean_at(a, PICTURE), mean_at(b, PICTURE)), 3)
+        cols_ = {x: round(shows_base(mean_at(a, [x], rows), mean_at(b, [x], rows)), 3) for x in cols}
+        return bars_, cols_, round(shows_base(mean_at(a, PICTURE, rows), mean_at(b, PICTURE, rows)), 3)
     try:
-        cb, cp = measure(0, BARS)
-        ctrl_ok, why = all(v >= 0.9 for v in cb.values()) and abs(cp) <= 0.05, f"bars {cb}; picture {cp}"
+        cb, cc, cp = measure(0, BARS, NEAR + EDGE)
+        ctrl_ok = (all(v >= 0.9 for v in cb.values()) and all(cc[x] >= 0.9 for x in NEAR)
+                   and all(cc[x] <= EDGE_TOL for x in EDGE) and abs(cp) <= PICTURE_TOL)
+        why = f"bars {cb}; beside the picture {[cc[x] for x in NEAR]}; its edge {[cc[x] for x in EDGE]}; picture {cp}"
     except observe.Unmeasurable as ex:
         ctrl_ok, why = False, f"unmeasurable: {ex}"
-    t.check("control: without an effect the track below shows fully in the bars (90 % or more of the difference of the "
-            "two colours under it) and not in the picture (5 % or less)", ctrl_ok, why)
+    t.check(f"control: without an effect the track below shows fully in the bars and the columns beside the picture "
+            f"(90 % or more of the difference of the two colours under it) and not in the picture's edge columns "
+            f"({EDGE_TOL:g} or less) or its middle ({PICTURE_TOL:g} or less)", ctrl_ok, why)
     for i, (e, end) in enumerate(segs[1:], 1):
         key = EFFECTS[e].get("key")
         label = (f"{e} ({'at its defaults' if end == 'defaults' else 'every value at the ' + end + ' end'}) keeps the "
@@ -297,14 +318,26 @@ def letterbox(t, d, upper):
         if not ctrl_ok or placed[i]:
             t.check(label, False, placed[i] or "the control failed")
             continue
+        spatial = e in SPATIAL
+        cols = [] if spatial else NEAR + ([] if key else EDGE)
         try:
-            got, pic = measure(i, FAR if e in SPATIAL else BARS)
+            got, col, pic = measure(i, FAR if spatial else BARS, cols)
         except observe.Unmeasurable as ex:
             t.check(label, False, f"unmeasurable: {ex}")
             continue
-        t.check(label, all(v >= 0.9 for v in got.values()) and (key or abs(pic) <= 0.05),
-                f"the track below shows {got} in the bars (want >= 0.9)"
-                + ("" if key else f", {pic} in the picture (want <= 0.05)"))
+        near = {x: col[x] for x in NEAR if x in col}
+        edge = {x: col[x] for x in EDGE if x in col}
+        ok = (all(v >= 0.9 for v in got.values())
+              and all(v >= 0.9 and v >= cc[x] - EDGE_TOL for x, v in near.items())
+              and all(v <= cc[x] + EDGE_TOL for x, v in edge.items())
+              and (key or abs(pic) <= PICTURE_TOL))
+        low = {x: v for x, v in got.items() if v < 0.9}
+        pairs = (lambda cols: ", ".join(f"{x}: {v:g}/{cc[x]:g}" for x, v in cols.items()))
+        t.check(label, ok, f"the track below shows: bars {low or f'min {min(got.values()):g}'} (want >= 0.9)"
+                + (f"; beside the picture {pairs(near)} (this/control; want >= 0.9 and >= control - {EDGE_TOL:g})"
+                   if near else "")
+                + (f"; edge columns {pairs(edge)} (want <= control + {EDGE_TOL:g})" if edge else "")
+                + ("" if key else f"; middle {pic:g} (want within {PICTURE_TOL:g} of 0)"))
 
 
 # ---------------------------------------------------------------- section 6: the vignette's amount

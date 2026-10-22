@@ -3,7 +3,7 @@
 
     python3 -I judge/run.py [--adapter "<command>"] [--build <dir>] [--only <text>] [--timeout <s>] [--jobs <n>]
                             [--scratch <dir>] [--keep] [--list] [--strict] [--require-trace] [--allow-unprotected]
-                            [--as-user <name>] [--graphics-addon <dir>]
+                            [--as-user <name>] [--graphics-addon <dir>] [--release zedmix|v0.2.0]
     python3 -I judge/run.py --self-test [--require-trace] [--as-user <name>]
 
 --adapter   the adapter command (default: this judge's v0.2.0 adapter, run with this Python). A word that names an
@@ -33,6 +33,11 @@
             Chrome headless shell in Remotion's browser cache below it (GRAPHICS_ADDON_BROWSER). A test that needs it
             records its checks on the add-on as not applicable without it (--strict fails them). Under --as-user that
             user must be able to read it and change none of it (the folder, its node_modules and the shell's folder)
+--release   the release the build under test is graded as (default zedmix): zedmix (this product line's current
+            release, and a rewrite of it) or v0.2.0 (the v0.2.0 release, ZabsReel). The judge holds what each release
+            is (its names: tests/test_cli_migrate.py's GENERATIONS), and the tests that depend on it grade the build
+            against the release given here, never against what the build or the adapter says it is. judge.yml passes
+            --release zedmix (the lock covers that line); a run on the v0.2.0 release passes --release v0.2.0
 --self-test the runner's own tests (judge/selftest.py): each way a test can fail must fail the run
 
 Statuses: a check passes or fails, or is recorded as NOT APPLICABLE (the hostile input it needs could not be made from
@@ -612,6 +617,9 @@ REQUIRE_TRACE = False  # --require-trace (the runner's flag; the runner passes i
 # adapter, so no process of the adapter's tree holds the channel.
 TRACEE = ["/bin/sh", "-c", 'exec 2>>"$0"; exec "$@"']
 
+# The releases a build can be graded as (--release, T.release): the current product line's (the default) and v0.2.0's.
+RELEASES = ("zedmix", "v0.2.0")
+
 # The graphics add-on the judge gives the editor (--graphics-addon; PROTOCOL.md, "Motion graphics"): the folder's
 # node_modules holds Remotion's packages, and the Chrome headless shell is in Remotion's own browser cache below it.
 GRAPHICS_ADDON_BROWSER = ("node_modules", ".remotion", "chrome-headless-shell", "linux64",
@@ -955,8 +963,10 @@ class TraceTail:
 class T:
     """What a test's run(t) gets: its scratch folder, the media, checks, and the editor (t.driver())."""
 
-    def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None, addon=None):
+    def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None, addon=None, release=RELEASES[0]):
         self.name, self.scratch, self.media_dir, self.build, self.adapter = name, scratch, media, build, adapter
+        # The release the build is graded as (--release): one of RELEASES, the runner's input, never the adapter's.
+        self.release = release
         import observe
         observe.confine(scratch, media)  # what the measurements may read: the test's folder and the media
         # The graphics add-on the judge gives the editor when a test asks for it (driver(graphics_addon=True)):
@@ -1191,7 +1201,7 @@ def child(a, unprotected):
     mod = importlib.util.module_from_spec(spec)
     addon = graphics_addon(a.graphics_addon)[0] if a.graphics_addon else None  # the runner checked it
     t = T(os.path.basename(a.child)[:-3], a.scratch, a.media, a.build, json.loads(a.adapter_json), out, a.trace_copy,
-          addon)
+          addon, a.release)
     try:
         spec.loader.exec_module(mod)
         t._emit({"declare": _declared(mod)})
@@ -1372,7 +1382,8 @@ def run_test(meta, a, base, media, adapter):
                                  + (["--allow-unprotected"] if a.allow_unprotected else [])
                                  + (["--require-trace"] if a.require_trace else [])
                                  + (["--as-user", AS_USER.name] if AS_USER else [])
-                                 + (["--graphics-addon", a.graphics_addon] if a.graphics_addon else []),
+                                 + (["--graphics-addon", a.graphics_addon] if a.graphics_addon else [])
+                                 + ["--release", a.release],
                                  stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=scratch, env=env, pass_fds=(w,))
         finally:
@@ -1483,6 +1494,9 @@ def main():
                     help="the graphics add-on to give the editor (Remotion and its headless shell, as "
                          "judge/fixtures/graphics-addon/install.sh makes it); without it the checks that need the "
                          "add-on are not applicable")
+    ap.add_argument("--release", choices=RELEASES, default=RELEASES[0],
+                    help="the release the build is graded as: zedmix (the default; judge.yml passes it) or v0.2.0 "
+                         "(the v0.2.0 release, ZabsReel)")
     ap.add_argument("--tests", default=os.path.join(JUDGE, "tests"), help=argparse.SUPPRESS)
     # child mode (one test, started by the runner)
     ap.add_argument("--child", help=argparse.SUPPRESS)
@@ -1577,7 +1591,7 @@ def main():
     else:
         print("judge: note: the adapter and the editor run as this user (a local run). CI runs them as another user "
               "(--as-user zjudge), which closes the same-user gaps listed in judge/README.md, \"Threat model\"")
-    print(f"judge: build {a.build}")
+    print(f"judge: build {a.build}, graded as the {a.release} release (--release)")
     print(f"judge: graphics add-on {addon['root']} (headless shell {addon['browser']})" if addon
           else f"judge: graphics add-on: none, so the checks on it are not applicable: {NO_GRAPHICS_ADDON}")
     print(f"judge: measurements with {observe.ffmpeg_version()} ({observe.FFMPEG})")

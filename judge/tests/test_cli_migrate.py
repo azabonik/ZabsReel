@@ -6,10 +6,11 @@ The product line has had three names; each release's installer migrates the one 
 
     SynthCut  ->  ZabsReel (the v0.2.0 release)  ->  ZedMix
 
-The test finds out which release it grades from what the installer itself installs: `add --client claude` in a fresh
-project writes the current skill's folder (zedmix-editor, zabsreel-editor). That release's names and the previous
-one's are the judge's own (GENERATIONS), so an adapter cannot pick what the installer is graded against: ZedMix must
-migrate ZabsReel's configuration, and v0.2.0 (ZabsReel) SynthCut's.
+The release the test grades is the runner's input, `run.py --release` (t.release: zedmix, the default and what
+judge.yml passes, or v0.2.0), never what the build installs: a build graded as ZedMix must install ZedMix's skill and
+migrate ZabsReel's configuration, and the v0.2.0 release (ZabsReel) SynthCut's. Each release's names are the judge's
+own (GENERATIONS), so neither the adapter nor the build can pick what the installer is graded against; the first
+checks fail when `add` installs another release's skill (a rewrite that still installs ZabsReel's names fails them).
 
 Each scene is a **world**: a folder with a home folder, an AppData folder, project folders and fake checkouts and
 packaged apps of the product (old and current names), of a look-alike with the same layout but another package name,
@@ -55,6 +56,7 @@ GENERATIONS = [
     {"product": "ZedMix", "key": "zedmix", "skill": "zedmix-editor", "id": "zedmix",
      "desktop": "zedmix-desktop", "data": ".zedmix"},
 ]
+RELEASE = {"v0.2.0": GENERATIONS[1], "zedmix": GENERATIONS[2]}   # run.py --release -> the names it is graded on
 MCP_PACKAGE = "@aive/mcp"   # packages/mcp's package name in a checkout and node_modules/@aive/mcp in a packaged app
 OTHER_PROGRAM = {"command": "npx", "args": ["-y", "some-other-mcp-server"]}
 
@@ -197,21 +199,36 @@ def same(t, label, a, b):
     return t.check(label, not diff, f"changed: {diff[:8]}" if diff else "nothing changed")
 
 
-def named(out, path, home, cwd=None):
-    """Whether the installer's output names `path`: as is, with the home folder written as ~, or relative to the folder
-    it ran in (`cwd`, its project folder unless said)."""
+PATH_CHARS = frozenset("~./\\-_@" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+
+def named(out, path, home, cwd=None, folder=False):
+    """Whether the installer's output names `path` itself: as is, with the home folder written as ~, or relative to the
+    folder it ran in (`cwd`, its project folder unless said), as a whole path: the characters around it are not part of
+    a path (so `.cursor/mcp.json` inside `~/.cursor/mcp.json` does not name the project's .cursor/mcp.json, and a
+    folder inside a longer path is not that folder). A path may end a sentence (a full stop after it); a folder
+    (`folder`) may also be written with a separator at its end."""
     cwd = cwd or os.path.join(os.path.dirname(home), "proj")
     forms = [path] + (["~" + path[len(home):]] if path.startswith(home + os.sep) else []) + (
         [os.path.relpath(path, cwd)] if path.startswith(cwd + os.sep) else [])
-    return any(f in out for f in forms)
+    ends = (".", os.sep) if folder else (".",)
+    for f in forms:
+        at = out.find(f)
+        while at >= 0:
+            end = at + len(f)
+            before, after, then = out[at - 1:at], out[end:end + 1], out[end + 1:end + 2]
+            if before not in PATH_CHARS and (after not in PATH_CHARS or after in ends and then not in PATH_CHARS):
+                return True
+            at = out.find(f, at + 1)
+    return False
 
 
 # ---------------------------------------------------------------- the test
 def run(t):
     d = t.driver()
-    cur, prev, cur_section = identity(t, d)
-    if cur is None:  # the installer installs no skill this judge knows: every scene is graded against ZedMix
-        cur, prev = GENERATIONS[2], GENERATIONS[1]
+    cur = RELEASE[t.release]
+    prev = GENERATIONS[GENERATIONS.index(cur) - 1]
+    cur_section = identity(t, d, cur)
     rename(t, d, cur, prev, cur_section)
     entry(t, d, cur, prev)
     rules(t, d, cur, prev)
@@ -220,9 +237,9 @@ def run(t):
     prompts(t, d, cur, prev)
 
 
-def identity(t, d):
-    """The release under test, from what `add` installs in a fresh project. -> (current, previous, the marked section
-    `add --client agents` writes into a new AGENTS.md)."""
+def identity(t, d, cur):
+    """`add` installs the skill of the release under test (run.py --release: `cur`) in a fresh project. -> the marked
+    section `add --client agents` writes into a new AGENTS.md (A3 expects it in place of the old one)."""
     w = World(t, d, "w-identity")
     w.make()
     r1 = w.cli(["add", "--client", "claude", "--scope", "project", "--dir", w.proj])
@@ -230,18 +247,16 @@ def identity(t, d):
     snap, data = w.snapshot()
     skills = sorted({k.split(os.sep)[3] for k in snap if k.startswith(os.path.join("proj", ".claude", "skills", ""))
                      and len(k.split(os.sep)) > 4})
-    cur = next((g for g in GENERATIONS[1:] if skills == [g["skill"]]), None)
-    md = data.get(os.path.join("proj", ".claude", "skills", cur["skill"], "SKILL.md"), b"") if cur else b""
-    ok = cur is not None and f"\nname: {cur['skill']}\n".encode() in b"\n" + md and r1["exit"] == 0
-    t.check("add --client claude installs the skill of a release this judge knows (ZedMix, or ZabsReel for v0.2.0)",
-            ok, f"exit {r1['exit']}; skill folders {skills}; graded as {cur['product'] if cur else '?'}")
+    md = data.get(os.path.join("proj", ".claude", "skills", cur["skill"], "SKILL.md"), b"")
+    ok = skills == [cur["skill"]] and f"\nname: {cur['skill']}\n".encode() in b"\n" + md and r1["exit"] == 0
+    t.check(f"add --client claude installs the skill of the release under test, {cur['product']} ({cur['skill']}; "
+            f"run.py --release {t.release})", ok, f"exit {r1['exit']}; skill folders {skills}")
     section = data.get(os.path.join("proj", "AGENTS.md"), b"").decode("utf-8", "replace")
-    marks = (f"<!-- {cur['id']}:{cur['skill']}:start -->", f"<!-- {cur['id']}:{cur['skill']}:end -->") if cur else ()
-    t.check("add --client agents writes the current skill into a new AGENTS.md as one marked section",
-            cur is not None and r2["exit"] == 0 and section.startswith(marks[0]) and section.rstrip().endswith(marks[1]),
+    marks = (f"<!-- {cur['id']}:{cur['skill']}:start -->", f"<!-- {cur['id']}:{cur['skill']}:end -->")
+    t.check(f"add --client agents writes {cur['product']}'s skill into a new AGENTS.md as one marked section",
+            r2["exit"] == 0 and section.startswith(marks[0]) and section.rstrip().endswith(marks[1]),
             f"exit {r2['exit']}; {section[:120]!r} ... {section[-80:]!r}")
-    prev = GENERATIONS[GENERATIONS.index(cur) - 1] if cur else None
-    return cur, prev, section
+    return section
 
 
 def skill_md(g):
@@ -361,17 +376,19 @@ def rename(t, d, cur, prev, cur_section):
     t.check("A1 --dry-run exits 0", dry["exit"] == 0, f"exit {dry['exit']}")
     same(t, "A1 --dry-run changes no file", before, w.snapshot(skip=[data])[0])
     t.check("A1 --dry-run makes no backup folder", w.kind(os.path.join(data, "backups")) is None, "")
+    # Each file is named itself (as a whole path: named); a skill is a folder, so its SKILL.md may be named by its folder.
+    def says(k):
+        return named(dry["output"], f[k], w.home) or k in ("skillHome", "skillProj") and named(
+            dry["output"], os.path.dirname(f[k]), w.home, folder=True)
     will = ["desktopLinux", "projMcp", "claudeJson", "codex", "skillHome", "cursorRule", "windsurfRule", "agentsProj",
             "geminiHome"]
-    missed = [k for k in will if not named(dry["output"], f[k], w.home)
-              and not named(dry["output"], os.path.dirname(f[k]), w.home)]
+    missed = [k for k in will if not says(k)]
     if not (named(dry["output"], f["cursor"], w.home) or named(dry["output"], f["cursorTarget"], w.home)):
         missed.append("cursor")
     t.check("A1 --dry-run names every file it would change", not missed, f"not named: {missed}")
     alone = ["desktopWin", "gemini", "cline", "vscodeUser", "desktopMac", "vscodeProj", "windsurf", "cursorProj",
              "skillProj"]
-    missed = [k for k in alone if not named(dry["output"], f[k], w.home)
-              and not named(dry["output"], os.path.dirname(f[k]), w.home)]
+    missed = [k for k in alone if not says(k)]
     t.check(f"A1 --dry-run names every config with an entry of {OLD} that it leaves alone", not missed,
             f"not named: {missed}")
     # A2. without --yes and without a terminal: nothing changes.
@@ -386,8 +403,10 @@ def rename(t, d, cur, prev, cur_section):
                "theme": "dark"}) + "\n"
     t.check(f"A3 rule 3: {OLD} is renamed {NEW} in place, every field and the key order kept", got("desktopLinux") == want,
             (got("desktopLinux") or "missing")[:300])
-    t.check("A3 the rewritten file keeps its mode 0640", got("desktopLinux") == want
-            and (after.get(w.rel(f["desktopLinux"])) or (0, 0, 0))[-1] == 0o640, after.get(w.rel(f["desktopLinux"])))
+    entry_ = after.get(w.rel(f["desktopLinux"]))
+    t.check("A3 the rewritten file keeps its mode 0640 (whatever its content)",
+            entry_ is not None and entry_[0] == "file" and entry_[-1] == 0o640,
+            f"{entry_[0]}, mode {oct(entry_[-1])}" if entry_ and entry_[0] == "file" else entry_)
     keep = ["desktopWin", "desktopMac", "gemini", "cline", "vscodeUser", "vscodeProj", "windsurf", "cursorProj"]
     diff = [k for k in keep if after.get(w.rel(f[k])) != before.get(w.rel(f[k]))]
     t.check("A3 rules 2, 4 and 6 and a JSON file with comments: those configs are left byte for byte", not diff,
@@ -473,6 +492,10 @@ def rename(t, d, cur, prev, cur_section):
     same(t, "A5 --restore --dry-run changes no file", after, w.snapshot()[0])
     w.cli(["migrate", "--restore", stamp])
     same(t, "A5 --restore without --yes and without a terminal changes no file", after, w.snapshot()[0])
+    # A6, before A5's restore: every config still holds what the migrate wrote, and the backup the bytes from before it,
+    # so restoring any good entry of a refused backup would change a file.
+    crafted_restores(t, w, stamp, inside, f["desktopLinux"], before_data.get(w.rel(f["desktopLinux"])),
+                     {k: before[k][1] for k in gone_or_changed})
     rr = w.cli(["migrate", "--restore", stamp, "--yes"])
     t.check("A5 --restore --yes exits 0", rr["exit"] == 0, f"exit {rr['exit']}: {rr['output'][-300:]}")
     restored, _ = w.snapshot(skip=[data])
@@ -489,8 +512,6 @@ def rename(t, d, cur, prev, cur_section):
     t.check("A5 before the restore, the files it put back were backed up (their migrated bytes, in a new backup folder)",
             len(new_stamps) == 1 and bool(put_back) and all(after[k][1] in held2 for k in put_back),
             f"new backup folders {new_stamps}; {len(put_back)} files put back")
-    # A6. --restore refuses a backup that points outside its folder (crafted from the installer's own backup folder).
-    crafted_restores(t, w, stamp, inside, f["desktopLinux"], before_data.get(w.rel(f["desktopLinux"])))
     # A7. a rule file at the old skill's path that is the user's own is left alone.
     r7 = w.cli(["migrate", "--yes"], cwd=w.p("proj2"))
     t.check("A7 a rule file at the old skill's path that is not the skill is kept, unchanged",
@@ -511,21 +532,29 @@ def toml_parses(t, label, text, test):
     t.check(label, ok, detail)
 
 
-def crafted_restores(t, w, stamp, inside, target, target_before):
+def crafted_restores(t, w, stamp, inside, target, target_before, originals):
     """Copies of the installer's backup folder, made by the test in its own folder, in which one backup is replaced:
     by an absolute path outside the copy, by a ../ path out of it, and by a link to a file outside it. --restore of
-    each must be refused and restore nothing (not even the good entries). The copy needs the backup files' paths as
-    the installer wrote them (observe.craft's rule): another format makes the first two not applicable."""
+    each must be refused and restore nothing (not even the good entries): no file in the world may change. It runs
+    while the files the backup holds differ from what is there now (`originals`: {relative path: sha256 of its bytes
+    before the migrate}, for every file the migrate changed or removed), so a restore of only the good entries changes
+    a file; the check fails when no good entry holds bytes that differ from its file now (it could not see that). The
+    copy needs the backup files' paths as the installer wrote them (observe.craft's rule): another format makes the
+    first two not applicable."""
     files = {k: v for k, v in inside.items() if v[0] == "file"}
     got = w.t.look(read=[w.p(k) for k in files])["read"]
     # The backup of the config the scene picks: the file holding its old bytes.
     pick = next((k for k in files if target_before is not None and files[k][1] == sha(target_before)), None)
+    good = {v[1] for k, v in files.items() if k != pick}
     outside = w.t.path("crafted", "outside.json")
     with open(outside, "w", encoding="utf-8") as fo:
         fo.write('{"evil": true}\n')
     labels = (("an absolute path outside", "abs"), ("a ../ path out of the folder", "dotdot"),
               ("a link inside that points outside", "link"))
     before = w.snapshot()[0]
+    tgt = w.rel(target)
+    visible = sorted(k for k, old in originals.items() if k != tgt and old in good and (before.get(k) or ("?", None))[
+        1] != old)
     for label, kind in labels:
         folder = w.t.path("crafted", kind, "x")
         folder = os.path.dirname(folder)
@@ -558,8 +587,9 @@ def crafted_restores(t, w, stamp, inside, target, target_before):
         diff = changed(before, snap)
         evil = w.text(target)
         t.check(f"A6 --restore of a backup with {label} is refused and restores nothing (not even the good entries)",
-                r["exit"] not in (0, None) and not diff and evil is not None and "evil" not in evil,
-                f"exit {r['exit']}; changed {diff[:5]}", needs=crafted)
+                r["exit"] not in (0, None) and not diff and evil is not None and "evil" not in evil and bool(visible),
+                f"exit {r['exit']}; changed {diff[:5]}; {len(visible)} good entries hold other bytes than their file "
+                f"now (want 1 or more: a restore of them would show), e.g. {visible[:3]}", needs=crafted)
 
 
 # ---------------------------------------------------------------- B: packaged apps and --entry
