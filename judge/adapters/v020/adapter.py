@@ -1243,7 +1243,8 @@ class Adapter:
     def op_cli_world(self, a):
         """Makes the folder `root` (new, inside the scratch folder) and the files, folders and links `files` names,
         as this process's own: the installer then runs on files of the editor's user, as a user's own configuration
-        is theirs."""
+        is theirs. An entry below a link entry is bad_request (it would be made through the link), and nothing is
+        made in a folder whose real path is not inside `root`."""
         root = self._inside(arg_str(a, "root"), "root")
         files = a.get("files")
         if not isinstance(files, dict):
@@ -1263,9 +1264,22 @@ class Adapter:
             if "text" in e and not isinstance(e["text"], str) or "link" in e and not isinstance(e["link"], str):
                 raise bad(f"{rel}: 'text' and 'link' are strings")
             plan.append((os.path.join(root, *parts), e))
+        links = {rel for rel, e in files.items() if "link" in e}
+        for rel in files:
+            parts = rel.split("/")
+            under = next((q for q in ("/".join(parts[:i]) for i in range(1, len(parts))) if q in links), None)
+            if under is not None:
+                raise bad(f"{rel}: an entry below the link {under}")
+
+        def inside_root(folder):
+            real = os.path.realpath(folder)
+            if real != root and not real.startswith(root + os.sep):
+                raise bad(f"{folder} is not inside {root}")
         os.mkdir(root, 0o755)
         for p, e in sorted(plan, key=lambda x: x[0]):  # folders, files and links, parents first
+            inside_root(os.path.dirname(p))
             os.makedirs(os.path.dirname(p), exist_ok=True)
+            inside_root(os.path.dirname(p))
             if e.get("dir"):
                 os.makedirs(p, exist_ok=True)
             elif "link" in e:
@@ -1632,6 +1646,13 @@ def self_test():
                [op(cli_adapter(), "cli_world", x)["error"]["code"] for x in (
                    {"root": os.path.join(tmp, "out"), "files": {}}, {"root": w, "files": {}},
                    {"root": os.path.join(scratch, "w2"), "files": {"../x": {"text": ""}}})], ["bad_request"] * 3)
+        outside = os.path.join(tmp, "outside")
+        os.makedirs(outside)
+        r = op(cli_adapter(), "cli_world", {"root": os.path.join(scratch, "w3"), "files": {
+            "a": {"link": outside}, "a/b": {"text": ""}}})
+        expect("cli_world: an entry below a link entry is bad_request and nothing is made outside the world",
+               ((r.get("error") or {}).get("code"), os.listdir(outside), os.path.lexists(os.path.join(scratch, "w3"))),
+               ("bad_request", [], False))
         home = os.path.join(w, "home")
         r = op(cli_adapter(), "cli", {"args": ["migrate", "--yes"], "cwd": w, "home": home,
                                       "path": [os.path.join(w, "bin")]})

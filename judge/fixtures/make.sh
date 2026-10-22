@@ -18,6 +18,7 @@
 #   fx-gray128.mp4   0x808080 320x180                fx-gray128p.mp4  0x808080 180x320 (portrait)
 #   fx-pair.mp4      0x806060 | 0xC04040, each 160x180
 #   fx-redblue.mp4   0xE02020 | 0x2020E0             fx-blue.mp4      0x2060C0 320x180
+#   fx-holdgb.mp4    0xE09020 | 0xE02090 (the same colour with green and blue swapped), each 160x180
 #   fx-box.mp4       a white 60x50 box at (130, 65) on black 320x180
 #   fx-gridline.mp4  a white line at y 30..33 on black 320x180
 #   fx-mover.mp4     a white 40x40 box at y 70, x = 20 + 100 t, on black 320x180
@@ -67,6 +68,7 @@ still fx-gray128.mp4 "color=c=0x808080:s=320x180:r=30"
 still fx-gray128p.mp4 "color=c=0x808080:s=180x320:r=30"
 still fx-pair.mp4 "color=c=0x806060:s=160x180:r=30[l];color=c=0xC04040:s=160x180:r=30[r];[l][r]hstack"
 still fx-redblue.mp4 "color=c=0xE02020:s=160x180:r=30[l];color=c=0x2020E0:s=160x180:r=30[r];[l][r]hstack"
+still fx-holdgb.mp4 "color=c=0xE09020:s=160x180:r=30[l];color=c=0xE02090:s=160x180:r=30[r];[l][r]hstack"
 still fx-blue.mp4 "color=c=0x2060C0:s=320x180:r=30"
 still fx-box.mp4 "color=c=black:s=320x180:r=30,drawbox=x=130:y=65:w=60:h=50:color=white:t=fill"
 still fx-gridline.mp4 "color=c=black:s=320x180:r=30,drawbox=x=0:y=30:w=320:h=4:color=white:t=fill"
@@ -90,7 +92,7 @@ done
 expect m.mp3 a:0 codec_name,sample_rate,channels,bit_rate mp3,44100,1,64000
 expect gap.m4a a:0 codec_name,profile,sample_rate,channels aac,LC,44100,1
 expect tiny.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,32,32,yuv420p,10/1,10
-for f in fx-white fx-gray64 fx-gray128 fx-pair fx-redblue fx-blue fx-box fx-gridline fx-mover; do
+for f in fx-white fx-gray64 fx-gray128 fx-pair fx-redblue fx-holdgb fx-blue fx-box fx-gridline fx-mover; do
   expect "$f.mp4" v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,60
 done
 for f in fx-base fx-base2; do

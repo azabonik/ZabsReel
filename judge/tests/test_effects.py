@@ -64,8 +64,11 @@ BAND = (10, 160)                    # rows y 10..169: a column is measured as it
 # opaque one pixel out and 5 % two out), put into those exports and encoded again as yuv420p, reads 0.078 to 0.107 at
 # the edge columns and 0.864 to 0.904 beside them with either FFmpeg (the chroma, shared by two columns, halves the
 # shift).
+# The margins, from those measurements: at the edge columns 0.024 above the worst variant (0.021 off the control) and
+# 0.026 below the softened edge (at least 0.071 off it: 0.078 against the control's 0.007 or less); beside the picture
+# 0.037 above the worst variant (0.008) and 0.055 below the softened edge (0.904 against 1.004).
 EDGE_TOL = 0.045
-PICTURE_TOL = 0.015  # the picture's middle: every variant and the control read within 0.004 of 0 there
+PICTURE_TOL = 0.015  # the picture's middle: every variant and the control read within 0.004 of 0 there (margin 0.011)
 
 
 def clear(d):

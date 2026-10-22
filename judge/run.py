@@ -34,7 +34,7 @@
             records its checks on the add-on as not applicable without it (--strict fails them). Under --as-user that
             user must be able to read it and change none of it (the folder, its node_modules and the shell's folder)
 --release   the release the build under test is graded as (default zedmix): zedmix (this product line's current
-            release, and a rewrite of it) or v0.2.0 (the v0.2.0 release, ZabsReel). The judge holds what each release
+            release, and a rewrite of it) or v0.2.0 (the v0.2.0 release). The judge holds what each release
             is (its names: tests/test_cli_migrate.py's GENERATIONS), and the tests that depend on it grade the build
             against the release given here, never against what the build or the adapter says it is. judge.yml passes
             --release zedmix (the lock covers that line); a run on the v0.2.0 release passes --release v0.2.0
@@ -1496,7 +1496,7 @@ def main():
                          "add-on are not applicable")
     ap.add_argument("--release", choices=RELEASES, default=RELEASES[0],
                     help="the release the build is graded as: zedmix (the default; judge.yml passes it) or v0.2.0 "
-                         "(the v0.2.0 release, ZabsReel)")
+                         "(the v0.2.0 release)")
     ap.add_argument("--tests", default=os.path.join(JUDGE, "tests"), help=argparse.SUPPRESS)
     # child mode (one test, started by the runner)
     ap.add_argument("--child", help=argparse.SUPPRESS)

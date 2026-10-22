@@ -169,6 +169,35 @@
       ],
       "count": 1,
       "reason": "smoke-otio's copy of the judge's v0.2.0 OTIO manifest, kept byte for byte: made_with names the release that wrote the files (0.2.0's id)."
+    },
+    {
+      "id": "A17",
+      "file": "judge/fixtures/v020-otio/manifest.json",
+      "literal": [
+        "\"name\": \"zabsreel\""
+      ],
+      "patterns": [
+        "zabsreel"
+      ],
+      "count": 1,
+      "reason": "The judge's v0.2.0 OTIO manifest (A16 is smoke-otio's copy of it): made_with names the release that wrote the files (0.2.0's id)."
+    },
+    {
+      "id": "A18",
+      "file": "judge/tests/test_cli_migrate.py",
+      "literal": [
+        "ZabsReel (the v0.2.0 release)",
+        "\"zabsreel-desktop\"",
+        "\"zabsreel-editor\"",
+        "\".zabsreel\"",
+        "\"ZabsReel\"",
+        "\"zabsreel\""
+      ],
+      "patterns": [
+        "zabsreel"
+      ],
+      "count": 7,
+      "reason": "The installer test's GENERATIONS (the product line's three names, the v0.2.0 release's values the installer is graded on) and the docstring's line naming the releases in order: spec data."
     }
   ]
 }

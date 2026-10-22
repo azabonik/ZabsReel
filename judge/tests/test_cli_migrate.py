@@ -8,9 +8,9 @@ The product line has had three names; each release's installer migrates the one 
 
 The release the test grades is the runner's input, `run.py --release` (t.release: zedmix, the default and what
 judge.yml passes, or v0.2.0), never what the build installs: a build graded as ZedMix must install ZedMix's skill and
-migrate ZabsReel's configuration, and the v0.2.0 release (ZabsReel) SynthCut's. Each release's names are the judge's
+migrate the v0.2.0 release's configuration, and the v0.2.0 release SynthCut's. Each release's names are the judge's
 own (GENERATIONS), so neither the adapter nor the build can pick what the installer is graded against; the first
-checks fail when `add` installs another release's skill (a rewrite that still installs ZabsReel's names fails them).
+checks fail when `add` installs another release's skill (a rewrite that still installs the v0.2.0 release's names fails them).
 
 Each scene is a **world**: a folder with a home folder, an AppData folder, project folders and fake checkouts and
 packaged apps of the product (old and current names), of a look-alike with the same layout but another package name,
@@ -21,7 +21,9 @@ world, PATH only what the scene gives, stdin not a terminal unless the scene typ
 their bytes (sha256 against the text the scene expects), kinds, links, modes, what appeared and what went, and the
 exit code. What the installer prints is never checked for wording: the dry runs must only name the files they would
 change and the ones they leave alone. Files are read through t.look (inside the test's folder, no link followed at the
-path, and under --as-user as the editor's user for its private files).
+path, and under --as-user as the editor's user for its private files). The adapter runs under strace with the file
+calls traced (t.driver(trace=True)): after a migrate and a restore, the trace must show that every file the run changed
+was written by a process started from a program in the build (installer_wrote), and by no other process.
 
 Rules the scenes check, in the original's numbering: (1) only entries of the previous name are changed; (2) an entry
 is the product only when the files next to its program show it (the checkout's package names, the packaged app's
@@ -38,13 +40,14 @@ import base64
 import hashlib
 import json
 import os
+import re
 
 import driver as drv
 import observe
 
 PORT_BOUND = True
 TIMEOUT = 1200
-CHECKS = 95
+CHECKS = 99
 
 # The product's names, oldest first: the product name, the MCP server key, the skill, the identifier in package names
 # and marked sections, the packaged desktop app's package name, and the data folder in the home folder.
@@ -223,9 +226,102 @@ def named(out, path, home, cwd=None, folder=False):
     return False
 
 
+# ---------------------------------------------------------------- who wrote the files (the trace)
+# The calls that change a file system entry at a path (an open only with one of WRITE_FLAGS). Their path arguments are
+# quoted strings, a relative one after its folder's descriptor, which -yy decorates with the folder's path.
+WRITE_CALL = re.compile(r"^(\d+) +(rename|renameat2?|open|openat2?|creat|unlink|unlinkat|rmdir|mkdir|mkdirat|chmod|"
+                        r"fchmodat2?|truncate|link|linkat|symlink|symlinkat)\((.*)$")
+WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC")
+EXECVE = re.compile(r"^(\d+) +execve(?:at)?\((.*)$")
+RESUMED = re.compile(r"^(\d+) +<\.\.\. (execve|execveat) resumed>(.*)$")
+QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+PATH_ARG = re.compile(r'(?:(?:AT_FDCWD|\d+)<((?:[^<>\\]|\\.)*)>, )?"((?:[^"\\]|\\.)*)"')
+JUDGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def trace_mark(t):
+    """Where the trace is now (its line count), or None without a trace."""
+    return len(t.trace.lines()) if t.trace is not None else None
+
+
+def build_processes(lines, inside, outside):
+    """{pid: [(line index, started a build program)]}: each process's successful execve calls in `lines` (strace form,
+    "<pid> <call>"). A program is the build's when its file or one of its arguments (the script an interpreter runs) is
+    a path under one of `inside` and under none of `outside` (strace forms, each ending with /)."""
+    def builds(text):
+        return any(any(q.startswith(i) for i in inside) and not any(q.startswith(o) for o in outside)
+                   for q in QUOTED.findall(text))
+    out, pending = {}, {}
+    for i, ln in enumerate(lines):
+        m = EXECVE.match(ln)
+        if m:
+            pid, rest = m.group(1), m.group(2)
+            if rest.endswith("<unfinished ...>"):
+                pending[pid] = builds(rest)
+            elif re.search(r"\) += 0$", rest):
+                out.setdefault(pid, []).append((i, builds(rest)))
+            continue
+        m = RESUMED.match(ln)
+        if m and m.group(1) in pending:
+            ok = pending.pop(m.group(1))
+            if re.search(r"\) += 0$", m.group(3)):
+                out.setdefault(m.group(1), []).append((i, ok))
+    return out
+
+
+def write_paths(rest):
+    """The paths (strace form) a write call's arguments name: a relative one joined to its folder's decoration."""
+    rest = rest.split(" <unfinished ...>")[0]
+    out = []
+    for folder, q in PATH_ARG.findall(rest):
+        out.append(q if q.startswith("/") or not folder else folder.rstrip("/") + "/" + q)
+    return out
+
+
+def installer_wrote(t, w, step, mark, pre, post):
+    """Records whether the trace (from `mark` on) shows every file the step changed (the entries that differ between
+    the snapshots `pre` and `post`, files and links) written by a process whose program is the build's (its execve
+    names a path in the build, not in the judge's folder, the adapter's or the test's scratch folder), and no write of
+    them, or of a folder above them, by any other process: the adapter, a process it forked without starting a
+    program, or one running another program. A write is a call of WRITE_CALL naming the path or a folder above it.
+    Without strace: not observed."""
+    label = (f"{step} the trace shows every file the run changed written by a process started from a program in the "
+             f"build, and none written by the adapter or any other process")
+    if mark is None:
+        t.not_observed(label, t.trace_why or "no file-system trace")
+        return
+    lines = t.trace.lines()
+    form = (lambda p: observe.strace_form(p).rstrip("/") + "/")
+    inside = {form(t.build), form(os.path.realpath(t.build))}
+    outside = {form(p) for p in [JUDGE_DIR, t.scratch] + [os.path.dirname(x) for x in t.adapter
+                                                          if os.path.isabs(x) and os.path.isfile(x)]}
+    outside |= {form(os.path.realpath(p[:-1])) for p in list(outside)}
+    progs = build_processes(lines, inside, outside)
+    files = [k for k in changed(pre, post) if (pre.get(k) or post.get(k))[0] in ("file", "link")]
+    forms = {k: {observe.strace_form(w.p(k)), observe.strace_form(os.path.realpath(w.p(k)))} for k in files}
+    covered, foreign = set(), []
+    for i in range(mark, len(lines)):
+        m = WRITE_CALL.match(lines[i])
+        if not m or m.group(2).startswith("open") and not any(fl in m.group(3) for fl in WRITE_FLAGS):
+            continue
+        args = write_paths(m.group(3))
+        hit = [k for k in files if any(a == f or f.startswith(a + "/") for a in args for f in forms[k])]
+        if not hit:
+            continue
+        execs = [b for at, b in progs.get(m.group(1), []) if at < i]
+        if execs and execs[-1]:
+            covered.update(hit)
+        else:
+            foreign.append(f"pid {m.group(1)} {m.group(2)} {hit[0]}")
+    missing = [k for k in files if k not in covered]
+    t.check(label, bool(files) and not missing and not foreign,
+            f"{len(files)} files changed; not written by a build program in the trace: {missing[:4]}; written by "
+            f"another process: {foreign[:3]}")
+
+
 # ---------------------------------------------------------------- the test
 def run(t):
-    d = t.driver()
+    d = t.driver(trace=True)
     cur = RELEASE[t.release]
     prev = GENERATIONS[GENERATIONS.index(cur) - 1]
     cur_section = identity(t, d, cur)
@@ -292,11 +388,12 @@ def co_root(entry):
 
 # ---------------------------------------------------------------- A: the rename
 def rename(t, d, cur, prev, cur_section):
+    import sys
     OLD, NEW = prev["key"], cur["key"]
     w = World(t, d, "w-rename")
     p = programs(w, cur, prev)
     w.checkout("proj", prev["id"])  # the project folder is itself a checkout of the previous release
-    local, local_look = co_root(p["oldCo"]), co_root(p["lookCo"])
+    local = co_root(p["oldCo"])
     H, A, P = w.home, w.appdata, w.proj
     f = {"desktopLinux": f"{H}/.config/Claude/claude_desktop_config.json",
          "desktopWin": f"{A}/Claude/claude_desktop_config.json",
@@ -339,14 +436,18 @@ def rename(t, d, cur, prev, cur_section):
     # Rule 4 without --entry: an installed app of the previous release is left alone.
     w.file(f["cursorProj"], js({"mcpServers": {OLD: {"command": p["oldApp"][0], "args": [p["oldApp"][1]],
                                                      "env": {"ELECTRON_RUN_AS_NODE": "1"}}}}) + "\n")
-    # Claude Code: the user scope (absolute path), a local scope with a relative path into the product, and one with a
-    # relative path into the look-alike.
+    # Claude Code: the user scope (absolute path) and a local scope with a relative path into the product. Only entries
+    # that change, so the dry run has no reason to name the file but that it would change it (A1; the look-alike's
+    # local scope, left alone, is C8's).
     rel_entry = {"type": "stdio", "command": "node", "args": ["packages/mcp/dist/index.js"]}
     w.file(f["claudeJson"], js({"numStartups": 3,
                                 "mcpServers": {OLD: {"type": "stdio", "command": "node", "args": [p["oldCo"]], "env": {}}},
                                 "projects": {local: {"allowedTools": ["x"], "mcpServers": {"other": {"command": "o"},
-                                                                                           OLD: rel_entry}},
-                                             local_look: {"mcpServers": {OLD: rel_entry}}}}))
+                                                                                           OLD: rel_entry}}}}))
+    # A1: a claude CLI for one dry run (none is on PATH for the others).
+    claude_bin = w.dir("fake-claude")
+    claude_log = w.p("claude-calls.log")
+    w.file("fake-claude/claude", FAKE_CLAUDE.format(python=sys.executable, mode="ok", log=claude_log), 0o755)
     codex_before = "\n".join(['model = "o3"', "", f"[mcp_servers.{OLD}]", 'command = "node"',
                               f"args = [{json.dumps(p['oldCo'])}]", "", f"[mcp_servers.{OLD}.env]",
                               'AIVE_DATA_DIR = "/data/x"', 'FOO = "bar"', "", "# notes", "[mcp_servers.notes]",
@@ -380,12 +481,22 @@ def rename(t, d, cur, prev, cur_section):
     def says(k):
         return named(dry["output"], f[k], w.home) or k in ("skillHome", "skillProj") and named(
             dry["output"], os.path.dirname(f[k]), w.home, folder=True)
-    will = ["desktopLinux", "projMcp", "claudeJson", "codex", "skillHome", "cursorRule", "windsurfRule", "agentsProj",
-            "geminiHome"]
+    # ~/.claude.json is left out here: this run may also name it in a warning (v0.2.0: "Close Claude Code ..."), so
+    # it is checked on the run with a claude CLI on PATH below.
+    will = ["desktopLinux", "projMcp", "codex", "skillHome", "cursorRule", "windsurfRule", "agentsProj", "geminiHome"]
     missed = [k for k in will if not says(k)]
     if not (named(dry["output"], f["cursor"], w.home) or named(dry["output"], f["cursorTarget"], w.home)):
         missed.append("cursor")
     t.check("A1 --dry-run names every file it would change", not missed, f"not named: {missed}")
+    # With a claude CLI on PATH, ~/.claude.json is changed through it (D), and nothing in the file is left alone: the
+    # dry run has no reason to name the file but that it would change it.
+    dry_cli = w.cli(["migrate", "--dry-run"], path=[claude_bin])
+    t.check("A1 --dry-run with a claude CLI on PATH names ~/.claude.json, which it would change, calls no claude and "
+            "changes no file",
+            dry_cli["exit"] == 0 and named(dry_cli["output"], f["claudeJson"], w.home)
+            and w.kind(claude_log) is None and not changed(before, w.snapshot(skip=[data])[0]),
+            f"exit {dry_cli['exit']}; named: {named(dry_cli['output'], f['claudeJson'], w.home)}; "
+            f"claude called: {w.kind(claude_log) is not None}")
     alone = ["desktopWin", "gemini", "cline", "vscodeUser", "desktopMac", "vscodeProj", "windsurf", "cursorProj",
              "skillProj"]
     missed = [k for k in alone if not says(k)]
@@ -395,9 +506,12 @@ def rename(t, d, cur, prev, cur_section):
     w.cli(["migrate"])
     same(t, "A2 without --yes and without a terminal, no file changes", before, w.snapshot(skip=[data])[0])
     # A3. --yes
+    pre_yes = w.snapshot()[0]
+    mark = trace_mark(t)
     yes = w.cli(["migrate", "--yes"])
     t.check("A3 --yes exits 0", yes["exit"] == 0, f"exit {yes['exit']}: {yes['output'][-300:]}")
     after, after_data = w.snapshot()
+    installer_wrote(t, w, "A3", mark, pre_yes, after)
     got = (lambda k: after_data.get(w.rel(f[k]), b"").decode("utf-8", "replace") if w.rel(f[k]) in after_data else None)
     want = js({"mcpServers": {"before": {"command": "a"}, NEW: old_entry, "after": {"command": "b"}},
                "theme": "dark"}) + "\n"
@@ -429,11 +543,10 @@ def rename(t, d, cur, prev, cur_section):
             cj.get("numStartups") == 3 and cj.get("mcpServers") == {
                 NEW: {"type": "stdio", "command": "node", "args": [p["oldCo"]], "env": {}}}, str(cj)[:300])
     projs = cj.get("projects") or {}
-    t.check("A3 ~/.claude.json: the local scope with a relative path into the product renamed in place, the look-alike's "
-            "local scope kept",
+    t.check("A3 ~/.claude.json: the local scope with a relative path into the product renamed in place",
             json.dumps(projs.get(local)) == json.dumps({"allowedTools": ["x"], "mcpServers": {"other": {"command": "o"},
                                                                                               NEW: rel_entry}})
-            and (projs.get(local_look) or {}).get("mcpServers") == {OLD: rel_entry}, str(projs)[:400])
+            and list(projs) == [local], str(projs)[:400])
     t.check("A3 ~/.claude.json: rewritten with no newline added at its end", got("claudeJson") is not None
             and after.get(w.rel(f["claudeJson"])) != before.get(w.rel(f["claudeJson"]))
             and not got("claudeJson").endswith("\n"), repr((got("claudeJson") or "")[-20:]))
@@ -496,6 +609,8 @@ def rename(t, d, cur, prev, cur_section):
     # so restoring any good entry of a refused backup would change a file.
     crafted_restores(t, w, stamp, inside, f["desktopLinux"], before_data.get(w.rel(f["desktopLinux"])),
                      {k: before[k][1] for k in gone_or_changed})
+    pre_restore = w.snapshot()[0]
+    mark = trace_mark(t)
     rr = w.cli(["migrate", "--restore", stamp, "--yes"])
     t.check("A5 --restore --yes exits 0", rr["exit"] == 0, f"exit {rr['exit']}: {rr['output'][-300:]}")
     restored, _ = w.snapshot(skip=[data])
@@ -506,6 +621,7 @@ def rename(t, d, cur, prev, cur_section):
     t.check("A5 the restored file keeps its mode 0640", (restored.get(w.rel(f["desktopLinux"])) or (0, 0, 0))[-1] == 0o640,
             restored.get(w.rel(f["desktopLinux"])))
     now = w.snapshot()[0]
+    installer_wrote(t, w, "A5", mark, pre_restore, now)
     new_stamps = sorted(k for k in now if os.path.dirname(k) == w.rel(backups) and k not in stamps)
     held2 = {v[1] for k, v in now.items() if v[0] == "file" and any(k.startswith(s + os.sep) for s in new_stamps)}
     put_back = [k for k in gone_or_changed if k in after and after[k][0] == "file"]
@@ -551,11 +667,12 @@ def crafted_restores(t, w, stamp, inside, target, target_before, originals):
         fo.write('{"evil": true}\n')
     labels = (("an absolute path outside", "abs"), ("a ../ path out of the folder", "dotdot"),
               ("a link inside that points outside", "link"))
-    before = w.snapshot()[0]
     tgt = w.rel(target)
-    visible = sorted(k for k, old in originals.items() if k != tgt and old in good and (before.get(k) or ("?", None))[
-        1] != old)
     for label, kind in labels:
+        # Each case starts from what the world holds now, so its detail names what this case changed.
+        before = w.snapshot()[0]
+        visible = sorted(k for k, old in originals.items() if k != tgt and old in good and (before.get(k) or ("?", None))[
+            1] != old)
         folder = w.t.path("crafted", kind, "x")
         folder = os.path.dirname(folder)
         counts = [0, 0]
@@ -690,15 +807,19 @@ def rules(t, d, cur, prev):
     r = w.cli(["migrate", "--yes"])
     t.check(f"C7 a checkout whose packages/mcp is not {MCP_PACKAGE} is left alone", r["exit"] == 0 and w.text(f) == text,
             f"exit {r['exit']}")
-    # ~/.claude.json: rule 5 in the user scope, rule 6 in a local scope, edited directly (no claude CLI on PATH).
+    # ~/.claude.json: rule 5 in the user scope, rule 6 in a local scope, and rule 2 in a local scope with a relative path
+    # into the look-alike, edited directly (no claude CLI on PATH).
     w = World(t, d, "w-claudejson")
     p = programs(w, cur, prev)
     local = w.dir("projA")
+    local_look = co_root(p["lookCo"])
+    rel_entry = {"type": "stdio", "command": "node", "args": ["packages/mcp/dist/index.js"]}
     f = f"{w.home}/.claude.json"
     w.file(f, js({"mcpServers": {OLD: {"command": "node", "args": [p["oldCo"]]},
                                  NEW: {"command": "node", "args": [p["curCo"]]}},
                   "projects": {local: {"mcpServers": {OLD: {"command": "node", "args": [p["oldCo"]]},
-                                                      NEW: OTHER_PROGRAM}}}}))
+                                                      NEW: OTHER_PROGRAM}},
+                               local_look: {"mcpServers": {OLD: rel_entry}}}}))
     w.make()
     r = w.cli(["migrate", "--yes"])
     try:
@@ -711,6 +832,9 @@ def rules(t, d, cur, prev):
     t.check("C8 ~/.claude.json local scope, rule 6: nothing written",
             json.dumps(((cj.get("projects") or {}).get(local) or {}).get("mcpServers")) == json.dumps(
                 {OLD: {"command": "node", "args": [p["oldCo"]]}, NEW: OTHER_PROGRAM}), str(cj.get("projects"))[:300])
+    t.check("C8 ~/.claude.json local scope with a relative path into the look-alike checkout, rule 2: kept",
+            ((cj.get("projects") or {}).get(local_look) or {}).get("mcpServers") == {OLD: rel_entry},
+            str(cj.get("projects"))[:400])
 
 
 # ---------------------------------------------------------------- D: the Claude Code CLI

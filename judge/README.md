@@ -39,17 +39,17 @@ python3 -I judge/run.py --only import_export --keep
 python3 -I judge/run.py --list
 python3 -I judge/run.py --strict --require-trace   # not applicable and not observed fail, as in CI
 python3 -I judge/run.py --graphics-addon /tmp/judge-addon   # the add-on that fixtures/graphics-addon/install.sh made
-python3 -I judge/run.py --release v0.2.0 --build /path/to/v0.2.0   # grade the v0.2.0 release (ZabsReel) as itself
+python3 -I judge/run.py --release v0.2.0 --build /path/to/v0.2.0   # grade the v0.2.0 release as itself
 python3 -I judge/run.py --as-user zjudge --scratch /srv/judge/scratch --strict --require-trace --build /home/zjudge/build
                                              # as CI runs it: the adapter and the editor as the user zjudge (below)
 python3 -I judge/run.py --allow-unprotected  # not Linux: run without the /proc protection (JUDGE line says UNPROTECTED)
 ```
 
 `--release` names the release the build is graded as: `zedmix` (the default: this product line's current release,
-and a rewrite of it) or `v0.2.0` (the v0.2.0 release, whose product name is ZabsReel). The judge holds what each
+and a rewrite of it) or `v0.2.0` (the v0.2.0 release). The judge holds what each
 release is (its names, in `tests/test_cli_migrate.py`), and the tests that depend on it grade against the release
 given here, never against what the build or the adapter says it is: a build run with the default must install
-ZedMix's skill and migrate ZabsReel's configuration, so a rewrite that still installs ZabsReel's names fails. CI
+ZedMix's skill and migrate the v0.2.0 release's configuration, so a rewrite that still installs the v0.2.0 release's names fails. CI
 passes `--release zedmix` (the lock covers that line); a run on the v0.2.0 release passes `--release v0.2.0`.
 
 Without `--as-user` (a local run) the adapter, the editor and everything they start run as your own user, and the runner

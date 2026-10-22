@@ -1,7 +1,8 @@
 """What the looks and style effects do to the picture, measured on exports: exposure, vibrance, invert, colorhold
-(its colour given as 0xRRGGBB and as #rrggbb), grain, glow, RGB split, the lens warp (its direction, and that it fills
-the frame), trails, and that a keyed clip's background colour does not tint the subject through glow or RGB split
-(through trails it does on v0.2.0's export and this tree's: judge/PORTING.md). Port of section 9 of
+(its colour given as 0xRRGGBB and as #rrggbb, and a colour whose green and blue differ, next to its green/blue swap),
+grain, glow, RGB split, the lens warp (its direction, and that it fills the frame), trails, and that a keyed clip's
+background colour does not tint the subject through glow or RGB split (through trails it does on v0.2.0's export and
+this tree's: judge/PORTING.md). Port of section 9 of
 packages/core/scripts/smoke-registry.ts (judge/PORTING.md has the map of its sections).
 
 Each case is a clip of its own on v0 (a segment of the timeline) of one of make.sh's flat test pictures (fx-*.mp4,
@@ -21,7 +22,7 @@ import observe
 
 PORT_BOUND = True
 TIMEOUT = 1500
-CHECKS = 29
+CHECKS = 30
 
 W, H, FPS = 320, 180, 30
 LENS_GRID = [(k1, k2) for k1 in (-1, -0.5, 0, 0.3, 0.5, 1) for k2 in (-1, -0.5, 0, 0.5, 1) if (k1, k2) != (0, 0)]
@@ -37,6 +38,7 @@ SEGMENTS = [
     ("inv", "fx-blue.mp4", 30, [("invert", None, None, None)]),
     ("hold", "fx-redblue.mp4", 30, [("colorhold", None, {"similarity": 0.3, "blend": 0.1}, "0xE02020")]),
     ("hold#", "fx-redblue.mp4", 30, [("colorhold", None, {"similarity": 0.3, "blend": 0.1}, "#e02020")]),
+    ("holdgb", "fx-holdgb.mp4", 30, [("colorhold", None, {"similarity": 0.2, "blend": 0.05}, "0xE09020")]),
     ("g0", "fx-gray128.mp4", 30, []), ("g40", "fx-gray128.mp4", 30, [("grain", 40, None, None)]),
     ("g80", "fx-gray128.mp4", 30, [("grain", 80, None, None)]),
     ("box", "fx-box.mp4", 30, []), ("glow", "fx-box.mp4", 30, [("glow", 1, {"radius": 12}, None)]),
@@ -192,6 +194,12 @@ def run(t):
       lambda: (blk("hold#", 0.5, 60, 80), blk("hold#", 0.5, 220, 80)),
       lambda v: v[0][0] > 180 and v[0][0] - v[0][1] > 120 and max(v[1]) - min(v[1]) <= 16,
       "left: red > 180, red - green > 120; right: spread <= 16")
+    # 0xE09020 and its green/blue swap 0xE02090 are 0.36 apart (the RGB distance over its largest, sqrt(3) x 255), past
+    # similarity 0.2 + blend 0.05: the held colour keeps its channels in their order, the swap turns grey.
+    m("colorhold of a colour whose green and blue differ (0xE09020) keeps it, channels in their order, and turns its "
+      "green/blue swap (0xE02090) grey", lambda: (blk("holdgb", 0.5, 60, 80), blk("holdgb", 0.5, 220, 80)),
+      lambda v: v[0][0] > 180 and v[0][0] - v[0][1] > 40 and v[0][1] - v[0][2] > 60 and max(v[1]) - min(v[1]) <= 16,
+      "left: red > 180, red - green > 40, green - blue > 60; right: spread <= 16")
     # grain
     def series(name):
         return list(observe.pixels(*at(name, 0), "crop=2:2:100:80,scale=1:1:flags=area", "gray", 20))
