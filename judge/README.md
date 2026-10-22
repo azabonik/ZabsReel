@@ -471,6 +471,13 @@ What it does not defend against:
     (below); a change to `judge.yml` that ran it as the runner's user would undo that, and only review sees it (see
     the open decisions below).
   - A kernel bug, or a bug in `sudo` or strace, that gives `zjudge` root or another user's rights.
+  - Unprivileged user namespaces, a known gap: `judge.yml` lifts Ubuntu's AppArmor restriction on them
+    (`kernel.apparmor_restrict_unprivileged_userns=0`) for every user so that the built-in graphics renderer's
+    sandbox works, and so `zjudge` can create user namespaces too. A kernel bug reachable only from inside a user
+    namespace, used as `zjudge`, could undo the separate-user isolation. This is accepted while the judge grades
+    v0.2.0. Before the first graded rewrite build: the judge installs a root-owned, checksum-pinned renderer
+    binary with an AppArmor profile that alone may create user namespaces; the editor is pointed at it (a spec
+    requirement); `judge.yml` stops lifting the restriction; and CI proves that `zjudge` cannot run `unshare -U`.
   - The runner image itself: its root-owned programs (`python3`, `sudo`, strace, FFmpeg, `tar`, ...) and settings
     (`fs.protected_*`, Yama's `ptrace_scope`) are trusted as GitHub ships them. `lockout.py` tries only the paths
     `judge.yml` gives it (the judge's copy, the file-command files, the Node toolchain, the folders on `PATH`, the
@@ -478,7 +485,13 @@ What it does not defend against:
   - FFmpeg and ffprobe parse hostile files with the runner's rights. `observe.py` runs the runner's FFmpeg (from
     `PATH`, as the runner's user, which has passwordless `sudo`) on the exports and frames the editor wrote, so a bug
     in an FFmpeg demuxer or decoder is a path from `zjudge` to the runner's user and to root. Running those
-    measurements as another unprivileged user would close it; the judge does not do that yet. The runner's `tar`
+    measurements as another unprivileged user would close it; the judge does not do that yet. What FFmpeg reads is
+    limited (`observe.source`): only a regular file in the test's folder or the media folder, opened by the judge
+    and given to FFmpeg as that open file, with only the file protocol and only demuxers that read nothing but their
+    own input (MP4 / QuickTime, Matroska / WebM, MP3, PNG, and NUT for the judge's own frames). So a file the editor
+    wrote cannot make the runner's FFmpeg open another file or a URL (an HLS playlist named `.png`, for example, is
+    unmeasurable), and a link to a file of the runner's is not read; a bug in those demuxers or decoders stays a
+    gap. The runner's `tar`
     also reads the checkout (file names from the pull request) when it copies it for `zjudge`.
   - The lock-covered judge files (`judge/`, the gate and `judge.yml`) come from the pull request and run as the
     runner's user. Only review stops a pull request that changes them and updates the lock (see "Edits to the judge"

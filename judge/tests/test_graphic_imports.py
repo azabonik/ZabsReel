@@ -83,7 +83,8 @@ NAMES = (["the graphics add-on is chosen in the window and ready (the State says
     "a graphic that imports react, react/jsx-runtime, react/jsx-dev-runtime and remotion renders",
     "…and its frame shows the colour it draws",
     "the built-in title card (the title template) renders",
-    "control: the trace saw the editor write the allowed graphic's rendered file",
+    "control: the trace saw the editor write the allowed graphic's rendered file (a 1 s video in the test's folder, "
+    "which the State names)",
 ])
 CHECKS = len(NAMES)
 
@@ -183,6 +184,10 @@ def run(t):
     rt, what = rendered(lambda: d.add_graphic(template="title", props={"title": "Judge"}, duration_s=1))
     t.check(NAMES[len(ROWS) + 8], rt is not None and bool(rt.get("clip")), f"{rt} {what}".strip())
     asset = next((a for a in d.get_state().get("assets", []) if r and a.get("id") == r.get("asset")), None)
-    base = os.path.basename((asset or {}).get("path") or "") or "(no rendered file in the State)"
-    trace_check(t, NAMES[len(ROWS) + 9], lambda: bool(asset) and bool(observe.trace_hits(t.trace, [base])),
-                lambda: f"{base}: {len(observe.trace_hits(t.trace, [base]))} line(s)")
+    path = (asset or {}).get("path")
+    # The file must be the editor's render of this graphic: a file the test wrote (its frames) is not one.
+    bad = observe.render_problem(path, t.scratch, 1, 30, [t.path("frames")])
+    base = os.path.basename(path or "")
+    trace_check(t, NAMES[len(ROWS) + 9], lambda: not bad and bool(observe.trace_hits(t.trace, [base])),
+                lambda: f"the allowed graphic's rendered file: {bad}" if bad
+                else f"{base}: {len(observe.trace_hits(t.trace, [base]))} line(s)")

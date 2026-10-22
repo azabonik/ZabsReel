@@ -270,6 +270,12 @@ jobs:
       # lift the same restriction). The judge's graphics checks on the
       # built-in renderer need it to run, so it is lifted here, for every
       # user, zjudge included (judge/README.md, "Threat model").
+      # A known gap, accepted while the judge grades v0.2.0: zjudge can
+      # create user namespaces too. Before the first graded rewrite build the
+      # judge installs a root-owned, checksum-pinned renderer binary with an
+      # AppArmor profile that alone may create user namespaces, the editor is
+      # pointed at it (a spec requirement), this step goes, and CI proves
+      # that zjudge cannot run `unshare -U`.
       - name: Allow unprivileged user namespaces (the built-in graphics renderer's sandbox)
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

@@ -32,8 +32,8 @@ none yet) the way a hand edit would: on purpose, as the attacker that PROTOCOL.m
 
 Motion graphics: add_graphic is the MCP tool add_graphic. The graphics renderer is the user's setting, made in the
 window: set_graphics_renderer uses the web shell's route (POST /api/graphics-addon/renderer with the shell key, as the
-window's Graphics add-on dialog does), "remotion" for the add-on and the product's own name ("zabsreel" in the v0.2.0
-release, "zedmix" in this tree) for the built-in renderer. The graphics add-on is never installed through the window
+window's Graphics add-on dialog does), "remotion" for the add-on and the product's own name (its MCP server's
+serverInfo.name: the v0.2.0 release still has its old name there, this tree "zedmix") for the built-in renderer. The graphics add-on is never installed through the window
 (that downloads it): start's graphics_addon names the judge's copy, which the editor gets as AIVE_REMOTION_ADDON (its
 root) and AIVE_REMOTION_BROWSER (its headless shell), the variables a source checkout honours (docs/TESTING.md). Without
 graphics_addon neither variable is set, so the editor has no add-on, as for a user who never installed it.
@@ -319,7 +319,7 @@ class Adapter:
         self.shell_key = None
         self.unreported_ports = []  # ports opened during an operation whose answer was not ok (handle() reports them)
         self.texts = []          # every text the editor answered since start (transcript)
-        self.product_name = None  # serverInfo.name: the built-in graphics renderer's setting value ("zabsreel", ...)
+        self.product_name = None  # serverInfo.name: the built-in graphics renderer's setting value
 
     def note(self, text):
         """Keeps one answer of the editor for the transcript operation."""
@@ -1166,14 +1166,14 @@ def self_test():
 
         def renderer_shell(status, body):
             ad = shell(status, body)
-            ad.mcp, ad.product_name = object(), "zabsreel"
+            ad.mcp, ad.product_name = object(), "product-x"
             ad._shell_post = lambda route, b: posted.append((route, b)) or (status, body)
             return ad
         op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "addon"})
         op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "builtin"})
         expect("set_graphics_renderer: addon is remotion, builtin the product's own name, through the window's route",
                posted, [("/api/graphics-addon/renderer", {"renderer": "remotion"}),
-                        ("/api/graphics-addon/renderer", {"renderer": "zabsreel"})])
+                        ("/api/graphics-addon/renderer", {"renderer": "product-x"})])
         expect("set_graphics_renderer: another value is bad_request; the window's 400 is product_error",
                (op(renderer_shell(200, {"ok": True}), "set_graphics_renderer", {"renderer": "chrome"})["error"]["code"],
                 op(renderer_shell(400, {"ok": False, "error": "Not a graphics renderer."}), "set_graphics_renderer",

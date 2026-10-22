@@ -810,7 +810,7 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
     download check (strace -u traces it), it cannot change the judge or the records or reach strace, sudo or the test
     process or get the runner's environment (SelfTest.asuser), and the child it leaves with an empty environment is
     ended by the user sweep. A user that already runs a process is refused (and the refusals in asuser_units), and
-    so are a --scratch folder the user can write or owns. A JUDGE_STRACE in a folder of the user's is not used.
+    so are a --scratch folder and a --graphics-addon folder the user can write or owns. A JUDGE_STRACE in a folder of the user's is not used.
     lockout.py finds a world-writable file and folder with --no-tighten, and takes the write bit away without it;
     with --kill it ends the user's processes first. With --fail-if-writable a file there that others could write
     fails it; a PATH folder that is not there is tried through the nearest folder above it; a world-writable folder
@@ -826,6 +826,15 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
         s.unit(f"the --as-user cases can run as {user}", False, why)
         return
     asuser_units(s, user)
+    if traced:  # AsUser.tracer: the adapter's tree gets the judge's own core limits, not the 0 sudo sets
+        st = shutil.which("strace", path=run.SYSTEM_PATH)
+        p = subprocess.run(au.tracer(au.env_words() + [st, "-f", "-qq", "-e", "trace=none", "-u", user, "--",
+                                                       "/bin/sh", "-c", "ulimit -H -c; ulimit -S -c"]),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, cwd="/")
+        soft, hard = run.core_limits()
+        s.unit(f"--as-user: the adapter's tree (under strace -u, through sudo) has the judge's core limits ({soft} "
+               f"soft, {hard} hard), so the editor can raise its soft limit as it can without --as-user",
+               p.returncode == 0 and p.stdout.split() == [hard, soft], f"rc {p.returncode}: {p.stdout!r} {p.stderr!r}")
     extra = ("--as-user", user)
     s.run("driver", 0, [r"^judge: as user " + re.escape(user), r"^PASS  test_driver: the fixture editor started",
                         drv(3, 3)], adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra,
@@ -877,6 +886,21 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
     left_runs = os.listdir(open_scratch) + os.listdir(own_scratch)
     s.unit("--as-user: a refused run leaves no folder in --scratch", not left_runs, left_runs)
     subprocess.run(au.root(rm + [own_scratch]), capture_output=True, timeout=60, cwd="/")
+
+    # The graphics add-on's folder must be one the other user can read but not change (run.py checks its root, its
+    # node_modules and the headless shell's folder with AsUser.folder_problem): a --graphics-addon folder it can write
+    # (mode 0777, not sticky) or one of its own is refused before any test runs.
+    open_addon = os.path.realpath(s.addon_fixture("addon-open"))
+    os.chmod(open_addon, 0o777)
+    s.run("ok", 1, [r"^JUDGE: refused: --graphics-addon \S+: " + re.escape(user) + " can write "
+                    + re.escape(open_addon) + "$"], extra=extra + ("--graphics-addon", open_addon),
+          label="--as-user: a --graphics-addon folder the other user can write is refused")
+    own_addon = os.path.realpath(s.addon_fixture("addon-user"))
+    subprocess.run(au.root([chown, user, own_addon]), check=True, capture_output=True, timeout=60, cwd="/")
+    s.run("ok", 1, [r"^JUDGE: refused: --graphics-addon \S+: " + re.escape(own_addon) + " belongs to "
+                    + re.escape(user) + "$"], extra=extra + ("--graphics-addon", own_addon),
+          label="--as-user: a --graphics-addon folder of the other user's is refused")
+    subprocess.run(au.root(rm + [own_addon]), capture_output=True, timeout=60, cwd="/")
 
     # strace runs as root under --as-user: a JUDGE_STRACE that the other user could replace (a root-owned copy in a
     # folder of that user's) is not used, so the trace checks are not observed. Every folder above that one is root's
@@ -1016,6 +1040,108 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
         p.wait(30)
     except subprocess.TimeoutExpired:
         pass
+
+
+def measure_units(s, observe):
+    """What a measurement may read (observe.source): with observe.confine(<folder>), a regular file in the folder is
+    measured; a file there that holds an HLS playlist (named .png, as a rendered frame, or .m3u8) naming a file
+    outside the folder is Unmeasurable for ffprobe (observe.streams) and FFmpeg (observe.mean_rgb), and the file it
+    names is never opened (a FIFO: a writer in this process counts every open of it); a link in the folder to a file
+    outside it is Unmeasurable."""
+    import threading
+    inside, outside = os.path.join(s.tmp, "measure", "test"), os.path.join(s.tmp, "measure", "elsewhere")
+    os.makedirs(inside)
+    os.makedirs(outside)
+    png = os.path.join(inside, "ok.png")
+    observe.run([observe.FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i",
+                 "color=c=0xff00ff:size=64x36,format=rgb24", "-frames:v", "1", png], heavy=False, timeout=60)
+    secret = os.path.join(outside, "secret.png")
+    shutil.copyfile(png, secret)
+    os.symlink(secret, os.path.join(inside, "link.png"))
+    seg = os.path.join(outside, "seg.ts")
+    os.mkfifo(seg)
+    opens, stop = [], threading.Event()
+
+    def writer():  # every open of the FIFO for reading meets one open here for writing
+        while not stop.is_set():
+            fd = os.open(seg, os.O_WRONLY)
+            if not stop.is_set():
+                opens.append(1)
+            os.close(fd)
+    w = threading.Thread(target=writer, daemon=True)
+    w.start()
+    playlist = f"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\n{seg}\n#EXT-X-ENDLIST\n"
+    for name in ("probe.png", "probe.m3u8"):
+        with open(os.path.join(inside, name), "w", encoding="utf-8") as f:
+            f.write(playlist)
+
+    def measured(fn, path):
+        try:
+            return f"measured {fn(path)}"
+        except observe.Unmeasurable as e:
+            return f"unmeasurable: {e}"
+    observe.confine(inside)
+    try:
+        try:
+            control = observe.mean_rgb(png)
+        except observe.Unmeasurable as e:
+            control = f"unmeasurable: {e}"
+        hls = {f"{fn.__name__}({name})": measured(fn, os.path.join(inside, name))
+               for name in ("probe.png", "probe.m3u8") for fn in (observe.streams, observe.mean_rgb)}
+        link = {fn.__name__: measured(fn, os.path.join(inside, "link.png")) for fn in (observe.streams, observe.mean_rgb)}
+    finally:
+        observe.confine()
+        seen = len(opens)
+        stop.set()
+        fd = os.open(seg, os.O_RDONLY | os.O_NONBLOCK)  # lets the writer's last open return
+        w.join(10)
+        os.close(fd)
+    s.unit("a measurement reads a regular file in the folder the judge allowed (a magenta PNG reads as magenta)",
+           isinstance(control, tuple) and observe.colour_is(control, (255, 0, 255)), control)
+    s.unit("a .png or .m3u8 file there holding an HLS playlist that names a file outside the folder is unmeasurable, "
+           "and that file is never opened",
+           all(v.startswith("unmeasurable") for v in hls.values()) and seen == 0, f"{seen} open(s) of it; {hls}")
+    s.unit("a link there to a picture outside the folder is unmeasurable (not read)",
+           all("is not in a folder the judge may measure in" in v for v in link.values()), link)
+
+
+def read_cap_units(s, observe):
+    """observe's readers of a file the editor wrote: sha256 reads it 1 MiB at a time, so a file of any size has its
+    hash; parse_srt, parse_otio and substitute read at most observe.TEXT_LIMIT bytes and call a longer file too large
+    to read (a failed check), so a huge file the editor writes cannot exhaust the judge's memory. The big files are
+    sparse: they take no disk space."""
+    import hashlib
+    d = os.path.join(s.tmp, "read-cap")
+    os.makedirs(d)
+    big, small = os.path.join(d, "big.srt"), os.path.join(d, "small.srt")
+    with open(big, "wb") as f:
+        f.truncate(observe.TEXT_LIMIT + 1)
+    with open(small, "w", encoding="utf-8") as f:
+        f.write("1\n00:00:00,000 --> 00:00:01,000\nhello\n")
+    hashed = os.path.join(d, "hashed.bin")
+    with open(hashed, "wb") as f:
+        f.truncate(3 * (1 << 20) + 5)
+
+    def outcome(fn):
+        try:
+            return f"read: {str(fn())[:80]}"
+        except observe.Unmeasurable as e:
+            return f"unmeasurable: {e}"
+    observe.confine(d)
+    try:
+        small_srt = outcome(lambda: observe.parse_srt(small))
+        too_big = {"parse_srt": outcome(lambda: observe.parse_srt(big)),
+                   "parse_otio": outcome(lambda: observe.parse_otio(big)["problems"]),
+                   "substitute": outcome(lambda: observe.substitute(big, os.path.join(d, "out.srt"), [("a", "b")]))}
+        digest = outcome(lambda: observe.sha256(hashed))
+    finally:
+        observe.confine()
+    s.unit("parse_srt reads a captions file the editor wrote (control)", small_srt.startswith("read: ([(0.0, 1.0"),
+           small_srt)
+    s.unit(f"parse_srt, parse_otio and substitute do not read a file of more than {observe.TEXT_LIMIT} bytes: it is "
+           "too large to read", all("too large to read" in v for v in too_big.values()), too_big)
+    s.unit("sha256 hashes a file of several MiB read 1 MiB at a time (the same hash as the whole file's)",
+           digest == "read: " + hashlib.sha256(bytes(3 * (1 << 20) + 5)).hexdigest(), digest)
 
 
 def lockout_units(s):
@@ -1383,6 +1509,8 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
         # The form of an strace line (observe.strace_line_problem): text joined to strace's own line in front or in
         # the middle cannot hide a call.
         import observe
+        measure_units(s, observe)
+        read_cap_units(s, observe)
         real = ('1234 connect(3<UDP:[5]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("192.0.2.1")}, '
                 '16) = 0')
         good = [real, '7 openat(AT_FDCWD</a>, "/dev/null", O_RDONLY) = 3</dev/null<char 1:3>>',
@@ -1391,14 +1519,19 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
                 '7 read(3,  <unfinished ...>', '7 mkdir("/a", 0777 <unfinished ...>', '7 <... read resumed>"", 1) = 0',
                 '7 sendto(5<UNIX-STREAM:[1->2]>, "x", 1, MSG_NOSIGNAL, NULL, 0 <unfinished ...>', '7 exit_group(0) = ?',
                 '7 io_uring_setup(1, 0x7f) = -1 ENOSYS (Function not implemented) (INJECTED)',
-                '7 ????( <unfinished ...>', '7 ????( <detached ...>']
+                '7 ????( <unfinished ...>', '7 ????( <detached ...>', '7 ???( <unfinished ...>', '7 ???( <detached ...>',
+                '7 ???() = ?', '7 ????() = ?']
         bad = ['0 open(""' + real, '0 open("' + real, '0 read(3<' + real, '0 x(' + real, real[:70],
                '0 x(7 <... io_uring_setup resumed>) = 3<anon_inode:[io_uring]>',
                '0 strace: Process 5 attached', '0 ' + real[5:].replace("connect", "Connect"),
                '7 ????(1, 2) = 0', '7 ????( <unfinished ...>' + real, '7 ????( <unavailable>',
-               '7 ????( <detached ...>) = 0', real + ' 7 ????( <unfinished ...>']
+               '7 ????( <detached ...>) = 0', real + ' 7 ????( <unfinished ...>', '7 ???(1, 2) = 0',
+               '7 ???( <unfinished ...>' + real, '7 ???( <unavailable>', '7 ???( <detached ...>) = 0',
+               '7 ??( <unfinished ...>', '7 ?????( <unfinished ...>', '7 ???(  <unfinished ...>',
+               real + ' 7 ???( <unfinished ...>', '7 ???() = 0', '7 ???(1) = ?', '7 ???() = ? ' + real,
+               real + ' 7 ???() = ?', '7 ??() = ?']
         s.unit("a real strace line passes the line check (also strace's own line for a call whose tracee was gone "
-               "at its entry: '<pid> ????( <unfinished ...>')",
+               "at its entry: '<pid> ????( <unfinished ...>', and strace 6.x's '<pid> ???( <unfinished ...>' and '<pid> ???() = ?')",
                all(observe.strace_line_problem(ln) is None for ln in good),
                [(ln, observe.strace_line_problem(ln)) for ln in good if observe.strace_line_problem(ln)])
         s.unit("text joined to an strace line, or a line cut short, fails the line check",

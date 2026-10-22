@@ -284,6 +284,13 @@ def _status_ids(pid):
     return uids, state
 
 
+def core_limits():
+    """(soft, hard) core file size limits of this process as `ulimit -c` words: 512-byte blocks or "unlimited"."""
+    import resource
+    return tuple("unlimited" if v == resource.RLIM_INFINITY else str(v // 512)
+                 for v in resource.getrlimit(resource.RLIMIT_CORE))
+
+
 class AsUser:
     """--as-user <name>: the adapter, the editor and everything they start run as this user. Commands that need root
     (strace, which then starts the adapter as the user with -u; the user sweep) run through `sudo -n`, so the runner's
@@ -301,6 +308,17 @@ class AsUser:
     def root(self, words):
         """The words that run `words` as root."""
         return [self.tools["sudo"], "-n", "--"] + list(words)
+
+    def tracer(self, words):
+        """The words that run `words` (strace, which then starts the adapter as this user) as root, with the core
+        file size limits of the process that runs the judge (core_limits). sudo gives the command it runs a core limit
+        of 0 (soft and hard: sudoers' rlimit_core), and a hard limit only root can raise, so without this the editor
+        as this user could not raise its own soft limit as it can when it runs as the judge's user (v0.2.0's built-in
+        graphics renderer does: "prlimit: failed to set the CORE resource limit"). The shell runs as root, between
+        sudo and strace -u, so it can set them; the user gets no limit the judge's user does not have."""
+        soft, hard = core_limits()
+        return self.root(["/bin/sh", "-c", 'ulimit -H -c "$0" && ulimit -S -c "$1" && shift && exec "$@"', hard, soft]
+                         + list(words))
 
     def as_user(self, words):
         """The words that run `words` as this user (sudo's own environment rules apply: give `env_words` first)."""
@@ -650,8 +668,8 @@ def strace_probe(st, bpf):
         if AS_USER is None:
             words = strace_words(st, bpf, NET_CALLS) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child
         else:  # as the tests run it: strace as root, the child as the other user (its stderr: nowhere it cannot reach)
-            words = AS_USER.root(AS_USER.env_words() + strace_words(st, bpf, NET_CALLS, AS_USER.name) + TRACEE_AS_USER
-                                 + ["/dev/null"] + child)
+            words = AS_USER.tracer(AS_USER.env_words() + strace_words(st, bpf, NET_CALLS, AS_USER.name)
+                                   + TRACEE_AS_USER + ["/dev/null"] + child)
         p = subprocess.Popen(words, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tail.writer,
                              close_fds=True, cwd="/" if AS_USER else None)
         tail.started()
@@ -743,8 +761,8 @@ def strace_cmd(stderr_path, files, scratch=None):
     calls = ("%file," if files else "") + NET_CALLS
     if AS_USER is None:
         return strace_words(strace(), _STRACE.get("bpf"), calls) + TRACEE + [stderr_path]
-    return AS_USER.root(AS_USER.env_words(scratch) + strace_words(strace(), _STRACE.get("bpf"), calls, AS_USER.name)
-                        + TRACEE_AS_USER + [stderr_path])
+    return AS_USER.tracer(AS_USER.env_words(scratch) + strace_words(strace(), _STRACE.get("bpf"), calls, AS_USER.name)
+                          + TRACEE_AS_USER + [stderr_path])
 
 
 _PID = re.compile(r"^\[pid +(\d+)\] (.*)$", re.S)
@@ -892,6 +910,8 @@ class T:
 
     def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None, addon=None):
         self.name, self.scratch, self.media_dir, self.build, self.adapter = name, scratch, media, build, adapter
+        import observe
+        observe.confine(scratch, media)  # what the measurements may read: the test's folder and the media
         # The graphics add-on the judge gives the editor when a test asks for it (driver(graphics_addon=True)):
         # {"root", "browser"}, or None, and then graphics_addon_why says why (the checks on it are not applicable).
         self.graphics_addon = addon

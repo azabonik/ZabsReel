@@ -138,7 +138,8 @@ NAMES = [
     "the graphics add-on is chosen in the window and ready (the State says so)",
     "a graphic that requests 127.0.0.2 and a .invalid computer (fetch, an image, a WebSocket, window.open) renders",
     "…and its code ran past its requests: its frame shows the colour it draws after them",
-    "…and the rendered graphic has no audio stream (renders are muted)",
+    "…and its rendered file, which the State names (a 0.2 s video the editor wrote in the test's folder), has no "
+    "audio stream (renders are muted)",
     "a graphic that reads a listener on 127.0.0.1 at another port (another origin) and a file of this computer renders",
     "…and its page could not read the listener's answer, which gives no cross-origin permission (its frame's colour)",
     "…and its page could not read the file (its frame's colour)",
@@ -229,11 +230,13 @@ def _run(t, other, control, reader, token):
     t.check(NAMES[2], observe.colour_is(colour, GREEN), f"{colour} at {how} (want {GREEN}; red: it did not finish)")
     asset = next((a for a in d.get_state().get("assets", []) if probe and a.get("id") == probe.get("asset")), None)
     path = (asset or {}).get("path")
-    if path:
+    # The file must be the editor's render of this graphic: a file the test wrote (its frames) is not one.
+    bad = observe.render_problem(path, t.scratch, 0.2, 30, [t.path("frames")])
+    if bad:
+        t.check(NAMES[3], False, f"the probe graphic's rendered file: {bad} ({probe})")
+    else:
         t.measure(NAMES[3], lambda: [s.get("codec_type") for s in observe.streams(path)],
                   lambda v: "video" in v and "audio" not in v, "a video stream and no audio stream")
-    else:
-        t.check(NAMES[3], False, f"the State names no file for the probe graphic's asset ({probe})")
 
     # ---- M1 (its outcome): the page keeps the browser's same-origin policy and reads no file
     secret = t.path(f"judge-page-{rnd.token_hex(4)}", "secret.txt")
@@ -284,6 +287,8 @@ def _run(t, other, control, reader, token):
         folder = os.path.basename(os.path.dirname(secret))
         hits = observe.trace_hits(t.trace, [folder])
         t.check(NAMES[15], not hits, hits[:3] or f"none of {len(observe.trace_lines(t.trace))} lines names {folder}")
-        base = os.path.basename(path or "") or "(no rendered file in the State)"
-        seen = observe.trace_hits(t.trace, [base]) if path else []
-        t.check(NAMES[16], bool(seen), f"{base}: {len(seen)} line(s)")
+        if bad:
+            t.check(NAMES[16], False, f"the probe graphic's rendered file: {bad}")
+        else:
+            seen = observe.trace_hits(t.trace, [os.path.basename(path)])
+            t.check(NAMES[16], bool(seen), f"{os.path.basename(path)}: {len(seen)} line(s)")

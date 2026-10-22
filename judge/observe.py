@@ -18,7 +18,8 @@ FFmpeg: JUDGE_FFMPEG / JUDGE_FFPROBE, else the ffmpeg / ffprobe on PATH. Heavy c
 `nice` exists) with a timeout.
 
 A measurement that the file makes impossible (missing file, no video stream, no frame at t) raises Unmeasurable; the
-test then fails that check with the reason.
+test then fails that check with the reason. So does a file outside the folders the judge measures in, or one in a format
+that names other files or URLs (see "What a measurement may read").
 """
 import hashlib
 import ipaddress
@@ -28,6 +29,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -44,13 +46,111 @@ class Unmeasurable(Exception):
     """The file makes the measurement impossible (missing, unreadable, no stream, no frame at t)."""
 
 
-def run(cmd, timeout=TIMEOUT, heavy=True):
+def run(cmd, timeout=TIMEOUT, heavy=True, fds=(), text=True):
     full = (NICE + cmd) if heavy else cmd
     try:
-        return subprocess.run(full, capture_output=True, text=True, errors="replace", timeout=timeout,
-                              stdin=subprocess.DEVNULL, check=False)
+        return subprocess.run(full, capture_output=True, text=text, errors="replace" if text else None,
+                              timeout=timeout, stdin=subprocess.DEVNULL, check=False, pass_fds=tuple(fds))
     except subprocess.TimeoutExpired as e:
         raise Unmeasurable(f"timed out after {timeout}s: {' '.join(cmd[:6])} ...") from e
+
+
+# ---------------------------------------------------------------- what a measurement may read
+# The files a measurement reads were written by the editor, or named by it (an asset's path in the State), and the
+# measurement runs as the judge's user, who can read files that the editor's user cannot (run.py --as-user). So every
+# file a measurement reads goes through source(): it must be a regular file in a folder the judge allowed (confine:
+# run.py's T allows the test's scratch folder and the media folder), and it is opened once, by this process; FFmpeg
+# and ffprobe get that open file (/dev/fd/N), with only the file protocol and only demuxers that read nothing but
+# their own input. A file the editor swaps for a link after the check is not read, and a file that names other files
+# or URLs (an HLS or DASH playlist, a concat list, an image sequence) is not followed, whatever its name says.
+MEDIA = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,mp3,png_pipe"  # renders, exports, the media, a rendered frame
+PICTURE = "png_pipe,nut"  # a rendered frame (PNG) or a frame Frames extracted (rawvideo in NUT)
+_ROOTS = []
+TEXT_LIMIT = 8 << 20  # the most bytes source.read() reads: captions, OTIO and project files are far smaller
+
+
+def confine(*roots):
+    """From now on, measurements read only regular files under `roots` (folders; links in them are resolved, so a link
+    to a file elsewhere is refused). Without a call (check_observe.py) every regular file may be read."""
+    _ROOTS[:] = [os.path.realpath(r) for r in roots if r]
+
+
+def _allow(root):
+    if _ROOTS:
+        _ROOTS.append(os.path.realpath(root))
+
+
+def _under(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+class source:
+    """`with source(path) as fd:` the file at `path`, opened for reading by this process: a regular file under the
+    folders confine() allowed, checked on the open file itself (its place as /proc/self/fd names it), so a link
+    swapped in after the check is not followed. Unmeasurable otherwise. `fd.words(formats)` are FFmpeg's input
+    words for it: only the file protocol and the demuxers `formats` (a comma list), then -i /dev/fd/N."""
+
+    def __init__(self, path):
+        self.path, self.fd = path, None
+
+    def _refuse(self, why):
+        raise Unmeasurable(f"{os.path.basename(self.path)} {why}")
+
+    def __enter__(self):
+        if not isinstance(self.path, str) or not self.path:
+            raise Unmeasurable(f"no file named ({self.path!r})")
+        real = os.path.realpath(self.path)
+        if _ROOTS and not any(_under(real, r) for r in _ROOTS):
+            self._refuse(f"is not in a folder the judge may measure in (it is {real})")
+        try:
+            self.fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        except FileNotFoundError:
+            raise Unmeasurable(f"missing file {os.path.basename(self.path)}") from None
+        except OSError as e:
+            self._refuse(f"cannot be opened: {e.strerror}")
+        try:
+            if not stat.S_ISREG(os.fstat(self.fd).st_mode):
+                self._refuse("is not a regular file")
+            try:
+                where = os.readlink(f"/proc/self/fd/{self.fd}")
+            except OSError:
+                where = real
+            if _ROOTS and not any(_under(where, r) for r in _ROOTS):
+                self._refuse(f"is not in a folder the judge may measure in (it is {where})")
+        except BaseException:
+            os.close(self.fd)
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)
+
+    def stat(self):
+        return os.fstat(self.fd)
+
+    def words(self, formats=MEDIA):
+        return ["-protocol_whitelist", "file", "-format_whitelist", formats, "-i", f"/dev/fd/{self.fd}"]
+
+    def chunks(self, size=1 << 20):
+        """The file's bytes from its start, `size` bytes at a time (the last piece may be shorter)."""
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        while True:
+            b = os.read(self.fd, size)
+            if not b:
+                return
+            yield b
+
+    def read(self, limit=TEXT_LIMIT):
+        """The file's bytes. A file that holds more than `limit` bytes (counted as they are read, so a file the editor
+        makes longer meanwhile counts too) is Unmeasurable as too large to read: the editor writes these files, and
+        one of any size must not exhaust the judge's memory."""
+        chunks, n = [], 0
+        for b in self.chunks():
+            n += len(b)
+            if n > limit:
+                self._refuse(f"is too large to read (more than {limit} bytes)")
+            chunks.append(b)
+        return b"".join(chunks)
 
 
 def ffmpeg_version():
@@ -60,10 +160,11 @@ def ffmpeg_version():
 
 
 def sha256(path):
+    """The sha256 of the file at `path`, read through source() 1 MiB at a time (a file of any size)."""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
+    with source(path) as src:
+        for b in src.chunks():
+            h.update(b)
     return h.hexdigest()
 
 
@@ -72,13 +173,15 @@ _probe_cache = {}
 
 
 def probe(path):
-    """ffprobe -show_format -show_streams as a dict (cached per path and modification time)."""
-    key = (path, os.path.getmtime(path) if os.path.exists(path) else None)
-    if key in _probe_cache:
-        return _probe_cache[key]
-    if not os.path.isfile(path):
-        raise Unmeasurable(f"missing file {os.path.basename(path)}")
-    p = run([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-of", "json", path], heavy=False)
+    """ffprobe -show_format -show_streams as a dict (cached per path and the file's identity and modification
+    time). The file is read through source() with the MEDIA demuxers."""
+    with source(path) as src:
+        st = src.stat()
+        key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        if key in _probe_cache:
+            return _probe_cache[key]
+        p = run([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-of", "json"] + src.words(), heavy=False,
+                fds=[src.fd])
     try:
         info = json.loads(p.stdout or "{}")
     except json.JSONDecodeError:
@@ -184,10 +287,9 @@ def fps(path):
 def decode(path):
     """Decodes every stream to the end: {exit, stderr (what `ffmpeg -v error` printed), video_frames, clean}.
     clean = exit 0, nothing printed at -v error, a video stream with at least one decoded frame."""
-    if not os.path.isfile(path):
-        raise Unmeasurable(f"missing file {os.path.basename(path)}")
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-v", "error", "-progress", "pipe:1", "-i", path, "-f",
-             "null", "-"])
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-v", "error", "-progress", "pipe:1"] + src.words()
+                + ["-f", "null", "-"], fds=[src.fd])
     err = p.stderr.strip()
     frames = re.findall(r"^frame=(\d+)", p.stdout, re.M)
     nframes = int(frames[-1]) if frames else 0
@@ -201,7 +303,10 @@ class Frames:
     """One frame per (path, t, size, extra filter), extracted once into a temp folder as yuv420p rawvideo .nut."""
 
     def __init__(self, tmp=None):
-        self.tmp = tmp or tempfile.mkdtemp(prefix="judge-frames-")
+        if not tmp:
+            tmp = tempfile.mkdtemp(prefix="judge-frames-")
+            _allow(tmp)  # this process's own folder (mode 0700): its frames may be measured
+        self.tmp = tmp
         os.makedirs(self.tmp, exist_ok=True)
         self.n = 0
         self.cache = {}
@@ -224,8 +329,10 @@ class Frames:
             vf = f"{vf_extra},{vf}"
         self.n += 1
         out = os.path.join(self.tmp, f"f{self.n}.nut")
-        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-y", "-ss", f"{float(t):.3f}", "-i", path,
-                 "-map", "0:v:0", "-frames:v", "1", "-vf", vf, "-c:v", "rawvideo", "-f", "nut", out])
+        with source(path) as src:
+            p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-y", "-ss", f"{float(t):.3f}"] + src.words()
+                    + ["-map", "0:v:0", "-frames:v", "1", "-vf", vf, "-c:v", "rawvideo", "-f", "nut", out],
+                    fds=[src.fd])
         need = (w * h * 3) // 2  # one yuv420p frame; a header-only file means there was no frame at t
         if p.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) < need:
             raise Unmeasurable(f"no frame at {t}s in {os.path.basename(path)}"
@@ -245,8 +352,9 @@ REGIONS = {
 def ssim(f1, f2, region=None, crop=None):
     """FFmpeg's SSIM 'All' of two frames (files from Frames.get), over a named region (REGIONS) or an FFmpeg crop."""
     crop = crop or REGIONS[region]
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-i", f1, "-i", f2, "-lavfi",
-             f"[0:v]{crop}[x];[1:v]{crop}[y];[x][y]ssim", "-f", "null", "-"])
+    with source(f1) as s1, source(f2) as s2:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats"] + s1.words(PICTURE) + s2.words(PICTURE)
+                + ["-lavfi", f"[0:v]{crop}[x];[1:v]{crop}[y];[x][y]ssim", "-f", "null", "-"], fds=[s1.fd, s2.fd])
     m = re.findall(r"All:\s*([0-9.]+)", p.stderr)
     if not m:
         raise Unmeasurable(f"ssim failed: {p.stderr.strip()[-300:]}")
@@ -264,8 +372,9 @@ def frame_ssim(frames, path, t, ref, ref_t, region=None, crop=None):
 
 def signalstats(frame):
     """FFmpeg signalstats of one frame file (YAVG, SATAVG, ... on 8-bit values)."""
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-i", frame, "-vf",
-             "signalstats,metadata=print:file=-", "-f", "null", "-"])
+    with source(frame) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + src.words(PICTURE)
+                + ["-vf", "signalstats,metadata=print:file=-", "-f", "null", "-"], fds=[src.fd])
     vals = dict(re.findall(r"lavfi\.signalstats\.(\w+)=([-0-9.]+)", p.stdout))
     if "YAVG" not in vals:
         raise Unmeasurable(f"signalstats failed: {p.stderr.strip()[-300:]}")
@@ -277,8 +386,10 @@ def last_frame_stats(path):
     change): (stats, frame index, pts_time, frames decoded)."""
     if video_stream(path) is None:
         raise Unmeasurable(f"{os.path.basename(path)} has no video stream")
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-map", "0:v:0", "-vf",
-             "format=yuv420p,signalstats,metadata=print:file=-", "-f", "null", "-"])
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + src.words()
+                + ["-map", "0:v:0", "-vf", "format=yuv420p,signalstats,metadata=print:file=-", "-f", "null", "-"],
+                fds=[src.fd])
     blocks = re.split(r"^frame:", p.stdout, flags=re.M)[1:]
     if not blocks:
         raise Unmeasurable(f"no decoded frames: {p.stderr.strip()[-300:]}")
@@ -291,18 +402,47 @@ def last_frame_stats(path):
 
 
 def mean_rgb(path, region="centre"):
-    """The mean colour (r, g, b, each 0..255) of an image or of a video's first frame, over a named region (REGIONS):
-    the frame scaled down to one pixel (area average) as rgb24. A test that needs to know whether a graphic's code
-    ran to its end lets the code pick the colour it draws."""
+    """The mean colour (r, g, b, each 0..255) of a picture (a PNG, as render_frame writes), over a named region
+    (REGIONS): the picture scaled down to one pixel (area average) as rgb24. A test that needs to know whether a
+    graphic's code ran to its end lets the code pick the colour it draws."""
     if video_stream(path) is None:
         raise Unmeasurable(f"{os.path.basename(path)} has no picture")
-    p = subprocess.run(NICE + [FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-frames:v", "1", "-vf",
-                               f"{REGIONS[region]},scale=1:1:flags=area,format=rgb24", "-f", "rawvideo", "-"],
-                       capture_output=True, timeout=120, stdin=subprocess.DEVNULL, check=False)
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error"] + src.words(PICTURE)
+                + ["-frames:v", "1", "-vf", f"{REGIONS[region]},scale=1:1:flags=area,format=rgb24", "-f", "rawvideo",
+                   "-"], timeout=120, fds=[src.fd], text=False)
     if p.returncode != 0 or len(p.stdout) < 3:
         why = p.stderr.decode("utf-8", "replace")[-300:]
         raise Unmeasurable(f"no colour read from {os.path.basename(path)}: {why}")
     return tuple(p.stdout[:3])
+
+
+def render_problem(path, root, seconds, fps, judge_paths=()):
+    """None when `path` (a file the State names as a render) is a video the editor rendered: a regular file under
+    `root` (the test's folder; links resolved) that is none of `judge_paths` (files the test wrote or asked the editor
+    to write, and folders of them), in a video container (QuickTime / MP4, or Matroska / WebM: not a picture), whose
+    video stream decodes to round(seconds * fps) frames, one either way. Else why not. A render that the State
+    reports as the judge's own file (a frame render_frame wrote, say) cannot then stand in for the editor's."""
+    if not isinstance(path, str) or not path:
+        return f"the State names no file ({path!r})"
+    real = os.path.realpath(path)
+    if not _under(real, os.path.realpath(root)):
+        return f"{path} is not in the test's folder"
+    mine = [os.path.realpath(p) for p in judge_paths]
+    if any(_under(real, p) for p in mine):
+        return f"{path} is the test's own file, not the editor's render"
+    try:
+        fmt = probe(path)["format"].get("format_name") or ""
+        if not set(fmt.split(",")) & {"mov", "matroska"}:
+            return f"{os.path.basename(path)} is {fmt or 'no known format'}, not a video container"
+        if video_stream(path) is None:
+            return f"{os.path.basename(path)} has no video stream"
+        frames, want = decode(path)["video_frames"], round(seconds * fps)
+    except Unmeasurable as e:
+        return str(e)
+    if abs(frames - want) > 1:
+        return f"{os.path.basename(path)} holds {frames} frames, not {want} ({seconds} s at {fps} fps)"
+    return None
 
 
 def colour_is(rgb, want, tol=40):
@@ -325,8 +465,9 @@ def mean_volume(path, af_prefix="", start=None, end=None):
             parts.append(f"end={end}")
         trim = "atrim=" + ":".join(parts) + ","
     af = f"{af_prefix}{trim}volumedetect"
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0", "-af", af, "-f", "null",
-             "-"])
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats"] + src.words() + ["-map", "0:a:0", "-af", af, "-f",
+                                                                                 "null", "-"], fds=[src.fd])
     m = re.findall(r"mean_volume:\s*(-?[0-9.]+|-inf) dB", p.stderr)
     if p.returncode != 0:
         raise Unmeasurable(f"audio decode failed: {p.stderr.strip()[-300:]}")
@@ -355,8 +496,9 @@ def loudness(path):
     """EBU R128 integrated loudness (LUFS) of the first audio stream; -inf when it cannot be measured."""
     if audio_stream(path) is None:
         raise Unmeasurable("no audio stream")
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0", "-af",
-             "ebur128=peak=none:framelog=verbose", "-f", "null", "-"])
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats"] + src.words()
+                + ["-map", "0:a:0", "-af", "ebur128=peak=none:framelog=verbose", "-f", "null", "-"], fds=[src.fd])
     m = re.findall(r"I:\s*(-?[0-9.]+|-inf|nan) LUFS", p.stderr)
     if not m:
         raise Unmeasurable(f"ebur128 failed: {p.stderr.strip()[-300:]}")
@@ -371,8 +513,10 @@ def silences(path, noise_db, min_len):
     silence still open at the end closes at the container duration."""
     if audio_stream(path) is None:
         raise Unmeasurable("no audio stream")
-    p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0", "-af",
-             f"silencedetect=noise={noise_db}dB:d={min_len}", "-f", "null", "-"])
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-nostats"] + src.words()
+                + ["-map", "0:a:0", "-af", f"silencedetect=noise={noise_db}dB:d={min_len}", "-f", "null", "-"],
+                fds=[src.fd])
     if p.returncode != 0:
         raise Unmeasurable(f"silencedetect failed: {p.stderr.strip()[-300:]}")
     events = re.findall(r"silence_(start|end):\s*(-?[0-9.]+)", p.stderr)
@@ -396,7 +540,8 @@ SRT_TIMING = re.compile(rf"^{SRT_TIME}\s+-->\s+{SRT_TIME}(\s+.*)?$")
 def parse_srt(path):
     """Strict SubRip parse: index line, 'HH:MM:SS,mmm --> HH:MM:SS,mmm' (end > start), one or more text lines.
     Returns (cues [(start s, end s, text)], problems [str])."""
-    raw = open(path, "rb").read()
+    with source(path) as src:
+        raw = src.read()
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -435,7 +580,11 @@ def parse_otio(path):
     Timeline.tracks (Stack / Track children, any depth up to 50). problems is empty for a well-formed timeline."""
     out = {"root_schema": None, "clips": [], "problems": []}
     try:
-        doc = json.load(open(path, encoding="utf-8"))
+        with source(path) as src:
+            doc = json.loads(src.read().decode("utf-8"))
+    except Unmeasurable as e:
+        out["problems"].append(f"not read: {e}")
+        return out
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         out["problems"].append(f"not JSON: {e}")
         return out
@@ -572,7 +721,7 @@ NET_SYSCALL = re.compile(r"^\d+\s+(<\.\.\. )?(connect|sendto|sendmsg|sendmmsg|io
 # lower-case word, not a list: %file gives names that differ between kernels and architectures (statx, openat2,
 # faccessat2, newfstatat), and a line of another call can never hide a network call.
 _LINE_FORM = re.compile(r"^\d+ +(?:[a-z_][a-z0-9_]*\(.*(?:\) += .+|<>)|<\.\.\.>.*= .+|\+\+\+ .* \+\+\+|--- .* ---)$")
-_CALL_START = re.compile(r"(?<![\w.])\d+ +(?:<\.\.\.>|[a-z_][a-z0-9_]*\(|\?\?\?\?\()")
+_CALL_START = re.compile(r"(?<![\w.])\d+ +(?:<\.\.\.>|[a-z_][a-z0-9_]*\(|\?\?\?\??\()")
 
 
 def strace_skeleton(ln):
@@ -617,8 +766,10 @@ def strace_skeleton(ln):
 
 # The one line strace writes for a call whose tracee had gone when strace stopped it at the call's entry: strace could
 # not read its registers (they are readable as long as the tracee lives), so it has no name, no arguments and no
-# result, and the tracee never ran the call. Seen when Chromium's and Electron's threads end together at exit.
-_VANISHED = re.compile(r"^\d+ +\?\?\?\?\( <(?:unfinished|detached) \.\.\.>$")
+# result, and the tracee never ran the call. Seen when Chromium's and Electron's threads end together at exit. strace
+# 5.16 writes four question marks ("????("), strace 6.x (6.8 on GitHub's Ubuntu 24.04 runner) three ("???("). strace
+# 6.8 also writes "<pid> ???() = ?" for such a call: no name, no arguments, no result.
+_VANISHED = re.compile(r"^\d+ +\?\?\?\??\((?: <(?:unfinished|detached) \.\.\.>|\) += \?)$")
 
 
 def strace_line_problem(ln):
@@ -628,9 +779,10 @@ def strace_line_problem(ln):
     own line, or into the middle of it, shows here, so such text cannot hide a call. The check cannot catch every
     such text (a writer that can cut one of strace's lines in two at the right place could make two lines of this
     form); what keeps other text out of the trace is that no process of the adapter's tree can reach it (run.py's
-    TraceTail). One more form is strace's own: "<pid> ????( <unfinished ...>" (or "<detached ...>"), exactly, for a
-    call whose tracee was gone at its entry (_VANISHED): it never ran, and the line holds nothing that could hide a
-    call; "????" with anything else is not accepted."""
+    TraceTail). One more form is strace's own: "<pid> ????( <unfinished ...>" (or "<detached ...>"; strace 6.x writes
+    "???(" in place of "????("), or "<pid> ???() = ?", exactly, for a call whose tracee was gone at its entry
+    (_VANISHED): it never ran, and the line holds nothing that could hide a call; "???" or "????" with anything else
+    is not accepted."""
     if _VANISHED.match(ln):
         return None
     skel = strace_skeleton(ln)
@@ -750,7 +902,8 @@ def substitute(src, out, pairs):
     `old` becomes `new` (keys are kept); any other file is replaced as UTF-8 text. A test crafts a hostile input this
     way from a file the editor itself wrote, without knowing its layout; a pair that made no replacement means the
     file does not hold that value, and the test records that as a failed check."""
-    raw = open(src, "rb").read()
+    with source(src) as f:  # the editor's file: a link to a file of the judge's user is not copied
+        raw = f.read()
     counts = [0] * len(pairs)
     try:
         doc = json.loads(raw.decode("utf-8"))
