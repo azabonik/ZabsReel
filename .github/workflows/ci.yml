@@ -62,7 +62,7 @@ jobs:
       # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
       # strace: smoke-unc row 16 traces FFmpeg on files that name a test server.
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
+        run: bash scripts/ci/apt-install.sh ffmpeg strace
 
       - name: Install dependencies
         run: npm ci
@@ -279,7 +279,7 @@ jobs:
         if: ${{ !cancelled() && steps.pack_linux.outcome == 'success' }}
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends strace)
+          command -v strace >/dev/null || bash scripts/ci/apt-install.sh --no-install-recommends strace
           npx tsx packages/motion/scripts/smoke-motion-media.ts
 
       # The motion renderer captures a frame of library media only once the

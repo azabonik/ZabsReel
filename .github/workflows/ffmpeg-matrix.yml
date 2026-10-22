@@ -101,7 +101,8 @@ jobs:
       # ci.yml); on ubuntu-22.04 that is also the build under test.
       # strace: smoke-unc row 16, smoke-chromeguard and smoke-motion-media (M5, M6).
       - name: Install FFmpeg and strace (apt)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
+        # scripts/ci/apt-install.sh: bounded waits and retries (a stalled mirror held two jobs for 32-34 min).
+        run: bash scripts/ci/apt-install.sh ffmpeg strace
 
       # BtbN prunes old autobuild releases, so each verified tarball is cached
       # (key: version + sha256). It is saved right after the check, not at the
