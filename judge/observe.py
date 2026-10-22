@@ -5,7 +5,7 @@ them with their own expectations. The filter chains are the ones the first-try b
 rev 4), so a value measured here and a baseline value measured there are the same measurement.
 
 mean_rgb reads the mean colour of a picture (a test lets a graphic's code pick the colour it draws, to see that it
-ran).
+ran); pixels and block_rgb read raw pixels and a block's mean colour of a video's frame (the effects' looks).
 
 The last part ("Side effects") holds the judge's own observations of what the editor does around it: a loopback listener
 that must receive nothing (on 127.0.0.1, or on another address of this computer such as 127.0.0.2), the host-level trace
@@ -443,6 +443,31 @@ def render_problem(path, root, seconds, fps, judge_paths=()):
     if abs(frames - want) > 1:
         return f"{os.path.basename(path)} holds {frames} frames, not {want} ({seconds} s at {fps} fps)"
     return None
+
+
+def pixels(path, t, chain, fmt="rgb24", frames=1):
+    """The raw pixels (bytes) of `frames` frames of the video at `path`, from the first frame at or after `t` s, after
+    the FFmpeg filter `chain` (a crop, for example, in the frame's own size), as `fmt` (rgb24: 3 bytes a pixel; gray:
+    1). Unmeasurable without a video stream or a frame there."""
+    if video_stream(path) is None:
+        raise Unmeasurable(f"{os.path.basename(path)} has no video stream")
+    with source(path) as src:
+        p = run([FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-ss", f"{float(t):.3f}"] + src.words()
+                + ["-map", "0:v:0", "-frames:v", str(int(frames)), "-vf", f"{chain},format={fmt}", "-f", "rawvideo",
+                   "-"], timeout=300, fds=[src.fd], text=False)
+    if p.returncode != 0 or not p.stdout:
+        why = p.stderr.decode("utf-8", "replace")[-300:]
+        raise Unmeasurable(f"no frame at {t}s in {os.path.basename(path)} ({why})")
+    return p.stdout
+
+
+def block_rgb(path, t, x, y, size=8):
+    """The mean colour (r, g, b, each 0..255) of the `size` x `size` block at (x, y) (its top left corner) of the
+    video's frame at `t` s: the block scaled to one pixel (area average) as rgb24, as smoke-registry.ts's sampleBlock."""
+    b = pixels(path, t, f"crop={size}:{size}:{x}:{y},scale=1:1:flags=area")
+    if len(b) < 3:
+        raise Unmeasurable(f"no colour read from {os.path.basename(path)} at {t}s")
+    return tuple(b[:3])
 
 
 def colour_is(rgb, want, tol=40):

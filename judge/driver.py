@@ -235,14 +235,28 @@ class Driver:
         """Sets a constant playback speed (1 = normal)."""
         return self.request("set_speed", {"clip": clip, "speed": float(speed)})
 
-    def apply_effect(self, clip, effect, amount=None, params=None):
-        """Adds a visual effect (by product-level name, e.g. "blur", "grayscale"). -> effect id or None"""
+    def apply_effect(self, clip, effect, amount=None, params=None, color=None, enabled=None, effect_id=None):
+        """Adds a visual effect (by product-level name, PROTOCOL.md "Effects"), or with effect_id changes that effect
+        of the clip in place (amount, params and color replaced by what is sent; enabled alone switches it off or
+        on). Values are sent unchanged. -> effect id or None"""
         args = {"clip": clip, "effect": effect}
-        if amount is not None:
-            args["amount"] = amount
-        if params is not None:
-            args["params"] = params
+        for k, v in (("amount", amount), ("params", params), ("color", color), ("enabled", enabled),
+                     ("effect_id", effect_id)):
+            if v is not None:
+                args[k] = v
         return self.request("apply_effect", args).get("effect")
+
+    def remove_effect(self, clip, effect):
+        """Removes the effect `effect` (an id from apply_effect) from the clip."""
+        return self.request("remove_effect", {"clip": clip, "effect": effect})
+
+    def reorder_effect(self, clip, effect, to_index):
+        """Moves the effect to position `to_index` (0 = first) of the clip's effects."""
+        return self.request("reorder_effect", {"clip": clip, "effect": effect, "to_index": int(to_index)})
+
+    def add_track(self, kind):
+        """Adds a track: "video" (composited over every video track) or "audio". -> its name ("v1", "a0", ...)"""
+        return self.request("add_track", {"kind": kind})["track"]
 
     def apply_colour(self, clip, **grade):
         """Colour grade: brightness, contrast, saturation, gamma, temperature, tint, hue (PROTOCOL.md)."""
@@ -380,6 +394,22 @@ class Driver:
             if v is not None:
                 args[k] = v
         return self.request("add_graphic", args)
+
+    # ------------------------------------------------------------ the command-line installer
+    def cli_world(self, root, files):
+        """Makes the new folder `root` (in the test's scratch folder) and `files` in it as the editor's user:
+        {relative path: {"text": str} | {"link": target} | {"dir": True}, each with an optional "mode"}."""
+        return self.request("cli_world", {"root": path_arg(root), "files": files})
+
+    def cli(self, args, cwd, home, appdata=None, path=None, input="", tty=False):
+        """Runs the editor's command-line installer with `args` in `cwd`, its home at `home` (PROTOCOL.md, cli).
+        -> {"exit": int, "output": str}"""
+        req = {"args": list(args), "cwd": path_arg(cwd), "home": path_arg(home), "input": input, "tty": bool(tty)}
+        if appdata is not None:
+            req["appdata"] = path_arg(appdata)
+        if path is not None:
+            req["path"] = [path_arg(p) for p in path]
+        return self.request("cli", req)
 
     # ------------------------------------------------------------ what an AI agent sees
     def agent_tools(self):

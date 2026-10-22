@@ -114,8 +114,8 @@ result that succeeds (`stop`'s included), so it is reported once in every case. 
 
 - Asset, clip and job ids are opaque strings that the adapter returns. The judge passes them back unchanged.
 - Tracks are named from the bottom: `v0` is the base video track, `v1` composites over it, and so on. `a0`, `a1`, ...
-  are the audio tracks. A new project has at least `v0`. Protocol version 1 has no operation that adds a track:
-  `place_clip` or `move_clip` on a track that does not exist answers `bad_request` and changes nothing.
+  are the audio tracks. A new project has at least `v0`; `add_track` adds one. `place_clip` or `move_clip` on a track
+  that does not exist answers `bad_request` and changes nothing.
 - Timeline positions and source ranges are integer **frames** at the project's frame rate. `out_frame` is exclusive,
   so a clip with `in_frame` 30 and `out_frame` 120 is 90 frames long. `render_frame` takes **seconds**.
 - Paths are absolute. A test may send, on purpose, a string that is not a local absolute path where an operation takes
@@ -163,7 +163,10 @@ what it leaves behind, never its message or code.
 | `split_clip` | `{"clip", "at_frame"}` | `{"clips": [left id, right id]}`: `at_frame` counts from the clip's start on the timeline. |
 | `remove_clip` | `{"clip"}` | `{}` |
 | `set_speed` | `{"clip", "speed"}` | `{}`: constant speed, 1 = normal. |
-| `apply_effect` | `{"clip", "effect", "amount"?, "params"?}` | `{"effect": id or null}` |
+| `apply_effect` | `{"clip", "effect", "amount"?, "params"?, "color"?, "enabled"?, "effect_id"?}` | `{"effect": id or null}`: adds the effect `effect` (see "Effects" below) at the end of the clip's effects. With `effect_id` (an effect of this clip) it changes that effect in place instead: `amount`, `params` and `color` are replaced by what is sent, and `enabled` alone (false: bypassed, kept but not rendered; true: on again) changes nothing else. Values are passed on unchanged: the editor clamps a value outside its range (get_state then shows the clamped value) or refuses it. Errors: `bad_request` when `enabled` is not a boolean or a field has the wrong type; `product_error` when the editor refuses: an effect it does not have, a param the effect does not have, an amount or a colour for an effect that takes none, a colour it cannot read or the effect does not take, an `effect_id` the clip does not have. |
+| `remove_effect` | `{"clip", "effect"}` | `{}`: removes the effect (an id from `apply_effect`). Errors: `product_error` when the clip does not have it. |
+| `reorder_effect` | `{"clip", "effect", "to_index"}` | `{}`: moves the effect to position `to_index` of the clip's effects (0 is the first, rendered first); a position past the end puts it last. One undo step. Errors: `product_error` when the clip does not have it. |
+| `add_track` | `{"kind": "video" \| "audio"}` | `{"track": name}`: a new track: a video track composites over every video track there is (it is the highest `v` name), an audio track is the next `a` name. Errors: `bad_request` for another kind. |
 | `apply_colour` | `{"clip", "brightness"?, "contrast"?, "saturation"?, "gamma"?, "temperature"?, "tint"?, "hue"?}` | `{}`: a colour grade. Neutral values: brightness 0, contrast 1, saturation 1, gamma 1, temperature 0, tint 0, hue 0. |
 | `apply_lut` | `{"clip", "path"}` | `{}`: applies the colour look-up table (a `.cube` file) at `path` to the clip. Errors: `bad_request` when `clip` or `path` is missing or not a string; `product_error` when the clip does not exist, or the path is not a local file the editor may read: a URL or another protocol, a path on a network computer the user has not allowed (that computer then waits for the user, see `list_hosts`), or a file of the editor's own allowed list in any spelling. |
 | `add_text` | `{"clip", "text", "style": {}}` | `{"text": id}`: a text overlay on the clip, shown for the whole clip. `style` fields, all optional: `position` (a placement name such as `bottom`, `top`, `center`), `x`, `y` (0..1), `font` (a font name or a font file path), `font_size`, `color`, `outline_color`, `outline_width`, `shadow_color`, `shadow_x`, `shadow_y`, `box` (bool), `box_color`, `box_border`. A colour is a name (`yellow`), `#rrggbb`, `#rrggbbaa`, `0xRRGGBB` or `name@alpha` (`white@0.5`). The adapter passes every value on unchanged, also one of another type: tests send hostile values on purpose, and the editor accepts or refuses each. |
@@ -183,7 +186,8 @@ State:
   "tracks": [
     {"track": "v0", "clips": [
       {"id": "...", "asset": "...", "start_frame": 0, "in_frame": 30, "out_frame": 120, "length_frames": 90,
-       "speed": 1, "graphics": []}
+       "speed": 1, "graphics": [], "texts": [{"id": "...", "text": "Hello"}],
+       "effects": [{"id": "...", "effect": "vignette", "enabled": true, "amount": 1.5}]}
     ]}
   ],
   "graphics": {"renderer": "builtin", "ready": true}
@@ -207,7 +211,43 @@ when the editor cannot use its file now: it is missing, or it waits for the user
 `waiting_host` is that computer's name (lower case, as in `list_hosts`) while the asset waits for it, else null. An
 adapter whose State has no such field leaves it out; the tests that need it then fail. A clip's `graphics` lists the
 ids of the motion graphics shown over it (`add_graphic` with `clip`), and the State's `graphics` says which renderer
-the user chose for motion graphics and whether it can render now (see "Motion graphics" below).
+the user chose for motion graphics and whether it can render now (see "Motion graphics" below). A clip's `texts` are
+its text overlays (`add_text`: their ids and texts), and its `effects` are its visual effects in the order they are
+rendered: each one's id, its name (see "Effects"), whether it is on (`enabled` false: bypassed), and, when it has
+them, its `amount`, its `params` (an object of numbers) and its `color` (in the editor's own spelling, which the tests
+only compare with itself). Values the editor clamped are shown clamped.
+
+### Effects
+
+The effects a clip can have (`apply_effect`), as the product names them, with their controls: the range of the
+`amount` (a number) and of each param (`params`, numbers), and what they do. A value outside its range is clamped. The
+tests use these names and ranges; another editor's adapter maps them to its own.
+
+| effect | controls | what it does |
+|---|---|---|
+| `blur` | amount 0..100 (the blur radius, sigma in pixels) | Gaussian blur |
+| `sharpen` | amount 0..5 | unsharp-mask sharpening |
+| `detail` | amount 0..1 | contrast-adaptive sharpening |
+| `denoise` | amount 0..30 | noise reduction over space and time |
+| `sepia`, `grayscale`, `edges`, `invert` | none | a warm brown tone; no colour; an edge drawing; every colour inverted |
+| `vignette` | amount 0..2.5 (1 the classic strength, 0 none) | darker corners |
+| `posterize` | amount 2..32 (levels per channel) | flat colour levels |
+| `pixelate` | amount 2..100 (block size factor) | mosaic blocks |
+| `chromakey` | params similarity 0.01..1, blend 0..1, despill 0..1; `color` the key colour (`0xRRGGBB`, `#rrggbb`, or `auto`) | a green or blue screen made transparent |
+| `colorkey` | params similarity 0.01..1, blend 0..1; `color` as chromakey | a flat colour made transparent |
+| `lumakey` | params threshold 0..1, tolerance 0..1, softness 0..1; `color` only `auto` | black or white made transparent |
+| `exposure` | amount -3..3 (stops), params black -1..1 (the black point; kept below the white point) | camera-style exposure |
+| `vibrance` | amount -2..2 | saturation that lifts dull colours more than saturated ones |
+| `colorhold` | params similarity 0.01..1, blend 0..1; `color` the colour kept (hex, not `auto`) | every other colour turned grey |
+| `grain` | amount 0..100 | film grain, new on every frame |
+| `glow` | amount 0..1, params radius 1..100 (pixels) | a bloom around bright areas |
+| `rgbsplit` | amount 0..50 (pixels), params angle 0..360 (degrees, 0 horizontal) | red and blue pushed apart |
+| `lens` | amount -1..1 (k1: positive barrel, negative pincushion), params k2 -1..1, fill 0..1 (1: zoomed so that no corner is left empty, the default; 0: the uncovered corners stay transparent) | a lens warp around the middle |
+| `trails` | amount 0.8..0.99 (the decay per source frame) | a fading echo of what moves |
+
+Only the keys (and `lens` with fill 0) make pixels transparent. A clip smaller than the canvas, or of another aspect,
+is fitted in the middle, and the rest of the canvas is transparent: the tracks below show there, also under any
+effect.
 
 ### Output and jobs
 
@@ -305,6 +345,23 @@ renderer gives the graphic no network: the only computer its page may reach is t
 the graphic names. The page keeps the browser's same-origin policy: it cannot read the answer of a server of another
 origin (another port of `127.0.0.1` included) that gives it no cross-origin permission, and it cannot read a file of
 this computer by its `file://` URL.
+
+### The command-line installer
+
+The editor's command-line installer (v0.2.0: `npx zabsreel`, this tree: `npx zedmix`; the v0.2.0 adapter runs the
+`bin` program of the build's `packages/skill-installer` with node) installs the editor's AI skill (`add`) and moves what an earlier release left in a
+user's AI-client configuration over to the current one (`migrate`). It works on the files of a home folder, so the
+judge gives it a **world**: a folder in the test's scratch folder with a home folder, project folders and the files in
+them, made by the adapter as the editor's user (with `run.py --as-user` the installer runs as that user, and must be
+able to rewrite, rename and remove a user's own files there).
+
+| op | args | result |
+|---|---|---|
+| `cli_world` | `{"root", "files": {path: entry}}` | `{}`: makes the folder `root` (absolute, inside the test's scratch folder, not there yet) and in it, for each relative `path` (`/`-separated plain names), the entry: `{"text": str}` a file with that text (UTF-8, exactly, line ends included), `{"link": target}` a symbolic link, or `{"dir": true}` a folder; each may have `"mode"` (permission bits, set after everything is made). Missing parent folders are made. Errors: `bad_request` when `root` is not inside the scratch folder or is there already, or an entry or path has another shape. |
+| `cli` | `{"args": [str], "cwd", "home", "appdata"?, "path"?: [folder], "input"?: str, "tty"?: bool}` | `{"exit": int, "output": str}`: runs the installer with `args` in the folder `cwd`, with its home folder at `home` (`HOME`, `USERPROFILE`, and `XDG_CONFIG_HOME` at `<home>/.config`), `APPDATA` at `appdata` (default `<home>/AppData/Roaming`), its data folder and temporary files in the editor's sandbox, and `PATH` exactly the `path` folders (none: no program can be found). `input` goes to its stdin; with `tty` true it runs on a new terminal instead, and each line of `input` is typed once the installer has printed something and waits. `exit` is its exit code (-9 when it did not end within 120 s and was killed); `output` is what it printed (stdout and stderr, or what the terminal showed). Every path is absolute and inside the test's scratch folder. Errors: `bad_request` for a path outside it or a field of another type; `adapter_error` when the installer cannot be found or started. |
+
+The tests check the world's files after each run (through `t.look`), and the exit code; they never check what the
+installer printed for its wording, only that a dry run names the files it would change or leave alone.
 
 ### What an AI agent is offered
 

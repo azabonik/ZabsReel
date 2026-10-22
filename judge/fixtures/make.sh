@@ -9,6 +9,20 @@
 #   gap.m4a   440 Hz tone, digital silence from 2.0 to 3.5 s, 5.5 s in all   AAC-LC mono 44.1 kHz
 # and a very small video that a test puts in a data: URI (a few kB):
 #   tiny.mp4  testsrc 32x32 10 fps 1 s, no audio                             H.264 yuv420p
+# a colour look-up table that swaps red and blue (test_v020_otio_compat):
+#   look.cube  LUT_3D_SIZE 2
+# and the effects test's pictures (test_effects), 30 fps, 2 s unless said, no audio, H.264 yuv420p (crf 18):
+#   fx-white.mp4     white 320x180                   fx-bars.mp4      testsrc2 240x180 (4:3, letterboxed in 16:9)
+#   fx-base.mp4      0xE020E0 320x180, 20 s (under it)                fx-base2.mp4     0x20C840, the same
+#   fx-gray64.mp4    0x404040 320x180
+#   fx-gray128.mp4   0x808080 320x180                fx-gray128p.mp4  0x808080 180x320 (portrait)
+#   fx-pair.mp4      0x806060 | 0xC04040, each 160x180
+#   fx-redblue.mp4   0xE02020 | 0x2020E0             fx-blue.mp4      0x2060C0 320x180
+#   fx-box.mp4       a white 60x50 box at (130, 65) on black 320x180
+#   fx-gridline.mp4  a white line at y 30..33 on black 320x180
+#   fx-mover.mp4     a white 40x40 box at y 70, x = 20 + 100 t, on black 320x180
+#   fx-ramp.mp4      a grey ramp, 0 at the left to 255 at the right, 320x180, 1 s
+#   fx-greensq.mp4   a 0x606060 60x60 square at y 60, x = 100 + 30 t, on 0x00FF00 320x180, 1 s
 # The tones are at amplitude 1/8 (peak about -18 dBFS). The frame rate is the source's (rate=30), never -r.
 # Usage: make.sh <outdir>   env: FFMPEG / FFPROBE (default: the ffmpeg / ffprobe on PATH)
 # Then checks each file with ffprobe (codecs, size, rate, frame count, channels) and prints what it made.
@@ -37,6 +51,29 @@ clip c640.mp4 testsrc2 640x480 5 440
 "$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "testsrc=size=32x32:rate=10:duration=1" \
   -c:v libx264 -preset medium -crf 30 -pix_fmt yuv420p -movflags +faststart "$OUT/tiny.mp4"
 
+printf 'LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n' > "$OUT/look.cube"
+
+# still <file> <lavfi graph> [<seconds>]: a picture with no audio
+still() {
+  "$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "$2" -t "${3:-2}" \
+    -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p "$OUT/$1"
+}
+still fx-white.mp4 "color=c=white:s=320x180:r=30"
+still fx-bars.mp4 "testsrc2=s=240x180:r=30"
+still fx-base.mp4 "color=c=0xE020E0:s=320x180:r=30" 20
+still fx-base2.mp4 "color=c=0x20C840:s=320x180:r=30" 20
+still fx-gray64.mp4 "color=c=0x404040:s=320x180:r=30"
+still fx-gray128.mp4 "color=c=0x808080:s=320x180:r=30"
+still fx-gray128p.mp4 "color=c=0x808080:s=180x320:r=30"
+still fx-pair.mp4 "color=c=0x806060:s=160x180:r=30[l];color=c=0xC04040:s=160x180:r=30[r];[l][r]hstack"
+still fx-redblue.mp4 "color=c=0xE02020:s=160x180:r=30[l];color=c=0x2020E0:s=160x180:r=30[r];[l][r]hstack"
+still fx-blue.mp4 "color=c=0x2060C0:s=320x180:r=30"
+still fx-box.mp4 "color=c=black:s=320x180:r=30,drawbox=x=130:y=65:w=60:h=50:color=white:t=fill"
+still fx-gridline.mp4 "color=c=black:s=320x180:r=30,drawbox=x=0:y=30:w=320:h=4:color=white:t=fill"
+still fx-mover.mp4 "color=c=black:s=320x180:r=30[b];color=c=white:s=40x40:r=30[w];[b][w]overlay=x='20+t*100':y=70:eval=frame"
+still fx-ramp.mp4 "color=c=gray:s=320x180:r=30,format=gray,geq=lum='X/320*255'" 1
+still fx-greensq.mp4 "color=c=0x00FF00:s=320x180:r=30[b];color=c=0x606060:s=60x60:r=30[q];[b][q]overlay=x='100+t*30':y=60:eval=frame" 1
+
 # probe <file> <stream> <entries>: the stream's values, comma-separated, in ffprobe's order.
 probe() { "$FP" -v error -select_streams "$2" -show_entries "stream=$3" -of csv=p=0 "$OUT/$1"; }
 # expect <file> <stream> <entries> <values>
@@ -53,6 +90,21 @@ done
 expect m.mp3 a:0 codec_name,sample_rate,channels,bit_rate mp3,44100,1,64000
 expect gap.m4a a:0 codec_name,profile,sample_rate,channels aac,LC,44100,1
 expect tiny.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,32,32,yuv420p,10/1,10
+for f in fx-white fx-gray64 fx-gray128 fx-pair fx-redblue fx-blue fx-box fx-gridline fx-mover; do
+  expect "$f.mp4" v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,60
+done
+for f in fx-base fx-base2; do
+  expect "$f.mp4" v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,600
+done
+expect fx-bars.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,240,180,yuv420p,30/1,60
+expect fx-gray128p.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,180,320,yuv420p,30/1,60
+for f in fx-ramp fx-greensq; do
+  expect "$f.mp4" v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,30
+done
+for f in fx-white fx-bars fx-ramp; do
+  [ -z "$(probe "$f.mp4" a "codec_type")" ] || { echo "make.sh: $f.mp4 has an audio stream" >&2; exit 1; }
+done
+[ "$(sed -n 1p "$OUT/look.cube")" = "LUT_3D_SIZE 2" ] || { echo "make.sh: look.cube is not a LUT" >&2; exit 1; }
 for f in a.mp4 b.mp4 c640.mp4 m.mp3 gap.m4a tiny.mp4; do
   printf '%-9s %s s, %s bytes\n' "$f" "$("$FP" -v error -show_entries format=duration -of csv=p=0 "$OUT/$f")" "$(stat -c %s "$OUT/$f")"
 done

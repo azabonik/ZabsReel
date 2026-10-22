@@ -38,6 +38,10 @@ it is not used (the check is not observed), and with --require-trace it fails th
 symbolic link in a folder this user can write (without --require-trace its real path runs). The cases that need strace
 are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the self-test.
 
+T.look's stat and read (look_units): a file's kind, mode, size and bytes, a link's target, a folder; no link is
+followed at the path, a file over 1 MiB is not read, and nothing is looked at whose folder, made real, is outside the
+test's folder (also through a link to a folder outside it).
+
 judge.yml's parts (ci_scripts, lockout_units): ci/quiet.sh, in both forms, prints a command's output that holds
 workflow commands between ::stop-commands::<token> and ::<token>:: with a new token that is in neither the command's
 arguments nor its environment, and keeps its exit code; ci/collect_logs.sh copies only the regular *.log and *.stderr
@@ -54,7 +58,9 @@ process through /proc and to send them signal 0 are all refused (SelfTest.asuser
 empty environment fails the run and is ended by the user sweep; its environment holds only run.AsUser.env_words (and
 PWD), without a canary set in the runner's. A user that already runs a process is refused, and so, in this process
 (asuser_units), are one that shares a group with this user, fs.protected_symlinks at 0, an env this user owns, and a
-sudo -n that cannot run a command as root. A --scratch folder the user can write or owns is refused, and a
+sudo -n that cannot run a command as root. That user's private file (0600 in a 0700 folder) is read by AsUser.look and
+not by this user, and a link it planted to a file of this user's is followed by neither. A --scratch folder the user
+can write or owns is refused, and a
 JUDGE_STRACE in a folder of that user's is not used. A world-writable diagnostic-log folder of the runner's still
 fails the probe when a file in it was removed after it was listed (the file is skipped), and the probe names an item
 that is not there as gone. lockout.py --no-tighten finds a world-writable folder and file, lockout.py takes
@@ -826,6 +832,30 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
         s.unit(f"the --as-user cases can run as {user}", False, why)
         return
     asuser_units(s, user)
+    # T.look's stat and read with another user: that user's private file (0600 in a 0700 folder, in a shared sticky
+    # folder as a test's) is read as that user (AsUser.look) and not by this one, and a link that user planted to a
+    # file of this user's is followed by neither.
+    shared = os.path.realpath(os.path.join(s.tmp, "look-user"))
+    os.mkdir(shared)
+    os.chmod(shared, 0o1777)
+    mine = os.path.join(s.tmp, "look-mine.txt")
+    with open(mine, "w", encoding="utf-8") as f:
+        f.write("this user's secret\n")
+    subprocess.run(au.as_user([au.tools["env"], "-i", "PATH=/usr/bin:/bin", "/bin/sh", "-c",
+                               'umask 077; mkdir "$0/p" && printf private > "$0/p/f" && ln -s "$1" "$0/l"', shared,
+                               mine]), check=True, capture_output=True, timeout=60, cwd="/")
+    pf, pl = os.path.join(shared, "p", "f"), os.path.join(shared, "l")
+    req = {"stat": [pf, pl], "read": [pf, pl], "root": shared}
+    theirs, me = au.look(req), run.look(req)
+    import base64
+    s.unit(f"look as {user}: its private file is read as it (mode 0600) and not by this user; a link it planted to a "
+           "file of this user's is followed by neither",
+           (theirs["read"][pf] and base64.b64decode(theirs["read"][pf])) == b"private"
+           and (theirs["stat"][pf] or {}).get("mode") == 0o600 and me["read"][pf] is None and me["stat"][pf] is None
+           and me["read"][pl] is None and theirs["read"][pl] is None and (me["stat"][pl] or {}).get("link") == mine,
+           {"theirs": theirs["stat"], "me": me["stat"], "read": {"theirs": theirs["read"], "me": me["read"]}})
+    subprocess.run(au.root([au.tools["rm"], "-rf", "--one-file-system", "--", shared]), capture_output=True,
+                   timeout=60, cwd="/")
     if traced:  # AsUser.tracer: the adapter's tree gets the judge's own core limits, not the 0 sudo sets
         st = shutil.which("strace", path=run.SYSTEM_PATH)
         p = subprocess.run(au.tracer(au.env_words() + [st, "-f", "-qq", "-e", "trace=none", "-u", user, "--",
@@ -1142,6 +1172,43 @@ def read_cap_units(s, observe):
            "too large to read", all("too large to read" in v for v in too_big.values()), too_big)
     s.unit("sha256 hashes a file of several MiB read 1 MiB at a time (the same hash as the whole file's)",
            digest == "read: " + hashlib.sha256(bytes(3 * (1 << 20) + 5)).hexdigest(), digest)
+
+
+def look_units(s):
+    """run.look's stat and read (T.look; tests/test_cli_migrate.py reads the installer's world with them): a regular
+    file's kind, mode and bytes, a link's target, a folder; no link is followed at the path, a file over the cap is not
+    read, and a path whose folder (made real) is outside `root` is not looked at, also through a link to a folder."""
+    import base64
+    import run
+    root = os.path.realpath(os.path.join(s.tmp, "look", "root"))
+    outside = os.path.realpath(os.path.join(s.tmp, "look", "outside"))
+    os.makedirs(os.path.join(root, "d"))
+    os.makedirs(outside)
+    f = os.path.join(root, "f.json")
+    with open(f, "wb") as fo:
+        fo.write(b"x\r\n")
+    os.chmod(f, 0o640)
+    secret = os.path.join(outside, "secret")
+    with open(secret, "w", encoding="utf-8") as fo:
+        fo.write("judge secret\n")
+    os.symlink(secret, os.path.join(root, "link"))
+    os.symlink(outside, os.path.join(root, "out"))
+    big = os.path.join(root, "big")
+    with open(big, "wb") as fo:
+        fo.truncate((1 << 20) + 1)
+    paths = [f, os.path.join(root, "link"), os.path.join(root, "d"), os.path.join(root, "out", "secret"), big,
+             os.path.join(root, "nope")]
+    got = run.look({"stat": paths, "read": paths, "root": root})
+    st, rd = got["stat"], got["read"]
+    s.unit("look stat: a file's kind, mode and size, a link's target (not followed), a folder; nothing for a path "
+           "outside root (through a link to a folder) or one that is not there",
+           st[f] == {"type": "file", "mode": 0o640, "size": 3, "link": None}
+           and st[paths[1]] == {"type": "link", "mode": st[paths[1]]["mode"], "size": len(secret), "link": secret}
+           and st[paths[2]]["type"] == "dir" and st[paths[3]] is None and st[paths[5]] is None, st)
+    s.unit("look read: a regular file's bytes; nothing through a link at the path, through a link to a folder outside "
+           "root, for a folder, a file over 1 MiB or one that is not there",
+           base64.b64decode(rd[f]) == b"x\r\n" and all(rd[p] is None for p in paths[1:]),
+           {p: (v[:20] if v else v) for p, v in rd.items()})
 
 
 def lockout_units(s):
@@ -1511,6 +1578,7 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
         import observe
         measure_units(s, observe)
         read_cap_units(s, observe)
+        look_units(s)
         real = ('1234 connect(3<UDP:[5]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("192.0.2.1")}, '
                 '16) = 0')
         good = [real, '7 openat(AT_FDCWD</a>, "/dev/null", O_RDONLY) = 3</dev/null<char 1:3>>',

@@ -293,6 +293,78 @@ def end_processes(pids, grace=5.0):
     return done
 
 
+CLI_OUTPUT_CAP = 1 << 20  # characters kept of the installer's output
+
+
+def run_piped(argv, env, cwd, text, timeout):
+    """(exit code, stdout and stderr together) of argv with `text` on stdin (not a terminal). A program that does not
+    end within `timeout` s is killed (exit -9)."""
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                         cwd=cwd, start_new_session=True)
+    try:
+        out, _ = p.communicate(text.encode("utf-8"), timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        out, _ = p.communicate()
+    return p.returncode, out.decode("utf-8", "replace")[:CLI_OUTPUT_CAP]
+
+
+def run_on_tty(argv, env, cwd, text, timeout, quiet=0.6):
+    """(exit code, what the terminal showed) of argv on a new pseudo-terminal (its stdin, stdout and stderr, and its
+    controlling terminal). Each line of `text` is typed once the program has printed something and then printed
+    nothing for `quiet` s (it waits for an answer), so no answer is read before its question is asked."""
+    import pty
+    import select
+    import termios
+    master, slave = pty.openpty()
+
+    def own_terminal():
+        os.setsid()
+        import fcntl
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, preexec_fn=own_terminal,
+                         close_fds=True)
+    os.close(slave)
+    out, deadline = bytearray(), time.time() + timeout
+    answers = [ln + "\n" for ln in text.splitlines()]
+    last, seen = time.time(), 0
+
+    def pull(wait):
+        """'data', 'idle' (nothing within `wait` s) or 'closed' (every holder of the terminal closed it)."""
+        nonlocal last
+        r, _, _ = select.select([master], [], [], wait)
+        if not r:
+            return "idle"
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:  # EIO: the program closed the terminal
+            return "closed"
+        if not chunk:
+            return "closed"
+        out.extend(chunk)
+        last = time.time()
+        return "data"
+    state = "idle"
+    while state != "closed" and time.time() < deadline:
+        if answers and len(out) > seen and time.time() - last >= quiet:
+            line = answers.pop(0).encode("utf-8")
+            os.write(master, line)
+            seen = len(out) + len(line) + 1  # past the terminal's echo of the line ("\n" shown as "\r\n")
+        state = pull(0.05)
+        if state == "idle" and p.poll() is not None:
+            break
+    if p.poll() is None:
+        try:
+            p.wait(max(1, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)  # its session: setsid made it the leader
+            p.wait()
+    while state != "closed" and pull(0.2) == "data":  # what is left on the terminal
+        pass
+    os.close(master)
+    return p.returncode, out.decode("utf-8", "replace")[:CLI_OUTPUT_CAP]
+
+
 def _zombie(pid):
     try:
         with open(f"/proc/{pid}/stat", "rb") as f:
@@ -550,11 +622,46 @@ class Adapter:
     def op_apply_effect(self, a):
         args = {"clipId": arg_str(a, "clip"), "type": arg_str(a, "effect")}
         if a.get("amount") is not None:
-            args["amount"] = a["amount"]
+            args["amount"] = a["amount"]  # passed on unchanged: the editor accepts, clamps or refuses each value
         if a.get("params") is not None:
             args["params"] = a["params"]
+        if a.get("color") is not None:
+            args["color"] = a["color"]
+        if a.get("enabled") is not None:
+            if not isinstance(a["enabled"], bool):
+                raise bad(f"'enabled' must be true or false, got {a['enabled']!r}")
+            args["enabled"] = a["enabled"]
+        eid = arg_str(a, "effect_id", required=False)
+        if eid is not None:
+            args["effectId"] = eid
         j = self.call("apply_effect", args)
         return {"effect": find_key(j, ["effectId"]) or find_key(j.get("effect"), ["id"])}
+
+    def op_remove_effect(self, a):
+        self.call("remove_effect", {"clipId": arg_str(a, "clip"), "effectId": arg_str(a, "effect")})
+        return {}
+
+    def op_reorder_effect(self, a):
+        self.call("reorder_effect", {"clipId": arg_str(a, "clip"), "effectId": arg_str(a, "effect"),
+                                     "toIndex": arg_int(a, "to_index")})
+        return {}
+
+    def op_add_track(self, a):
+        """A new video track (composited over every video track there is) or audio track. Its name is the one
+        get_state gives it: the track with the trackIndex add_track returned."""
+        kind = arg_str(a, "kind")
+        if kind not in ("video", "audio"):
+            raise bad(f"'kind' must be 'video' or 'audio', got {kind!r}")
+        j = self.call("add_track", {"kind": kind})
+        idx = j.get("trackIndex", j.get("index"))
+        if not isinstance(idx, int):
+            m = re.search(r"trackIndex\D{0,4}(\d+)", str(j.get("text") or ""))
+            idx = int(m.group(1)) if m else None
+        names, _ = self.tracks()
+        name = next((n for n, i in names.items() if i == idx and n[0] == kind[0]), None)
+        if name is None:
+            raise OpError("adapter_error", f"add_track answered no track of kind {kind}: {json.dumps(j)[:300]}")
+        return {"track": name}
 
     def op_apply_colour(self, a):
         clip = arg_str(a, "clip")
@@ -596,10 +703,17 @@ class Adapter:
         def speed_of(c):  # v0.2.0 keeps a constant speed in the clip's effects
             v = (c.get("effects") or {}).get("speed", c.get("speed", 1))
             return v if isinstance(v, (int, float)) and v > 0 else 1
-        overlays = {}  # clip id -> its motion graphics' ids (get_state's clips; timeline_summary does not list them)
-        for t in st.get("tracks", []):
+        overlays, effects, texts = {}, {}, {}  # clip id -> its graphics, effects and texts (get_state's clips;
+        for t in st.get("tracks", []):        # timeline_summary does not list them)
             for c in t.get("clips", []) or []:
                 overlays[c.get("id")] = [g.get("id") for g in c.get("graphics") or [] if isinstance(g, dict)]
+                fx = (c.get("effects") or {}).get("filters") or []
+                effects[c.get("id")] = [
+                    {"id": f.get("id"), "effect": f.get("type"), "enabled": f.get("enabled") is not False,
+                     **{k: f[k] for k in ("amount", "params", "color") if k in f}}
+                    for f in fx if isinstance(f, dict)]
+                texts[c.get("id")] = [{"id": o.get("id"), "text": o.get("text")} for o in c.get("overlays") or []
+                                      if isinstance(o, dict) and isinstance(o.get("text"), str)]
         tracks = []
         for kind, prefix in (("video", "v"), ("audio", "a")):
             kt = sorted((t for t in ts.get("tracks", []) if t.get("kind") == kind), key=lambda t: t["trackIndex"])
@@ -609,7 +723,9 @@ class Adapter:
                     clips.append({"id": c.get("clipId"), "asset": c.get("assetId"), "start_frame": c.get("startFrame"),
                                   "in_frame": c.get("sourceInFrame"), "out_frame": c.get("sourceOutFrame"),
                                   "length_frames": c.get("durationFrames"),
-                                  "speed": speed_of(c), "graphics": overlays.get(c.get("clipId"), [])})
+                                  "speed": speed_of(c), "graphics": overlays.get(c.get("clipId"), []),
+                                  "effects": effects.get(c.get("clipId"), []),
+                                  "texts": texts.get(c.get("clipId"), [])})
                 tracks.append({"track": f"{prefix}{n}", "clips": clips})
         out = {"canvas": {"width": canvas.get("width"), "height": canvas.get("height"), "fps": canvas.get("fps")},
                "length_frames": ts.get("totalFrames"), "assets": assets, "tracks": tracks}
@@ -990,6 +1106,108 @@ class Adapter:
     def op_transcript(self, a):
         return {"texts": list(self.texts)}
 
+    # ------------------------------------------------------------ the command-line installer
+    def _inside(self, path, what):
+        """`path`, an absolute path the judge gave, when it is inside the test's scratch folder (made real; it need
+        not exist yet), else bad_request: the installer's home, its folders and its world stay in the scratch folder
+        (rule 1)."""
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise bad(f"{what} must be an absolute path, got {path!r}")
+        if self.scratch is None:
+            raise OpError("adapter_error", "the editor is not started")
+        real = os.path.realpath(path)
+        if not real.startswith(self.scratch + os.sep):
+            raise bad(f"{what} {path} is not inside the test's scratch folder")
+        return real
+
+    def op_cli_world(self, a):
+        """Makes the folder `root` (new, inside the scratch folder) and the files, folders and links `files` names,
+        as this process's own: the installer then runs on files of the editor's user, as a user's own configuration
+        is theirs."""
+        root = self._inside(arg_str(a, "root"), "root")
+        files = a.get("files")
+        if not isinstance(files, dict):
+            raise bad(f"'files' must be an object of relative path -> entry, got {files!r}")
+        if os.path.lexists(root):
+            raise bad(f"{root} exists: a world is made in a new folder")
+        plan = []
+        for rel, e in files.items():
+            parts = rel.split("/") if isinstance(rel, str) else []
+            if not parts or rel.startswith("/") or any(p in ("", ".", "..") for p in parts):
+                raise bad(f"{rel!r} is not a relative path of plain names")
+            if not isinstance(e, dict) or sum(k in e for k in ("text", "link", "dir")) != 1:
+                raise bad(f"{rel}: an entry has exactly one of 'text', 'link' and 'dir'")
+            mode = e.get("mode")
+            if mode is not None and (isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o7777):
+                raise bad(f"{rel}: 'mode' must be a permission number, got {mode!r}")
+            if "text" in e and not isinstance(e["text"], str) or "link" in e and not isinstance(e["link"], str):
+                raise bad(f"{rel}: 'text' and 'link' are strings")
+            plan.append((os.path.join(root, *parts), e))
+        os.mkdir(root, 0o755)
+        for p, e in sorted(plan, key=lambda x: x[0]):  # folders, files and links, parents first
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            if e.get("dir"):
+                os.makedirs(p, exist_ok=True)
+            elif "link" in e:
+                os.symlink(e["link"], p)
+            else:
+                with open(p, "x", encoding="utf-8", newline="") as f:
+                    f.write(e["text"])
+        for p, e in sorted(plan, key=lambda x: x[0], reverse=True):  # modes last, deepest first (a 0700 folder too)
+            if e.get("mode") is not None and "link" not in e:
+                os.chmod(p, e["mode"])
+        return {}
+
+    def _cli_program(self):
+        """The installer's program: the one `bin` entry of <build>/packages/skill-installer/package.json (the command
+        a user runs as `npx <name>`), inside the build."""
+        pkg = os.path.join(self.build, "packages", "skill-installer")
+        try:
+            with open(os.path.join(pkg, "package.json"), encoding="utf-8") as f:
+                b = json.load(f).get("bin")
+        except (OSError, ValueError) as e:
+            raise OpError("adapter_error", f"no installer package in the build ({e})")
+        rel = b if isinstance(b, str) else (list(b.values())[0] if isinstance(b, dict) and len(b) == 1 else None)
+        prog = os.path.realpath(os.path.join(pkg, rel)) if isinstance(rel, str) else None
+        if not prog or not prog.startswith(self.build + os.sep) or not os.path.isfile(prog):
+            raise OpError("adapter_error", f"the installer package names no program in the build ({b!r})")
+        return prog
+
+    def op_cli(self, a):
+        """Runs the installer (`<program> <args>`) with node, HOME / USERPROFILE at `home`, XDG_CONFIG_HOME at
+        <home>/.config, APPDATA at `appdata` (default <home>/AppData/Roaming), its data folder and temporary files in
+        the sandbox, PATH exactly the `path` folders (none: an empty folder), in `cwd`; `input` on stdin, or with
+        `tty` typed line by line on a terminal, each line once the program has printed and waits."""
+        args = a.get("args")
+        if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+            raise bad(f"'args' must be a list of strings, got {args!r}")
+        cwd, home = self._inside(arg_str(a, "cwd"), "cwd"), self._inside(arg_str(a, "home"), "home")
+        appdata = a.get("appdata")
+        appdata = self._inside(appdata, "appdata") if appdata is not None else os.path.join(home, "AppData", "Roaming")
+        path = a.get("path") or []
+        if not isinstance(path, list):
+            raise bad(f"'path' must be a list of folders, got {path!r}")
+        path = [self._inside(p, "a path folder") for p in path]
+        text = a.get("input", "")
+        tty = a.get("tty", False)
+        if not isinstance(text, str) or not isinstance(tty, bool):
+            raise bad("'input' must be a string and 'tty' true or false")
+        node = shutil.which("node", path=self.env["PATH"])
+        if not node:
+            raise OpError("adapter_error", "no node on PATH")
+        empty = os.path.join(self.root, "cli-empty-path")
+        os.makedirs(empty, exist_ok=True)
+        env = {"HOME": home, "USERPROFILE": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"), "APPDATA": appdata,
+               "AIVE_DATA_DIR": os.path.join(self.root, "cli-data"), "TMPDIR": self.env["TMPDIR"],
+               "LANG": "C.UTF-8", "PATH": os.pathsep.join(path) or empty}
+        for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "AIVE_DATA_DIR", "TMPDIR"):  # the sandbox rule, checked
+            if not os.path.realpath(env[k]).startswith(self.scratch + os.sep):
+                raise OpError("adapter_error", f"{k} is outside the test's scratch folder")
+        argv = [node, self._cli_program()] + args
+        log(f"cli: {' '.join(args)} (cwd {cwd})")
+        code, out = (run_on_tty if tty else run_piped)(argv, env, cwd, text, 120)
+        self.note(out)
+        return {"exit": code, "output": out}
 
 def handle(ad, raw):
     """One request line -> its response object. bad_request only for the judge's arguments (arg_* and the checks in
@@ -1193,6 +1411,119 @@ def self_test():
         expect("start: a graphics_addon that is not an object with root and browser is bad_request",
                [op(Adapter(), "start", {"build": tmp, "scratch": tmp, "graphics_addon": x})["error"]["code"]
                 for x in ("dir", {"root": tmp}, {"root": tmp, "browser": 3})], ["bad_request"] * 3)
+
+        # Effects and tracks (batch 2 operations), on canned replies.
+        sent = []
+
+        def fx_reply(n, a):
+            sent.append((n, a))
+            if n == "add_track":
+                return {"trackIndex": 3}
+            if n == "timeline_summary":
+                return {"tracks": [{"kind": "video", "trackIndex": 0}, {"kind": "audio", "trackIndex": 1},
+                                   {"kind": "video", "trackIndex": 3}]}
+            return {"effectId": "fx_1"}
+        ad = adapter(fx_reply)
+        r = [op(ad, "apply_effect", {"clip": "c1", "effect": "colorkey", "color": "auto", "enabled": False,
+                                     "effect_id": "fx_1", "params": {"similarity": 0.3}, "amount": 500}),
+             op(ad, "remove_effect", {"clip": "c1", "effect": "fx_1"}),
+             op(ad, "reorder_effect", {"clip": "c1", "effect": "fx_1", "to_index": 0}),
+             op(ad, "add_track", {"kind": "video"})]
+        expect("apply_effect, remove_effect, reorder_effect and add_track map to v0.2.0's tools; add_track names the "
+               "track of the trackIndex it returned",
+               ([x.get("result") for x in r], [x for x in sent if x[0] != "timeline_summary"]),
+               ([{"effect": "fx_1"}, {}, {}, {"track": "v1"}],
+                [("apply_effect", {"clipId": "c1", "type": "colorkey", "amount": 500, "params": {"similarity": 0.3},
+                                   "color": "auto", "enabled": False, "effectId": "fx_1"}),
+                 ("remove_effect", {"clipId": "c1", "effectId": "fx_1"}),
+                 ("reorder_effect", {"clipId": "c1", "effectId": "fx_1", "toIndex": 0}),
+                 ("add_track", {"kind": "video"})]))
+        expect("apply_effect: enabled that is not a boolean, and add_track of another kind, are bad_request",
+               (op(adapter(fx_reply), "apply_effect", {"clip": "c1", "effect": "blur", "enabled": "no"})["error"]["code"],
+                op(adapter(fx_reply), "add_track", {"kind": "subtitle"})["error"]["code"]),
+               ("bad_request", "bad_request"))
+
+        def fx_state(n, a):
+            if n == "timeline_summary":
+                return {"tracks": [{"kind": "video", "trackIndex": 0, "clips": [
+                    {"clipId": "c1", "assetId": "a1", "startFrame": 0, "durationFrames": 30, "sourceInFrame": 0,
+                     "sourceOutFrame": 30}]}], "canvas": {"width": 64, "height": 64, "fps": 30}, "totalFrames": 30}
+            return {"assets": [], "tracks": [{"clips": [{"id": "c1", "overlays": [{"id": "text_1", "text": "Hi"}],
+                                                         "effects": {"filters": [
+                                                             {"id": "fx_1", "type": "vignette", "amount": 1.5},
+                                                             {"id": "fx_2", "type": "colorkey", "color": "0x808080",
+                                                              "params": {"similarity": 0.1}, "enabled": False}]}}]}]}
+        c = op(adapter(fx_state), "get_state", {})["result"]["tracks"][0]["clips"][0]
+        expect("get_state: each clip's effects (in order, bypassed ones too) and texts",
+               (c["effects"], c["texts"]),
+               ([{"id": "fx_1", "effect": "vignette", "enabled": True, "amount": 1.5},
+                 {"id": "fx_2", "effect": "colorkey", "enabled": False, "params": {"similarity": 0.1},
+                  "color": "0x808080"}], [{"id": "text_1", "text": "Hi"}]))
+        # The command-line installer: the world, and the installer's environment, on a fake build.
+        scratch = os.path.realpath(os.path.join(tmp, "scratch"))
+        build = os.path.join(tmp, "build")
+        inst = os.path.join(build, "packages", "skill-installer")
+        os.makedirs(os.path.join(inst, "bin"))
+        os.makedirs(os.path.join(scratch, "editor", "tmp"))
+        with open(os.path.join(inst, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"bin": {"x": "bin/x.mjs"}}, f)
+        with open(os.path.join(inst, "bin", "x.mjs"), "w", encoding="utf-8") as f:
+            f.write("import { createInterface } from 'node:readline';\n"
+                    "const e = process.env;\n"
+                    "const out = {args: process.argv.slice(2), cwd: process.cwd(), tty: !!process.stdin.isTTY,\n"
+                    "  env: Object.fromEntries(['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'APPDATA', 'PATH',\n"
+                    "    'AIVE_DATA_DIR', 'TMPDIR'].map((k) => [k, e[k]]))};\n"
+                    "if (!out.tty) { console.log(JSON.stringify(out)); process.exit(3); }\n"
+                    "const rl = createInterface({input: process.stdin, output: process.stdout});\n"
+                    "rl.question('first? ', (a) => rl.question('second? ', (b) => {\n"
+                    "  out.answers = [a, b]; console.log('RESULT' + JSON.stringify(out)); rl.close(); }));\n")
+
+        def cli_adapter():
+            ad = Adapter()
+            ad.build, ad.scratch, ad.root = os.path.realpath(build), scratch, os.path.join(scratch, "editor")
+            ad.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": os.path.join(scratch, "editor", "tmp")}
+            return ad
+        def stat_mode(path):
+            return os.stat(path).st_mode & 0o7777
+        w = os.path.join(scratch, "w")
+        r = op(cli_adapter(), "cli_world", {"root": w, "files": {
+            "home/a.json": {"text": "x\r\n", "mode": 0o640}, "home/l": {"link": "/elsewhere"},
+            "home/d": {"dir": True, "mode": 0o700}, "bin/p": {"text": "#!/bin/sh\n", "mode": 0o755}}})
+        made = (open(os.path.join(w, "home", "a.json"), "rb").read(), stat_mode(os.path.join(w, "home", "a.json")),
+                os.readlink(os.path.join(w, "home", "l")), stat_mode(os.path.join(w, "home", "d")),
+                stat_mode(os.path.join(w, "bin", "p"))) if r.get("ok") else r
+        expect("cli_world: files (bytes exactly), links and folders, with their modes",
+               made, (b"x\r\n", 0o640, "/elsewhere", 0o700, 0o755))
+        expect("cli_world: a root outside the scratch folder, a root that is there, and a .. path are bad_request",
+               [op(cli_adapter(), "cli_world", x)["error"]["code"] for x in (
+                   {"root": os.path.join(tmp, "out"), "files": {}}, {"root": w, "files": {}},
+                   {"root": os.path.join(scratch, "w2"), "files": {"../x": {"text": ""}}})], ["bad_request"] * 3)
+        home = os.path.join(w, "home")
+        r = op(cli_adapter(), "cli", {"args": ["migrate", "--yes"], "cwd": w, "home": home,
+                                      "path": [os.path.join(w, "bin")]})
+        res = r.get("result") or {}
+        try:
+            got = json.loads(res.get("output", "").strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            got = res
+        expect("cli: the installer runs with node in cwd with its home, APPDATA, data folder and temporary files in the "
+               "scratch folder and PATH only the given folders; its exit code and output come back",
+               (res.get("exit"), got.get("args"), got.get("cwd"), got.get("tty"), got.get("env")),
+               (3, ["migrate", "--yes"], w, False,
+                {"HOME": home, "USERPROFILE": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+                 "APPDATA": os.path.join(home, "AppData", "Roaming"), "PATH": os.path.join(w, "bin"),
+                 "AIVE_DATA_DIR": os.path.join(scratch, "editor", "cli-data"),
+                 "TMPDIR": os.path.join(scratch, "editor", "tmp")}))
+        r = op(cli_adapter(), "cli", {"args": [], "cwd": w, "home": home, "input": "yes\nno", "tty": True})
+        res = r.get("result") or {}
+        line = next((ln for ln in res.get("output", "").splitlines() if ln.startswith("RESULT")), "RESULT{}")
+        got = json.loads(line[6:])
+        expect("cli with tty: the installer has a terminal, and each line is typed after its question",
+               (res.get("exit"), got.get("tty"), got.get("answers")), (0, True, ["yes", "no"]))
+        expect("cli: a cwd, home or path folder outside the scratch folder is bad_request",
+               [op(cli_adapter(), "cli", x)["error"]["code"] for x in (
+                   {"args": [], "cwd": tmp, "home": home}, {"args": [], "cwd": w, "home": tmp},
+                   {"args": [], "cwd": w, "home": home, "path": ["/usr/bin"]})], ["bad_request"] * 3)
 
         class FakeMcp:
             def request(self, method, params, timeout=None):

@@ -487,14 +487,61 @@ class AsUser:
 
 def look(req):
     """What one user sees of some paths (T.look; under --as-user AsUser.look runs this function's own source as that
-    user). req: {"files": [path], "folders": [path], "walk": [path]}. Returns {"files": {path: sha256 of a regular
-    file it can read, else None}, "folders": {path: sorted names, or None when it cannot list it}, "walk": {path:
-    size of a regular file, None for a folder, a link or anything else} for every entry under each walk root (links
-    are not followed)}."""
+    user). req: {"files": [path], "folders": [path], "walk": [path], "stat": [path], "read": [path], "root": folder}.
+    Returns {"files": {path: sha256 of a regular file it can read, else None}, "folders": {path: sorted names, or None
+    when it cannot list it}, "walk": {path: size of a regular file, None for a folder, a link or anything else} for
+    every entry under each walk root (links are not followed), "stat": {path: {"type": "file" | "dir" | "link" |
+    "other", "mode": permission bits, "size", "link": a link's target or None}, or None}, "read": {path: the bytes of a
+    regular file as base64, when it holds at most 1 MiB, else None}}.
+    stat and read follow no link at the path itself (lstat, O_NOFOLLOW), and answer None for a path whose folder,
+    made real, is not inside `root` (when given), so a link the editor put on the way cannot point them at a file
+    of the user that runs this; read also checks where the file it opened is (/proc/self/fd) before it reads."""
+    import base64
     import hashlib
     import os
     import stat
-    out = {"files": {}, "folders": {}, "walk": {}}
+    read_cap = 1 << 20
+    root = os.path.realpath(req["root"]) if req.get("root") else None
+
+    def inside(p):
+        return root is None or p == root or p.startswith(root.rstrip(os.sep) + os.sep)
+    out = {"files": {}, "folders": {}, "walk": {}, "stat": {}, "read": {}}
+    for p in req.get("stat", []):
+        out["stat"][p] = None
+        if not inside(os.path.realpath(os.path.dirname(p))):
+            continue
+        try:
+            st = os.lstat(p)
+            kind = ("link" if stat.S_ISLNK(st.st_mode) else "dir" if stat.S_ISDIR(st.st_mode)
+                    else "file" if stat.S_ISREG(st.st_mode) else "other")
+            out["stat"][p] = {"type": kind, "mode": stat.S_IMODE(st.st_mode), "size": st.st_size,
+                              "link": os.readlink(p) if kind == "link" else None}
+        except OSError:
+            pass
+    for p in req.get("read", []):
+        out["read"][p] = None
+        if not inside(os.path.realpath(os.path.dirname(p))):
+            continue
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            where = os.readlink(f"/proc/self/fd/{fd}") if os.path.isdir("/proc/self/fd") else p
+            if stat.S_ISREG(os.fstat(fd).st_mode) and inside(where):
+                chunks, n = [], 0
+                while n <= read_cap:
+                    b = os.read(fd, 1 << 16)
+                    if not b:
+                        break
+                    chunks.append(b)
+                    n += len(b)
+                if n <= read_cap:
+                    out["read"][p] = base64.b64encode(b"".join(chunks)).decode("ascii")
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
     for p in req.get("files", []):
         out["files"][p] = None
         try:
@@ -948,23 +995,25 @@ class T:
             shared_folders(self.scratch, os.path.dirname(p))
         return p
 
-    def look(self, files=(), folders=(), walk=()):
+    def look(self, files=(), folders=(), walk=(), stat=(), read=()):
         """What the editor can see of these paths, for checks on its own files (run.look): {"files": {path: sha256 or
         None}, "folders": {path: sorted names or None}, "walk": {path: size of a regular file, else None} under each
-        walk root}. This process looks itself; under --as-user the editor's user looks too (the editor keeps private
-        files, mode 0600 in folders of mode 0700, that the runner's user cannot read): a file or folder this process
-        cannot read gets that user's answer, and the walk lists what either of them sees. That user's answer is the
-        editor's own word on its own files (it runs as the editor's user), as it is in a run without --as-user."""
-        req = {"files": list(files), "folders": list(folders), "walk": list(walk)}
+        walk root, "stat": {path: {"type", "mode", "size", "link"} or None}, "read": {path: bytes or None}}. stat and
+        read look only inside this test's scratch folder and follow no link at the path (run.look). This process looks
+        itself; under --as-user the editor's user looks too (the editor keeps private files, mode 0600 in folders of
+        mode 0700, that the runner's user cannot read): a file or folder this process cannot read gets that user's
+        answer, and the walk lists what either of them sees. That user's answer is the editor's own word on its own
+        files (it runs as the editor's user), as it is in a run without --as-user."""
+        import base64
+        req = {"files": list(files), "folders": list(folders), "walk": list(walk), "stat": list(stat),
+               "read": list(read), "root": self.scratch}
         mine = look(req)
-        if AS_USER is None:
-            return mine
-        theirs = AS_USER.look(req)
-        return {"files": {p: mine["files"][p] if mine["files"][p] is not None else theirs["files"].get(p)
-                          for p in req["files"]},
-                "folders": {p: mine["folders"][p] if mine["folders"][p] is not None else theirs["folders"].get(p)
-                            for p in req["folders"]},
-                "walk": {**theirs["walk"], **mine["walk"]}}
+        if AS_USER is not None:
+            theirs = AS_USER.look(req)
+            mine = {k: {p: mine[k][p] if mine[k][p] is not None else theirs[k].get(p) for p in req[k]}
+                    for k in ("files", "folders", "stat", "read")} | {"walk": {**theirs["walk"], **mine["walk"]}}
+        mine["read"] = {p: None if v is None else base64.b64decode(v) for p, v in mine["read"].items()}
+        return mine
 
     def _record(self, name, ok, detail, harness, status):
         if not harness:

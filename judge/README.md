@@ -82,7 +82,7 @@ folder then needs `sudo`.
 A check passes or fails, or it is not made, for one of two reasons, each printed with its name and counted on the
 `JUDGE` line (`JUDGE: 150/150 passed, 6 not applicable`), neither passed nor failed:
 
-- **Not applicable** (`N/A`), for one of two reasons. First, the graphics tests' checks on the graphics add-on, when
+- **Not applicable** (`N/A`), for one of three reasons. First, the graphics tests' checks on the graphics add-on, when
   no add-on was given to the judge (`--graphics-addon`, or `JUDGE_GRAPHICS_ADDON`): a run without it cannot judge them,
   and must not pass them. Second, the hostile input the check is about could not be made. The judge makes a hostile
   project or OTIO file by text substitution in a file the editor itself saved (`observe.craft`). That needs the file
@@ -91,7 +91,8 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   not skip it silently either, so every check on that input is recorded as not applicable, with the replacement
   counts. `--strict` makes each one a failure. `judge.yml` passes `--strict` while the judge grades v0.2.0, whose
   format every crafted input comes from. A rewrite's run without `--strict` lists its not-applicable checks: each one
-  is a security check the judge could not apply to that build, not a pass.
+  is a security check the judge could not apply to that build, not a pass. Third, a check that needs Python's
+  `tomllib` (Python 3.11 or newer: `test_cli_migrate` parses the TOML the installer rewrote) on an older Python.
 - **Not observed** (`N/O`): the observation needs `strace`, which is not installed, not usable (it failed the
   runner's test of it, or under `--require-trace` it can be written by the runner's user or is named through a
   symbolic link in a folder that user can write), or `JUDGE_STRACE` is set empty:
@@ -224,7 +225,10 @@ folder must fail `lockout.py`, a `PATH` folder that is not there, below a sticky
 fail it, and `--kill` with no path must remove the user's crontab (or report that `crontab` refuses the user, as it does
 for one in `cron.deny`) and end its processes. It also runs the v0.2.0 adapter's and `check_observe.py`'s self-tests. On
 a system other than Linux, run `--self-test --allow-unprotected`: every runner it starts gets the flag, and the two
-refusal cases are skipped.
+refusal cases are skipped. `t.look`'s `stat` and `read` must give a file's kind, mode and bytes and a link's target,
+follow no link at the path, read no file over 1 MiB, and look at nothing whose folder is outside the test's folder
+(also through a link to a folder); with `--as-user`, that user's private file must be read as that user and not by the
+runner's, and a link it planted to a file of the runner's must be followed by neither.
 
 ## What is here
 
@@ -236,6 +240,7 @@ refusal cases are skipped.
 | `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing. They are the first-try baseline checker's measurements, with the same FFmpeg filter chains. Also the judge's own observations of side effects: a loopback listener that must receive nothing (or that answers a token a graphic's page must not be able to read), the search of the file-system trace, the search of the network calls for a download (`net_hits`), files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote (`craft`, which also says when it cannot). |
 | `check_observe.py` | Compares `observe.py` with the values that the baseline checker recorded for its oracle exports (a local tool: the oracles are not in the repository). |
 | `fixtures/make.sh` | Makes the test media. |
+| `fixtures/v020-otio/` | OpenTimelineIO files that the v0.2.0 release exported (`generate.py` made them with the v0.2.0 adapter, and replaced only their media folder with a token) and `manifest.json`, what each must open as, for `tests/test_v020_otio_compat.py`. `generate.py` is a tool a person runs once against the v0.2.0 release, as their own user and with no trace; CI never runs it. |
 | `fixtures/graphics-addon/` | The graphics add-on the judge gives the editor: `package.json` and `package-lock.json` (Remotion 4.0.481's packages, with their integrity hashes), `headless-shell.json` (the Chrome headless shell's URL, size and sha256) and `install.sh`, which installs both into a folder (see "The graphics add-on"). |
 | `run.py` | The runner. |
 | `lockout.py` | CI's proof that the build user cannot change what the judge relies on (see "CI"). |
@@ -277,12 +282,16 @@ def run(t):
   `t.graphics_addon` is it (`{"root", "browser"}`), or None when the judge has none; the test then records each of its
   checks on the add-on with `t.not_applicable(name, t.graphics_addon_why)`. Without the argument the editor starts
   with no add-on, as for a user who never installed it.
-- To check the editor's own files (its allowed list, what appeared in a folder), use `t.look(files=[...],
-  folders=[...], walk=[...])`, not `open` or `os.listdir`: with `--as-user` the editor keeps files that the runner's
-  user cannot read (mode 0600 in folders of mode 0700), and `t.look` then also looks as the editor's user. It returns
-  each file's sha256 (or None), each folder's sorted names (or None), and every entry under each walk root with the
-  size of each regular file. What the editor's user reports is the editor's own word on its own files, as it is
-  without `--as-user`.
+- To check the editor's own files (its allowed list, what appeared in a folder, a world the installer changed), use
+  `t.look(files=[...], folders=[...], walk=[...], stat=[...], read=[...])`, not `open` or `os.listdir`: with
+  `--as-user` the editor keeps files that the runner's user cannot read (mode 0600 in folders of mode 0700), and
+  `t.look` then also looks as the editor's user. It returns each file's sha256 (or None), each folder's sorted names
+  (or None), every entry under each walk root with the size of each regular file, each `stat` path's kind, mode, size
+  and link target (or None), and each `read` path's bytes (at most 1 MiB, or None). `stat` and `read` follow no link
+  at the path itself, answer None for a path whose folder is not inside the test's scratch folder (made real), and
+  `read` checks where the file it opened is before it reads it: a link the editor put on the way cannot make the judge
+  read a file of its own. What the editor's user reports is the editor's own word on its own files, as it is without
+  `--as-user`.
 - `t.driver()` runs the adapter, and so the editor and everything they start, under `strace -f -yy` with the
   network calls traced (`connect`, `sendto`, `sendmsg`, `sendmmsg`, `io_uring_setup`) when strace is available
   (`JUDGE_STRACE`, else `strace` on `PATH`; see "A download during a run" under "Threat model"). strace refuses every `io_uring_setup` with
@@ -462,6 +471,15 @@ What it defends against:
 - **A file format that defeats the crafted inputs**: a rewrite whose saved files do not hold the values as given
   turns the checks on crafted inputs into not applicable, each listed by name and counted on the `JUDGE` line, never
   into passes; `--strict` fails them.
+- **The command-line installer's world** (`tests/test_cli_migrate.py`): the adapter makes the world (`cli_world`) as
+  the editor's user, in the test's folder, and the test first checks that it holds exactly the files the test gave
+  (an adapter that makes another world fails that check). The installer runs there as that user, with its home and
+  APPDATA in the world and `PATH` only the folders the test names (the adapter refuses a path outside the test's
+  folder). The test reads the world only through `t.look`: `stat` and `read` follow no link at the path, look only
+  inside the test's folder and check where the opened file is, so a link the installer or the editor plants there
+  cannot make the runner's user read one of its own files into a check's detail (which the CI log shows). What
+  `t.look` reads there as the editor's user is the editor's own word, as for its other private files. Which release's
+  names the installer is graded against comes from the skill it installs, not from the adapter.
 
 What it does not defend against:
 
