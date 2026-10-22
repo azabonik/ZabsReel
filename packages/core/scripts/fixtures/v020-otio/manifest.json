@@ -1,0 +1,595 @@
+{
+ "token": "@JUDGE_MEDIA@",
+ "made_with": {
+  "name": "zabsreel",
+  "version": "0.2.0"
+ },
+ "media_ffmpeg": "ffmpeg version n9.0.2-17-g2a571b6068-20260930 Copyright (c) 2000-2026 the FFmpeg developers",
+ "files": [
+  {
+   "file": "cuts.otio",
+   "what": "cuts, a trim and a gap on one video track; the clips' own audio (440 Hz, 660 Hz)",
+   "canvas": [
+    640,
+    360,
+    30
+   ],
+   "length": 180,
+   "tracks": {
+    "v0": [
+     {
+      "media": "a.mp4",
+      "start_frame": 0,
+      "in_frame": 30,
+      "out_frame": 75,
+      "length_frames": 45,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 45,
+      "in_frame": 75,
+      "out_frame": 120,
+      "length_frames": 45,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "b.mp4",
+      "start_frame": 120,
+      "in_frame": 15,
+      "out_frame": 75,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "source",
+     "t": 0.5,
+     "media": "a.mp4",
+     "source_t": 1.5
+    },
+    {
+     "kind": "source",
+     "t": 2.0,
+     "media": "a.mp4",
+     "source_t": 3.0
+    },
+    {
+     "kind": "black",
+     "t": 3.5
+    },
+    {
+     "kind": "source",
+     "t": 4.5,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "source",
+     "t": 5.5,
+     "media": "b.mp4",
+     "source_t": 2.0
+    },
+    {
+     "kind": "tone",
+     "from": 0.2,
+     "to": 2.8,
+     "hz": 440,
+     "heard": true
+    },
+    {
+     "kind": "tone",
+     "from": 4.2,
+     "to": 5.8,
+     "hz": 660,
+     "heard": true
+    },
+    {
+     "kind": "quiet",
+     "from": 3.1,
+     "to": 3.9
+    }
+   ],
+   "media_folder_replaced": 5,
+   "media_url_replaced": 3
+  },
+  {
+   "file": "layers.otio",
+   "what": "two video tracks (a 4:3 clip over a 16:9 one, from 1 s: a gap first on v1) and an audio track",
+   "canvas": [
+    640,
+    360,
+    30
+   ],
+   "length": 150,
+   "tracks": {
+    "v0": [
+     {
+      "media": "b.mp4",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 150,
+      "length_frames": 150,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     }
+    ],
+    "v1": [
+     {
+      "media": "c640.mp4",
+      "start_frame": 30,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     }
+    ],
+    "a0": [
+     {
+      "media": "m.mp3",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 150,
+      "length_frames": 150,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "source",
+     "t": 0.5,
+     "media": "b.mp4",
+     "source_t": 0.5
+    },
+    {
+     "kind": "region",
+     "t": 2.0,
+     "media": "c640.mp4",
+     "source_t": 1.0,
+     "crop": "crop=480:360:80:0",
+     "source_chain": "scale=480:360:flags=bicubic",
+     "size": [
+      480,
+      360
+     ],
+     "what": "the 4:3 clip of v1, fitted in the middle"
+    },
+    {
+     "kind": "region",
+     "t": 2.0,
+     "media": "b.mp4",
+     "source_t": 2.0,
+     "crop": "crop=72:360:0:0",
+     "source_chain": "scale=640:360:flags=bicubic,crop=72:360:0:0",
+     "size": [
+      72,
+      360
+     ],
+     "what": "v0 beside it, where the 4:3 clip leaves the canvas empty"
+    },
+    {
+     "kind": "source",
+     "t": 4.0,
+     "media": "b.mp4",
+     "source_t": 4.0
+    },
+    {
+     "kind": "tone",
+     "from": 0.2,
+     "to": 4.8,
+     "hz": 330,
+     "heard": true
+    },
+    {
+     "kind": "tone",
+     "from": 0.2,
+     "to": 4.8,
+     "hz": 660,
+     "heard": true
+    },
+    {
+     "kind": "tone",
+     "from": 1.2,
+     "to": 2.8,
+     "hz": 440,
+     "heard": true
+    },
+    {
+     "kind": "tone",
+     "from": 3.3,
+     "to": 4.8,
+     "hz": 440,
+     "heard": false
+    }
+   ],
+   "media_folder_replaced": 6,
+   "media_url_replaced": 3
+  },
+  {
+   "file": "speed.otio",
+   "what": "a 25 fps 480x270 canvas: a clip at twice its speed, then one at half its speed",
+   "canvas": [
+    480,
+    270,
+    25
+   ],
+   "length": 125,
+   "tracks": {
+    "v0": [
+     {
+      "media": "a.mp4",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 50,
+      "length_frames": 25,
+      "speed": 2,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "b.mp4",
+      "start_frame": 25,
+      "in_frame": 25,
+      "out_frame": 75,
+      "length_frames": 100,
+      "speed": 0.5,
+      "effects": [],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "source",
+     "t": 0.3,
+     "media": "a.mp4",
+     "source_t": 0.6
+    },
+    {
+     "kind": "source",
+     "t": 0.8,
+     "media": "a.mp4",
+     "source_t": 1.6
+    },
+    {
+     "kind": "source",
+     "t": 2.0,
+     "media": "b.mp4",
+     "source_t": 1.5
+    },
+    {
+     "kind": "source",
+     "t": 4.6,
+     "media": "b.mp4",
+     "source_t": 2.8
+    },
+    {
+     "kind": "audio_length",
+     "seconds": 5.0
+    }
+   ],
+   "media_folder_replaced": 4,
+   "media_url_replaced": 2
+  },
+  {
+   "file": "looks.otio",
+   "what": "effects, colour grades, a LUT and a text: grayscale, a brightness and saturation grade, vignette 2 and 0, the red-blue LUT, a text, a warm white balance, invert",
+   "canvas": [
+    640,
+    360,
+    30
+   ],
+   "length": 480,
+   "tracks": {
+    "v0": [
+     {
+      "media": "a.mp4",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "grayscale",
+        "amount": null,
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 60,
+      "in_frame": 60,
+      "out_frame": 120,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 120,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "vignette",
+        "amount": 2.0,
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 180,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "vignette",
+        "amount": 0,
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 240,
+      "in_frame": 60,
+      "out_frame": 120,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "b.mp4",
+      "start_frame": 300,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": [
+       "JUDGE"
+      ]
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 360,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 420,
+      "in_frame": 120,
+      "out_frame": 180,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "invert",
+        "amount": null,
+        "enabled": true
+       }
+      ],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "look",
+     "look": "grayscale",
+     "t": 1.0,
+     "media": "a.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "brighter",
+     "t": 3.0,
+     "media": "a.mp4",
+     "source_t": 3.0
+    },
+    {
+     "kind": "look",
+     "look": "vignette",
+     "t": 5.0,
+     "media": "a.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "source",
+     "t": 7.0,
+     "media": "a.mp4",
+     "source_t": 1.0,
+     "what": "vignette amount 0 leaves the picture as it is"
+    },
+    {
+     "kind": "look",
+     "look": "red_blue_swapped",
+     "t": 9.0,
+     "media": "a.mp4",
+     "source_t": 3.0
+    },
+    {
+     "kind": "look",
+     "look": "text_at_bottom",
+     "t": 11.0,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "text_yellow",
+     "t": 11.0,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "text_box",
+     "t": 11.0,
+     "media": "b.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "warmer",
+     "t": 13.0,
+     "media": "a.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "inverted",
+     "t": 15.0,
+     "media": "a.mp4",
+     "source_t": 5.0
+    }
+   ],
+   "media_folder_replaced": 11,
+   "media_url_replaced": 8
+  },
+  {
+   "file": "params.otio",
+   "what": "effects with params, a colour and a bypass, and a grade on a flat colour: brightness 0.15 and saturation 1.4 on the dull and bright reds, colorhold #e02020 (similarity 0.3, blend 0.1) on the red-blue picture, exposure 0 with its black point at 0.1 on grey 128, and a vignette 2 bypassed",
+   "canvas": [
+    640,
+    360,
+    30
+   ],
+   "length": 240,
+   "tracks": {
+    "v0": [
+     {
+      "media": "fx-pair.mp4",
+      "start_frame": 0,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [],
+      "texts": []
+     },
+     {
+      "media": "fx-redblue.mp4",
+      "start_frame": 60,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "colorhold",
+        "amount": null,
+        "params": {
+         "similarity": 0.3,
+         "blend": 0.1
+        },
+        "color": "#e02020",
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "fx-gray128.mp4",
+      "start_frame": 120,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "exposure",
+        "amount": 0,
+        "params": {
+         "black": 0.1
+        },
+        "enabled": true
+       }
+      ],
+      "texts": []
+     },
+     {
+      "media": "a.mp4",
+      "start_frame": 180,
+      "in_frame": 0,
+      "out_frame": 60,
+      "length_frames": 60,
+      "speed": 1,
+      "effects": [
+       {
+        "effect": "vignette",
+        "amount": 2.0,
+        "enabled": false
+       }
+      ],
+      "texts": []
+     }
+    ]
+   },
+   "probes": [
+    {
+     "kind": "look",
+     "look": "graded_dull",
+     "t": 1.0,
+     "media": "fx-pair.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "red_held",
+     "t": 3.0,
+     "media": "fx-redblue.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "look",
+     "look": "lifted",
+     "t": 5.0,
+     "media": "fx-gray128.mp4",
+     "source_t": 1.0
+    },
+    {
+     "kind": "source",
+     "t": 7.0,
+     "media": "a.mp4",
+     "source_t": 1.0,
+     "what": "a bypassed vignette (amount 2) leaves the picture as it is"
+    }
+   ],
+   "media_folder_replaced": 8,
+   "media_url_replaced": 4
+  }
+ ]
+}

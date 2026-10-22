@@ -157,6 +157,18 @@
       ],
       "count": 2,
       "reason": "The judge's v0.2.0 adapter sends the web shell's key under the v0.2.0 release's header name too (its docstring and SHELL_HEADERS)."
+    },
+    {
+      "id": "A16",
+      "file": "packages/core/scripts/fixtures/v020-otio/manifest.json",
+      "literal": [
+        "\"name\": \"zabsreel\""
+      ],
+      "patterns": [
+        "zabsreel"
+      ],
+      "count": 1,
+      "reason": "smoke-otio's copy of the judge's v0.2.0 OTIO manifest, kept byte for byte: made_with names the release that wrote the files (0.2.0's id)."
     }
   ]
 }

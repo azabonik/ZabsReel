@@ -28,10 +28,11 @@ import { averageSpeed, hasSpeedRamp } from "../speed.js";
  *    `metadata.zedmix.*`, so a ZedMix→ZedMix round-trip is LOSSLESS.
  *
  *  - otioToProject: maps tracks/clips/gaps/transitions back. When
- *    metadata.zedmix is present the original objects are restored verbatim;
- *    foreign OTIO is mapped structurally (cut positions from the sequence,
- *    transitions to overlap crossfades) and anything unmappable lands in the
- *    returned `warnings`.
+ *    metadata.zedmix is present the original objects are restored verbatim,
+ *    and so are they from metadata.synthcut, where 0.2.0 wrote the same data
+ *    (see ownMetadata). Foreign OTIO is mapped structurally (cut positions
+ *    from the sequence, transitions to overlap crossfades) and anything
+ *    unmappable lands in the returned `warnings`.
  */
 
 // ---- OTIO JSON shapes (the subset we read/write) -----------------------------
@@ -251,6 +252,14 @@ const framesAt = (t: OtioRationalTime | undefined, fps: number): number =>
   t ? Math.round((t.value / t.rate) * fps) : 0;
 
 /**
+ * Our own data on one OTIO object: metadata.zedmix, else metadata.synthcut,
+ * the key 0.2.0 wrote (so its exports open as they do in 0.2.0). Export
+ * writes only metadata.zedmix; on an object that carries both, it wins.
+ */
+const ownMetadata = <T>(metadata: Record<string, unknown> | undefined): Partial<T> =>
+  (metadata?.zedmix ?? metadata?.synthcut ?? {}) as Partial<T>;
+
+/**
  * Map an OTIO Timeline back into a project. `probe` resolves a media path to a
  * probed asset (returns null when the file is missing — the caller supplies
  * ffprobe; missing files become offline placeholder assets with missing:true).
@@ -268,7 +277,7 @@ export async function otioToProject(
   const warnings: string[] = [];
   const missing: string[] = [];
 
-  const sc = (t.metadata?.zedmix ?? {}) as Partial<{
+  const sc = ownMetadata<{
     schemaVersion: number;
     width: number;
     height: number;
@@ -277,7 +286,7 @@ export async function otioToProject(
     music: Project["music"];
     folders: Project["folders"];
     assets: MediaAsset[];
-  }>;
+  }>(t.metadata);
 
   // fps: our metadata, else the first RationalTime rate we can find.
   const firstRate = t.tracks.children
@@ -322,7 +331,7 @@ export async function otioToProject(
       warnings.push(`Skipped unknown stack child "${otioTrack.OTIO_SCHEMA}"`);
       continue;
     }
-    const tsc = (otioTrack.metadata?.zedmix ?? {}) as Partial<{ index: number; muted: boolean; volume: number; hidden: boolean; locked: boolean }>;
+    const tsc = ownMetadata<{ index: number; muted: boolean; volume: number; hidden: boolean; locked: boolean }>(otioTrack.metadata);
     const kind = otioTrack.kind === "Audio" ? "audio" : "video";
     const track: Track = {
       id: newId("track"),
@@ -345,7 +354,7 @@ export async function otioToProject(
         continue;
       }
       if (item.OTIO_SCHEMA === "Transition.1") {
-        const meta = (item.metadata?.zedmix ?? {}) as Partial<{ type: string; durationFrames: number }>;
+        const meta = ownMetadata<{ type: string; durationFrames: number }>(item.metadata);
         const dur = meta.durationFrames ?? framesAt(item.in_offset, fps) + framesAt(item.out_offset, fps);
         pendingTransition = { type: meta.type ?? "dissolve", durationFrames: Math.max(1, dur) };
         continue;
@@ -357,8 +366,8 @@ export async function otioToProject(
 
       const ref =
         item.media_references?.[item.active_media_reference_key ?? "DEFAULT_MEDIA"] ?? item.media_reference;
-      const clipMeta = (item.metadata?.zedmix ?? {}) as Partial<{ clip: Clip }>;
-      const refMeta = (ref?.metadata?.zedmix ?? {}) as Partial<{ asset: MediaAsset; adjustment: boolean }>;
+      const clipMeta = ownMetadata<{ clip: Clip }>(item.metadata);
+      const refMeta = ownMetadata<{ asset: MediaAsset; adjustment: boolean }>(ref?.metadata);
 
       // Resolve the media (dedup by path; probe; placeholder when missing).
       let assetId: string | undefined;

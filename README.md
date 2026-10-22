@@ -116,7 +116,7 @@ A full multi-track, frame-based editing workstation. Every capability is exposed
 
 ## Interchange (OpenTimelineIO)
 
-Start the edit with AI in ZedMix, finish anywhere: `export_otio` writes the timeline as an [OpenTimelineIO](https://opentimeline.io) `.otio` file that DaVinci Resolve, Hiero, RV and other OTIO-capable tools read — tracks, clips, gaps, dissolves and speed all map natively, and everything OTIO can't express (effect stacks, keyframes, captions, motion graphics, adjustment layers) rides in `metadata.zedmix`, so `import_otio` restores a ZedMix export **losslessly**. Importing foreign OTIO works too: referenced media is probed from disk and anything missing becomes an offline placeholder asset ready for relinking.
+Start the edit with AI in ZedMix, finish anywhere: `export_otio` writes the timeline as an [OpenTimelineIO](https://opentimeline.io) `.otio` file that DaVinci Resolve, Hiero, RV and other OTIO-capable tools read — tracks, clips, gaps, dissolves and speed all map natively, and everything OTIO can't express (effect stacks, keyframes, captions, motion graphics, adjustment layers) rides in `metadata.zedmix`, so `import_otio` restores a ZedMix export **losslessly**. A file exported by v0.2.0, which kept the same data in `metadata.synthcut`, opens as it did in v0.2.0. Importing foreign OTIO works too: referenced media is probed from disk and anything missing becomes an offline placeholder asset ready for relinking.
 
 ## Make your AI a professional editor — the `zedmix-editor` skill
 

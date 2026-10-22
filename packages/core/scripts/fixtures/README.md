@@ -6,3 +6,9 @@
   (https://github.com/ggml-org/whisper.cpp/blob/master/samples/jfk.wav). Used by
   `smoke-textedit.ts` to exercise word-level transcription and text-based editing
   without any external download.
+- `v020-otio/` — the OpenTimelineIO files the v0.2.0 release exported (`cuts`,
+  `layers`, `speed`, `looks`, `params`; its data under `metadata.synthcut`) and
+  `manifest.json`, what each must open as. Copied byte for byte from the judge's
+  `judge/fixtures/v020-otio/` (its `generate.py` made them with the v0.2.0 build);
+  `@JUDGE_MEDIA@` stands for the media folder. Used by `smoke-otio.ts`, which makes
+  the media and checks that each file opens as it does in v0.2.0.
