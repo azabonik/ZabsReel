@@ -25,11 +25,21 @@ that is there, and the folders above that one, since <name> could make the missi
    may). Every attempt must be refused; one that is not fails the run, named. A sticky folder above a PATH is not
    tried for adding a file; the nearest folder above a PATH that is not there is, sticky or not.
 
+A file or folder that was listed and is gone when steps 3 and 4 reach it fails the run, named, since nothing was then
+tried in its place. One case is skipped and named instead: GitHub's runner writes and removes its own diagnostic logs
+under its home while a step runs (seen as <home>/actions-runner/cached/2.338.0/_diag/pages/<id>.log). A file or folder
+that is gone is skipped only when it is not a PATH itself, the folder that held it is one of the runner's diagnostic-log
+folders (DIAG, below a PATH folder), and step 4 tried that folder: a user that could remove the item can write that
+folder, which fails step 4. A folder above a PATH, or the nearest folder above a PATH that is not there, that is gone
+always fails, and so does a gone item whose folder step 4 does not try (a sticky folder above a PATH). Any other error
+reading one fails the run.
+
 Exit 0 when every step passed, else 1. Python 3 standard library only.
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,17 +51,20 @@ import run  # noqa: E402  (run.AsUser: the user sweep and the sudo words)
 
 # Run as the other user: reads [[kind, path], ...] on stdin ("d" a folder, "f" a file, "a" a folder above a PATH, "m"
 # the nearest folder above a PATH that is not there),
-# prints {"tried": n, "written": [[path, [what]]]}.
+# prints {"tried": n, "written": [[path, [what]]], "gone": [path]}: "gone" each item that was not there (an attempt
+# said ENOENT and none got through), which main checks as it checks the items gone before the probe (vanish_verdict).
 PROBE = r'''
 import json, os, sys
 items = json.load(sys.stdin)
-written = []
+written, gone = [], []
 for kind, p in items:
-    how = []
+    how, missing = [], False
     if kind in ("d", "a", "m"):
         q = os.path.join(p, ".lockout-probe-%d" % os.getpid())
         try:
             fd = os.open(q, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileNotFoundError:
+            missing = True
         except OSError:
             pass
         else:
@@ -61,6 +74,8 @@ for kind, p in items:
     else:
         try:
             fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            missing = True
         except OSError:
             pass
         else:
@@ -68,14 +83,23 @@ for kind, p in items:
             how.append("opened it for writing")
     try:
         os.chmod(p, os.lstat(p).st_mode & 0o7777)
+    except FileNotFoundError:
+        missing = True
     except OSError:
         pass
     else:
         how.append("changed its mode")
     if how:
         written.append([p, how])
-print(json.dumps({"tried": len(items), "written": written}))
+    elif missing:
+        gone.append(p)
+print(json.dumps({"tried": len(items), "written": written, "gone": gone}))
 '''
+
+# The runner's own diagnostic-log folders, as a path below a PATH folder (judge.yml gives the runner's home): GitHub's
+# runner writes and removes logs there while a step runs. Seen on GitHub's ubuntu-24.04 runner as
+# actions-runner/cached/2.338.0/_diag/pages; _diag itself and _diag/blocks are the runner's other log folders.
+DIAG = re.compile(r"actions-runner/cached/[0-9]+(?:\.[0-9]+)*/_diag(?:/pages|/blocks)?")
 
 
 def nearest(path):
@@ -137,12 +161,17 @@ def under(p, folders):
 
 def tighten(au, items, strict=()):
     """chmod o-w on each item that others can write (not a sticky folder above a path, nor a sticky nearest folder
-    above a path that is not there: step 4 then fails on it). Returns [(path, how)] done and [problem]: what was not
-    done, and each item under a folder in `strict` (real paths) that others could write (done or not)."""
-    done, problems = [], []
+    above a path that is not there: step 4 then fails on it). Returns [(path, how)] done, [problem]: what was not
+    done, and each item under a folder in `strict` (real paths) that others could write (done or not), and
+    [(kind, path)] vanished: each item that is no longer there (another process removed it after gather), for
+    vanish_verdict to skip or fail. Any other error reading an item is a problem."""
+    done, problems, vanished = [], [], []
     for kind, p in items:
         try:
             st = os.lstat(p)
+        except FileNotFoundError:
+            vanished.append((kind, p))
+            continue
         except OSError as e:
             problems.append(f"{p}: {e}")
             continue
@@ -165,11 +194,67 @@ def tighten(au, items, strict=()):
             done.append((p, f"{stat.S_IMODE(st.st_mode):o} -> {mode:o} (as root)"))
         else:
             problems.append(f"sudo chmod o-w {p}: {(r.stderr or r.stdout).strip()[:200]}")
-    return done, problems
+    return done, problems, vanished
+
+
+def present(items):
+    """(the items that are still there, [(kind, path)] of those that vanished). An item that cannot be read for another
+    reason is kept (tighten or the probe then names it)."""
+    kept, vanished = [], []
+    for kind, p in items:
+        try:
+            os.lstat(p)
+        except FileNotFoundError:
+            vanished.append((kind, p))
+            continue
+        except OSError:
+            pass
+        kept.append((kind, p))
+    return kept, vanished
+
+
+def to_probe(items):
+    """The items step 4 tries: all but a sticky folder above a PATH (such as /tmp, which lets others add files but not
+    rename or remove ours). The nearest folder above a PATH that is not there ("m") is tried even when sticky: the user
+    could make the PATH there. A folder above a PATH that cannot be read is tried (the probe then says)."""
+    out = []
+    for k, p in items:
+        if k == "a":
+            try:
+                if os.lstat(p).st_mode & stat.S_ISVTX:
+                    continue
+            except OSError:
+                pass
+        out.append((k, p))
+    return out
+
+
+def vanish_verdict(vanished, probed, tops):
+    """([path] skipped, [problem]) for `vanished` ([(kind, path)]: items gone after gather). An item is skipped only
+    when it is a folder or file under a PATH ("d" or "f", not a PATH itself), the folder that held it is a
+    diagnostic-log folder of the runner's (DIAG, below a PATH folder in `tops`), and that folder is one of `probed`
+    (the items step 4 tried and found there: so not a sticky folder above a PATH, and not a folder that was gone too).
+    A user that could remove the item can write that folder, which step 4 then fails. Any other vanished item is a
+    problem: nothing was tried in its place."""
+    tried = {p for k, p in probed if k in ("d", "a", "m")}
+    skipped, problems = [], []
+    for kind, p in vanished:
+        d = os.path.dirname(p)
+        diag = any(d.startswith(t.rstrip(os.sep) + os.sep) and DIAG.fullmatch(d[len(t.rstrip(os.sep)) + 1:])
+                   for t in tops)
+        if kind in ("d", "f") and p not in tops and d in tried and diag:
+            skipped.append(p)
+        elif kind in ("a", "m") or p in tops:
+            problems.append(f"{p} vanished after it was listed, and it is a PATH or a folder above one: nothing was "
+                            f"tried in its place")
+        else:
+            problems.append(f"{p} vanished after it was listed, and it is not in a diagnostic-log folder of the "
+                            f"runner's that was tried: nothing was tried in its place")
+    return skipped, problems
 
 
 def probe(au, items):
-    """Each item tried as the user (PROBE). Returns (tried, [(path, [what])])."""
+    """Each item tried as the user (PROBE). Returns (tried, [(path, [what])], [path] gone: not there when tried)."""
     words = au.as_user([au.tools["env"], "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", sys.executable, "-I", "-S", "-B",
                         "-c", PROBE])
     r = subprocess.run(words, input=json.dumps([[k, p] for k, p in items]), capture_output=True, text=True,
@@ -179,7 +264,23 @@ def probe(au, items):
     except ValueError:
         raise SystemExit(f"lockout: FAIL the probe as {au.name} did not answer (exit {r.returncode}): "
                          f"{(r.stderr or r.stdout).strip()[:400]}")
-    return out["tried"], [(p, how) for p, how in out["written"]]
+    return out["tried"], [(p, how) for p, how in out["written"]], out["gone"]
+
+
+def group_verdict(name, user_groups, my_groups):
+    """None when the user `name` (group ids `user_groups`) shares no group with this user (`my_groups`), else why."""
+    shared = run.shared_groups(user_groups, my_groups)
+    return f"{name} shares the group id(s) {shared} with this user" if shared else None
+
+
+def sudo_verdict(name, text):
+    """None when `text` (what sudo -n -l -U <name> said, as root) says that the user `name` may not run sudo, else
+    why. Only sudo's own answer passes ("User <name> is not allowed to run sudo on <host>."): a list of commands the
+    user may run, an error or nothing fails."""
+    said = " ".join(text.split())
+    if "is not allowed to run sudo" in said and "may run the following" not in said:
+        return None
+    return f"{name} may run sudo, or sudo -l -U could not tell: {said[:300]}"
 
 
 def main():
@@ -234,16 +335,16 @@ def main():
         if left:
             fails.append(f"processes of {au.name} still running after the sweep: {left}")
 
-    mine = set(os.getgroups()) | {os.getgid(), os.getegid()}
-    if au.groups & mine:
-        fails.append(f"{au.name} shares the group id(s) {sorted(au.groups & mine)} with this user")
+    why = group_verdict(au.name, au.groups, run.runner_groups())
+    if why:
+        fails.append(why)
     r = subprocess.run(au.root([au.tools["sudo"], "-n", "-l", "-U", au.name]), stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, timeout=60, cwd="/")
-    said = " ".join((r.stdout + " " + r.stderr).split())
-    if "is not allowed to run sudo" not in said:
-        fails.append(f"{au.name} may run sudo, or sudo -l -U could not tell: {said[:300]}")
+    why = sudo_verdict(au.name, r.stdout + " " + r.stderr)
+    if why:
+        fails.append(why)
     else:
-        print(f"lockout: sudo -l -U {au.name}: {said[:200]}", flush=True)
+        print(f"lockout: sudo -l -U {au.name}: {' '.join((r.stdout + ' ' + r.stderr).split())[:200]}", flush=True)
 
     if not a.paths:
         for f in fails:
@@ -255,24 +356,37 @@ def main():
     if absent:
         print(f"lockout: not there (the nearest folder above each is tried instead): {absent}", flush=True)
     items = gather(a.paths)
+    tops = {os.path.realpath(t) for t in a.paths}
     strict = [os.path.realpath(d) for d in a.fail_if_writable]
     if a.no_tighten:
         print("lockout: --no-tighten: no write bit is taken away", flush=True)
-        fails += [f"others could write {p} under a --fail-if-writable folder" for k, p in items
-                  if k != "a" and under(p, strict) and os.lstat(p).st_mode & stat.S_IWOTH]
+        items, gone = present(items)
+        for k, p in items:
+            try:
+                if k != "a" and under(p, strict) and os.lstat(p).st_mode & stat.S_IWOTH:
+                    fails.append(f"others could write {p} under a --fail-if-writable folder")
+            except FileNotFoundError:
+                gone.append((k, p))
     else:
-        done, problems = tighten(au, items, strict)
+        done, problems, gone = tighten(au, items, strict)
         fails += problems
         print(f"lockout: chmod o-w on {len(done)} of {len(items)} path(s)"
               + (": " + run._short([f"{p} {how}" for p, how in done], 800) if done else ""), flush=True)
-
-    # A sticky folder above a path (such as /tmp) lets others add files but not rename or remove ours: not tried. The
-    # nearest folder above a path that is not there ("m") is tried even when sticky: the user could make the path.
-    tried, written = probe(au, [(k, p) for k, p in items if not (k == "a" and os.stat(p).st_mode & stat.S_ISVTX)])
+    items, later = present(items)
+    tried_items = to_probe(items)
+    tried, written, missing = probe(au, tried_items)
     for p, how in written:
         fails.append(f"{au.name} could change {p}: {', '.join(how)}")
     print(f"lockout: {au.name} tried to change {tried} path(s) (files, folders, and the folders above them): "
           f"{len(written)} not refused", flush=True)
+    # Gone after gather (before or during the probe): only the runner's own diagnostic logs are skipped.
+    missing = set(missing)
+    gone = list(dict.fromkeys(gone + later + [(k, p) for k, p in tried_items if p in missing]))
+    skipped, problems = vanish_verdict(gone, [(k, p) for k, p in tried_items if p not in missing], tops)
+    fails += problems
+    if skipped:
+        print(f"lockout: {len(skipped)} path(s) of the runner's diagnostic logs vanished after they were listed "
+              f"(skipped; the folder of each was tried): " + run._short(skipped, 600), flush=True)
     running = au.procs()  # the probe's own process has ended
     if running:
         fails.append(f"processes of {au.name} are running: {running}")

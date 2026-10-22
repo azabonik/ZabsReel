@@ -1,18 +1,20 @@
 # sha256 of every file under judge/ except this one, of scripts/check-judge-lock.mjs and of
 # .github/workflows/judge.yml, sorted by path from the repository root (scripts/check-judge-lock.mjs).
 # The agents that rewrite the editor must not change the judge. The gauntlet reviews a change to this file on its PR.
-badd165e011f84654d3bfc88ddaa52f995a993398871adc96c4982abe5534595  .github/workflows/judge.yml
+6155ee97f1d71a30ca74618c8711bb7c103061450857bb0f59b671c4f4957cf7  .github/workflows/judge.yml
 f32b2fb52de116ce040df06150ee0751fec90e67e9ca1622405d5470125e7229  judge/PORTING.md
 24ba280b20e6c458cbf30beda47753a7bec146cf748c903a4e75434dd046272e  judge/PROTOCOL.md
-e6af13f1daf96d1beaa066ce1fcc18fe0bb57230fd881580507292158308e671  judge/README.md
+6c8813480f3c30cfd2cc8ebad0dd941134f763788e7ff89b7bffef14e828b13f  judge/README.md
 dbd4971996538baa61f75ca33d4b3b0dd6fbfd6cc48c2cb2be6b383651197b5b  judge/adapters/v020/adapter.py
 60d050f139e5972a2c91a5133b7fcb3a3f3d85e83fa91d2db23f68d812f80beb  judge/check_observe.py
+6c27d8baf904312890c92162eee77d69246c2073fd3b0c4ee9428d6ca5af2310  judge/ci/collect_logs.sh
+cec031a9c49e120f470dd046493f577bb48dbb229dcf324c355a650af159c1c6  judge/ci/quiet.sh
 6e786ff4cfd20f68bd55bdeca508af47f62b30aac5274e80a390a960df078b3e  judge/driver.py
 383b12f0542842f44bbae5e77f096e7670b4ccddafba3ad703102946f509f2cf  judge/fixtures/make.sh
-1a68654dcc65792b6fad860d7ba5fda651ba43fe3f29ef890797e17c341cecde  judge/lockout.py
+2abbe732444163fe4ffa85a88d48820763f392eb1e10ce9a2959ded48c005e24  judge/lockout.py
 43e9541e65fd679741338912468ae08a617116963385e775fd9661ad9064a370  judge/observe.py
-491b8fb9c86dd314b4188bd06cf979a1929e331cf2bbd09bd0f6352511545856  judge/run.py
-42953eee64fdcb6f1091f7e1e67138bae080cc05bea024ac37b4527778d65ffa  judge/selftest.py
+7ad211c2399a07e2ef149dddabc3519e30b9aa372eed1274912ddaa8ccfe089b  judge/run.py
+12909af69163fb691ef4e60e0d146fd1da52f84a3c7ca865bdf287f1dbfc5d78  judge/selftest.py
 097eb125559a99db0ee813a8cdb32f50aabd0d3c140e251d7902efd656230aa7  judge/tests/test_host_approval.py
 58ba8be14907c4614f86ffe4f62274ecc975b9702e9bd615308dcf37993cf260  judge/tests/test_import_export.py
 0bf7c044b3a45acbce21f5ac1c2ba60b473c40fea5e7f5596e22e0a88b6ec2ed  judge/tests/test_network_hosts.py

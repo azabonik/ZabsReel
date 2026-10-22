@@ -41,19 +41,20 @@ python3 -I judge/run.py --as-user zjudge --scratch /srv/judge/scratch --strict -
 python3 -I judge/run.py --allow-unprotected  # not Linux: run without the /proc protection (JUDGE line says UNPROTECTED)
 ```
 
-Without `--as-user` (a local run) the adapter, the editor and everything they start run as your own user, and the
-runner prints a note that says so: the judge's same-user defences apply (see "Threat model"), and so do their gaps.
-`--as-user <name>` runs them as another user, through `sudo -n` (your user needs sudo without a password, and the
-other user must run nothing else: the runner ends every process of it after each test). The runner refuses to start
-when that user is root or your own, shares a group with yours, already runs a process, or could change a folder above
-the run's folder (give `--scratch` a folder that it can enter but not write), or when `fs.protected_symlinks`,
-`fs.protected_hardlinks` or `fs.protected_regular` is 0. The other user must be able to read and run the build, and
-`python3`, `node` and FFmpeg on your `PATH`. A custom `--adapter` must be readable and runnable by it too; the default
-adapter is copied into the run's folder for it. strace then runs as root and traces a process of the other user,
-which needs root's `CAP_SYS_PTRACE` (a virtual machine's root has it; in a Docker container, give `--cap-add
-SYS_PTRACE`): without it the strace probe fails and the trace checks are not observed. That strace is
-`JUDGE_STRACE`, or else the one in `/usr/sbin:/usr/bin:/sbin:/bin` (never your `PATH`), and it is not used when your
-user can change it or a folder above it.
+Without `--as-user` (a local run) the adapter, the editor and everything they start run as your own user, and the runner
+prints a note that says so: the judge's same-user defences apply (see "Threat model"), and so do their gaps. `--as-user
+<name>` runs them as another user, through `sudo -n` (your user needs sudo without a password, and the other user must
+run nothing else: the runner ends every process of it after each test). The runner refuses to start when that user is
+root or your own, shares a group with yours, already runs a process, or could change a folder above the run's folder
+(give `--scratch` a folder that it can enter but not write), or when `fs.protected_symlinks`, `fs.protected_hardlinks`
+or `fs.protected_regular` is 0. The other user must be able to read and run the build, and `python3`, `node` and FFmpeg
+on your `PATH`. A custom `--adapter` must be readable and runnable by it too; the default adapter is copied into the
+run's folder for it. strace then runs as root and traces a process of the other user, which needs root's
+`CAP_SYS_PTRACE` (a virtual machine's root has it; in a Docker container, give `--cap-add SYS_PTRACE`): without it the
+strace probe fails and the trace checks are not observed. That strace is `JUDGE_STRACE`, or else the one in
+`/usr/sbin:/usr/bin:/sbin:/bin` (never your `PATH`), and it is not used when your user or the other user can change it
+or a folder above it (the other user owns one, or may write one), or a folder that holds a symbolic link on the way to
+it.
 
 The runner prints one line per check (`PASS`, `FAIL`, `N/A` or `N/O`, see "Statuses"), then
 `JUDGE: <passed>/<judged> passed`, followed by `, <n> not applicable` and `, <n> not observed` when there are any. It
@@ -95,49 +96,55 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
 ### CI
 
 CI runs the judge in its own workflow, `.github/workflows/judge.yml`, with the FFmpeg on the runner's `PATH`. No code
-from the change under test runs as the runner's user, which has passwordless `sudo`, except the lock-covered judge
-files (`judge/`, the gate and `judge.yml`): they come from the pull request's checkout, and the gauntlet reviews them
-on that pull request (see "Threat model"). Before anything from the change runs, the workflow copies `judge/`, the
-gate and `judge.yml` to `$RUNNER_TEMP/judge-src` (read-only), closes the checkout's `.git` (which holds the job's
-token) to other users (`chmod -R go-rwx`), checks the copy with the copied gate, installs FFmpeg and `strace` from
-apt, and makes the build user `zjudge`: no `sudo`, only its own group, its own home, and no cron or at jobs (it is
-added to `/etc/cron.deny` and `/etc/at.deny`; the step fails when `/etc/cron.allow` or `/etc/at.allow` is there,
-since either makes the deny file ignored). It makes `/srv/judge` (the runner's, mode 0755) for the judge's scratch
-folders, and runs `lockout.py` (below) for `zjudge`. Then it runs `run.py --self-test --require-trace --as-user
-zjudge` from the copy. It copies the checkout without `.git` and `judge/` to `/home/zjudge/build`, and runs `npm ci`,
-the Electron install and the build there as `zjudge` (`sudo -n -u zjudge -H env -i`, with the toolchain's `node` first
-on `PATH`, `zjudge`'s home and npm cache, umask 022; no npm cache is restored or saved). The output of those steps
-goes to a file of the runner's (mode 0600), which the step prints after the command ends between
-`::stop-commands::<token>` and `::<token>::`, with a token made in the step's shell after `zjudge`'s command ended:
-nothing `zjudge` prints is read as a workflow command (`::add-mask::`, `::add-matcher::`, `::set-output::`, ...).
-The judge step turns workflow commands off the same way while it runs, since its check details quote what the editor
-said. After the build it runs `lockout.py --kill` (`zjudge`'s crontab is removed and every process the build left is
-ended), checks that the copy's lock and gate are the bytes it pinned before the install and that the copy still
-matches its lock, then runs the judge from the copy with `--build /home/zjudge/build --scratch /srv/judge/scratch
---strict --require-trace --as-user zjudge`. A failed run first ends every `zjudge` process (`lockout.py --kill`
-with no path: by real and by effective user id, and the step fails when one is left), then root copies only the
-regular files named `*.log` or `*.stderr` from the kept scratch folders (`find -type f`, which follows no link and
-leaves out links, FIFOs and devices) into a new folder of the runner's, and only that folder is uploaded as the
-`judge-logs` artifact (among the files, `records/<test>.adapter-strace.log`). The editor's sandbox is a folder of
-`zjudge`'s, where the kernel's link protection does not apply, so a link it planted there (to the job's token in
-`.git/config`, to `/proc/self/environ`, or to a folder of the runner's) never reaches the artifact. `ci.yml` runs the
-lock gate on the checkout as well, so deleting `judge.yml` or the gate fails `ci.yml`.
+from the change under test runs as the runner's user, which has passwordless `sudo`, except the lock-covered judge files
+(`judge/`, the gate and `judge.yml`): they come from the pull request's checkout, and the gauntlet reviews them on that
+pull request (see "Threat model"). Before anything from the change runs, the workflow copies `judge/`, the gate and
+`judge.yml` to `$RUNNER_TEMP/judge-src` (read-only), closes the checkout's `.git` to other users (`chmod -R go-rwx`; the
+checkout keeps no token there or anywhere else: `actions/checkout` runs with `persist-credentials: false`), checks the
+copy with the copied gate, installs FFmpeg and `strace` from apt, and makes the build user `zjudge`: no `sudo`, only its
+own group, its own home, and no cron or at jobs (it is added to `/etc/cron.deny` and `/etc/at.deny`; the step fails when
+`/etc/cron.allow` or `/etc/at.allow` is there, since either makes the deny file ignored). It makes `/srv/judge` (the
+runner's, mode 0755) for the judge's scratch folders, and runs `lockout.py` (below) for `zjudge`. Then it runs `run.py
+--self-test --require-trace --as-user zjudge` from the copy. It copies the checkout without `.git` and `judge/` to
+`/home/zjudge/build`, and runs `npm ci`, the Electron install and the build there as `zjudge` (`sudo -n -u zjudge -H env
+-i`, with the toolchain's `node` first on `PATH`, `zjudge`'s home and npm cache, umask 022; no npm cache is restored or
+saved). The output of those steps goes to a file of the runner's (mode 0600), which the step prints after the command
+ends between `::stop-commands::<token>` and `::<token>::`, with a token made after `zjudge`'s command ended and never
+passed to it (`ci/quiet.sh`): nothing `zjudge` prints is read as a workflow command (`::add-mask::`, `::add-matcher::`,
+`::set-output::`, ...). The judge step turns workflow commands off the same way while it runs (`ci/quiet.sh --live`),
+since its check details quote what the editor said. After the build it runs `lockout.py --kill` (`zjudge`'s crontab is
+removed and every process the build left is ended), checks that the copy's lock and gate are the bytes it pinned before
+the install and that the copy still matches its lock, then runs the judge from the copy with `--build /home/zjudge/build
+--scratch /srv/judge/scratch --strict --require-trace --as-user zjudge`. A failed run first ends every `zjudge` process
+(`lockout.py --kill` with no path: by real and by effective user id, and the step fails when one is left), then root
+(`ci/collect_logs.sh`) copies only the regular files named `*.log` or `*.stderr` from the kept scratch folders (`find
+-type f`, which follows no link and leaves out links, FIFOs and devices) into a new folder of the runner's, and only
+that folder is uploaded as the `judge-logs` artifact (among the files, `records/<test>.adapter-strace.log`). The
+editor's sandbox is a folder of `zjudge`'s, where the kernel's link protection does not apply, so a link it planted
+there (to the checkout's `.git/config`, to `/proc/self/environ`, or to a folder of the runner's) never reaches the
+artifact. `ci.yml` runs the lock gate on the checkout as well, so deleting `judge.yml` or the gate fails `ci.yml`.
 
-`lockout.py --user zjudge [--kill] [--fail-if-writable DIR] PATH...` proves that `zjudge` cannot change what the
-judge and the steps after it rely on. `judge.yml` gives it the judge's copy, its own step's file-command files
-(`$GITHUB_ENV`, `$GITHUB_PATH`, `$GITHUB_OUTPUT`, `$GITHUB_STEP_SUMMARY` and their folder under
-`$RUNNER_TEMP/_runner_file_commands`), the setup-node toolchain, every folder on `PATH`, the runner's home, the
-workspace and `/srv/judge`. For every folder and regular file under each of them, and every folder above them, it
-takes away the write bit for others where it is set (`chmod o-w`; not on a sticky folder above them, such as `/tmp`),
-then, as `zjudge`, tries to open each file for writing, to add a file to each folder and to change each one's mode
-(nothing is written, and an added file is removed again). For a folder on `PATH` that is not there, it tries the
-nearest folder above it that is there (sticky or not), since `zjudge` could make the missing folder there and put a
-`python3` or a `node` in it. The runner makes new file-command files for each later step in the same folder, with its
-own umask; `judge.yml` passes that folder as `--fail-if-writable`, so a write bit for others there fails the step
-instead of being taken away quietly (it shows a umask that would leave the later steps' files open too). The step
-fails when one attempt is not refused, when `zjudge` shares a group with the runner's user or may run `sudo` (`sudo
--l -U`), or when a `zjudge` process is still running (`--kill` removes `zjudge`'s crontab and ends its processes
-first; with `--kill` and no path it does only that and the user checks).
+`lockout.py --user zjudge [--kill] [--fail-if-writable DIR] PATH...` proves that `zjudge` cannot change what the judge
+and the steps after it rely on. `judge.yml` gives it the judge's copy, its own step's file-command files (`$GITHUB_ENV`,
+`$GITHUB_PATH`, `$GITHUB_OUTPUT`, `$GITHUB_STEP_SUMMARY` and their folder under `$RUNNER_TEMP/_runner_file_commands`),
+the setup-node toolchain, every folder on `PATH`, the runner's home, the workspace and `/srv/judge`. For every folder
+and regular file under each of them, and every folder above them, it takes away the write bit for others where it is set
+(`chmod o-w`; not on a sticky folder above them, such as `/tmp`), then, as `zjudge`, tries to open each file for
+writing, to add a file to each folder and to change each one's mode (nothing is written, and an added file is removed
+again). For a folder on `PATH` that is not there, it tries the nearest folder above it that is there (sticky or not),
+since `zjudge` could make the missing folder there and put a `python3` or a `node` in it. The runner makes new
+file-command files for each later step in the same folder, with its own umask; `judge.yml` passes that folder as
+`--fail-if-writable`, so a write bit for others there fails the step instead of being taken away quietly (it shows a
+umask that would leave the later steps' files open too). The step fails when one attempt is not refused, when `zjudge`
+shares a group with the runner's user or may run `sudo` (`sudo -l -U`), or when a `zjudge` process is still running
+(`--kill` removes `zjudge`'s crontab and ends its processes first; with `--kill` and no path it does only that and the
+user checks). A file or folder that was listed and is gone when it is reached fails the step, named, since nothing was
+tried in its place. Only the runner's own diagnostic logs are skipped and named instead: GitHub's runner writes and
+removes them while a step runs, seen as `$HOME/actions-runner/cached/2.338.0/_diag/pages/<id>.log`. A gone file or
+folder is skipped only when it is not a `PATH` itself, the folder that held it is
+`actions-runner/cached/<version>/_diag` or its `pages` or `blocks` below a `PATH` folder, and `zjudge` was tried on
+that folder: a `zjudge` that could remove it could write that folder, which fails the step. A gone item whose folder is
+not tried (a sticky folder above a `PATH`), and a gone `PATH` or folder above one, fail the step.
 
 On a pull request, `judge.yml` also fetches the base branch, writes the base branch's copy of the gate to
 `$RUNNER_TEMP/base-gate` and runs it with `--root "$GITHUB_WORKSPACE"` on the pull request's files, before the
@@ -148,49 +155,64 @@ leaves `judge.yml` unchanged: on `pull_request` events GitHub runs the pull requ
 request that also edits `judge.yml` can remove the step, and with it the warning and the summary list. Such a pull
 request shows `judge.yml` and `JUDGE.lock` changes in its diff, and only review sees them (see "Threat model").
 
-`python3 -I judge/run.py --self-test` runs the runner's own tests (`selftest.py`, on fixture tests in a temp folder):
-a crash, a hang past the timeout, `sys.exit(0)` in the middle, no checks, fewer or more checks than declared, no
-`CHECKS`, a process left by the test or by the adapter, an adapter that speaks another protocol version, an adapter
-that writes passing results into its scratch folder, lines on the result pipe that are not the test's records, a fork
-without exec that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and
-a clean test must pass. A not-applicable check (also one made through `needs=` on an input that could not be
-crafted) and a not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`.
-A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1
-port 9 and sends with `write()`, sends with `sendto()` to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1
-port 80 must fail the download check. The adapter must not reach the trace: one that starts a DNS lookup and at stop
-rewrites, empties or deletes every file it can reach (its scratch folder and the logs next to it, among them the copy
-of the trace), or that writes a partial strace line to every descriptor it holds, to strace's descriptors through
-`/proc` and to those files and then overwrites the lookup's port in them, must still fail the check on the lookup
-itself, and its open of strace's trace channel through `/proc` must be refused (`ENXIO`). One that ends strace must
-fail the check (the trace ended before stop). One that at stop leaves a child running that waits until strace no
-longer traces it and then starts a DNS lookup must fail the run: when the child carries the scratch folder in its
-environment, the test process's sweep ends it and fails "nothing the adapter started is left running after stop";
-when its environment is cleared (the sweep cannot find it), the download check fails (the trace did not end). Real strace lines must pass the line check, and text joined to an
-strace line or a line cut short must fail it. One that asks for an io_uring must be refused it, and one that makes a UDP connect to
-127.0.0.1 and Chromium's IPv6 probe must pass the check. With strace switched off (`JUDGE_STRACE=`) the check must
-be not observed, a failure with `--require-trace`; a fake `JUDGE_STRACE` (a script that runs its command without
-tracing it) must not be used, and with `--require-trace` it must fail the run, as must a `JUDGE_STRACE` that is a
-symbolic link in a folder the runner's user can write (without `--require-trace` its real path runs). The cases that
-need strace are
-skipped without it, unless `--self-test --require-trace` is given (`judge.yml` does): then a missing strace fails
-the self-test. On Linux an adapter that tries to open the test's and the runner's descriptors through
-`/proc/<pid>/fd` for writing must be refused every time, with the verdict unchanged, and a fork child that writes
-through the result pipe's descriptor number must get EBADF. A runner or a test process that cannot be made
-non-dumpable (forced with `JUDGE_FORCE_UNPROTECTED=runner` or `child`) must fail the run, and with
-`--allow-unprotected` the run must pass with `UNPROTECTED` on its `JUDGE:` line. `--as-user` with the runner's own
-user, with root or with a user that does not exist must be refused before anything runs. With `--self-test --as-user
-<name>` (`judge.yml` gives `zjudge`; without it these cases are skipped, and when `sudo -n` does not work they fail),
-the fixture adapter runs as that user: it must pass clean, and its DNS lookup must fail the download check; its
-attempts to change the judge's files (append, add a file, change a mode) and the runner's records, to list and open
-the descriptors of strace, sudo and the test process through `/proc` and to send them signal 0 must all be refused;
-and the child it leaves at stop with an empty environment must fail the run and be ended by the user sweep. A user
-that already runs a process must be refused. `lockout.py --no-tighten` must find a world-writable folder and file
-and fail, `lockout.py` must take their write bit away and pass, and `--kill` must end the user's processes. A file
-that others can write under a `--fail-if-writable` folder must fail `lockout.py`, a `PATH` folder that is not there,
-below a sticky folder that everyone can write, must fail it, and `--kill` with no path must remove the user's crontab
-(or report that `crontab` refuses the user, as it does for one in `cron.deny`) and end its processes. It also
-runs the v0.2.0 adapter's and `check_observe.py`'s self-tests. On a system other than Linux, run `--self-test --allow-unprotected`: every runner it
-starts gets the flag, and the two refusal cases are skipped.
+`python3 -I judge/run.py --self-test` runs the runner's own tests (`selftest.py`, on fixture tests in a temp folder): a
+crash, a hang past the timeout, `sys.exit(0)` in the middle, no checks, fewer or more checks than declared, no `CHECKS`,
+a process left by the test or by the adapter, an adapter that speaks another protocol version, an adapter that writes
+passing results into its scratch folder, lines on the result pipe that are not the test's records, a fork without exec
+that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and a clean test
+must pass. A not-applicable check (also one made through `needs=` on an input that could not be crafted) and a
+not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`. A fixture adapter
+that starts a DNS lookup (a UDP connect to 192.0.2.1 port 53), makes a UDP connect to 192.0.2.1 port 9 and sends with
+`write()`, sends with `sendto()` to 192.0.2.1 port 9, or starts a TCP connect to 192.0.2.1 port 80 must fail the
+download check. The adapter must not reach the trace: one that starts a DNS lookup and at stop rewrites, empties or
+deletes every file it can reach (its scratch folder and the logs next to it, among them the copy of the trace), or that
+writes a partial strace line to every descriptor it holds, to strace's descriptors through `/proc` and to those files
+and then overwrites the lookup's port in them, must still fail the check on the lookup itself, and its open of strace's
+trace channel through `/proc` must be refused (`ENXIO`). One that ends strace must fail the check (the trace ended
+before stop). One that at stop leaves a child running that waits until strace no longer traces it and then starts a DNS
+lookup must fail the run: when the child carries the scratch folder in its environment, the test process's sweep ends it
+and fails "nothing the adapter started is left running after stop"; when its environment is cleared (the sweep cannot
+find it), the download check fails (the trace did not end). Real strace lines must pass the line check, and text joined
+to an strace line or a line cut short must fail it. One that asks for an io_uring must be refused it, and one that makes
+a UDP connect to 127.0.0.1 and Chromium's IPv6 probe must pass the check. With strace switched off (`JUDGE_STRACE=`) the
+check must be not observed, a failure with `--require-trace`; a fake `JUDGE_STRACE` (a script that runs its command
+without tracing it) must not be used, and with `--require-trace` it must fail the run, as must a `JUDGE_STRACE` that is
+a symbolic link in a folder the runner's user can write (without `--require-trace` its real path runs). The parts of
+`judge.yml` in `ci/` run on fixtures: `ci/quiet.sh` (both forms) must print a command's output, which holds a workflow
+command, between `::stop-commands::<token>` and `::<token>::` with a new token that is in neither the command's
+arguments nor its environment, and keep its exit code; `ci/collect_logs.sh` must copy only the regular `*.log` and
+`*.stderr` files from a tree that also holds links to a file of the runner's and to a folder, and a FIFO. `lockout.py`
+must skip a file that was listed and then removed only in a diagnostic-log folder of the runner's
+(`actions-runner/cached/<version>/_diag`, its `pages` or `blocks`, below a `PATH` folder) that it tries, and still
+tighten that folder; a file removed from any other folder, a removed `PATH` whose folder is sticky (not tried), and a
+removed `PATH` folder must fail it. It must pass only `sudo`'s own refusal of the build user (a list of commands it
+may run, an error or no answer fails), and fail a build user that shares a group with the runner's. The cases that
+need strace are skipped without it, unless `--self-test --require-trace` is given
+(`judge.yml` does): then a missing strace fails the self-test. On Linux an adapter that tries to open the test's and the
+runner's descriptors through `/proc/<pid>/fd` for writing must be refused every time, with the verdict unchanged, and a
+fork child that writes through the result pipe's descriptor number must get EBADF. A runner or a test process that
+cannot be made non-dumpable (forced with `JUDGE_FORCE_UNPROTECTED=runner` or `child`) must fail the run, and with
+`--allow-unprotected` the run must pass with `UNPROTECTED` on its `JUDGE:` line. `--as-user` with the runner's own user,
+with root or with a user that does not exist must be refused before anything runs. With `--self-test --as-user <name>`
+(`judge.yml` gives `zjudge`; without it these cases are skipped, and when `sudo -n` does not work they fail), the
+fixture adapter runs as that user: it must pass clean, and its DNS lookup must fail the download check; its attempts to
+change the judge's files (append, add a file, change a mode) and the runner's records, to list and open the descriptors
+of strace, sudo and the test process through `/proc` and to send them signal 0 must all be refused; and the child it
+leaves at stop with an empty environment must fail the run and be ended by the user sweep. Its environment must hold
+only what `run.py` gives it (and `PWD`): a canary set in the runner's environment must not reach it. A user that already
+runs a process must be refused, and so (checked in the self-test's own process, nothing changed on the system) must one
+that shares a group with the runner's user, `fs.protected_symlinks` at 0, an `env` that the runner's user can change,
+and a `sudo -n` that cannot run a command as root. A `--scratch` folder that the user can write, or that belongs to it,
+must be refused, and so must a `JUDGE_STRACE` in a folder that belongs to it (strace runs as root; the trace checks are
+then not observed). `lockout.py --no-tighten` must find a world-writable folder and file and fail, `lockout.py` must
+take their write bit away and pass, and `--kill` must end the user's processes. A world-writable diagnostic-log folder
+of the runner's must still fail the probe when a file in it was removed after it was listed (the file is skipped), and
+the probe must name an item that is not there as gone. A file that others can write under a `--fail-if-writable`
+folder must fail `lockout.py`, a `PATH` folder that is not there, below a sticky folder that everyone can write, must
+fail it, and `--kill` with no path must remove the user's crontab (or report that `crontab` refuses the user, as it does
+for one in `cron.deny`) and end its processes. It also runs the v0.2.0 adapter's and `check_observe.py`'s self-tests. On
+a system other than Linux, run `--self-test --allow-unprotected`: every runner it starts gets the flag, and the two
+refusal cases are skipped.
 
 ## What is here
 
@@ -204,6 +226,7 @@ starts gets the flag, and the two refusal cases are skipped.
 | `fixtures/make.sh` | Makes the test media. |
 | `run.py` | The runner. |
 | `lockout.py` | CI's proof that the build user cannot change what the judge relies on (see "CI"). |
+| `ci/quiet.sh`, `ci/collect_logs.sh` | `judge.yml`'s shell parts: workflow commands off around the build user's output, and the copy of the logs after a failed run (see "CI"). |
 | `selftest.py` | The runner's own tests (`run.py --self-test`). |
 | `tests/test_*.py` | The tests. |
 | `PORTING.md` | Where each section of the older test scripts went: a judge check, a test that stays with v0.2.0, or a recorded drop. |
@@ -407,9 +430,9 @@ What it does not defend against:
   - The lock-covered judge files (`judge/`, the gate and `judge.yml`) come from the pull request and run as the
     runner's user. Only review stops a pull request that changes them and updates the lock (see "Edits to the judge"
     above and the open decisions below).
-  - What `zjudge` can still do: read what others may read on the runner (the checkout's `.git`, with the job's token,
-    is closed to it); use the network during the install and the build; and have a service other than cron and at
-    that starts processes as it start one later (cron and at refuse it: it is in `cron.deny` and `at.deny`, and
+  - What `zjudge` can still do: read what others may read on the runner (the checkout's `.git` is closed to it, and no
+    job token is stored in the checkout); use the network during the install and the build; and have a service
+    other than cron and at that starts processes as it start one later (cron and at refuse it: it is in `cron.deny` and `at.deny`, and
     `lockout.py --kill` removes any crontab). Such a process is not in the traced tree, so its network calls are not
     seen, and it runs until the user sweep after the test. As in a local run, the editor's own word about its own
     files (`t.look` as `zjudge`) is not checked against anything else.

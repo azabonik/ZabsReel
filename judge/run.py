@@ -243,6 +243,23 @@ SHARED = 0o1777  # each test's folder and the folders T.path makes in it, under 
 PROTECTED_SYSCTLS = ("protected_symlinks", "protected_hardlinks", "protected_regular")
 
 
+def runner_groups():
+    """Every group id of the user that runs this (supplementary, real and effective)."""
+    return set(os.getgroups()) | {os.getgid(), os.getegid()}
+
+
+def shared_groups(user_groups, my_groups):
+    """The group ids in both sets, sorted. A user that shares a group with the runner's user can write what that group
+    may write (AsUser.problem and lockout.py refuse it)."""
+    return sorted(set(user_groups) & set(my_groups))
+
+
+def _sysctl(name):
+    """The value of the sysctl fs.<name> (/proc/sys/fs/<name>) as an integer; raises OSError or ValueError."""
+    with open(f"/proc/sys/fs/{name}", encoding="ascii") as f:
+        return int(f.read().strip())
+
+
 def _status_ids(pid):
     """(user ids, state letter) of a process from /proc/<pid>/status (readable by every user), or None."""
     try:
@@ -311,11 +328,10 @@ class AsUser:
         if self.uid in (os.getuid(), os.geteuid()):
             return f"{self.name} is the user that runs the judge"
         import grp
-        mine = set(os.getgroups()) | {os.getgid(), os.getegid()}
-        shared = self.groups & mine
+        shared = shared_groups(self.groups, runner_groups())
         if shared:
             names = []
-            for g in sorted(shared):
+            for g in shared:
                 try:
                     names.append(grp.getgrgid(g).gr_name)
                 except KeyError:
@@ -325,13 +341,12 @@ class AsUser:
         if missing:
             return f"no {', '.join(missing)} in {SYSTEM_PATH}"
         for t in ("sudo", "env"):
-            why = _not_writable(self.tools[t])
+            why = _not_writable(self.tools[t], self)
             if why:
                 return f"{t} {self.tools[t]} is not used: {why}"
         for name in PROTECTED_SYSCTLS:
             try:
-                with open(f"/proc/sys/fs/{name}", encoding="ascii") as f:
-                    value = int(f.read().strip())
+                value = _sysctl(name)
             except (OSError, ValueError) as e:
                 return f"fs.{name} cannot be read ({e})"
             if value < 1:
@@ -525,10 +540,11 @@ REQUIRE_TRACE = False  # --require-trace (the runner's flag; the runner passes i
 TRACEE = ["/bin/sh", "-c", 'exec 2>>"$0"; exec "$@"']
 
 
-def _not_writable(path):
+def _not_writable(path, user=None):
     """None when neither `path` (made real) nor any folder above it can be written by this user: each is owned by root
     or by another user (in a user namespace root's files belong to the overflow user), this user cannot write it, and
-    it has no group or other write bit. Else why not."""
+    it has no group or other write bit. With `user` (an AsUser: the --as-user user, for a program that runs as root)
+    none of them may belong to that user or be writable by it either. Else why not."""
     p = os.path.realpath(path)
     me = os.geteuid()
     while True:
@@ -538,6 +554,10 @@ def _not_writable(path):
             return f"{p}: {e}"
         if st.st_uid == me and me != 0:
             return f"{p} belongs to this user"
+        if user is not None and st.st_uid == user.uid:
+            return f"{p} belongs to {user.name}"
+        if user is not None and user._may(st, 2):
+            return f"{p} can be written by {user.name}"
         if st.st_mode & 0o022:
             return f"{p} can be written by its group or by others"
         if me != 0 and os.access(p, os.W_OK):  # root can write any file: for root, ownership and mode decide
@@ -548,10 +568,10 @@ def _not_writable(path):
         p = parent
 
 
-def _links_not_writable(path):
+def _links_not_writable(path, user=None):
     """None when no symbolic link met while resolving `path` (as given, before it is made real) sits in a folder that
-    this user can write (_not_writable on that folder), else why not. Such a link could be pointed elsewhere between
-    the check of the real file and its start."""
+    this user, or `user` (an AsUser), can write (_not_writable on that folder), else why not. Such a link could be
+    pointed elsewhere between the check of the real file and its start."""
     parts = [p for p in (path if os.path.isabs(path) else os.path.join(os.getcwd(), path)).split(os.sep) if p]
     cur, links = os.sep, 0
     while parts:
@@ -568,9 +588,10 @@ def _links_not_writable(path):
         links += 1
         if links > 40:
             return f"{path}: too many symbolic links"
-        why = _not_writable(cur)
+        why = _not_writable(cur, user)
         if why:
-            return f"{nxt} is a symbolic link in a folder this user can write ({why})"
+            return (f"{nxt} is a symbolic link in a folder this user" + (f" or {user.name}" if user else "")
+                    + f" can write ({why})")
         target = os.readlink(nxt)
         parts = [p for p in target.split(os.sep) if p] + parts
         if os.path.isabs(target):
@@ -630,7 +651,9 @@ def strace(require_trace=None):
     is made real once, here, and that real path is what runs. With --require-trace (REQUIRE_TRACE), and always under
     --as-user, an strace whose real file, or a folder above it, this user can write is not used, and neither is one
     named through a symbolic link that sits in a folder this user can write: a build step could have named it through
-    $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. An strace that fails strace_probe is not
+    $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. Under --as-user (strace runs as root)
+    the same holds for the other user: an strace whose real file, a folder above it, or a folder holding a link on
+    the way belongs to that user or can be written by it is not used either. An strace that fails strace_probe is not
     used."""
     if require_trace is None:
         require_trace = REQUIRE_TRACE
@@ -644,9 +667,9 @@ def strace(require_trace=None):
             why = "strace is not installed" + (" (JUDGE_STRACE is empty)" if env == "" else "")
         elif not (os.path.isfile(real) and os.access(real, os.X_OK)):
             why = f"strace {st} is not an executable file"
-        elif (require_trace or AS_USER) and (_links_not_writable(st) or _not_writable(real)):
+        elif (require_trace or AS_USER) and (_links_not_writable(st, AS_USER) or _not_writable(real, AS_USER)):
             why = (f"strace {st} is not used with " + ("--require-trace" if require_trace else "--as-user (it runs as "
-                   "root)") + f": {_links_not_writable(st) or _not_writable(real)}")
+                   "root)") + f": {_links_not_writable(st, AS_USER) or _not_writable(real, AS_USER)}")
         else:
             bad = strace_probe(real, True)
             if bad is None:

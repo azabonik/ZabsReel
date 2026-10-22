@@ -37,16 +37,29 @@ symbolic link in a folder this user can write (without --require-trace its real 
 strace are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the
 self-test.
 
+judge.yml's parts (ci_scripts, lockout_units): ci/quiet.sh, in both forms, prints a command's output that holds
+workflow commands between ::stop-commands::<token> and ::<token>:: with a new token that is in neither the command's
+arguments nor its environment, and keeps its exit code; ci/collect_logs.sh copies only the regular *.log and *.stderr
+files, not a link to a file of this user's, a FIFO or a linked folder. lockout.py skips a file that was listed and then
+removed only in a diagnostic-log folder of the runner's that is tried (and still tightens that folder); one removed
+elsewhere, under a sticky folder above a PATH, or a PATH folder that was removed, fails. It passes only sudo's own
+refusal of the build user, and fails a build user that shares a group with this user.
+
 --as-user: the runner refuses the user that runs it, root, and a user that does not exist, before anything runs. With
 --self-test --as-user <name> (judge.yml: zjudge; skipped without it, failed when sudo -n does not work) the fixture
 adapter runs as that user (user_cases): it passes clean; its DNS lookup fails the download check; its attempts to
 change the judge's files and the runner's records, to list and open the descriptors of strace, sudo and the test
 process through /proc and to send them signal 0 are all refused (SelfTest.asuser); and the child it leaves with an
-empty environment fails the run and is ended by the user sweep. A user that already runs a process is refused.
-lockout.py --no-tighten finds a world-writable folder and file, lockout.py takes their write bit away, and --kill
-ends the user's processes first. lockout.py --fail-if-writable fails on a file there that others could write, a PATH
-folder that is not there is tried through the nearest folder above it (a sticky one that others can write fails), and
---kill with no PATH removes the user's crontab and ends its processes.
+empty environment fails the run and is ended by the user sweep; its environment holds only run.AsUser.env_words (and
+PWD), without a canary set in the runner's. A user that already runs a process is refused, and so, in this process
+(asuser_units), are one that shares a group with this user, fs.protected_symlinks at 0, an env this user owns, and a
+sudo -n that cannot run a command as root. A --scratch folder the user can write or owns is refused, and a
+JUDGE_STRACE in a folder of that user's is not used. A world-writable diagnostic-log folder of the runner's still
+fails the probe when a file in it was removed after it was listed (the file is skipped), and the probe names an item
+that is not there as gone. lockout.py --no-tighten finds a world-writable folder and file, lockout.py takes
+their write bit away, and --kill ends the user's processes first. lockout.py --fail-if-writable fails on a file there
+that others could write, a PATH folder that is not there is tried through the nearest folder above it (a sticky one
+that others can write fails), and --kill with no PATH removes the user's crontab and ends its processes.
 """
 import json
 import os
@@ -64,6 +77,12 @@ JUDGE = os.path.dirname(os.path.abspath(__file__))
 PROTECTED = "the test process is non-dumpable (its result pipe cannot be reopened through /proc)"  # run.PROTECTED_CHECK
 
 HEAD = "import os, subprocess, sys, time\n"
+# --as-user: the runner's environment holds this canary for the asuser run (SelfTest.asuser); the adapter must not.
+CANARY = ("JUDGE_SELFTEST_SECRET", "canary-the-runners-environment-must-not-reach-the-adapter")
+# The adapter's whole environment under --as-user: run.AsUser.env_words (and nothing else: no GITHUB_*, ACTIONS_*,
+# tokens, SUDO_*), plus PWD, which the shell that starts the adapter (run.TRACEE_AS_USER) sets.
+ADAPTER_ENV = {"PATH", "LANG", "HOME", "TMPDIR", "USER", "LOGNAME", "JUDGE_TEST_SCRATCH", "AIVE_FFMPEG", "AIVE_FFPROBE",
+               "PWD"}
 
 TESTS = {
     "ok": "PORT_BOUND = False\nCHECKS = 1\ndef run(t):\n    t.check('a passing check', True)\n",
@@ -350,9 +369,10 @@ def asuser():
     file and folder it can list there, and run.py and JUDGE.lock by name), the runner's records (records/ next to the
     scratch folder, and the test's log and copy of the trace there by name), and to open every descriptor of each
     process from strace up to the test process through /proc/<pid>/fd, for writing and for reading, to list them, and
-    to send each process signal 0. Every attempt is in asuser.json in the scratch folder."""
+    to send each process signal 0. Every attempt is in asuser.json in the scratch folder, with this adapter's whole
+    environment."""
     judge = extra[0]
-    rep = {"judge": {}, "records": {}, "procs": {}}
+    rep = {"judge": {}, "records": {}, "procs": {}, "env": dict(os.environ)}
     paths = [judge, os.path.join(judge, "run.py"), os.path.join(judge, "JUDGE.lock")]
     for d, dirs, files in os.walk(judge):
         paths += [os.path.join(d, n) for n in dirs + files]
@@ -634,6 +654,15 @@ class SelfTest:
         if rep is None:
             problems.append("no asuser.json report")
         else:
+            env = rep.get("env")
+            if not isinstance(env, dict) or not {"PATH", "HOME", "JUDGE_TEST_SCRATCH"} <= set(env):
+                problems.append(f"the adapter's environment was not reported: {env}")
+            else:
+                if set(env) - ADAPTER_ENV:
+                    problems.append(f"the adapter's environment holds more than run.AsUser.env_words gives: "
+                                    f"{sorted(set(env) - ADAPTER_ENV)}")
+                if CANARY[0] in env or any(CANARY[1] in v for v in env.values()):
+                    problems.append(f"the runner's {CANARY[0]} reached the adapter")
             for part in ("judge", "records"):
                 done = {p: r for p, r in rep[part].items() if set(r) & {"opened", "added", "chmod"}}
                 if done:
@@ -650,8 +679,8 @@ class SelfTest:
                                     f"opens not refused {other}, signal 0 {e['signal']}")
         ok = not problems
         print(f"{'ok  ' if ok else 'FAIL'} --as-user: the adapter cannot change the judge or the records, open the "
-              f"descriptors of strace, sudo or the test process, or signal them" + (f"; {problems}" if problems else ""),
-              flush=True)
+              f"descriptors of strace, sudo or the test process, or signal them, and gets none of the runner's "
+              f"environment" + (f"; {problems}" if problems else ""), flush=True)
         if not ok:
             self.failures += 1
 
@@ -709,14 +738,52 @@ class SelfTest:
             print("     | " + "\n     | ".join((p.stdout + p.stderr).strip().splitlines()[-25:]), flush=True)
 
 
+def asuser_units(s, user):
+    """AsUser.problem()'s refusals that the runs below do not reach, each on a fresh AsUser of `user` with one thing
+    changed in this process (nothing on the system changes): a group shared with this user, fs.protected_symlinks at
+    0 (run._sysctl replaced, then put back), an env program this user owns, and a sudo -n that cannot run a command
+    as root (its `true` replaced by `false`)."""
+    import run
+    au = run.AsUser(user)
+    au.groups |= {os.getgid()}
+    why = au.problem() or ""
+    s.unit("--as-user: a user that shares a group with this user is refused",
+           why.startswith(f"{user} shares the group(s) ") and why.endswith(" with the user that runs the judge"), why)
+    real = run._sysctl
+    run._sysctl = lambda name: 0 if name == "protected_symlinks" else real(name)
+    try:
+        why = run.AsUser(user).problem() or ""
+    finally:
+        run._sysctl = real
+    s.unit("--as-user: fs.protected_symlinks at 0 is refused",
+           why.startswith(f"fs.protected_symlinks is 0: the test's folders are shared with {user} "), why)
+    mine = os.path.join(s.tmp, "env-mine")
+    shutil.copyfile(run.AsUser(user).tools["env"], mine)
+    os.chmod(mine, 0o755)
+    au = run.AsUser(user)
+    au.tools["env"] = mine
+    why = au.problem() or ""
+    s.unit("--as-user: an env program this user can change is not used",
+           why == f"env {mine} is not used: {os.path.realpath(mine)} belongs to this user", why)
+    au = run.AsUser(user)
+    au.tools["true"] = shutil.which("false", path=run.SYSTEM_PATH)
+    why = au.problem() or ""
+    s.unit("--as-user: a sudo -n that cannot run a command as root is refused",
+           why.startswith("sudo -n cannot run a command as root: ") or why == "sudo -n cannot run a command as root",
+           why)
+
+
 def user_cases(s, user, traced, py, drv, fail, net, left):
     """--self-test --as-user <user>: the fixture adapter as that user. It passes clean, its DNS lookup fails the
     download check (strace -u traces it), it cannot change the judge or the records or reach strace, sudo or the test
-    process (SelfTest.asuser), and the child it leaves with an empty environment is ended by the user sweep. A user
-    that already runs a process is refused. lockout.py finds a world-writable file and folder with --no-tighten, and
-    takes the write bit away without it; with --kill it ends the user's processes first. With --fail-if-writable a
-    file there that others could write fails it; a PATH folder that is not there is tried through the nearest folder
-    above it; --kill with no PATH removes the user's crontab and ends its processes."""
+    process or get the runner's environment (SelfTest.asuser), and the child it leaves with an empty environment is
+    ended by the user sweep. A user that already runs a process is refused (and the refusals in asuser_units), and
+    so are a --scratch folder the user can write or owns. A JUDGE_STRACE in a folder of the user's is not used.
+    lockout.py finds a world-writable file and folder with --no-tighten, and takes the write bit away without it;
+    with --kill it ends the user's processes first. With --fail-if-writable a file there that others could write
+    fails it; a PATH folder that is not there is tried through the nearest folder above it; a world-writable folder
+    still fails the probe when a file in it was removed after it was listed; --kill with no PATH removes the user's
+    crontab and ends its processes."""
     import run
     try:
         au = run.AsUser(user)
@@ -726,6 +793,7 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
     if why:
         s.unit(f"the --as-user cases can run as {user}", False, why)
         return
+    asuser_units(s, user)
     extra = ("--as-user", user)
     s.run("driver", 0, [r"^judge: as user " + re.escape(user), r"^PASS  test_driver: the fixture editor started",
                         drv(3, 3)], adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra,
@@ -736,6 +804,7 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
               label="--as-user: the other user's DNS lookup fails the download check (strace -u traces it)")
     s.run("driver", 1, [left + r"\d+ \S+ -I -c import time; time\.sleep\(300\)"],
           adapter=f"{py} {FAKE_ADAPTER} 1 asuser {shlex.quote(JUDGE)}", extra=extra + ("--keep",),
+          env=dict([CANARY]),
           label="--as-user: a child left with an empty environment is found by the user sweep and the run fails")
     s.asuser(JUDGE)
     s.still_running("--as-user: the child the adapter left", s.pids_in("driver", "asuser.pid"))
@@ -753,6 +822,58 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
                                                                        "is refused")
     au.sweep()
     p.wait(30)
+
+    # The run's folder must be one the other user can enter but not change (AsUser.folder_problem): a --scratch
+    # folder it can write (mode 0777, not sticky: it could rename the run's folder) or one of its own is refused.
+    chown = shutil.which("chown", path=run.SYSTEM_PATH)
+    rm = [au.tools["rm"], "-rf", "--one-file-system", "--"]
+    open_scratch = os.path.realpath(os.path.join(s.tmp, "scratch-open"))
+    os.mkdir(open_scratch)
+    os.chmod(open_scratch, 0o777)
+    s.run("ok", 1, [r"^JUDGE: refused: --as-user " + re.escape(user) + r": the run's folder " + re.escape(open_scratch)
+                    + r"/judge-\S+: " + re.escape(user) + r" can (write|rename) .*\(it can write "
+                    + re.escape(open_scratch) + r"\)"], extra=extra + ("--scratch", open_scratch),
+          label="--as-user: a --scratch folder the other user can write is refused")
+    own_scratch = os.path.realpath(os.path.join(s.tmp, "scratch-user"))
+    os.mkdir(own_scratch)
+    os.chmod(own_scratch, 0o777)  # the runner makes the run's folder in it
+    subprocess.run(au.root([chown, user, own_scratch]), check=True, capture_output=True, timeout=60, cwd="/")
+    s.run("ok", 1, [r"^JUDGE: refused: --as-user " + re.escape(user) + r": the run's folder " + re.escape(own_scratch)
+                    + r"/judge-\S+: " + re.escape(own_scratch) + " belongs to " + re.escape(user)],
+          extra=extra + ("--scratch", own_scratch),
+          label="--as-user: a --scratch folder of the other user's is refused")
+    left_runs = os.listdir(open_scratch) + os.listdir(own_scratch)
+    s.unit("--as-user: a refused run leaves no folder in --scratch", not left_runs, left_runs)
+    subprocess.run(au.root(rm + [own_scratch]), capture_output=True, timeout=60, cwd="/")
+
+    # strace runs as root under --as-user: a JUDGE_STRACE that the other user could replace (a root-owned copy in a
+    # folder of that user's) is not used, so the trace checks are not observed. Every folder above that one is root's
+    # (a new folder in /run, made as root): under the self-test's folder, which is this user's, it would be refused
+    # for this user already. The same copy in the root-owned folder is used (the case's control).
+    if traced:
+        def as_root(*words):
+            return subprocess.run(au.root(list(words)), check=True, capture_output=True, text=True, timeout=60, cwd="/")
+        tool = {t: shutil.which(t, path=run.SYSTEM_PATH) for t in ("mktemp", "install", "chmod")}
+        top = as_root(tool["mktemp"], "-d", "/run/judge-selftest-strace.XXXXXXXX").stdout.strip()
+        try:
+            as_root(tool["chmod"], "0755", top)
+            as_root(tool["install"], "-o", "0", "-g", "0", "-m", "0755", run_strace_path(), os.path.join(top, "strace"))
+            sdir = os.path.join(top, "user")
+            as_root(tool["install"], "-d", "-o", user, "-m", "0755", sdir)
+            scopy = os.path.join(sdir, "strace")
+            as_root(tool["install"], "-o", "0", "-g", "0", "-m", "0755", run_strace_path(), scopy)
+            s.run("driver", 0, [r"^judge: trace with " + re.escape(os.path.join(top, "strace")) + r"( |$)",
+                                r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra,
+                  env={"JUDGE_STRACE": os.path.join(top, "strace")},
+                  label="--as-user: a JUDGE_STRACE in a folder of root's is used")
+            s.run("driver", 0, [r"^judge: trace with nothing \(strace " + re.escape(scopy) + r" is not used with "
+                                r"--as-user \(it runs as root\): " + re.escape(sdir) + " belongs to " + re.escape(user)
+                                + r"\)", r"^JUDGE: 3/3 passed, 1 not observed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra, env={"JUDGE_STRACE": scopy},
+                  label="--as-user: a JUDGE_STRACE in a folder of the other user's is not used (strace runs as root)")
+        finally:
+            subprocess.run(au.root(rm + [top]), capture_output=True, timeout=60, cwd="/")
 
     lockout = [sys.executable, "-I", "-B", os.path.join(JUDGE, "lockout.py"), "--user", user]
     lk = os.path.join(s.tmp, "lockout")
@@ -817,6 +938,30 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
            r.returncode == 1 and f"lockout: FAIL {user} could change {open_top}: added a file" in out,
            f"exit {r.returncode}; {out[-1500:]}")
 
+    # A file listed and then removed before the probe, in a diagnostic-log folder of the runner's (GitHub's runner
+    # removes its own logs at any time): skipped, while that folder, which the user can write, still fails the probe.
+    # An item that is gone when the probe reaches it is named as gone, not counted as refused.
+    import lockout as lockout_mod
+    vt = os.path.realpath(os.path.join(s.tmp, "lockout-vanish-open"))
+    vd = os.path.join(vt, "actions-runner", "cached", "2.338.0", "_diag", "pages")
+    os.makedirs(vd)
+    os.chmod(vd, 0o777)
+    vf = os.path.join(vd, "gone.log")
+    with open(vf, "w", encoding="utf-8") as f:
+        f.write("x\n")
+    items = [i for i in lockout_mod.gather([vt]) if i[0] != "a"]
+    os.unlink(vf)
+    kept, gone = lockout_mod.present(items)
+    tried, written, missing = lockout_mod.probe(au, kept + [("f", vf)])
+    skipped, problems = lockout_mod.vanish_verdict(gone, kept, {vt})
+    s.unit("lockout.py: a file removed from a diagnostic-log folder of the runner's after it was listed is skipped, "
+           "the folder that held it, which the user can write, still fails the probe, and the probe names the file as "
+           "gone",
+           items[-1] == ("f", vf) and gone == [("f", vf)] and ("d", vd) in kept and tried == len(kept) + 1
+           and written == [(vd, ["added a file"])] and missing == [vf] and skipped == [vf] and problems == [],
+           f"items {items}; gone {gone}; tried {tried}; written {written}; missing {missing}; skipped {skipped}; "
+           f"problems {problems}")
+
     # --kill with no PATH (judge.yml's failure path): the user's crontab is removed and its processes are ended. When
     # crontab refuses the user even for root (judge.yml puts zjudge in /etc/cron.deny), no crontab can be planted
     # and lockout.py must say that cron refuses the user; with no crontab program it says so.
@@ -839,6 +984,181 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
         p.wait(30)
     except subprocess.TimeoutExpired:
         pass
+
+
+def lockout_units(s):
+    """lockout.py's parts that need no other user (judge.yml runs it for zjudge). A file that was listed and is gone
+    when tighten reaches it is skipped and named only in a diagnostic-log folder of the runner's (GitHub's runner
+    removes its own logs at any time) that is tried; that folder is still tightened and kept for the probe. A file gone
+    from any other folder, a gone PATH whose folder is sticky (not tried), and a gone PATH folder fail the run."""
+    import lockout
+    top = os.path.realpath(os.path.join(s.tmp, "lockout-vanish"))  # stands in for the runner's home (a PATH)
+    diag = os.path.join(top, "actions-runner", "cached", "2.338.0", "_diag", "pages")
+    other = os.path.join(top, "work")
+    os.makedirs(diag)
+    os.makedirs(other)
+    os.chmod(top, 0o777)
+    diag_gone, other_gone = os.path.join(diag, "gone.log"), os.path.join(other, "gone.log")
+    for p in (diag_gone, other_gone):
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("x\n")
+    items = [i for i in lockout.gather([top]) if i[0] != "a"]  # the folders above are not this case's
+    listed = items[0] == ("d", top) and ("f", diag_gone) in items and ("f", other_gone) in items
+    os.unlink(diag_gone)
+    os.unlink(other_gone)
+    done, problems, vanished = lockout.tighten(None, items)
+    kept, later = lockout.present(items)
+    probed = lockout.to_probe(kept)
+    skipped, failed = lockout.vanish_verdict(vanished, probed, {top})
+    s.unit("lockout.py: a file listed and then removed from a diagnostic-log folder of the runner's is skipped and "
+           "named, not failed; its folder is still tightened and tried",
+           listed and problems == [] and sorted(vanished) == sorted([("f", diag_gone), ("f", other_gone)])
+           and [p for p, _ in done] == [top] and ("d", diag) in probed and sorted(later) == sorted(vanished)
+           and stat.S_IMODE(os.stat(top).st_mode) == 0o775 and skipped == [diag_gone],
+           f"listed {listed}; done {done}; problems {problems}; vanished {vanished}; later {later}; "
+           f"skipped {skipped}; failed {failed}")
+    s.unit("lockout.py: a file listed and then removed from a folder that is not a diagnostic-log folder of the "
+           "runner's fails the run, named",
+           len(failed) == 1 and failed[0].startswith(f"{other_gone} vanished after it was listed, and it is not in a "
+                                                     f"diagnostic-log folder"), f"skipped {skipped}; failed {failed}")
+    # A PATH file in a sticky diagnostic-log folder: that folder is a folder above a PATH, which the probe does not try
+    # when sticky, so the file's removal is covered by nothing and fails, also when the PATH is not counted.
+    shome = os.path.realpath(os.path.join(s.tmp, "lockout-vanish-sticky"))
+    sdiag = os.path.join(shome, "actions-runner", "cached", "2.338.0", "_diag")
+    os.makedirs(sdiag)
+    os.chmod(sdiag, 0o1777)
+    sfile = os.path.join(sdiag, "Runner.log")
+    with open(sfile, "w", encoding="utf-8") as f:
+        f.write("x\n")
+    sitems = lockout.gather([sfile])
+    os.unlink(sfile)
+    skept, sgone = lockout.present(sitems)
+    sprobed = lockout.to_probe(skept)
+    as_path = lockout.vanish_verdict(sgone, sprobed, {sfile})
+    below_home = lockout.vanish_verdict(sgone, sprobed, {shome})
+    s.unit("lockout.py: a file removed under a sticky folder above a PATH (not tried) fails the run, named",
+           sitems[:2] == [("f", sfile), ("a", sdiag)] and sgone == [("f", sfile)] and ("a", sdiag) not in sprobed
+           and as_path[0] == [] and len(as_path[1]) == 1 and as_path[1][0].startswith(f"{sfile} vanished")
+           and below_home[0] == [] and len(below_home[1]) == 1 and below_home[1][0].startswith(f"{sfile} vanished"),
+           f"items {sitems[:3]}; gone {sgone}; as a PATH {as_path}; below a PATH folder {below_home}")
+    # A PATH folder removed after it was listed (here a diagnostic-log folder of the runner's, whose folder is tried):
+    # it fails, and so does the nearest folder above a PATH that is not there ("m").
+    phome = os.path.realpath(os.path.join(s.tmp, "lockout-vanish-path"))
+    pdir = os.path.join(phome, "actions-runner", "cached", "2.338.0", "_diag", "pages")
+    os.makedirs(pdir)
+    pitems = lockout.gather([pdir])
+    os.rmdir(pdir)
+    pkept, pgone = lockout.present(pitems)
+    pprobed = lockout.to_probe(pkept)
+    pv = lockout.vanish_verdict(pgone + [("m", phome)], pprobed, {pdir, phome})
+    s.unit("lockout.py: a PATH folder, or the nearest folder above a PATH that is not there, removed after it was "
+           "listed fails the run, named",
+           pgone == [("d", pdir)] and ("a", os.path.dirname(pdir)) in pprobed and pv[0] == []
+           and [x.split(" vanished")[0] for x in pv[1]] == [pdir, phome]
+           and all("it is a PATH or a folder above one" in x for x in pv[1]), f"gone {pgone}; verdict {pv}")
+    # The build user must not run sudo: only sudo's own refusal passes; a list of commands, an error or nothing fails.
+    ok_text = "User zjudge is not allowed to run sudo on runnervm8k3b6.\n"
+    bad = {"may run": "Matching Defaults entries for zjudge on host:\n    env_reset\n\n"
+                      "User zjudge may run the following commands on host:\n    (ALL) NOPASSWD: ALL\n",
+           "error": "sudo: unknown user zjudge\nsudo: error initializing audit plugin sudoers_audit\n",
+           "password": "sudo: a password is required\n", "empty": "", "blank": " \n "}
+    s.unit("lockout.py: sudo's refusal of the build user passes the sudo check",
+           lockout.sudo_verdict("zjudge", ok_text) is None, lockout.sudo_verdict("zjudge", ok_text))
+    s.unit("lockout.py: a build user that may run sudo, or a sudo -l answer that is an error or empty, fails",
+           all((lockout.sudo_verdict("zjudge", t) or "").startswith("zjudge may run sudo, or sudo -l -U could not tell")
+               for t in bad.values()), {k: lockout.sudo_verdict("zjudge", t) for k, t in bad.items()})
+    s.unit("lockout.py: a build user that shares a group with this user fails; one with only its own group passes",
+           lockout.group_verdict("zjudge", {1002, 4}, {1001, 4, 27})
+           == "zjudge shares the group id(s) [4] with this user"
+           and lockout.group_verdict("zjudge", {1002}, {1001, 4, 27}) is None,
+           [lockout.group_verdict("zjudge", {1002, 4}, {1001, 4, 27}), lockout.group_verdict("zjudge", {1002}, {1001})])
+
+
+def ci_scripts(s):
+    """judge.yml's shell parts, run here as this user. ci/quiet.sh (both forms) prints a command's output, which holds
+    a workflow command, between ::stop-commands::<token> and ::<token>:: with one fresh 32-digit token that is in
+    neither the command's arguments nor its environment, keeps the command's exit code, and makes its log mode 0600.
+    ci/collect_logs.sh copies only the regular *.log and *.stderr files: not a link to a file this user can read
+    (the runner's), not a FIFO, nothing under a linked folder, and nothing else."""
+    ci = os.path.join(JUDGE, "ci")
+    base = os.path.join(s.tmp, "ci")
+    os.mkdir(base)
+    tokens = []
+    for form in ("log", "live"):
+        log = os.path.join(base, f"quiet-{form}.log")
+        seen = os.path.join(base, f"quiet-{form}.seen")  # the command's arguments and environment (never printed)
+        cmd = ["sh", "-c", 'echo "::error::canary $*"; echo "::add-mask::x"; { echo "$0 $*"; env; } > "$0"; exit 3',
+               seen, "arg"]
+        words = ["bash", os.path.join(ci, "quiet.sh")] + (["--live"] if form == "live" else [log]) + cmd
+        p = subprocess.run(words, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        lines = p.stdout.splitlines()
+        m = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", lines[0]) if lines else None
+        tok = m.group(1) if m else None
+        tokens.append(tok)
+        with open(seen, encoding="utf-8", errors="replace") as f:
+            seen_text = f.read()
+        ok = (p.returncode == 3 and tok is not None
+              and lines[1:] == ["::error::canary arg", "::add-mask::x", f"::{tok}::"]
+              and "PATH=" in seen_text and tok not in seen_text and p.stderr == ""
+              and (form == "live" or stat.S_IMODE(os.stat(log).st_mode) == 0o600))
+        s.unit(f"ci/quiet.sh{' --live' if form == 'live' else ''}: the command's workflow commands are printed between "
+               f"::stop-commands::<token> and ::<token>::, the token is not in its arguments or environment, its exit "
+               f"code is kept", ok, f"exit {p.returncode}; stdout {p.stdout[-800:]!r}; stderr {p.stderr[-300:]!r}")
+    s.unit("ci/quiet.sh: each run makes a new token", None not in tokens and tokens[0] != tokens[1], tokens)
+
+    secret = os.path.join(base, "runner-only.txt")
+    with open(secret, "w", encoding="utf-8") as f:
+        f.write("SECRET-OF-THE-RUNNER\n")
+    os.chmod(secret, 0o600)
+    outside = os.path.join(base, "outside")
+    os.mkdir(outside)
+    with open(os.path.join(outside, "c.log"), "w", encoding="utf-8") as f:
+        f.write("SECRET-OF-THE-RUNNER\n")
+    top = os.path.join(base, "scratch")
+    t = os.path.join(top, "judge-x", "test_a")
+    os.makedirs(os.path.join(t, "editor", "sub"))
+    os.makedirs(os.path.join(top, "judge-x", "records"))
+    want = [os.path.join(top, "judge-x", "records", "test_a.log"), os.path.join(t, "adapter.stderr"),
+            os.path.join(t, "editor", "sub", "e.log")]
+    for path in want + [os.path.join(t, "media.mp4"), os.path.join(t, "notes.txt")]:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a log line\n")
+    os.symlink(secret, os.path.join(t, "editor", "token.log"))
+    os.symlink(secret, os.path.join(t, "editor", "marker.stderr"))
+    os.symlink(outside, os.path.join(t, "editor", "d.log"))
+    os.symlink(outside, os.path.join(t, "editor", "d"))
+    os.mkfifo(os.path.join(t, "editor", "fifo.log"))
+    out = os.path.join(base, "judge-logs")
+    os.mkdir(out)
+    with open(os.path.join(out, "stale.log"), "w", encoding="utf-8") as f:
+        f.write("from before\n")
+    p = subprocess.Popen(["bash", os.path.join(ci, "collect_logs.sh"), f"{os.getuid()}:{os.getgid()}", out, top,
+                          os.path.join(base, "not-there")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        said, _ = p.communicate(timeout=60)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)  # its own session: the cp blocked on the FIFO too
+        p.communicate()
+        rc, said = None, "it did not end within 60 s (it opened the FIFO)"
+    got, other, leaked = [], [], []
+    for d, dirs, files in os.walk(out):
+        for n in dirs + files:
+            q = os.path.join(d, n)
+            st = os.lstat(q)
+            if stat.S_ISREG(st.st_mode):
+                got.append(os.path.relpath(q, out))
+                with open(q, encoding="utf-8", errors="replace") as f:
+                    if "SECRET" in f.read():
+                        leaked.append(q)
+            elif not stat.S_ISDIR(st.st_mode):
+                other.append(q)
+    s.unit("ci/collect_logs.sh: only the regular *.log and *.stderr files are copied (no link, FIFO or linked folder, "
+           "nothing older), into a folder of mode 0700",
+           rc == 0 and sorted(got) == sorted(os.path.relpath(w, "/") for w in want) and not other and not leaked
+           and stat.S_IMODE(os.stat(out).st_mode) == 0o700,
+           f"exit {rc}; got {sorted(got)}; other {other}; leaked {leaked}; {said[-500:]}")
 
 
 def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_user=None):
@@ -1004,9 +1324,11 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
             else:
                 print("skip the --as-user cases with another user: no --as-user given (judge.yml gives one)",
                       flush=True)
+        sys.path.insert(0, JUDGE)
+        lockout_units(s)
+        ci_scripts(s)
         # The form of an strace line (observe.strace_line_problem): text joined to strace's own line in front or in
         # the middle cannot hide a call.
-        sys.path.insert(0, JUDGE)
         import observe
         real = ('1234 connect(3<UDP:[5]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("192.0.2.1")}, '
                 '16) = 0')
