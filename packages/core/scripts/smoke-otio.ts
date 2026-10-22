@@ -19,7 +19,7 @@
  * Run: npx tsx packages/core/scripts/smoke-otio.ts
  * (Self-contained — synthesizes media with ffmpeg lavfi.)
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -301,7 +301,10 @@ async function main() {
     mkdirSync(media);
     await makeV020Media(media);
     const manifest = JSON.parse(readFileSync(join(V020, "manifest.json"), "utf8")) as { files: V020File[] };
-    check(manifest.files.length === 5, `the manifest lists the five v0.2.0 files (${manifest.files.map((f) => f.file).join(", ")})`);
+    const onDisk = readdirSync(V020).filter((n) => n.endsWith(".otio")).sort();
+    const listed = manifest.files.map((f) => f.file).sort();
+    check(listed.length > 0 && stable(listed) === stable(onDisk),
+      `the manifest lists every v0.2.0 file in the folder (${listed.join(", ")}; on disk ${onDisk.join(", ")})`);
     const v020Imports = new Map<string, Project>();
 
     for (const f of manifest.files) {
@@ -367,6 +370,52 @@ async function main() {
       check(c1?.sourceOutFrame === 40 && c1.effects?.speed === 2, `a clip with both keys takes metadata.zedmix (source ${c1?.sourceInFrame}-${c1?.sourceOutFrame})`);
       check(c2?.sourceInFrame === 25 && c2.sourceOutFrame === 75 && c2.effects?.speed === 0.5 && clipDurationFrames(c2, p.fps) === 100,
         `a clip with only metadata.synthcut under it still opens as v0.2.0 stored it (source ${c2?.sourceInFrame}-${c2?.sourceOutFrame}, ${c2 ? clipDurationFrames(c2, p.fps) : 0} frames)`);
+    }
+
+    // The track, the transition and the media reference read metadata.synthcut too. The fixtures hold only
+    // default track flags, and their clips restore whole, so: flags on the track, and a clip without its
+    // stored clip, with no asset list, after a v0.2.0 transition, then an adjustment layer.
+    {
+      type Meta = Record<string, Record<string, unknown>>;
+      const doc = JSON.parse(v020Text("speed.otio", media)) as {
+        metadata: Meta;
+        tracks: { children: { metadata: Meta; children: Record<string, unknown>[] }[] };
+      };
+      delete doc.metadata.synthcut.assets;
+      const track = doc.tracks.children[0];
+      track.metadata.synthcut = { index: 0, muted: true, hidden: true, locked: true, volume: 0.5 };
+      const second = track.children[1] as { metadata: Meta; media_references: Record<string, { metadata: Meta }> };
+      delete second.metadata.synthcut.clip;
+      const refAsset = second.media_references.DEFAULT_MEDIA.metadata.synthcut.asset as { id: string };
+      const zero = { OTIO_SCHEMA: "RationalTime.1", rate: 25, value: 0 };
+      track.children.splice(1, 0, {
+        OTIO_SCHEMA: "Transition.1", name: "wipeleft", transition_type: "SMPTE_Dissolve", in_offset: zero, out_offset: zero,
+        metadata: { synthcut: { type: "wipeleft", durationFrames: 7 } },
+      });
+      track.children.push({
+        OTIO_SCHEMA: "Clip.2",
+        name: "Adjustment layer",
+        source_range: { OTIO_SCHEMA: "TimeRange.1", start_time: zero, duration: { ...zero, value: 25 } },
+        media_references: {
+          DEFAULT_MEDIA: { OTIO_SCHEMA: "ExternalReference.1", target_url: "", available_range: null, metadata: { synthcut: { adjustment: true } } },
+        },
+        active_media_reference_key: "DEFAULT_MEDIA",
+      });
+      const fallbacks = join(root, "fallbacks.otio");
+      writeFileSync(fallbacks, JSON.stringify(doc), "utf8");
+      const eng = new EditorEngine(mkdtempSync(join(tmpdir(), "aive-otio-v020-")));
+      await eng.importOtio(fallbacks);
+      const p = eng.getProject();
+      const t0 = p.tracks[0];
+      check(t0?.muted === true && t0.hidden === true && t0.locked === true && t0.volume === 0.5,
+        `a track's muted, hidden, locked and volume come from metadata.synthcut (got ${stable({ muted: t0?.muted, hidden: t0?.hidden, locked: t0?.locked, volume: t0?.volume })})`);
+      const [, c2, adj] = t0?.clips ?? [];
+      check(c2?.transition?.type === "wipeleft" && c2.transition.durationFrames === 7,
+        `a transition's type and length come from metadata.synthcut (got ${stable(c2?.transition ?? null)})`);
+      check(!!c2 && c2.assetId === refAsset.id && p.assets.some((a) => a.id === refAsset.id),
+        `a media reference's asset id comes from metadata.synthcut (${refAsset.id}, got ${c2?.assetId})`);
+      check(adj?.adjustment === true && adj.assetId === undefined,
+        `a media reference's adjustment flag comes from metadata.synthcut (got ${stable({ adjustment: adj?.adjustment ?? null, assetId: adj?.assetId ?? null })})`);
     }
 
     // A v0.2.0 file exported again: only the current key, and it opens as the v0.2.0 file did.
