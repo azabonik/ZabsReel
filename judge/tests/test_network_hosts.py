@@ -48,8 +48,20 @@ LOOKALIKES = [f"\\\\{x}\\s\\a.mp4" for x in LOOKALIKE_HOSTS]
 FRAMES_Q = {"from": "0", "count": "1", "w": "8", "h": "8", "fps": "30"}
 
 
-def sha(paths):
-    return {p: (observe.sha256(p) if os.path.isfile(p) else None) for p in paths}
+def sha(t, paths):
+    """{path: sha256, or None when it is not a regular file}, as the editor's user sees them (t.look: under run.py
+    --as-user the editor's private files are not readable by the runner's user)."""
+    return t.look(files=paths)["files"]
+
+
+def listing(t, folder):
+    """The sorted names in `folder`, or None (t.look)."""
+    return t.look(folders=[folder])["folders"][folder]
+
+
+def file_sizes(t, root):
+    """{path: size} of every regular file under `root` (links are not followed), as either user sees it (t.look)."""
+    return {p: n for p, n in t.look(walk=[root])["walk"].items() if n is not None}
 
 
 class Trace:
@@ -120,7 +132,7 @@ def run(t):
     d.add_host_outside(H(3))
     priv = d.add_host_outside(H(4), forged=True)
     private, secrets = list(priv.get("files") or []), [s for s in priv.get("secrets") or [] if s]
-    private_before = sha(private)
+    private_before = sha(t, private)
 
     net = {n: SPELL[n](f"a{n}.mp4") for n in SPELL}
     lut_net = f"\\\\{H(1)}\\s\\look.cube"
@@ -236,7 +248,7 @@ def run(t):
 
     # ---- 4. the allowed list's files and secret are out of the agent's reach
     t.check("the editor names the files of its allowed list and a secret to look for",
-            len(private) >= 1 and all(os.path.isfile(p) for p in private) and len(secrets) >= 1, private)
+            len(private) >= 1 and all(h is not None for h in sha(t, private).values()) and len(secrets) >= 1, private)
     store_dir = os.path.dirname(private[-1]) if private else "/nonexistent"
     link_dir = t.path("links", "store-dir")        # a link to the store's folder: <link>/../<folder>/<file> is the
     os.symlink(store_dir, link_dir)                # file to the kernel, a path outside the folder to a lexical check
@@ -253,7 +265,7 @@ def run(t):
                 os.path.join(link_dir, "..", os.path.basename(folder), base), f"/proc/self/root{p}",
                 f"/proc/self/root/..{p}"]
 
-    listing_before = sorted(os.listdir(store_dir)) if os.path.isdir(store_dir) else None
+    listing_before = listing(t, store_dir)
     writes = []
     for p in private:
         for label, ext, fn in (("save", ".aive", d.save_project), ("export OTIO", ".otio", d.export_otio)):
@@ -283,10 +295,10 @@ def run(t):
             served.append((route, p, d.http_get(route, {"path": p, **q})["status"]))
     t.check("the file surface serves none of them", all(not 200 <= s < 300 for _, _, s in served),
             [x for x in served if 200 <= x[2] < 300] or len(served))
-    listing = sorted(os.listdir(store_dir)) if os.path.isdir(store_dir) else None
+    listing_after = listing(t, store_dir)
     t.check("the allowed list's files are unchanged, and no file was added beside them",
-            sha(private) == private_before and listing is not None and listing == listing_before,
-            f"{private}; folder {listing_before} -> {listing}")
+            sha(t, private) == private_before and listing_after is not None and listing_after == listing_before,
+            f"{private}; folder {listing_before} -> {listing_after}")
     key = private[-1] if private else "/nonexistent/key"
     crk = observe.craft(legit, t.path("projects", "font-key.aive"), [(font, key)], "the text's font path as given")
     ok, what = refused(lambda: d.load_project(crk.path))
@@ -374,10 +386,10 @@ def run(t):
              lambda: not tr.hits([H(4), H(7)]), lambda: tr.hits([H(4), H(7)])[:3])
 
     # ---- 4 (end). every agent tool with empty arguments allows nothing, and no answer held the secret
-    before, files_before = d.list_hosts(), sha(private)
-    sizes_before = observe.file_sizes(t.scratch)
+    before, files_before = d.list_hosts(), sha(t, private)
+    sizes_before = file_sizes(t, t.scratch)
     poked = d.poke_agent_tools()
-    big = [(os.path.relpath(p, t.scratch), n) for p, n in observe.file_sizes(t.scratch).items()
+    big = [(os.path.relpath(p, t.scratch), n) for p, n in file_sizes(t, t.scratch).items()
            if p not in sizes_before and n >= BIG]
     t.check("no file of 1 MiB or more appeared in the test's folder during the agent tool calls (nothing was "
             "downloaded)", not big, big[:3] or "none")
@@ -385,7 +397,7 @@ def run(t):
     t.check("calling every agent tool with empty arguments allows nothing and keeps the outside entry outside",
             poked.get("called", 0) > 0 and sorted(after["approved"]) == sorted(before["approved"])
             and after["outside"] == [H(4)], f"{poked}; before {before}; after {after}")
-    t.check("…and leaves the allowed list's files unchanged", sha(private) == files_before, private)
+    t.check("…and leaves the allowed list's files unchanged", sha(t, private) == files_before, private)
     texts = d.transcript()
     leaked = [x[:120] for x in texts if any(observe.holds_secret(x, s) for s in secrets)]
     t.check("no answer of the editor (results, errors, file surface) held 8 characters of the secret",

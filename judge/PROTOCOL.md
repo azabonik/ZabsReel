@@ -15,6 +15,15 @@ HTTP routes where an operation needs them). A new editor ships its own adapter a
   runner's sweep uses it to find processes left running, see rule 3). The adapter inherits no file descriptor other
   than stdin, stdout and stderr. `run.py --adapter` makes a word of the command that names an existing relative path
   absolute, so `--adapter "node adapters/new.mjs"` works from the folder you run it in.
+- With `run.py --as-user <name>` (CI: `zjudge`) the adapter and everything it starts run as that user, with umask
+  022 and an environment of exactly `PATH` (the runner's), `LANG`, `HOME` and `TMPDIR` (the scratch folder), `USER`,
+  `LOGNAME`, `JUDGE_TEST_SCRATCH`, and `AIVE_FFMPEG` / `AIVE_FFPROBE` when the runner has them. The adapter's command,
+  the build and the media must be readable by that user. The scratch folder belongs to the runner (mode 1777): the
+  adapter can add files and folders there, but cannot rename or remove the judge's. The hostile inputs the judge
+  writes (`observe.craft`) are writable by others, because the editor may save into a project it opened; the
+  judge's other files there are not. Files the editor writes for the judge to read
+  (exports, saved projects, frames) must be readable by others; its own private files need not be (the judge reads
+  those through `t.look`, as that user).
 - The judge sends `hello` first and fails the test when the result's `protocol` is not the judge's version (1).
 - Requests go to the adapter's **stdin** and responses come from its **stdout**: one JSON object per line, UTF-8.
 - The judge sends one request at a time and waits for its response before it sends the next.

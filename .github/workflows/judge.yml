@@ -9,6 +9,24 @@ name: Judge
 # runs (npm ci, the Electron install and the build all do), and the copy is
 # checked by its own copied gate before the install and again after the build.
 #
+# No code from the change runs as the runner's user (which has passwordless
+# sudo), except the lock-covered judge files (judge/, the gate and this file),
+# which come from the pull request's checkout and which the gauntlet reviews.
+# The install, the build and the editor under test run as zjudge, a user made
+# here before any of it: no sudo, no group shared with the runner's user, no
+# cron or at jobs, umask 022, its own home and npm cache; the checkout's .git
+# (the job's token) is closed to it. judge/lockout.py proves, before the build
+# and again just before the judge, that zjudge cannot change the judge's copy,
+# its own step's file-command files (a write bit for others there fails the
+# step: the runner makes the later steps' files there with the same umask), the
+# Node toolchain, the folders on PATH, the runner's home, the workspace or the
+# judge's scratch folder (after it takes the write bit for others away where it
+# is set), and ends every process zjudge left. Workflow commands are off while
+# zjudge's output is printed. run.py --as-user zjudge runs the adapter and the
+# editor as zjudge under an strace that runs as root, and ends every zjudge
+# process after each test. The runner's FFmpeg still reads the files the editor
+# wrote, with the runner's rights (judge/README.md, "Threat model").
+#
 # On a pull request the base branch's gate also checks the pull request's
 # files, and every lock-covered path that differs from the base is listed in
 # the job summary and in one warning. This catches a weakened gate only when
@@ -45,10 +63,11 @@ jobs:
           cp .github/workflows/judge.yml "$J/.github/workflows/"
           chmod -R a-w "$J"
 
+      # No npm cache: the install runs as zjudge, with a cache of its own in its
+      # home (nothing it writes is saved for other runs).
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
 
       # Pull requests only, before anything from the checkout runs. The lock's
       # content comes from the pull request (a reviewed judge change updates
@@ -80,6 +99,12 @@ jobs:
           git show FETCH_HEAD:scripts/check-judge-lock.mjs > "$RUNNER_TEMP/base-gate/check-judge-lock.mjs"
           node "$RUNNER_TEMP/base-gate/check-judge-lock.mjs" --root "$GITHUB_WORKSPACE"
 
+      # The checkout's .git (actions/checkout keeps the job's token in .git/config)
+      # is closed to every other user before the build user exists; nothing after
+      # this step runs git, and the build user's copy leaves .git out.
+      - name: Close the checkout's .git to other users
+        run: chmod -R go-rwx "$GITHUB_WORKSPACE/.git"
+
       # The copied gate on the copy (its self-test works on temp copies). The
       # step output pins the copy's lock and gate for the check after the build.
       - name: Judge lock gate on the copy (before the install)
@@ -97,26 +122,134 @@ jobs:
       - name: Install FFmpeg and strace
         run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
 
+      # The build user, before any code from the change runs: zjudge, no sudo,
+      # only its own group, and no cron or at jobs (cron.deny, at.deny; an
+      # allow file would make them ignored). /srv/judge (the runner's, mode 0755)
+      # holds the judge's scratch folders, where zjudge can enter but not write.
+      # lockout.py then takes away the write bit for others where it is set
+      # (chmod o-w) on the judge's copy, this step's file-command files
+      # ($GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT, $GITHUB_STEP_SUMMARY), the
+      # Node toolchain, every folder on PATH (or the nearest folder above one that
+      # is not there), the runner's home, the workspace and /srv/judge, and as
+      # zjudge tries to change each file and folder there and each folder above
+      # them: one attempt that is not refused fails the step. The runner makes
+      # new file-command files for each later step in the same folder with its
+      # own umask, so there a write bit for others fails the step
+      # (--fail-if-writable) instead of being taken away.
+      - name: Create the build user and lock it out
+        run: |
+          sudo useradd --create-home --user-group --shell /bin/bash zjudge
+          if [ "$(id -Gn zjudge)" != zjudge ]; then
+            echo "zjudge is in other groups: $(id -Gn zjudge)" >&2
+            exit 1
+          fi
+          if [ -e /etc/cron.allow ] || [ -e /etc/at.allow ]; then
+            echo "/etc/cron.allow or /etc/at.allow is there: cron.deny and at.deny would be ignored" >&2
+            exit 1
+          fi
+          echo zjudge | sudo tee -a /etc/cron.deny /etc/at.deny > /dev/null
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 /srv/judge
+          IFS=: read -r -a path_dirs <<< "$PATH"
+          python3 -I -B "$RUNNER_TEMP/judge-src/judge/lockout.py" --user zjudge \
+            --fail-if-writable "$(dirname "$GITHUB_ENV")" \
+            "$RUNNER_TEMP/judge-src" "$(dirname "$GITHUB_ENV")" "$GITHUB_ENV" "$GITHUB_PATH" "$GITHUB_OUTPUT" \
+            "$GITHUB_STEP_SUMMARY" "$(dirname "$(dirname "$(command -v node)")")" "${path_dirs[@]}" "$HOME" \
+            "$GITHUB_WORKSPACE" /srv/judge
+
       # The runner's own tests (crash, hang, early exit, wrong check counts, a
       # leaked process, forged results, SIGTERM, the not applicable and not
       # observed statuses, the download tripwire on a fixture adapter that
-      # addresses another computer) and the adapter's and check_observe.py's
+      # addresses another computer), the --as-user cases with zjudge (the
+      # fixture adapter cannot change the judge or reach strace or the test
+      # process, what it leaves running is ended by the user sweep, lockout.py
+      # finds a world-writable file), and the adapter's and check_observe.py's
       # self-tests. No editor starts, so it runs before the install.
       # --require-trace: the tripwire cases must run here, so a runner where
       # strace cannot trace a child fails this step.
       - name: Judge runner self-test
-        run: timeout -k 30 900 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --self-test --require-trace --scratch "$RUNNER_TEMP/judge-selftest"
+        run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --self-test --require-trace --as-user zjudge --scratch /srv/judge/selftest
 
-      - name: Install dependencies
-        run: npm ci
+      # The checkout without .git and judge/, in a folder of zjudge's: the
+      # install and the build write only there.
+      # Every step whose output comes from zjudge or the editor turns workflow
+      # commands off around it: ::stop-commands:: with a token made in this
+      # step's shell (never in a command line or the environment, so zjudge
+      # cannot read it), and the token turns them on again, also when the
+      # command fails. zjudge's output goes to a file of the runner's (mode
+      # 0600) that is printed after the command ends, so no zjudge process holds
+      # the step's own output, sees the token, or keeps the step open.
+      - name: Copy the checkout for the build user
+        run: |
+          set -o pipefail
+          sudo -n -u zjudge -- mkdir -m 0755 /home/zjudge/build
+          log="$RUNNER_TEMP/zjudge-step.log"
+          install -m 0600 /dev/null "$log"
+          rc=0
+          tar -C "$GITHUB_WORKSPACE" --exclude=./.git --exclude=./judge -cf - . 2>> "$log" \
+            | sudo -n -u zjudge -- tar -C /home/zjudge/build -xf - >> "$log" 2>&1 || rc=$?
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          cat "$log"
+          echo "::$token::"
+          exit "$rc"
+
+      # The install and the build as zjudge, with an environment of their own
+      # (env -i): the toolchain's node and npm first on PATH, zjudge's home and
+      # npm cache, umask 022 (the judge reads what they make).
+      - name: Install dependencies (as zjudge)
+        run: |
+          log="$RUNNER_TEMP/zjudge-step.log"
+          install -m 0600 /dev/null "$log"
+          rc=0
+          sudo -n -u zjudge -H -- env -i PATH="$(dirname "$(command -v node)"):/usr/local/bin:/usr/bin:/bin" \
+            HOME=/home/zjudge npm_config_cache=/home/zjudge/.npm LANG=C.UTF-8 CI=true \
+            sh -c 'umask 022 && cd /home/zjudge/build && npm ci' > "$log" 2>&1 || rc=$?
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          cat "$log"
+          echo "::$token::"
+          exit "$rc"
 
       # As in ci.yml: npm ci leaves Electron's binary out; install.js fetches
       # it (checked against the package's checksums.json).
-      - name: Install the Electron binary
-        run: node node_modules/electron/install.js
+      - name: Install the Electron binary (as zjudge)
+        run: |
+          log="$RUNNER_TEMP/zjudge-step.log"
+          install -m 0600 /dev/null "$log"
+          rc=0
+          sudo -n -u zjudge -H -- env -i PATH="$(dirname "$(command -v node)"):/usr/local/bin:/usr/bin:/bin" \
+            HOME=/home/zjudge npm_config_cache=/home/zjudge/.npm LANG=C.UTF-8 CI=true \
+            sh -c 'umask 022 && cd /home/zjudge/build && node node_modules/electron/install.js' > "$log" 2>&1 || rc=$?
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          cat "$log"
+          echo "::$token::"
+          exit "$rc"
 
-      - name: Build
-        run: npm run build
+      - name: Build (as zjudge)
+        run: |
+          log="$RUNNER_TEMP/zjudge-step.log"
+          install -m 0600 /dev/null "$log"
+          rc=0
+          sudo -n -u zjudge -H -- env -i PATH="$(dirname "$(command -v node)"):/usr/local/bin:/usr/bin:/bin" \
+            HOME=/home/zjudge npm_config_cache=/home/zjudge/.npm LANG=C.UTF-8 CI=true \
+            sh -c 'umask 022 && cd /home/zjudge/build && npm run build' > "$log" 2>&1 || rc=$?
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          cat "$log"
+          echo "::$token::"
+          exit "$rc"
+
+      # Just before the judge: every process the build left as zjudge is ended
+      # (--kill), and the same paths are tried again as zjudge.
+      - name: Lock the build user out (after the build)
+        run: |
+          IFS=: read -r -a path_dirs <<< "$PATH"
+          python3 -I -B "$RUNNER_TEMP/judge-src/judge/lockout.py" --user zjudge --kill \
+            --fail-if-writable "$(dirname "$GITHUB_ENV")" \
+            "$RUNNER_TEMP/judge-src" "$(dirname "$GITHUB_ENV")" "$GITHUB_ENV" "$GITHUB_PATH" "$GITHUB_OUTPUT" \
+            "$GITHUB_STEP_SUMMARY" "$(dirname "$(dirname "$(command -v node)")")" "${path_dirs[@]}" "$HOME" \
+            "$GITHUB_WORKSPACE" /srv/judge
 
       # The install and the build ran code from the change under test: the
       # copy's lock and gate must be the bytes pinned before them, and the copy
@@ -133,9 +266,12 @@ jobs:
           fi
           node "$J/scripts/check-judge-lock.mjs"
 
-      # The judge from the copy against the checkout's build, through the
-      # v0.2.0 adapter (its MCP server over stdio, a scratch home and data
-      # folder, a free port), measured with the runner's FFmpeg (apt, on PATH).
+      # The judge from the copy against zjudge's build, through the v0.2.0
+      # adapter (its MCP server over stdio, a scratch home and data folder, a
+      # free port), measured with the runner's FFmpeg (apt, on PATH).
+      # --as-user zjudge: the adapter, the editor and what they start run as
+      # zjudge, under an strace that runs as root; after each test every zjudge
+      # process is ended.
       # Media made with lavfi, nothing downloaded: the adapter starts the
       # editor so that it fetches nothing, and every test's "nothing was
       # downloaded" check fails on any connection to another computer.
@@ -143,22 +279,53 @@ jobs:
       # "not observed"). --strict: while the judge grades v0.2.0, whose file
       # format every crafted input is made from, a check recorded as not
       # applicable fails. timeout -k ends a hang as a failure; the runner also
-      # times out each test.
-      - name: Judge (v0.2.0 adapter)
-        run: timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build "$GITHUB_WORKSPACE" --scratch "$RUNNER_TEMP/judge-scratch" --strict --require-trace
+      # times out each test. The check details quote what the editor said, so
+      # workflow commands are off while it runs (the runner prints as it goes;
+      # no zjudge process holds the step's output, and the token is made before
+      # any zjudge process starts and is never passed on).
+      - name: Judge (v0.2.0 adapter, as zjudge)
+        run: |
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          rc=0
+          timeout -k 30 1200 python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build /home/zjudge/build \
+            --scratch /srv/judge/scratch --strict --require-trace --as-user zjudge < /dev/null 2>&1 || rc=$?
+          echo "::$token::"
+          exit "$rc"
 
-      # A failed run keeps its scratch folder: upload the logs (test.log,
-      # adapter.stderr, mcp-server.stderr, <test>.adapter-strace.log, the
-      # editor's own logs), not the media or the exports.
+      # A failed run keeps its scratch folder, which holds files and folders of
+      # zjudge's, links among them (the editor's sandbox is zjudge's own folder,
+      # so the kernel's link protection does not apply there). First every
+      # zjudge process and its crontab are ended (lockout.py --kill: by real and
+      # by effective user id, and none may be left), so nothing changes them
+      # after that. Then root copies only the regular files named *.log or
+      # *.stderr (find does not follow links, and -type f leaves out links,
+      # FIFOs and devices) into a new folder of the runner's, which is all the
+      # upload sees: a link the editor planted to a file of the runner's (the
+      # job's token, /proc/self/environ) or to a folder never reaches it.
+      - name: Collect the judge's logs
+        if: failure()
+        run: |
+          python3 -I -B "$RUNNER_TEMP/judge-src/judge/lockout.py" --user zjudge --kill
+          out="$RUNNER_TEMP/judge-logs"
+          rm -rf "$out"
+          mkdir -m 0700 "$out"
+          for top in /srv/judge/scratch /srv/judge/selftest; do
+            if [ -d "$top" ]; then
+              sudo -n find "$top" -xdev -type f \( -name '*.log' -o -name '*.stderr' \) \
+                -exec cp -P --parents -t "$out" -- {} +
+            fi
+          done
+          sudo -n chown -R "$(id -u):$(id -g)" "$out"
+
+      # The logs (records/<test>.log, records/<test>.adapter-strace.log,
+      # adapter.stderr, mcp-server.stderr, the editor's own logs), not the
+      # media or the exports: only the copies made above.
       - name: Upload the judge's logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: judge-logs
-          path: |
-            ${{ runner.temp }}/judge-scratch/**/*.log
-            ${{ runner.temp }}/judge-scratch/**/*.stderr
-            ${{ runner.temp }}/judge-selftest/**/*.log
-            ${{ runner.temp }}/judge-selftest/**/*.stderr
+          path: ${{ runner.temp }}/judge-logs
           if-no-files-found: ignore
           retention-days: 14

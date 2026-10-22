@@ -160,8 +160,11 @@ class Driver:
         except subprocess.TimeoutExpired:
             exited = False
             if kill:
-                self.p.kill()
-                self.p.wait(10)
+                try:  # under run.py --as-user the command is sudo: the runner's user may not be allowed to signal it
+                    self.p.kill()
+                    self.p.wait(10)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         if self._err is not None:
             self._err.close()
         return exited

@@ -96,7 +96,8 @@ def body(t, canary):
         refused(fn)
     job = d.export(t.path("out", "trav.mp4"))
     t.check("…and it renders: the export finishes", job.get("status") == "done", job, needs=trav)
-    found = observe.named(os.path.dirname(t.scratch), marker)
+    seen = t.look(walk=[os.path.dirname(t.scratch)])["walk"]  # every entry, as the runner or the editor's user sees it
+    found = [p for p in seen if marker in os.path.basename(p)]
     t.check("no file or folder named after a crafted identifier appears (the test's folder and the run's)",
             not found, found[:5], needs=trav)
 

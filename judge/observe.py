@@ -739,6 +739,11 @@ def substitute(src, out, pairs):
         data = text.encode("utf-8")
     with open(out, "wb") as f:
         f.write(data)
+    # The editor treats the file as the user's own document and may save into it (v0.2.0 saves the open project before
+    # it opens another). With run.py --as-user the editor is another user: the file is writable by others, as it is
+    # writable by the editor when it runs as the judge's user. (The test's folder is sticky there, so the editor can
+    # change the file but not replace or remove it.)
+    os.chmod(out, 0o666)
     return counts
 
 

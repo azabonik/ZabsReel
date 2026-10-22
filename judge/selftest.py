@@ -36,6 +36,17 @@ not used (the check is not observed), and with --require-trace it fails the run,
 symbolic link in a folder this user can write (without --require-trace its real path runs). The cases that need
 strace are skipped without it, unless --require-trace is given (judge.yml): then a missing strace fails the
 self-test.
+
+--as-user: the runner refuses the user that runs it, root, and a user that does not exist, before anything runs. With
+--self-test --as-user <name> (judge.yml: zjudge; skipped without it, failed when sudo -n does not work) the fixture
+adapter runs as that user (user_cases): it passes clean; its DNS lookup fails the download check; its attempts to
+change the judge's files and the runner's records, to list and open the descriptors of strace, sudo and the test
+process through /proc and to send them signal 0 are all refused (SelfTest.asuser); and the child it leaves with an
+empty environment fails the run and is ended by the user sweep. A user that already runs a process is refused.
+lockout.py --no-tighten finds a world-writable folder and file, lockout.py takes their write bit away, and --kill
+ends the user's processes first. lockout.py --fail-if-writable fails on a file there that others could write, a PATH
+folder that is not there is tried through the nearest folder above it (a sticky one that others can write fails), and
+--kill with no PATH removes the user's crontab and ends its processes.
 """
 import json
 import os
@@ -43,6 +54,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -125,9 +137,12 @@ TESTS = {
 # DNS lookup, "outlive" and "outlivehidden" leave a child running at stop (OUTLIVE) that waits until strace no longer
 # traces it and then starts a DNS lookup ("outlivehidden" with an empty environment, which the sweep cannot find), and
 # "loopback" makes a UDP connect to 127.0.0.1 and one to [2001:4860:4860::8888]:443 (Chromium's reachability
-# probe, which observe.net_hits allows).
+# probe, which observe.net_hits allows). "asuser <judge folder>" (run.py --as-user) tries at start to change the judge
+# and the records and to reach strace, sudo and the test process (asuser.json), and leaves a child with an empty
+# environment at stop (asuser.pid).
 FAKE = r'''import errno, json, os, socket, subprocess, sys, time
 proto, mode = int(sys.argv[1]), sys.argv[2]
+extra = sys.argv[3:]
 scratch = None
 FORGED = json.dumps({"check": "forged", "ok": True, "detail": ""}) + "\n"
 
@@ -282,6 +297,96 @@ def overwrite():
         except OSError:
             pass
 
+def chain():
+    """The process ids from this adapter's parent up to the test process (the nearest ancestor started with --child):
+    strace and sudo between them under --as-user."""
+    out, pid = [], os.getppid()
+    while pid > 1:
+        out.append(pid)
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"--child" in f.read().split(b"\0"):
+                return out
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            pid = int(f.read().rsplit(b")", 1)[1].split()[1])
+    return out
+
+def err(e):
+    return errno.errorcode.get(e.errno, type(e).__name__) if e.errno else type(e).__name__
+
+def change_file(p):
+    """[open for appending (nothing written), chmod to its own mode]: "opened" / "chmod", or the error of each."""
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK)
+    except OSError as e:
+        res = [err(e)]
+    else:
+        os.close(fd)
+        res = ["opened"]
+    try:
+        os.chmod(p, os.stat(p).st_mode & 0o7777)
+    except OSError as e:
+        return res + [err(e)]
+    return res + ["chmod"]
+
+def change_folder(d):
+    """[add a file (removed again), chmod to its own mode]: "added" / "chmod", or the error of each."""
+    q = os.path.join(d, ".asuser-probe-%d" % os.getpid())
+    try:
+        fd = os.open(q, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as e:
+        res = [err(e)]
+    else:
+        os.close(fd)
+        os.unlink(q)
+        res = ["added"]
+    try:
+        os.chmod(d, os.stat(d).st_mode & 0o7777)
+    except OSError as e:
+        return res + [err(e)]
+    return res + ["chmod"]
+
+def asuser():
+    """--as-user: what the adapter (the editor's user) can reach. It tries to change the judge's folder (argv 3: every
+    file and folder it can list there, and run.py and JUDGE.lock by name), the runner's records (records/ next to the
+    scratch folder, and the test's log and copy of the trace there by name), and to open every descriptor of each
+    process from strace up to the test process through /proc/<pid>/fd, for writing and for reading, to list them, and
+    to send each process signal 0. Every attempt is in asuser.json in the scratch folder."""
+    judge = extra[0]
+    rep = {"judge": {}, "records": {}, "procs": {}}
+    paths = [judge, os.path.join(judge, "run.py"), os.path.join(judge, "JUDGE.lock")]
+    for d, dirs, files in os.walk(judge):
+        paths += [os.path.join(d, n) for n in dirs + files]
+    for p in dict.fromkeys(paths):
+        rep["judge"][p] = change_folder(p) if os.path.isdir(p) else change_file(p)
+    records = os.path.join(os.path.dirname(scratch), "records")
+    rep["records"][records] = change_folder(records)
+    for n in ("test_driver.log", "test_driver.adapter-strace.log"):
+        rep["records"][os.path.join(records, n)] = change_file(os.path.join(records, n))
+    for pid in chain():
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            entry = {"cmd": f.read().replace(b"\0", b" ").decode("utf-8", "replace")[:100], "open": {}}
+        try:
+            entry["listed"] = sorted(os.listdir(f"/proc/{pid}/fd"))
+        except OSError as e:
+            entry["listed"] = type(e).__name__
+        for n in range(64):
+            for flags, how in ((os.O_WRONLY, "w"), (os.O_RDONLY, "r")):
+                try:
+                    fd = os.open(f"/proc/{pid}/fd/{n}", flags | os.O_NONBLOCK)
+                except OSError as e:
+                    entry["open"][f"{n}{how}"] = type(e).__name__
+                else:
+                    os.close(fd)
+                    entry["open"][f"{n}{how}"] = "opened"
+        try:
+            os.kill(pid, 0)
+            entry["signal"] = "sent"
+        except OSError as e:
+            entry["signal"] = type(e).__name__
+        rep["procs"][str(pid)] = entry
+    with open(os.path.join(scratch, "asuser.json"), "w") as f:
+        json.dump(rep, f)
+
 def net(mode):
     if mode == "killstrace":  # strace (this adapter's parent) ended: the lookup after it is not traced
         os.kill(os.getppid(), 9)
@@ -346,6 +451,8 @@ for line in sys.stdin:
             forge()
         if mode == "procfd":
             procfd()
+        if mode == "asuser":
+            asuser()
         why = net(mode)
         if why:
             print(json.dumps({"id": req["id"], "ok": False, "error": {"code": "product_error", "message": why}}),
@@ -361,6 +468,11 @@ for line in sys.stdin:
             c = subprocess.Popen([sys.executable, "-I", "-c", OUTLIVE], start_new_session=True,
                                  env={} if mode == "outlivehidden" else None)
             with open(os.path.join(scratch, mode + ".pid"), "w") as f:
+                f.write(str(c.pid))
+        if mode == "asuser":  # left running with an empty environment: only the user sweep can find it
+            c = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"], start_new_session=True,
+                                 env={}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(os.path.join(scratch, "asuser.pid"), "w") as f:
                 f.write(str(c.pid))
         if mode == "forge":
             forge()
@@ -414,6 +526,7 @@ class SelfTest:
         self.run_py = run_py
         self.allow_unprotected = allow_unprotected  # another system: every runner gets --allow-unprotected
         self.tmp = tempfile.mkdtemp(prefix="judge-selftest-", dir=parent)
+        os.chmod(self.tmp, 0o755)  # the --as-user cases: the other user runs the fixture adapter from here
         self.tests = os.path.join(self.tmp, "tests")
         os.makedirs(self.tests)
         for name, body in TESTS.items():
@@ -507,6 +620,41 @@ class SelfTest:
         if not ok:
             self.failures += 1
 
+    def asuser(self, judge):
+        """The asuser adapter's report (--as-user): the judge's folder, the runner's records, and every process from
+        strace up to the test process are out of the other user's reach. Every change of the judge's files and
+        folders and of the records is refused; listing each process's descriptors, opening each one through
+        /proc/<pid>/fd for writing and for reading, and sending it signal 0 are refused (PermissionError)."""
+        rep = None
+        for d, _, files in os.walk(os.path.join(self.tmp, "scratch")):
+            if os.path.basename(d) == "test_driver" and "asuser.json" in files:
+                with open(os.path.join(d, "asuser.json"), encoding="utf-8") as f:
+                    rep = json.load(f)
+        problems = []
+        if rep is None:
+            problems.append("no asuser.json report")
+        else:
+            for part in ("judge", "records"):
+                done = {p: r for p, r in rep[part].items() if set(r) & {"opened", "added", "chmod"}}
+                if done:
+                    problems.append(f"{part}: changed {done}")
+            if os.path.join(judge, "run.py") not in rep["judge"]:
+                problems.append("run.py was not tried")
+            procs = rep["procs"]
+            if not procs or "--child" not in list(procs.values())[-1]["cmd"]:
+                problems.append(f"the processes up to the test process were not all tried: {procs}")
+            for pid, e in procs.items():
+                other = {n: r for n, r in e["open"].items() if r != "PermissionError"}
+                if e["listed"] != "PermissionError" or other or len(e["open"]) != 128 or e["signal"] != "PermissionError":
+                    problems.append(f"{pid} ({e['cmd'][:60]}): listed {e['listed'] if e['listed'] == 'PermissionError' else 'yes'}, "
+                                    f"opens not refused {other}, signal 0 {e['signal']}")
+        ok = not problems
+        print(f"{'ok  ' if ok else 'FAIL'} --as-user: the adapter cannot change the judge or the records, open the "
+              f"descriptors of strace, sudo or the test process, or signal them" + (f"; {problems}" if problems else ""),
+              flush=True)
+        if not ok:
+            self.failures += 1
+
     def unit(self, name, ok, detail=""):
         print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f"; {detail}" if not ok and detail else ""), flush=True)
         if not ok:
@@ -561,7 +709,139 @@ class SelfTest:
             print("     | " + "\n     | ".join((p.stdout + p.stderr).strip().splitlines()[-25:]), flush=True)
 
 
-def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
+def user_cases(s, user, traced, py, drv, fail, net, left):
+    """--self-test --as-user <user>: the fixture adapter as that user. It passes clean, its DNS lookup fails the
+    download check (strace -u traces it), it cannot change the judge or the records or reach strace, sudo or the test
+    process (SelfTest.asuser), and the child it leaves with an empty environment is ended by the user sweep. A user
+    that already runs a process is refused. lockout.py finds a world-writable file and folder with --no-tighten, and
+    takes the write bit away without it; with --kill it ends the user's processes first. With --fail-if-writable a
+    file there that others could write fails it; a PATH folder that is not there is tried through the nearest folder
+    above it; --kill with no PATH removes the user's crontab and ends its processes."""
+    import run
+    try:
+        au = run.AsUser(user)
+        why = au.problem()  # never root or this user: the cases below end every process of that user
+    except KeyError:
+        why = "no such user"
+    if why:
+        s.unit(f"the --as-user cases can run as {user}", False, why)
+        return
+    extra = ("--as-user", user)
+    s.run("driver", 0, [r"^judge: as user " + re.escape(user), r"^PASS  test_driver: the fixture editor started",
+                        drv(3, 3)], adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra,
+          label="--as-user: the fixture adapter runs as the other user and passes")
+    if traced:
+        s.run("driver", 1, [fail.format("driver", net + ".*htons\\(53\\).*192\\.0\\.2\\.1")],
+              adapter=f"{py} {FAKE_ADAPTER} 1 connect", extra=extra,
+              label="--as-user: the other user's DNS lookup fails the download check (strace -u traces it)")
+    s.run("driver", 1, [left + r"\d+ \S+ -I -c import time; time\.sleep\(300\)"],
+          adapter=f"{py} {FAKE_ADAPTER} 1 asuser {shlex.quote(JUDGE)}", extra=extra + ("--keep",),
+          label="--as-user: a child left with an empty environment is found by the user sweep and the run fails")
+    s.asuser(JUDGE)
+    s.still_running("--as-user: the child the adapter left", s.pids_in("driver", "asuser.pid"))
+
+    def user_sleeps():
+        p = subprocess.Popen(au.as_user([au.tools["env"], "-i", "PATH=/usr/bin:/bin", "sleep", "120"]),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd="/")
+        deadline = time.time() + 20
+        while time.time() < deadline and not any("sleep" in c for _, c in au.procs()):
+            time.sleep(0.2)
+        return p
+    p = user_sleeps()
+    s.run("ok", 1, [r"^JUDGE: refused: --as-user " + re.escape(user) + ": " + re.escape(user)
+                    + r" already runs 1 process"], extra=extra, label="--as-user: a user that already runs a process "
+                                                                       "is refused")
+    au.sweep()
+    p.wait(30)
+
+    lockout = [sys.executable, "-I", "-B", os.path.join(JUDGE, "lockout.py"), "--user", user]
+    lk = os.path.join(s.tmp, "lockout")
+    os.mkdir(lk)
+    os.chmod(lk, 0o755)
+    open_dir, closed = os.path.join(lk, "open"), os.path.join(lk, "closed")
+    os.mkdir(open_dir)
+    open_file = os.path.join(open_dir, "f")
+    for path, mode in ((open_file, 0o666), (closed, 0o644)):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x\n")
+        os.chmod(path, mode)
+    os.chmod(open_dir, 0o777)
+    r = subprocess.run(lockout + ["--no-tighten", lk], capture_output=True, text=True, timeout=600,
+                       stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    want = [f"lockout: FAIL {user} could change {open_dir}: added a file",
+            f"lockout: FAIL {user} could change {open_file}: opened it for writing"]
+    s.unit("lockout.py --no-tighten: a world-writable folder and file are found, and the run fails",
+           r.returncode == 1 and all(w in out for w in want) and closed not in out, out[-1500:])
+    r = subprocess.run(lockout + [lk], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    modes = {p: stat.S_IMODE(os.stat(p).st_mode) for p in (open_dir, open_file, closed)}
+    s.unit("lockout.py: it takes the write bit for others away (chmod o-w), and then nothing can be changed",
+           r.returncode == 0 and "lockout: ok" in r.stdout and modes == {open_dir: 0o775, open_file: 0o664,
+                                                                          closed: 0o644},
+           f"exit {r.returncode}; {modes}; {(r.stdout + r.stderr)[-1500:]}")
+    p = user_sleeps()
+    r = subprocess.run(lockout + ["--kill", lk], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    s.unit("lockout.py --kill: it ends the user's processes first",
+           r.returncode == 0 and "lockout: ended 1 process(es)" in r.stdout and not au.procs(),
+           f"exit {r.returncode}; {(r.stdout + r.stderr)[-1500:]}")
+    try:
+        p.wait(30)
+    except subprocess.TimeoutExpired:
+        pass
+
+    # --fail-if-writable (judge.yml: the runner's file-command folder): a file there that others can write fails the
+    # run, also when its write bit is taken away.
+    fc = os.path.join(s.tmp, "lockout-file-commands")
+    os.mkdir(fc)
+    os.chmod(fc, 0o755)
+    fc_file = os.path.join(fc, "set_env_later")
+    with open(fc_file, "w", encoding="utf-8") as f:
+        f.write("")
+    os.chmod(fc_file, 0o666)
+    r = subprocess.run(lockout + ["--fail-if-writable", fc, fc], capture_output=True, text=True, timeout=600,
+                       stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    s.unit("lockout.py --fail-if-writable: a file there that others could write fails the run (its bit taken away)",
+           r.returncode == 1 and f"lockout: FAIL others could write {fc_file} (mode 666)" in out
+           and stat.S_IMODE(os.stat(fc_file).st_mode) == 0o664, f"exit {r.returncode}; {out[-1500:]}")
+
+    # A folder on PATH that is not there: the user could make it in the nearest folder above, which is tried (here a
+    # sticky folder that everyone can write, as /tmp is, so it is not tightened and the user can add to it).
+    open_top = os.path.join(s.tmp, "lockout-sticky")
+    os.mkdir(open_top)
+    os.chmod(open_top, 0o1777)
+    r = subprocess.run(lockout + [os.path.join(open_top, "not", "there", "bin")], capture_output=True, text=True,
+                       timeout=600, stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    s.unit("lockout.py: a PATH folder that is not there is tried through the nearest folder above it",
+           r.returncode == 1 and f"lockout: FAIL {user} could change {open_top}: added a file" in out,
+           f"exit {r.returncode}; {out[-1500:]}")
+
+    # --kill with no PATH (judge.yml's failure path): the user's crontab is removed and its processes are ended. When
+    # crontab refuses the user even for root (judge.yml puts zjudge in /etc/cron.deny), no crontab can be planted
+    # and lockout.py must say that cron refuses the user; with no crontab program it says so.
+    crontab = shutil.which("crontab", path=run.SYSTEM_PATH)
+    planted = crontab and subprocess.run(au.root([crontab, "-u", user, "-"]), input="@reboot true\n",
+                                         capture_output=True, text=True, timeout=60, cwd="/").returncode == 0
+    p = user_sleeps()
+    r = subprocess.run(lockout + ["--kill"], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    tab = subprocess.run(au.root([crontab, "-l", "-u", user]), capture_output=True, text=True, timeout=60,
+                         stdin=subprocess.DEVNULL, cwd="/") if crontab else None
+    s.unit("lockout.py --kill with no PATH: it removes the user's crontab (or says cron refuses the user) and ends "
+           "its processes",
+           r.returncode == 0 and "lockout: ended 1 process(es)" in out and not au.procs()
+           and (f"lockout: removed the crontab of {user}" in out and tab.returncode != 0 if planted else
+                f"lockout: {user} may not use cron" in out if crontab else "lockout: no crontab in " in out),
+           f"exit {r.returncode}; crontab {crontab}, planted {planted}: {tab and (tab.stdout + tab.stderr).strip()}; "
+           f"{out[-1500:]}")
+    try:
+        p.wait(30)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_user=None):
     if parent:
         os.makedirs(parent, exist_ok=True)
     s = SelfTest(run_py, parent, allow_unprotected)
@@ -691,9 +971,13 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
             # used (the link could be pointed elsewhere after the check); without, its real path is what runs.
             link = os.path.join(s.tmp, "strace-link")
             os.symlink(run_strace_path(), link)
+            # (The reason is matched on the "trace with" line, which is printed whole: a check's detail is cut at 400
+            # characters, and the two paths in it are long when the scratch folder's path is.)
             s.run("driver", 1, [fail.format("driver", net + ".*a failure with --require-trace: strace .*strace-link is "
-                                            "not used with --require-trace: .*strace-link is a symbolic link in a "
-                                            "folder this user can write"), r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                                            "not used with --require-trace: "),
+                                r"^judge: trace with nothing \(strace .*strace-link is not used with --require-trace: "
+                                r".*strace-link is a symbolic link in a folder this user can write",
+                                r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 plain", env={"JUDGE_STRACE": link}, extra=("--require-trace",),
                   label="a JUDGE_STRACE symbolic link in a folder this user can write, with --require-trace: refused")
             s.run("driver", 0, [r"^judge: trace with " + re.escape(run_strace_path()) + r"( |$)",
@@ -704,6 +988,22 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False):
             print(f"{'FAIL' if require_trace else 'skip'} the download tripwire cases: strace is not installed"
                   + (" (--require-trace)" if require_trace else ""), flush=True)
             s.failures += bool(require_trace)
+        # --as-user: a user that is root, the runner's own, or not there is refused before anything runs (no sudo
+        # needed). The cases with another user run only when --as-user names one (judge.yml does); then a sudo -n
+        # that does not work fails them.
+        if sys.platform.startswith("linux"):
+            import pwd
+            me = pwd.getpwuid(os.geteuid()).pw_name
+            for who, why in ((me, "is root" if os.geteuid() == 0 else "is the user that runs the judge"),
+                             ("root", "is root"), ("judge-no-such-user", "no such user")):
+                s.run("ok", 1, [r"^JUDGE: refused: --as-user " + re.escape(who) + ": " + ("" if why == "no such user"
+                                                                                          else re.escape(who) + " ")
+                                + re.escape(why)], extra=("--as-user", who), label=f"--as-user {who}: refused")
+            if as_user:
+                user_cases(s, as_user, traced, py, drv, fail, net, left)
+            else:
+                print("skip the --as-user cases with another user: no --as-user given (judge.yml gives one)",
+                      flush=True)
         # The form of an strace line (observe.strace_line_problem): text joined to strace's own line in front or in
         # the middle cannot hide a call.
         sys.path.insert(0, JUDGE)

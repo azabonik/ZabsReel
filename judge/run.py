@@ -3,7 +3,8 @@
 
     python3 -I judge/run.py [--adapter "<command>"] [--build <dir>] [--only <text>] [--timeout <s>] [--jobs <n>]
                             [--scratch <dir>] [--keep] [--list] [--strict] [--require-trace] [--allow-unprotected]
-    python3 -I judge/run.py --self-test [--require-trace]
+                            [--as-user <name>]
+    python3 -I judge/run.py --self-test [--require-trace] [--as-user <name>]
 
 --adapter   the adapter command (default: this judge's v0.2.0 adapter, run with this Python). A word that names an
             existing file or folder relative to the current folder is made absolute: the adapter runs with its
@@ -21,6 +22,10 @@
 --allow-unprotected
             run even when the runner or a test process cannot be made non-dumpable (see below); the JUDGE line says
             UNPROTECTED. Development only (not Linux); CI never passes it
+--as-user   run the adapter, the editor and everything they start as this other user (judge.yml: zjudge, made for the
+            job, with no sudo and no group shared with the runner's user), through `sudo -n` (see "Another user"
+            below). Without it they run as the runner's user (a local run). With --self-test: the --as-user cases
+            run as this user (without it they are skipped)
 --self-test the runner's own tests (judge/selftest.py): each way a test can fail must fail the run
 
 Statuses: a check passes or fails, or is recorded as NOT APPLICABLE (the hostile input it needs could not be made from
@@ -30,10 +35,11 @@ is printed with its name and the JUDGE line counts them ("JUDGE: 150/150 passed,
 observed"). --strict turns not applicable into a failure, --require-trace turns not observed into a failure.
 
 Downloads: every test that starts the editor runs its adapter under strace (JUDGE_STRACE names it; empty means none,
-else the strace on PATH), with the network calls traced and io_uring refused, and the runner adds the check "nothing
-was downloaded": no process of the adapter's tree addressed another computer (observe.net_hits on the lines the test
-process read while the editor ran from a socket that only it and strace hold, TraceTail; a line not of strace's form,
-a trace that ended before stop, or one that did not end after it, fails the check). After stop the test process
+else the strace on PATH, or under --as-user the one in SYSTEM_PATH), with the network calls traced and io_uring
+refused, and the runner adds the check "nothing was downloaded": no process of the adapter's tree addressed another
+computer (observe.net_hits on the lines the test process read while the editor ran from a socket that only it and
+strace hold, TraceTail; a line not of strace's form, a trace that ended before stop, or one that did not end after
+it, fails the check). After stop the test process
 waits for strace to exit (it exits when the last process it traces has ended); when it does not, the test process
 sweeps the scratch folder itself (but strace), fails "nothing the adapter started is left running after stop" on
 what it finds, and a trace that still does not end within 10 s is incomplete (a traced process outlived stop). An
@@ -59,10 +65,26 @@ did not report its end, wrote a malformed or unknown record, recorded a number o
 a process running, or there were no checks. SIGTERM or SIGINT ends the running tests and what they started, prints
 "JUDGE: interrupted ..." and exits 1. Python 3 standard library only; FFmpeg and ffprobe from PATH
 (JUDGE_FFMPEG / JUDGE_FFPROBE override).
+
+Another user (--as-user <name>): strace runs as root (`sudo -n env -i ... strace -u <name> ...`) and starts the adapter
+as that user, so nothing the adapter starts can signal strace, attach to it or open its descriptors, and the test
+process (another user, non-dumpable) and the runner's files are out of its reach. Without strace the adapter starts
+through `sudo -n -u <name>`. The adapter's environment is an explicit list (AsUser.env_words), and it runs with umask
+022 so the judge can read what it writes. The run's folder is the runner's (mode 0755); in it the runner keeps its
+records (each test's log and the copy of its trace) in records/ (mode 0700), and a copy of the default adapter in
+adapter/. Each test's folder, and every folder T.path makes in it, belongs to the runner with mode 1777 (sticky): the
+editor can add files and folders there, but cannot rename or remove the test's own files, and the kernel does not let
+the test follow the editor's links there or open its files with O_CREAT (fs.protected_symlinks and
+fs.protected_regular, which the runner checks). After each test the runner ends every process of that user (sudo -n
+pkill -KILL, by real and by effective user id) and fails "nothing left running after the test" on what it finds, as
+well as the sweep by scratch values (which cannot read that user's processes' environment). Tests run one at a time
+(the sweep is per user). The runner refuses to start when the user is root or itself, shares a group with it, already
+runs a process, could change a folder above the run's folder, or when sudo -n does not work.
 """
 import argparse
 import ctypes
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -71,6 +93,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -211,6 +234,285 @@ def sweep(folder, skip=()):
     return left
 
 
+# ---------------------------------------------------------------- --as-user: the adapter and the editor as another user
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"  # where the commands run as root are looked up (never the PATH)
+AS_USER = None  # an AsUser while --as-user is given (in the runner and in each test process)
+# TRACEE (below) for --as-user: the adapter's tree also gets umask 022, so the judge can read what the editor writes.
+TRACEE_AS_USER = ["/bin/sh", "-c", 'umask 022; exec 2>>"$0"; exec "$@"']
+SHARED = 0o1777  # each test's folder and the folders T.path makes in it, under --as-user (sticky: see the docstring)
+PROTECTED_SYSCTLS = ("protected_symlinks", "protected_hardlinks", "protected_regular")
+
+
+def _status_ids(pid):
+    """(user ids, state letter) of a process from /proc/<pid>/status (readable by every user), or None."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    uids, state = set(), "?"
+    for ln in text.splitlines():
+        if ln.startswith("Uid:"):
+            uids = {int(x) for x in ln.split()[1:] if x.isdigit()}
+        elif ln.startswith("State:"):
+            state = (ln.split() + ["?", "?"])[1]
+    return uids, state
+
+
+class AsUser:
+    """--as-user <name>: the adapter, the editor and everything they start run as this user. Commands that need root
+    (strace, which then starts the adapter as the user with -u; the user sweep) run through `sudo -n`, so the runner's
+    user needs sudo without a password (a GitHub-hosted runner has it). Every command run as root is looked up in
+    SYSTEM_PATH (strace too, unless JUDGE_STRACE names one), and strace is not used when this user can change it
+    (strace())."""
+
+    def __init__(self, name):
+        import pwd
+        pw = pwd.getpwnam(name)  # KeyError: no such user
+        self.name, self.uid, self.gid = pw.pw_name, pw.pw_uid, pw.pw_gid
+        self.groups = set(os.getgrouplist(pw.pw_name, pw.pw_gid))
+        self.tools = {t: shutil.which(t, path=SYSTEM_PATH) for t in ("sudo", "env", "pkill", "pgrep", "rm", "true")}
+
+    def root(self, words):
+        """The words that run `words` as root."""
+        return [self.tools["sudo"], "-n", "--"] + list(words)
+
+    def as_user(self, words):
+        """The words that run `words` as this user (sudo's own environment rules apply: give `env_words` first)."""
+        return [self.tools["sudo"], "-n", "-u", self.name, "--"] + list(words)
+
+    def env_words(self, scratch=None):
+        """`env -i` with the adapter's whole environment: PATH (the runner's), LANG, HOME and TMPDIR (the test's
+        scratch folder, so nothing goes elsewhere), USER and LOGNAME, JUDGE_TEST_SCRATCH, and AIVE_FFMPEG /
+        AIVE_FFPROBE when the runner has them."""
+        home = scratch or "/"
+        pairs = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": home, "TMPDIR": home,
+                 "USER": self.name, "LOGNAME": self.name}
+        if scratch:
+            pairs["JUDGE_TEST_SCRATCH"] = scratch
+        for k in ("AIVE_FFMPEG", "AIVE_FFPROBE"):
+            if os.environ.get(k):
+                pairs[k] = os.environ[k]
+        return [self.tools["env"], "-i"] + [f"{k}={v}" for k, v in pairs.items()]
+
+    def _run(self, words, timeout=60, **kw):
+        return subprocess.run(words, stdin=kw.pop("stdin", subprocess.DEVNULL), capture_output=True, text=True,
+                              timeout=timeout, cwd="/", **kw)
+
+    def problem(self):
+        """None when the runner may use this user, else why not. It must be another user than root and the runner's,
+        share no group with the runner's user, run no process yet (what runs as it is ended after each test), and
+        sudo -n must run commands as root and as it. The kernel must refuse to follow another user's link and to open
+        another user's file with O_CREAT in a sticky folder that others can write (the shared test folders)."""
+        if not sys.platform.startswith("linux"):
+            return f"another user needs Linux (this is {sys.platform})"
+        if self.uid == 0:
+            return f"{self.name} is root"
+        if self.uid in (os.getuid(), os.geteuid()):
+            return f"{self.name} is the user that runs the judge"
+        import grp
+        mine = set(os.getgroups()) | {os.getgid(), os.getegid()}
+        shared = self.groups & mine
+        if shared:
+            names = []
+            for g in sorted(shared):
+                try:
+                    names.append(grp.getgrgid(g).gr_name)
+                except KeyError:
+                    names.append(str(g))
+            return f"{self.name} shares the group(s) {', '.join(names)} with the user that runs the judge"
+        missing = [t for t, p in self.tools.items() if not p]
+        if missing:
+            return f"no {', '.join(missing)} in {SYSTEM_PATH}"
+        for t in ("sudo", "env"):
+            why = _not_writable(self.tools[t])
+            if why:
+                return f"{t} {self.tools[t]} is not used: {why}"
+        for name in PROTECTED_SYSCTLS:
+            try:
+                with open(f"/proc/sys/fs/{name}", encoding="ascii") as f:
+                    value = int(f.read().strip())
+            except (OSError, ValueError) as e:
+                return f"fs.{name} cannot be read ({e})"
+            if value < 1:
+                return (f"fs.{name} is {value}: the test's folders are shared with {self.name} (sticky, mode 1777) "
+                        f"and need it at 1 or more")
+        for words, who in ((self.root([self.tools["true"]]), "root"),
+                           (self.as_user([self.tools["true"]]), self.name)):
+            try:
+                p = self._run(words, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return f"sudo -n cannot run a command as {who} ({e})"
+            if p.returncode != 0:
+                return f"sudo -n cannot run a command as {who}: {_short(p.stderr or p.stdout, 200)}"
+        running = self.procs()
+        if running:
+            return (f"{self.name} already runs {len(running)} process(es) ({_short([f'{p} {c}' for p, c in running], 200)}"
+                    f"): the runner ends every process of this user after each test, so it must be a user only the "
+                    f"judge uses")
+        return None
+
+    def _may(self, st, bit):
+        """Whether this user has permission `bit` (4 read, 2 write, 1 search) on a file with stat `st` (mode bits)."""
+        if st.st_uid == self.uid:
+            return bool(st.st_mode & (bit << 6))
+        if st.st_gid in self.groups:
+            return bool(st.st_mode & (bit << 3))
+        return bool(st.st_mode & bit)
+
+    def folder_problem(self, path):
+        """None when this user can reach the folder `path` (search permission on it and on every folder above it) and
+        can change none of them: it owns none, cannot write `path`, and cannot rename any of them (it cannot write
+        the folder above, or that folder is sticky and it owns neither). Else why not. Mode bits only (no ACLs)."""
+        chain, p = [], os.path.realpath(path)
+        while True:
+            chain.append(p)
+            if os.path.dirname(p) == p:
+                break
+            p = os.path.dirname(p)
+        for d in chain:
+            st = os.stat(d)
+            if st.st_uid == self.uid:
+                return f"{d} belongs to {self.name}"
+            if not self._may(st, 1):
+                return f"{self.name} cannot enter {d} (no search permission for it)"
+        if self._may(os.stat(chain[0]), 2):
+            return f"{self.name} can write {chain[0]}"
+        for child, parent in zip(chain, chain[1:]):
+            pst = os.stat(parent)
+            if self._may(pst, 2) and not (pst.st_mode & stat.S_ISVTX):
+                return f"{self.name} can rename {child} (it can write {parent})"
+        return None
+
+    def procs(self):
+        """[(pid, cmdline)] of every process of this user (by real, effective, saved or file-system user id) that is
+        not a zombie: this process's own look at /proc, and `pgrep` as root for any that /proc hides from it."""
+        found = {}
+        for name in os.listdir("/proc"):
+            if name.isdigit():
+                ids = _status_ids(name)
+                if ids and self.uid in ids[0] and ids[1] != "Z":
+                    found[int(name)] = cmdline(name)
+        for flag in ("-U", "-u"):
+            try:
+                p = self._run(self.root([self.tools["pgrep"], flag, str(self.uid)]), timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            for word in p.stdout.split():
+                if word.isdigit() and int(word) not in found:
+                    ids = _status_ids(word)
+                    if ids and ids[1] != "Z":
+                        found[int(word)] = cmdline(word)
+        return sorted(found.items())
+
+    def sweep(self, wait=10.0):
+        """Ends every process of this user: pkill -KILL by real and by effective user id, as root, again until none is
+        left or `wait` s have passed. Returns (found, left): [(pid, cmdline)] seen before the first kill, and those
+        still there at the end. Never for root or the user that runs this (it would end the judge itself)."""
+        if self.uid == 0 or self.uid in (os.getuid(), os.geteuid()):
+            raise RuntimeError(f"no sweep of every process of {self.name}: root, or the user that runs the judge")
+        found = left = self.procs()
+        deadline = time.time() + wait
+        while left and time.time() < deadline:
+            for flag in ("-U", "-u"):
+                try:
+                    self._run(self.root([self.tools["pkill"], "-KILL", flag, str(self.uid)]), timeout=30)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            settle = time.time() + 2
+            while time.time() < settle:
+                left = self.procs()
+                if not left:
+                    break
+                time.sleep(0.2)
+        return found, left
+
+    def look(self, req):
+        """look(req) run as this user (its own rights: the editor's private files and folders), or raises
+        RuntimeError."""
+        src = "import json, sys\n" + inspect.getsource(look) + "\nprint(json.dumps(look(json.load(sys.stdin))))\n"
+        words = self.as_user([self.tools["env"], "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", sys.executable, "-I",
+                              "-S", "-B", "-c", src])
+        try:
+            p = self._run(words, timeout=300, input=json.dumps(req), stdin=None)
+            return json.loads(p.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+            raise RuntimeError(f"looking as {self.name} failed: {e}")
+
+    def remove(self, folder):
+        """Removes `folder` (the run's folder, which holds files of this user) as root."""
+        self._run(self.root([self.tools["rm"], "-rf", "--one-file-system", "--", folder]), timeout=600)
+
+
+def look(req):
+    """What one user sees of some paths (T.look; under --as-user AsUser.look runs this function's own source as that
+    user). req: {"files": [path], "folders": [path], "walk": [path]}. Returns {"files": {path: sha256 of a regular
+    file it can read, else None}, "folders": {path: sorted names, or None when it cannot list it}, "walk": {path:
+    size of a regular file, None for a folder, a link or anything else} for every entry under each walk root (links
+    are not followed)}."""
+    import hashlib
+    import os
+    import stat
+    out = {"files": {}, "folders": {}, "walk": {}}
+    for p in req.get("files", []):
+        out["files"][p] = None
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                h = hashlib.sha256()
+                for chunk in iter(lambda: os.read(fd, 1 << 20), b""):
+                    h.update(chunk)
+                out["files"][p] = h.hexdigest()
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    for p in req.get("folders", []):
+        try:
+            out["folders"][p] = sorted(os.listdir(p))
+        except OSError:
+            out["folders"][p] = None
+    for root in req.get("walk", []):
+        for d, dirs, files in os.walk(root, followlinks=False):
+            for n in dirs + files:
+                q = os.path.join(d, n)
+                try:
+                    st = os.lstat(q)
+                except OSError:
+                    continue
+                out["walk"][q] = st.st_size if stat.S_ISREG(st.st_mode) else None
+    return out
+
+
+def shared_folder(path):
+    """Makes the folder `path` for --as-user: owned by this user, mode SHARED (1777)."""
+    os.mkdir(path)
+    os.chmod(path, SHARED)
+
+
+def shared_folders(root, folder):
+    """Makes `folder` and the folders between it and `root` (a test's folder) as shared_folder does. A folder already
+    there must be this user's own, not a link: one the editor made could hold links the test would write through."""
+    rel = os.path.relpath(folder, root)
+    if rel == ".":
+        return
+    if rel.startswith(".."):
+        raise ValueError(f"{folder} is outside the test's folder {root}")
+    cur = root
+    for part in rel.split(os.sep):
+        cur = os.path.join(cur, part)
+        try:
+            shared_folder(cur)
+        except FileExistsError:
+            st = os.lstat(cur)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+                raise RuntimeError(f"{cur} is not a folder the test made (another user's, or a link): the test does "
+                                   "not write in it")
+
+
 # ---------------------------------------------------------------- strace (file-system trace and the download tripwire)
 NET_CALLS = "connect,sendto,sendmsg,sendmmsg,io_uring_setup"  # the calls observe.net_hits reads (see its docstring)
 NET_CHECK = "nothing was downloaded: no process of the adapter or the editor addressed another computer"
@@ -289,8 +591,13 @@ def strace_probe(st, bpf):
     tail = None
     try:
         tail = TraceTail(os.path.join(tmp, "probe.log"))
-        p = subprocess.Popen(strace_words(st, bpf, NET_CALLS) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tail.writer, close_fds=True)
+        if AS_USER is None:
+            words = strace_words(st, bpf, NET_CALLS) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child
+        else:  # as the tests run it: strace as root, the child as the other user (its stderr: nowhere it cannot reach)
+            words = AS_USER.root(AS_USER.env_words() + strace_words(st, bpf, NET_CALLS, AS_USER.name) + TRACEE_AS_USER
+                                 + ["/dev/null"] + child)
+        p = subprocess.Popen(words, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tail.writer,
+                             close_fds=True, cwd="/" if AS_USER else None)
         tail.started()
         tail.stopping()
         try:
@@ -319,25 +626,27 @@ def strace_probe(st, bpf):
 
 def strace(require_trace=None):
     """The strace to run the adapter under, as its real path, or None (strace_why() says why): JUDGE_STRACE when set
-    (empty: none), else strace on PATH. The path is made real once, here, and that real path is what runs. With
-    --require-trace (REQUIRE_TRACE) an strace whose real file, or a folder above it, this user can write is not used,
-    and neither is one named through a symbolic link that sits in a folder this user can write: a build step could
-    have named it through $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. An strace that
-    fails strace_probe is not used."""
+    (empty: none), else strace on PATH (under --as-user, where strace runs as root: strace in SYSTEM_PATH). The path
+    is made real once, here, and that real path is what runs. With --require-trace (REQUIRE_TRACE), and always under
+    --as-user, an strace whose real file, or a folder above it, this user can write is not used, and neither is one
+    named through a symbolic link that sits in a folder this user can write: a build step could have named it through
+    $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. An strace that fails strace_probe is not
+    used."""
     if require_trace is None:
         require_trace = REQUIRE_TRACE
-    key = bool(require_trace)
+    key = (bool(require_trace), AS_USER.name if AS_USER else None)
     if key not in _STRACE:
         env = os.environ.get("JUDGE_STRACE")
-        st = (env or None) if env is not None else shutil.which("strace")
+        st = (env or None) if env is not None else shutil.which("strace", path=SYSTEM_PATH if AS_USER else None)
         real = os.path.realpath(st) if st else None
         why, bpf = None, False
         if not st:
             why = "strace is not installed" + (" (JUDGE_STRACE is empty)" if env == "" else "")
         elif not (os.path.isfile(real) and os.access(real, os.X_OK)):
             why = f"strace {st} is not an executable file"
-        elif require_trace and (_links_not_writable(st) or _not_writable(real)):
-            why = f"strace {st} is not used with --require-trace: {_links_not_writable(st) or _not_writable(real)}"
+        elif (require_trace or AS_USER) and (_links_not_writable(st) or _not_writable(real)):
+            why = (f"strace {st} is not used with " + ("--require-trace" if require_trace else "--as-user (it runs as "
+                   "root)") + f": {_links_not_writable(st) or _not_writable(real)}")
         else:
             bad = strace_probe(real, True)
             if bad is None:
@@ -357,22 +666,27 @@ def strace_why():
     return _STRACE.get("why")
 
 
-def strace_words(st, bpf, calls):
+def strace_words(st, bpf, calls, user=None):
     """The strace words that run a command under strace `st` with `calls` traced to strace's stderr (the trace
     channel, TraceTail), following every process it starts: -yy names each socket (TCP, UDP, UNIX, ...) and the ends
     of a connected one, which observe.net_hits needs, and every io_uring_setup is refused with ENOSYS (io_uring
-    connect and send operations are not system calls strace sees; Node's libuv then uses epoll). The command after
-    them is TRACEE and then the adapter."""
+    connect and send operations are not system calls strace sees; Node's libuv then uses epoll). With `user` (strace
+    then runs as root) the command runs as that user (-u). The command after them is TRACEE and then the adapter."""
     return ([st, "-f"] + (["--seccomp-bpf"] if bpf else [])
             + ["-qq", "-yy", "-s", "4096", "-e", f"trace={calls}", "-e", "inject=io_uring_setup:error=ENOSYS",
-               "-e", "signal=none", "--"])
+               "-e", "signal=none"] + (["-u", user] if user else []) + ["--"])
 
 
-def strace_cmd(stderr_path, files):
+def strace_cmd(stderr_path, files, scratch=None):
     """The words that run a command under strace with the network calls (and with files=True, the file calls) traced
-    (strace_words), started through TRACEE with its stderr appended to `stderr_path`."""
-    return (strace_words(strace(), _STRACE.get("bpf"), ("%file," if files else "") + NET_CALLS)
-            + TRACEE + [stderr_path])
+    (strace_words), started through TRACEE with its stderr appended to `stderr_path`. Under --as-user strace runs as
+    root through sudo with the adapter's environment (AsUser.env_words for the test's `scratch` folder), and starts
+    the command as the other user."""
+    calls = ("%file," if files else "") + NET_CALLS
+    if AS_USER is None:
+        return strace_words(strace(), _STRACE.get("bpf"), calls) + TRACEE + [stderr_path]
+    return AS_USER.root(AS_USER.env_words(scratch) + strace_words(strace(), _STRACE.get("bpf"), calls, AS_USER.name)
+                        + TRACEE_AS_USER + [stderr_path])
 
 
 _PID = re.compile(r"^\[pid +(\d+)\] (.*)$", re.S)
@@ -518,9 +832,12 @@ class TraceTail:
 class T:
     """What a test's run(t) gets: its scratch folder, the media, checks, and the editor (t.driver())."""
 
-    def __init__(self, name, scratch, media, build, adapter, out):
+    def __init__(self, name, scratch, media, build, adapter, out, trace_copy=None):
         self.name, self.scratch, self.media_dir, self.build, self.adapter = name, scratch, media, build, adapter
         self._out = out  # the write end of the runner's result pipe
+        # Where this process writes its copy of the trace's lines (the runner names it: next to the scratch folder, or
+        # in the run's records/ under --as-user).
+        self.trace_copy = trace_copy or os.path.join(os.path.dirname(scratch), f"{name}.adapter-strace.log")
         self._driver = None
         self.n_checks = 0
         self.trace_path = None  # the copy of the trace's lines (for people; no check reads it): driver(trace=True)
@@ -540,10 +857,32 @@ class T:
         return p
 
     def path(self, *parts):
-        """A path in this test's scratch folder (its parent folders are made)."""
+        """A path in this test's scratch folder (its parent folders are made; under --as-user they are shared with the
+        editor's user, mode 1777, and one that is there already must be this test's own: shared_folders)."""
         p = os.path.join(self.scratch, *parts)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if AS_USER is None:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+        else:
+            shared_folders(self.scratch, os.path.dirname(p))
         return p
+
+    def look(self, files=(), folders=(), walk=()):
+        """What the editor can see of these paths, for checks on its own files (run.look): {"files": {path: sha256 or
+        None}, "folders": {path: sorted names or None}, "walk": {path: size of a regular file, else None} under each
+        walk root}. This process looks itself; under --as-user the editor's user looks too (the editor keeps private
+        files, mode 0600 in folders of mode 0700, that the runner's user cannot read): a file or folder this process
+        cannot read gets that user's answer, and the walk lists what either of them sees. That user's answer is the
+        editor's own word on its own files (it runs as the editor's user), as it is in a run without --as-user."""
+        req = {"files": list(files), "folders": list(folders), "walk": list(walk)}
+        mine = look(req)
+        if AS_USER is None:
+            return mine
+        theirs = AS_USER.look(req)
+        return {"files": {p: mine["files"][p] if mine["files"][p] is not None else theirs["files"].get(p)
+                          for p in req["files"]},
+                "folders": {p: mine["folders"][p] if mine["folders"][p] is not None else theirs["folders"].get(p)
+                            for p in req["folders"]},
+                "walk": {**theirs["walk"], **mine["walk"]}}
 
     def _record(self, name, ok, detail, harness, status):
         if not harness:
@@ -610,15 +949,17 @@ class T:
             stderr_path = os.path.join(self.scratch, "adapter.stderr")
             if strace():
                 if self.net_trace is None:
-                    copy = os.path.join(os.path.dirname(self.scratch), f"{self.name}.adapter-strace.log")
-                    self.net_trace = TraceTail(copy)  # its reader runs before strace (and the adapter) starts
+                    self.net_trace = TraceTail(self.trace_copy)  # its reader runs before strace (and the adapter) starts
                 if trace:
                     self.trace, self.trace_path = self.net_trace, self.net_trace.copy_path
-                cmd = strace_cmd(stderr_path, files=trace) + cmd
+                cmd = strace_cmd(stderr_path, files=trace, scratch=self.scratch) + cmd
                 self._driver = driver.Driver(cmd, self.scratch, stderr_path, stderr_fd=self.net_trace.writer.fileno())
                 self.net_trace.started()
             else:
                 self.trace_why = strace_why()
+                if AS_USER is not None:
+                    cmd = AS_USER.as_user(AS_USER.env_words(self.scratch) + ["/bin/sh", "-c", 'umask 022; exec "$@"',
+                                                                            "sh"]) + cmd
                 self._driver = driver.Driver(cmd, self.scratch, stderr_path)
             hello = self._driver.hello()
             proto = hello.get("protocol") if isinstance(hello, dict) else None
@@ -641,10 +982,19 @@ class T:
         except Exception as e:  # noqa: BLE001
             self.check("the editor stops when asked", False, str(e), harness=True)
         finally:
-            # Under strace, d's process is strace: it exits when the last process it traces has ended. It is not
-            # killed here: that would end the trace while a traced process still runs (TraceTail.close below).
+            # Under strace, d's process is strace (under --as-user, sudo, whose child strace is): it exits when the
+            # last process it traces has ended. It is not killed here: that would end the trace while a traced process
+            # still runs (TraceTail.close below).
             exited = d.close(kill=self.net_trace is None)
-        if not exited and self.net_trace is not None:
+        if not exited and AS_USER is not None:
+            # The adapter's tree outlived stop by 30 s (all of it runs as the other user, and no process of that user
+            # belongs to anything else): the user sweep ends every process of that user, so the trace can end.
+            found, still = AS_USER.sweep()
+            if found:
+                self.check(LEFT_CHECK, False, "; ".join(f"{pid} {cmd[:120]}" for pid, cmd in found)
+                           + (f"; still running after the user sweep: {[p for p, _ in still]}" if still else ""),
+                           harness=True)
+        elif not exited and self.net_trace is not None:
             # A process of the adapter's tree outlived stop. The sweep ends each one whose environment names the
             # scratch folder (not strace itself), so the trace can end; one it cannot find keeps the trace open, and
             # TraceTail.close then marks the trace as not ended.
@@ -662,8 +1012,11 @@ class T:
         import observe
         self.net_trace.close(wait=10)
         if d.p.poll() is None:  # strace still runs: the trace is already marked as not ended
-            d.p.kill()
-            d.p.wait(10)
+            try:
+                d.p.kill()  # under --as-user sudo; strace (root) then ends when what it traces has ended
+                d.p.wait(10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         hits = observe.net_hits(self.net_trace)
         bad = self.net_trace.tampered
         detail = "; ".join(([bad] if bad else []) + ([_short(hits[:3])] if hits else []))
@@ -701,7 +1054,7 @@ def child(a, unprotected):
     out = os.fdopen(fd, "w", encoding="utf-8")
     spec = importlib.util.spec_from_file_location(os.path.basename(a.child)[:-3], a.child)
     mod = importlib.util.module_from_spec(spec)
-    t = T(os.path.basename(a.child)[:-3], a.scratch, a.media, a.build, json.loads(a.adapter_json), out)
+    t = T(os.path.basename(a.child)[:-3], a.scratch, a.media, a.build, json.loads(a.adapter_json), out, a.trace_copy)
     try:
         spec.loader.exec_module(mod)
         t._emit({"declare": _declared(mod)})
@@ -852,7 +1205,13 @@ def verdict(recs, timed_out, returncode, timeout, left, channel_closed, strict=F
 def run_test(meta, a, base, media, adapter):
     name = meta["name"]
     scratch = os.path.realpath(os.path.join(base, name))
-    os.makedirs(scratch)
+    if AS_USER is None:
+        os.makedirs(scratch)
+        log_path, trace_copy = os.path.join(scratch, "test.log"), os.path.join(base, f"{name}.adapter-strace.log")
+    else:  # the test's folder is shared with the editor's user; the runner's records are not
+        shared_folder(scratch)
+        records = os.path.join(base, "records")
+        log_path, trace_copy = os.path.join(records, f"{name}.log"), os.path.join(records, f"{name}.adapter-strace.log")
     timeout = a.timeout or meta["timeout"]
     t0 = time.time()
     env = dict(os.environ)
@@ -868,13 +1227,14 @@ def run_test(meta, a, base, media, adapter):
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     recs.append(BadLine(line))  # not a dict: no line on the pipe can produce one
 
-    with open(os.path.join(scratch, "test.log"), "wb") as logf:
+    with open(log_path, "xb") as logf:
         try:
             p = subprocess.Popen([sys.executable, "-I", "-B", os.path.abspath(__file__), "--child", meta["path"],
                                   "--scratch", scratch, "--results-fd", str(w), "--media", media, "--build", a.build,
-                                  "--adapter-json", json.dumps(adapter)]
+                                  "--adapter-json", json.dumps(adapter), "--trace-copy", trace_copy]
                                  + (["--allow-unprotected"] if a.allow_unprotected else [])
-                                 + (["--require-trace"] if a.require_trace else []),
+                                 + (["--require-trace"] if a.require_trace else [])
+                                 + (["--as-user", AS_USER.name] if AS_USER else []),
                                  stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=scratch, env=env, pass_fds=(w,))
         finally:
@@ -890,6 +1250,9 @@ def run_test(meta, a, base, media, adapter):
             timed_out = True
             _end_group(p)
     left = sweep(scratch)
+    if AS_USER is not None:  # the editor's user's processes: the sweep above cannot read their environment
+        found, still = AS_USER.sweep()
+        left += found + [(pid, f"(still running after the user sweep) {cmd}") for pid, cmd in still]
     reader.join(10)
     with LIVE_LOCK:
         LIVE.pop(name, None)
@@ -928,6 +1291,8 @@ def _on_signal(base):
         for _, scratch in live:
             if scratch:
                 sweep(scratch)
+        if AS_USER is not None:
+            AS_USER.sweep()
         passed = sum(1 for c in RESULTS if c["status"] == "pass")
         judged = sum(1 for c in RESULTS if c["status"] in ("pass", "fail"))
         try:
@@ -973,24 +1338,28 @@ def main():
     ap.add_argument("--allow-unprotected", action="store_true",
                     help="run even when the runner or a test process cannot be made non-dumpable (not Linux, or prctl "
                          "fails); the JUDGE line then says UNPROTECTED. For development only; CI never passes it")
+    ap.add_argument("--as-user", metavar="NAME",
+                    help="run the adapter, the editor and everything they start as this other user, through sudo -n "
+                         "(judge.yml: zjudge); with --self-test, run the --as-user cases as this user")
     ap.add_argument("--tests", default=os.path.join(JUDGE, "tests"), help=argparse.SUPPRESS)
     # child mode (one test, started by the runner)
     ap.add_argument("--child", help=argparse.SUPPRESS)
     ap.add_argument("--results-fd", help=argparse.SUPPRESS)
     ap.add_argument("--media", help=argparse.SUPPRESS)
     ap.add_argument("--adapter-json", help=argparse.SUPPRESS)
+    ap.add_argument("--trace-copy", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    global REQUIRE_TRACE
+    global REQUIRE_TRACE, AS_USER
     REQUIRE_TRACE = a.require_trace
     if a.child:
+        if a.as_user:
+            AS_USER = AsUser(a.as_user)  # the runner checked it (AsUser.problem) before it started any test
         return child(a, unprotected)
     if a.self_test:
         import selftest
-        return selftest.main(os.path.abspath(__file__), a.scratch, a.allow_unprotected, a.require_trace)
+        return selftest.main(os.path.abspath(__file__), a.scratch, a.allow_unprotected, a.require_trace, a.as_user)
 
     a.build = os.path.abspath(a.build)
-    adapter = absolute_words(shlex.split(a.adapter)) if a.adapter else [
-        sys.executable, "-I", "-B", os.path.join(JUDGE, "adapters", "v020", "adapter.py")]
     tests_dir = os.path.abspath(a.tests)
     tests = sorted(os.path.join(tests_dir, f) for f in os.listdir(tests_dir)
                    if f.startswith("test_") and f.endswith(".py"))
@@ -1008,15 +1377,53 @@ def main():
         print(f"JUDGE: refused: the runner is not protected ({unprotected}): a process of the same user could reopen "
               f"the result pipe through /proc. --allow-unprotected runs anyway (development only)", flush=True)
         return 1
+    if a.as_user:
+        try:
+            au = AsUser(a.as_user)
+        except KeyError:
+            print(f"JUDGE: refused: --as-user {a.as_user}: no such user", flush=True)
+            return 1
+        why = au.problem()
+        if why:
+            print(f"JUDGE: refused: --as-user {a.as_user}: {why}", flush=True)
+            return 1
+        AS_USER = au
+        os.umask(0o022)  # the fixtures and every file the tests write must be readable by the editor's user
+        a.jobs = 1  # the user sweep after a test ends every process of that user: no other test may run meanwhile
 
     import observe
     parent = a.scratch or tempfile.gettempdir()
     os.makedirs(parent, exist_ok=True)
     base = os.path.realpath(tempfile.mkdtemp(prefix="judge-", dir=parent))
+    if AS_USER is not None:
+        os.chmod(base, 0o755)
+        why = AS_USER.folder_problem(base)
+        if why:
+            shutil.rmtree(base, ignore_errors=True)
+            print(f"JUDGE: refused: --as-user {AS_USER.name}: the run's folder {base}: {why} (give --scratch a folder "
+                  f"that user can enter but not change)", flush=True)
+            return 1
+        os.mkdir(os.path.join(base, "records"), 0o700)
     handler = _on_signal(base)
     signal.signal(signal.SIGTERM, handler)
     signal.signal(signal.SIGINT, handler)
+    if a.adapter:
+        adapter = absolute_words(shlex.split(a.adapter))
+    elif AS_USER is None:
+        adapter = [sys.executable, "-I", "-B", os.path.join(JUDGE, "adapters", "v020", "adapter.py")]
+    else:  # a copy the editor's user can read (it may not reach judge/), and cannot change
+        adir = os.path.join(base, "adapter")
+        os.mkdir(adir, 0o755)
+        shutil.copyfile(os.path.join(JUDGE, "adapters", "v020", "adapter.py"), os.path.join(adir, "adapter.py"))
+        os.chmod(os.path.join(adir, "adapter.py"), 0o444)
+        adapter = [sys.executable, "-I", "-B", os.path.join(adir, "adapter.py")]
     print(f"judge: adapter {' '.join(adapter)}")
+    if AS_USER is not None:
+        print(f"judge: as user {AS_USER.name} (uid {AS_USER.uid}) through sudo -n: the adapter, the editor and what "
+              f"they start; the runner's records in {os.path.join(base, 'records')}; one test at a time")
+    else:
+        print("judge: note: the adapter and the editor run as this user (a local run). CI runs them as another user "
+              "(--as-user zjudge), which closes the same-user gaps listed in judge/README.md, \"Threat model\"")
     print(f"judge: build {a.build}")
     print(f"judge: measurements with {observe.ffmpeg_version()} ({observe.FFMPEG})")
     print(f"judge: trace with {strace() or f'nothing ({strace_why()}): the trace checks are not observed'}"
@@ -1071,6 +1478,8 @@ def main():
                 print(f"judge:   {c['test']}: {c['check']}")
     print(f"JUDGE: {passed}/{judged} passed{counts}{mark}", flush=True)
     if ok and not a.keep:
+        if AS_USER is not None:
+            AS_USER.remove(base)  # it holds files and folders of the editor's user
         shutil.rmtree(base, ignore_errors=True)
     elif not ok:
         print(f"judge: scratch kept for inspection: {base}")
