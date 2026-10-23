@@ -49,7 +49,9 @@ permissions:
 
 jobs:
   judge:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to a new Ubuntu release on its own schedule, and this
+    # job is a required check on main. Moving to a new release is a deliberate PR (the FFmpeg matrix pins too).
+    runs-on: ubuntu-24.04
     steps:
       # No token is kept in the checkout (persist-credentials: false): nothing
       # after this step needs it (the base gate's fetch reads the public
