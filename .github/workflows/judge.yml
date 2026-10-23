@@ -132,6 +132,8 @@ jobs:
         # Bounded waits and retries, as scripts/ci/apt-install.sh does for the other workflows (throttled mirror
         # throughput, 43 kB/s, held two matrix jobs for 32-34 min, so install has no time cap; the script's header
         # says why); inline because this job runs only lock-covered code as the runner user.
+        # No .deb cache here, unlike ci.yml and the FFmpeg matrix: apt does not check the hash of a cached file, this
+        # install runs as root before the graded build, and the Actions cache can be written from jobs that run the PR's code.
         run: |
           opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120)
           for attempt in 1 2 3; do

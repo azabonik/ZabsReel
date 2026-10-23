@@ -58,7 +58,11 @@
  *                            rotate the key or drop an entry; the stale and
  *                            unread states; no laundering; Keep and Remove;
  *                            HostTrust publishes approved servers only, and
- *                            picks up changes (lazy reload, watch, 1 s retry).
+ *                            picks up changes (lazy reload, watch, 1 s retry);
+ *                            a revoke counts on the next check of that server
+ *                            (the gate's own included), with no watch and no
+ *                            re-check; a store that can't be read then fails
+ *                            closed as on a miss.
  *  13. the trust folder    — isTrustPath's quick form (Windows streams,
  *                            trailing dots, 8.3 names, case); gatedfs content
  *                            calls and G7 refuse it in every mode, metadata
@@ -92,7 +96,12 @@
  *                            enforced, the asset is offline and pending; the
  *                            autosave of a project on such a server goes to
  *                            the recovery folder; timeline_summary says why a
- *                            clip is offline (not found; the unread state).
+ *                            clip is offline (not found; the unread state);
+ *                            right after a revoke, with no re-read yet, G4, G5
+ *                            and G6 refuse the server's online media (a
+ *                            cutout colour source on it included), and a job
+ *                            already running gets no further FFmpeg call on it
+ *                            (G7's per-spawn guard).
  *  15. the args builders   — every ffmpeg input gets FFmpeg's own format
  *                            allowlist (MEDIA_DEMUXERS; concat plus the list
  *                            for ZedMix's -f concat lists; none for its
@@ -133,7 +142,7 @@
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -1334,7 +1343,9 @@ async function main() {
   // 1 s retry timer → the unread rows arm no timer and are still unread after
   // 10 s; arm it at another delay → the "every 1 s" rows fail. Ignore
   // onlyIfOutside → the remove-after-keep row removes the host. Drop the lazy
-  // reload or the watch → their HostTrust rows fail. Keep a missing or corrupt
+  // reload or the watch → their HostTrust rows fail. Take the store's
+  // signature after the read in HostTrust.reload → the Keep-during-a-re-read
+  // row finds zr-evil-3.invalid still outside. Keep a missing or corrupt
   // key (or list) as the last good copy → the missing/corrupt-then-EBUSY rows
   // call nas outside (or give "allow") instead of unread.
   console.log("12. stamps: outside entries, the key, read errors, the unread state, HostTrust...");
@@ -1571,7 +1582,151 @@ async function main() {
     const t0 = Date.now();
     while (Date.now() - t0 < 2_000 && !gfs.allowedNetworkHosts().has("zr-evil-4.invalid")) await sleep(50);
     check(gfs.allowedNetworkHosts().has("zr-evil-4.invalid"), `fs.watch on the trust folder picks up a write with no check (${Date.now() - t0} ms)`);
+    // A write that lands while a re-read is reading the store (a UI host's Keep during the watch's re-read
+    // of an earlier write) counts on the next check, before the watch sees it: the next version of the
+    // list is renamed into place right after the re-read's read of hosts.json.
+    const next = join(d, "next.json");
+    const key = Buffer.from(readFileSync(keyFile(d), "utf8").trim(), "base64url");
+    const kept3 = readList(d).servers.filter((s) => s.host !== E3);
+    const added3 = new Date().toISOString();
+    writeFixture(next, JSON.stringify({ version: 2, servers: [...kept3, { host: E3, via: "prompt", added: added3, stamp: stampWith(key, E3, "prompt", added3) }] }));
+    const fsMod = require("node:fs") as Record<string, unknown>;
+    const realRead = fsMod.readFileSync as (...a: unknown[]) => unknown;
+    let landed = false;
+    fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
+      const bytes = realRead.apply(this, a);
+      if (!landed && a[0] === listFile(d)) {
+        landed = true;
+        renameSync(next, listFile(d));
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      ht.reload();
+    } finally {
+      fsMod.readFileSync = realRead;
+      syncBuiltinESMExports();
+    }
+    check(landed && ht.isApproved(E3) && !ht.isOutside(E3),
+      `a Keep written while a re-read reads the store counts on the next check (lazy reload; no watch, no re-check) (${landed}; ${JSON.stringify(ht.list().outside)})`);
+    // The mirror: a revoke (nas taken off the list) that lands during a re-read counts on the next miss
+    // of another server, before the watch sees it. This checks the miss path (the next block checks a
+    // hit on the revoked server itself), so the revoked host is checked after the miss.
+    writeFixture(next, JSON.stringify({ version: 2, servers: readList(d).servers.filter((s) => s.host !== "nas") }));
+    let revoked = false;
+    fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
+      const bytes = realRead.apply(this, a);
+      if (!revoked && a[0] === listFile(d)) {
+        revoked = true;
+        renameSync(next, listFile(d));
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      ht.reload();
+    } finally {
+      fsMod.readFileSync = realRead;
+      syncBuiltinESMExports();
+    }
+    const nasAfterReload = ht.list().approved.some((a) => a.host === "nas");
+    const missUnlisted = ht.isApproved("zr-unlisted.invalid");
+    check(revoked && nasAfterReload && !missUnlisted && !ht.isApproved("nas") && ht.isApproved(E3),
+      `a revoke written while a re-read reads the store counts on the next miss of another server (miss path; no watch, no re-check) (${revoked}; ${nasAfterReload}; ${names(ht.list().approved)})`);
     ht.close();
+    gfs.setAllowedNetworkHosts([]);
+  }
+  {
+    // A revoke counts on the very next check of the revoked server itself, already allowed and checked
+    // (a hit), in a core with no watch (a simulated platform has none, as a watch on WSL/9p or a share
+    // may never fire) that nobody asks to re-check: made through the app's route, by another process,
+    // by a hand edit in place, or by a new key. Also when the next check is a second core's, or the
+    // gate's own (a path on nas opened before any trust check, as a background job's FFmpeg call is).
+    // MUTATION: return on a hit in HostTrust.isApproved before the store is compared → every row here
+    // finds nas still allowed. Drop the store check on a hit in gatedfs → the gate row opens the path.
+    const fresh = async () => {
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      await approveHost(d, "other", "prompt");
+      const ht = new HostTrust(d, { platform: process.platform }).start();
+      const cached = ht.isApproved("nas") && ht.isApproved("nas") && gfs.allowedNetworkHosts().has("nas");
+      return { d, ht, cached };
+    };
+    const revokes: [string, (d: string) => Promise<unknown>][] = [
+      ["through the app's route (revokeHost)", (d) => revokeHost(d, "nas")],
+      ["by another process (revokeHost in trust-child.ts)", (d) => child(["revoke", d, "nas"])],
+      ["by a hand edit of hosts.json in place", async (d) => writeList(d, readList(d).servers.filter((s) => s.host !== "nas"))],
+      // The store signature is size:mtime:inode, so a same-size edit in place within one mtime tick is not
+      // seen until the next change. The new key goes in as the product writes one (a temp file in the trust
+      // folder, renamed over hosts.key): a new inode, whatever the clock.
+      ["by a new hosts.key (no stamp is valid any more)", async (d) => {
+        const tmp = join(dirname(keyFile(d)), "hosts.key.smoke-tmp");
+        writeFixture(tmp, `${randomBytes(32).toString("base64url")}\n`);
+        renameSync(tmp, keyFile(d));
+      }],
+    ];
+    for (const [how, revoke] of revokes) {
+      const { d, ht, cached } = await fresh();
+      await revoke(d);
+      const refused = !ht.isApproved("nas");
+      check(cached && refused && !gfs.allowedNetworkHosts().has("nas"),
+        `a revoke ${how} counts on the next check of nas itself (no watch, no re-check) (cached ${cached}; approved ${names(ht.list().approved)}; published ${allowed()})`);
+      ht.close();
+    }
+    {
+      // Two cores on one data folder: the UI host that revoked re-checks its own core only.
+      const { d, ht, cached } = await fresh();
+      const second = new HostTrust(d, { platform: process.platform }).start();
+      const cached2 = second.isApproved("nas");
+      await revokeHost(d, "nas");
+      ht.reload();
+      check(cached && cached2 && !second.isApproved("nas") && second.isApproved("other"),
+        `a second core on the same data folder refuses nas on its next check too (approved ${names(second.list().approved)})`);
+      second.close();
+      ht.close();
+    }
+    {
+      const { d, ht, cached } = await fresh();
+      await revokeHost(d, "nas");
+      const e = await thrown(() => gfs.assertReachable("//nas/s/a.mp4", "smoke"));
+      check(cached && e instanceof gfs.BlockedPathError && e.host === "nas" && !ht.list().approved.some((a) => a.host === "nas") && !gfs.allowedNetworkHosts().has("nas"),
+        `the gate's own check of a path on nas (no trust check first) re-reads the store and refuses it (${e?.message.slice(0, 110)}; published ${allowed()})`);
+      ht.close();
+    }
+    // Fail closed: the store changed and can't be read as it was. A missing list, a corrupt list or a
+    // missing key leaves no server approved, as on a miss: nas is refused on its next check.
+    const spoils: [string, (d: string) => void][] = [
+      ["hosts.json deleted", (d) => unlinkSync(listFile(d))],
+      ["hosts.json corrupt", (d) => writeFixture(listFile(d), "{ not a store file")],
+      ["hosts.key deleted", (d) => unlinkSync(keyFile(d))],
+    ];
+    for (const [how, spoil] of spoils) {
+      const { d, ht, cached } = await fresh();
+      spoil(d);
+      const logs = await logsOf(() => void ht.isApproved("nas"));
+      check(cached && !ht.isApproved("nas") && !ht.isApproved("other") && !gfs.allowedNetworkHosts().has("nas"),
+        `${how}: nas (and every other server) is refused on its next check (approved ${names(ht.list().approved)}; ${JSON.stringify(logs)})`);
+      ht.close();
+    }
+    {
+      // A revoke, then hosts.json can't be read (EBUSY: an antivirus scanner holds the new file): the last
+      // good copy is used (stale) and nas stays allowed, as on a miss, until the first check a second later.
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      const inject: ReadErrorInjection = {};
+      const ht = new HostTrust(d, { platform: process.platform, readError: inject }).start();
+      const cached = ht.isApproved("nas");
+      await revokeHost(d, "nas");
+      inject["hosts.json"] = "EBUSY";
+      const during = ht.isApproved("nas");
+      const stale = ht.list().stale;
+      delete inject["hosts.json"];
+      await sleep(1_050);
+      check(cached && during && stale && !ht.isApproved("nas") && !ht.list().stale,
+        `a revoke, then hosts.json unreadable at the next check: nas stays allowed from the last good copy (stale ${stale}), as on a miss, and is refused on the first check a second later`);
+      ht.close();
+    }
     gfs.setAllowedNetworkHosts([]);
   }
 
@@ -2211,6 +2366,128 @@ async function main() {
       check(engine.getProject().assets[0].awaitingServer === undefined && after.unread.length === 0 && after.pending.some((x) => x.host === "zr-evil-3.invalid" && x.origins.includes("outside")),
         `the read works again: the retry timer alone brings the asset online, and only now is zr-evil-3.invalid pending as outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
     } finally {
+      ht.close();
+      (engine as unknown as { trust: HostTrust }).trust = realTrust;
+      realTrust.start();
+    }
+  }
+  if (enforced) {
+    // A revoke with no re-read yet (no watch, no re-check): the next check of the revoked server refuses
+    // media of it that was online. G4 (generate_thumbnail), G5 (render_preview) and G6 (/file) each check
+    // the server of the media they would open: media_offline naming it (or 403) before any job starts,
+    // the asset waits for it, and no FFmpeg call names it. Each starts online again (approve, re-check, load).
+    // An asset whose own file is local and whose cutout colour source is on the server counts as on it too.
+    // MUTATION: check only the server an asset waits for in requireMedia → the G4 row gets the gate's
+    // ERR_PATH_BLOCKED instead of media_offline. The same in assertTimelineOnline → the G5 row starts a
+    // preview job (the gate refuses its FFmpeg call). Both, and drop the gate's store check → both run FFmpeg.
+    // Drop the cutout colour path from assetServers → the colour-source G5 row starts a preview job.
+    const OK6 = "zr-ok-6.invalid";
+    const d = freshData();
+    const realTrust = engine.trust;
+    const ht = new HostTrust(d, { platform: process.platform, onChange: () => engine.onTrustChanged() });
+    (engine as unknown as { trust: HostTrust }).trust = ht;
+    const eng = engine as unknown as Record<string, unknown>;
+    eng.proxyInBackground = () => {};
+    eng.probeUnrecordedColors = async () => {};
+    try {
+      ht.start();
+      const f = join(root, "revoke6.aive");
+      writeFixture(f, JSON.stringify(project(`//${OK6}/s/a.mp4`)));
+      // A local matte whose colour source is on OK6 (the asset's own path is local).
+      const fc = join(root, "revoke6-color.aive");
+      const matte = join(root, "revoke6-matte.mp4");
+      writeFixture(matte, "");
+      writeFixture(fc, JSON.stringify(project(matte, { cutout: { colorPath: `//${OK6}/s/color.mp4`, colorStart: 0 } })));
+      const named = () => spawned.filter((a) => JSON.stringify(a).includes(OK6)).length;
+      const jobIds = () => new Set(engine.jobs.list().map((j) => j.id));
+      /** media_offline naming OK6, or what the call did instead. */
+      const offline = async (fn: () => unknown) => {
+        const e = await thrown(fn);
+        const ok = e instanceof RpcError && e.code === "media_offline" && e.message.includes(`\\\\${OK6}`);
+        return { ok, got: e ? `${(e as RpcError).code ?? e.name}: ${e.message.slice(0, 120)}` : "(no error)" };
+      };
+      const calls: [string, string, () => Promise<{ ok: boolean; got: string }>][] = [
+        ["generate_thumbnail (G4)", f, () => offline(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }))],
+        ["render_preview (G5)", f, () => offline(() => dispatch(engine, "render_preview", {}))],
+        ["/file of its path (G6)", f, async () => {
+          const r = engine.servablePath(`//${OK6}/s/a.mp4`);
+          return { ok: "status" in r && r.status === 403, got: JSON.stringify(r) };
+        }],
+        ["render_preview (G5) of a local matte whose cutout colour source is on it", fc, () => offline(() => dispatch(engine, "render_preview", {}))],
+      ];
+      for (const [what, file, call] of calls) {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        await engine.load(file);
+        const online = engine.getProject().assets[0].awaitingServer === undefined;
+        await revokeHost(d, OK6);
+        const notReread = engine.mediaServers().approved.some((x) => x.host === OK6);
+        const before = named();
+        const jobsBefore = jobIds();
+        const r = await call();
+        const waits = engine.getProject().assets[0].awaitingServer;
+        const started = [...jobIds()].filter((id) => !jobsBefore.has(id)).length;
+        check(online && notReread && r.ok && waits === OK6 && named() === before && started === 0,
+          `${what} right after a revoke (no re-read yet): refused (media_offline naming ${OK6}, or 403) before any job starts; the asset waits for it; no FFmpeg call names it (online ${online}, not re-read ${notReread}; ${r.got}; waits ${waits}; jobs started ${started}; FFmpeg calls ${before} → ${named()})`);
+      }
+      // A revoke that lands while a job runs: generate_proxy probes the file (an ffprobe on OK6), then
+      // reads its colour and encodes (more FFmpeg calls on OK6). The revoke is made between the first call
+      // and the next ones, with no re-read yet: the per-spawn guard (G7, the gate's own store check) refuses
+      // every later call, the job ends in error naming OK6, and the asset then waits for it.
+      // MUTATION: drop the gate's store check on a hit (gatedfs) → the later FFmpeg calls name OK6, the job
+      // fails in FFmpeg instead, and the asset stays online.
+      {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        await engine.load(f);
+        const online = engine.getProject().assets[0].awaitingServer === undefined;
+        const realSourceColor = (eng.sourceColor as (a: unknown) => Promise<unknown>).bind(engine);
+        const start = named();
+        let heldAt = -1;
+        let notReread = false;
+        eng.sourceColor = async (a: unknown) => {
+          await revokeHost(d, OK6);
+          notReread = engine.mediaServers().approved.some((x) => x.host === OK6);
+          heldAt = named();
+          return realSourceColor(a);
+        };
+        const jobsBefore = jobIds();
+        let e: Error | null;
+        try {
+          e = await thrown(() => engine.generateProxy("asset_a1"));
+        } finally {
+          delete eng.sourceColor;
+        }
+        const job = engine.jobs.list().find((j) => !jobsBefore.has(j.id));
+        const waits = engine.getProject().assets[0].awaitingServer;
+        check(online && notReread && heldAt > start && named() === heldAt && e instanceof gfs.BlockedPathError && e.host === OK6
+          && job?.type === "proxy" && job.status === "error" && !!job.error?.includes(OK6) && waits === OK6,
+          `a revoke while generate_proxy runs (no re-read yet): every FFmpeg call after it is refused by the per-spawn guard (ERR_PATH_BLOCKED naming ${OK6}), the job ends in error and the asset waits for it (online ${online}, not re-read ${notReread}; FFmpeg calls naming it ${start} → ${heldAt} before the revoke → ${named()}; ${e?.name}: ${e?.message.slice(0, 110)}; job ${job?.type} ${job?.status}; waits ${waits})`);
+      }
+      // The per-spawn guard itself, right after a revoke (no re-read yet): an argument on OK6, and a concat
+      // list entry on OK6, are refused before any spawn. Each starts with OK6 allowed and published.
+      // MUTATION: drop the gate's store check on a hit (gatedfs) → both spawn FFmpeg.
+      const list = join(root, "revoke6-concat.txt");
+      writeFixture(list, `file '//${OK6}/s/a.mp4'\n`);
+      const guarded: [string, string[]][] = [
+        ["an FFmpeg argument on it", ["-hide_banner", "-i", `//${OK6}/s/a.mp4`, "-f", "null", "-"]],
+        ["a concat list entry on it", ["-hide_banner", "-f", "concat", "-safe", "0", "-i", list, "-f", "null", "-"]],
+      ];
+      for (const [what, args] of guarded) {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        const published = gfs.allowedNetworkHosts().has(OK6);
+        await revokeHost(d, OK6);
+        const stillPublished = gfs.allowedNetworkHosts().has(OK6);
+        const before = spawned.length;
+        const e = await thrown(() => runFfmpeg(args));
+        const spawns = spawned.slice(before).filter((a) => a.some((x) => Array.isArray(x) && x.some((y) => y === list || String(y).includes(OK6)))).length;
+        check(published && stillPublished && e instanceof gfs.BlockedPathError && e.code === "ERR_PATH_BLOCKED" && e.host === OK6 && spawns === 0 && !gfs.allowedNetworkHosts().has(OK6),
+          `the per-spawn guard right after a revoke (no re-read yet) refuses ${what}: ERR_PATH_BLOCKED naming ${OK6}, no spawn (published ${published} → ${stillPublished}; ${e?.name}: ${e?.message.slice(0, 110)}; spawns ${spawns})`);
+      }
+    } finally {
+      delete eng.proxyInBackground;
+      delete eng.probeUnrecordedColors;
       ht.close();
       (engine as unknown as { trust: HostTrust }).trust = realTrust;
       realTrust.start();

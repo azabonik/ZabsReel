@@ -12,6 +12,7 @@
  *                                               then approve <name> in a fresh <baseDir>/fw-<i>
  *   stale <dataDir> <name> <barrierDir>         take the lock while a stale one is there; A goes
  *                                               first, B only once A is inside: { overlap }
+ *   revoke <dataDir> <host>                     revoke <host> once (another UI host's Remove): { removed }
  *
  * Not a smoke on its own (smoke-unc.ts starts it).
  */
@@ -85,6 +86,10 @@ async function run(mode: string, args: string[]): Promise<unknown> {
       },
     );
     return { overlap };
+  }
+  if (mode === "revoke") {
+    const [dataDir, host] = args;
+    return { removed: (await revokeHost(dataDir, host)).removed };
   }
   throw new Error(`unknown mode ${mode}`);
 }

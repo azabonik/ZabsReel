@@ -9,8 +9,11 @@
  * (setAllowedNetworkHosts) with the trust folder (setTrustDir). Servers added
  * outside ZedMix are listed but never published. It picks up changes
  * without a restart:
- *  - a check that meets a server it does not trust re-reads the store when
- *    the size, mtime or file id of hosts.json or hosts.key changed;
+ *  - every check of a server (trusted or not, the gate's own check before it
+ *    opens a path on one included) re-reads the store when the size, mtime or
+ *    file id of hosts.json or hosts.key changed, so a revoke made anywhere
+ *    counts on the next check of that server; the data folder's own server
+ *    is not in the store, so its check reads nothing;
  *  - while a file could not be read (stale or unread), the next check of any
  *    server re-reads it, at most once a second, and in the unread state a 1 s
  *    timer re-reads it too, so the state ends without waiting for a check;
@@ -198,11 +201,16 @@ export class HostTrust {
   private unread: TrustFile[] = [];
   private stale = false;
   private lastRead = 0;
-  /** Size, mtime and file id of the two store files at the last read. */
+  /** Size, mtime and file id of the two store files, taken just before the last read. */
   private sig = "";
   private retry: NodeJS.Timeout | null = null;
   private watcher: ReturnType<typeof watch> | null = null;
   private debounce: NodeJS.Timeout | null = null;
+  private closed = false;
+  /** The gate's check before it opens a path on a server this store allowed (published with the set). */
+  private readonly gateCheck = (host: string): void => {
+    if (!this.closed) this.isApproved(host);
+  };
   /** Servers already named in a "would block" / "blocked" line, with the reason. */
   private logged = new Set<string>();
   /** Pending, origin "project": what the open project uses on each server it may not open (G3 sets it). */
@@ -232,6 +240,7 @@ export class HostTrust {
 
   /** Read the store, publish to gatedfs and watch the trust folder. */
   start(): this {
+    this.closed = false;
     setTrustDir(this.trustDir);
     this.reload();
     return this;
@@ -239,23 +248,31 @@ export class HostTrust {
 
   /** Stop the watch and the timers. */
   close(): void {
+    this.closed = true;
     if (this.retry) clearInterval(this.retry);
     if (this.debounce) clearTimeout(this.debounce);
     this.watcher?.close();
     this.retry = this.debounce = this.watcher = null;
   }
 
-  /** Re-read the store (stamps checked) and publish the approved servers. */
+  /**
+   * Re-read the store (stamps checked) and publish the approved servers. The
+   * signature is taken before the read: a write that lands during the read
+   * then differs from it, so the next miss reads again. Taken after, it would
+   * match the new file while the read holds the old one, and no miss would
+   * read again until the watch did.
+   */
   reload(): void {
     const before = this.state();
+    const sig = this.signature();
     const r = readTrustedHosts(this.dataDir, { readError: this.opts.readError });
     this.approved = new Map(r.approved.map((a) => [a.host, a]));
     this.outside = r.outside.map((o) => o.host);
     this.unread = r.unread;
     this.stale = r.stale;
     this.lastRead = Date.now();
-    this.sig = this.signature();
-    setAllowedNetworkHosts(this.dataFolderHost ? [...this.approved.keys(), this.dataFolderHost] : this.approved.keys());
+    this.sig = sig;
+    setAllowedNetworkHosts(this.dataFolderHost ? [...this.approved.keys(), this.dataFolderHost] : this.approved.keys(), this.gateCheck);
     if (this.unread.length > 0 && !this.retry) {
       this.retry = setInterval(() => this.reload(), 1_000);
       this.retry.unref();
@@ -314,13 +331,15 @@ export class HostTrust {
 
   /**
    * Whether the user approved `host` (a valid stamp, or the data folder's
-   * server). A miss re-reads the store when it changed on disk; a stale or
-   * unread store is re-read at most once a second.
+   * server). Each check re-reads the store when it changed on disk, a hit as
+   * well as a miss, so a revoke counts on the next check of that server; a
+   * stale or unread store is re-read at most once a second. The data folder's
+   * server is not in the store: its check takes no signature (when the data
+   * folder is on a share, that stat would come back here through the gate).
    */
   isApproved(host: string): boolean {
     if ((this.stale || this.unread.length > 0) && Date.now() - this.lastRead >= 1_000) this.reload();
-    if (this.trusts(host)) return true;
-    if (this.signature() !== this.sig) this.reload();
+    else if (host !== this.dataFolderHost && this.signature() !== this.sig) this.reload();
     return this.trusts(host);
   }
 
