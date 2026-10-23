@@ -105,5 +105,23 @@ ok "exit 1, no comment" '[ "$(last)" = "exit 1" ] && [ "$(called comment)" = 0 ]
 c=norepo; echo "== $c: GH_REPO unset with flaky lines"; flaky 7.1 "$L71"; run $c GH_REPO=
 ok "exit non-zero, no issue call" '[ "$(last)" != "exit 0" ] && [ "$(calls)" = 0 ]'
 
+# judge.yml's flaky-report job: the same script with the judge's texts (FLAKY_*), its lines unprefixed.
+JUDGE_ENV=(FLAKY_TITLE='Flaky judge tests (strace)' FLAKY_PREFIX= FLAKY_WHAT=test FLAKY_RUN='Judge run'
+  FLAKY_NONE='flaky-report: no flaky judge tests in this run' FLAKY_LOGS='Logs: the judge-logs artifact.'
+  FLAKY_INTRO='The judge runs a test once more when strace itself failed.')
+LJ='FLAKY test_safepath (first run: strace failed while the editor ran: ptrace(PTRACE_LISTEN,pid:1,sig:0): Input/output error; rerun passed)'
+c=judge-none; echo "== $c: the judge's empty file"; mkdir -p "$W/$c/in"; : > "$W/$c/in/flaky-judge.txt"; run $c "${JUDGE_ENV[@]}"
+ok "exit 0, no issue call, the judge's wording" '[ "$(last)" = "exit 0" ] && [ "$(calls)" = 0 ] && grep -q "no flaky judge tests" "$W/$c/out.txt"'
+
+c=judge-create; echo "== $c: one judge test, no open judge issue (the matrix's does not count)"; flaky judge "$LJ"
+run $c "${JUDGE_ENV[@]}" STUB_ISSUES="$OPEN12" STUB_NEW=43
+ok "exit 0" '[ "$(last)" = "exit 0" ]'
+ok "creates the judge's issue" '[ "$(called create)" = 1 ] && grep -q "^issue create --repo o/r --title Flaky judge tests (strace) --body-file " "$W/$c/state/calls.txt"'
+ok "the new issue has the judge's intro" '[ "$(cat "$W/$c/state/intro.md")" = "The judge runs a test once more when strace itself failed." ]'
+ok "comments on the new #43" 'grep -q "^issue comment 43 " "$W/$c/state/calls.txt"'
+ok "counts 1 test in a judge run" 'body | grep -q "^\*\*1 flaky test\*\* in \[Judge run 7\](https://github.com/o/r/actions/runs/7) on \`0123456\` (push, "'
+ok "the line as the judge wrote it, no prefix" '[ "$(body | grep "^FLAKY ")" = "$LJ" ]'
+ok "the judge's logs paragraph" '[ "$(body | tail -1)" = "Logs: the judge-logs artifact." ]'
+
 echo "== $PASS checks passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]

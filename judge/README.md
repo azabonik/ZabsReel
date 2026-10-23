@@ -68,9 +68,11 @@ or a folder above it (the other user owns one, or may write one), or a folder th
 it.
 
 The runner prints one line per check (`PASS`, `FAIL`, `N/A` or `N/O`, see "Statuses"), then
-`JUDGE: <passed>/<judged> passed`, followed by `, <n> not applicable` and `, <n> not observed` when there are any. It
-exits 1 when any check fails, when a test does not finish within its timeout, when there are no checks, or when the
-runner or a test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given.
+`JUDGE: <passed>/<judged> passed`, followed by `, <n> not applicable`, `, <n> not observed` and `, <n> flaky (strace)`
+when there are any. It exits 1 when any check fails, when a test does not finish within its timeout, when there are no
+checks, or when the runner or a test process cannot be made non-dumpable (see "Threat model") and
+`--allow-unprotected` is not given. A test that ran twice because strace failed in its first run is judged on its
+second run only (see "A test rerun after strace failed").
 Each run makes its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch
 folder: the base set always, and the optional fixtures (the edit tests' media) only when a test of the run names them
 (`EXTRA_MEDIA`, see "Write a test"). A run that passes deletes that folder unless you give `--keep`. A run that fails
@@ -78,7 +80,9 @@ keeps it, and the runner prints its path. Each test's folder holds `test.log`, `
 logs; next to it, with strace, `<test>.adapter-strace.log` is the test process's copy of the trace lines it read (no
 check reads it). With
 `--as-user` the runner keeps its own records in `records/` in the run's folder (mode 0700, the runner's):
-`records/<test>.log` (the test process's output) and `records/<test>.adapter-strace.log`. Each test's folder then
+`records/<test>.log` and `records/<test>.adapter-strace.log`. A test's log (`test.log`, or `records/<test>.log`) holds
+what the test process printed, which is nothing as a rule (its results go to the runner over a pipe), and then the
+lines the runner printed for that test: one per check, and its time. Each test's folder then
 belongs to the runner with mode 1777 (sticky), as does every folder `t.path` makes in it: the editor's user can add
 files and folders there (exports, its sandbox, saved projects), but cannot rename or remove the test's own files, and
 the kernel does not let the test follow that user's links there or open that user's files with `O_CREAT`. The
@@ -109,10 +113,54 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   optical flow, and the judge acts within milliseconds, or 0.3 s), so a correct editor does not get here; `--strict`
   makes each one a failure.
 - **Not observed** (`N/O`): the observation needs `strace`, which is not installed, not usable (it failed the
-  runner's test of it, or under `--require-trace` it can be written by the runner's user or is named through a
-  symbolic link in a folder that user can write), or `JUDGE_STRACE` is set empty:
+  runner's test of it, or under `--require-trace` it can be written by the runner's user, is named through a
+  symbolic link in a folder that user can write, or takes neither `--seccomp-bpf` nor `--kill-on-exit`), or
+  `JUDGE_STRACE` is set empty:
   the download check of every test that starts the editor, and `test_network_hosts`' file-system trace checks.
   `--require-trace` makes each one a failure; `judge.yml` passes it.
+
+### A test rerun after strace failed
+
+strace itself can fail while the editor runs. strace 6.8 (Ubuntu 24.04's) does so when a thread stops for a signal
+and is killed before strace looks at it, as happens when Electron's GPU process ends: strace takes the thread for a
+stopped process, asks the kernel to keep it stopped, gets `EIO` (the thread now waits at its exit), prints
+`<strace's path>: ptrace(PTRACE_LISTEN,pid:<n>,sig:0): Input/output error` into the trace, and exits 1. strace's later
+releases, up to its current code, have the same behaviour. About 1 Electron start in 800 met it in a rehearsal of CI;
+a run of the judge starts Electron about 14 times.
+
+The trace then ends early, so that test's download check fails: "strace failed while the editor ran (<message>); the
+trace ends there, so what the editor did after it was not seen". The runner then runs that test once more, in a new
+folder, when all of these hold:
+
+- strace's message is the last thing in the trace, at the end of its line and outside every quoted string and `<...>`
+  decoration (what strace prints of a process's data is always quoted or decorated, so a process cannot write it);
+- every line before it has strace's form, and so has the call strace was printing when it failed, completed as
+  strace's own `<pid> ... <unfinished ...>` line;
+- strace exited with 1;
+- strace ran with `--kill-on-exit` (the judge gives it when strace takes it: strace 6.x does, strace 5.x does not, and
+  with strace 5.x no test is rerun), so the kernel killed every process it traced when it exited, and none of them ran
+  on untraced;
+- no line of the trace, the cut call included, addressed another computer (a DNS lookup in it fails the test at once);
+- no other check of that run failed: neither one of the test's own checks nor one the runner adds (such as "nothing
+  the adapter started is left running after stop"). A test whose first run failed another check is not run again: the
+  runner prints `judge: <test> is not run again after strace failed: another check of it failed (<check>)`, the test
+  fails as it is, and it does not count toward the 2 reruns a run.
+
+At most 2 tests a run are rerun. The first run's checks are printed with `  try 1: ` in front and not counted. Its
+folder and records stay as `<test>.try1`, `records/<test>.try1.log` and `records/<test>.try1.adapter-strace.log`
+(without `--as-user`: `<test>.try1/test.log` and `<test>.try1.adapter-strace.log`), and the runner prints `RERUN
+<test>: ...`. The second run is the test's result. When it passes, the runner prints `FLAKY <test> (first run: strace
+failed while the editor ran: <message>; rerun passed)`, the `JUDGE` line adds `, 1 flaky (strace)`, the run's folder is
+kept, and `--flaky-file <file>` gets the `FLAKY` line. When the second run fails in any way, strace failing again
+included, the test fails.
+
+A `flaky (strace)` result therefore means: the first run told nothing about downloads, and a second, complete run of
+the same test showed none. It never passes the download check on a trace that ended early: that check passes only on
+the second run's whole trace, which strace ended normally after the editor stopped. Nothing can run unseen in the
+gap: the processes strace traced die with it. A process that could make strace fail on purpose gains nothing by it:
+a test is run again only when every other check of its first run passed or was not made (without `--strict` and
+`--require-trace`), so a failed check is never hidden by a rerun, and the run fails when strace fails twice in the same
+test.
 
 ### CI
 
@@ -140,7 +188,14 @@ ended), checks that the copy's lock and gate are the bytes it pinned before the 
 its lock, lifts Ubuntu's AppArmor restriction on unprivileged user namespaces
 (`kernel.apparmor_restrict_unprivileged_userns=0`, which the editor's built-in graphics renderer needs for its sandbox,
 as in `ci.yml`), then runs the judge from the copy with `--build /home/zjudge/build --scratch /srv/judge/scratch
---strict --require-trace --as-user zjudge --graphics-addon /srv/judge/addon --release zedmix`. A failed run first ends every `zjudge`
+--strict --require-trace --as-user zjudge --graphics-addon /srv/judge/addon --release zedmix --flaky-file
+$RUNNER_TEMP/judge-flaky.txt`. When a test passed its rerun after strace failed (see "A test rerun after strace
+failed"), the next step puts the `FLAKY` lines in the job summary with a warning, and the logs are collected and
+uploaded as for a failed run. On main (a push or a manual run, never a pull request) the `FLAKY` lines are also
+uploaded (`judge-flaky`, an empty file when none), and a separate job, `flaky-report`, the only one with
+`issues: write`, adds them as one comment to the tracking issue "Flaky judge tests (strace)"
+(`scripts/ci/flaky-report.sh` with the judge's texts; it opens the issue when none is open), also when the judge job
+failed. A failed run first ends every `zjudge`
 process (`lockout.py --kill` with no path: by real and by effective user id, and the step fails when one is left), then
 root (`ci/collect_logs.sh`) copies only the regular files named `*.log` or `*.stderr` from the kept scratch folders
 (`find -type f`, which follows no link and leaves out links, FIFOs and devices) into a new folder of the runner's, and
@@ -203,7 +258,22 @@ before stop). One that at stop leaves a child running that waits until strace no
 lookup must fail the run: when the child carries the scratch folder in its environment, the test process's sweep ends it
 and fails "nothing the adapter started is left running after stop"; when its environment is cleared (the sweep cannot
 find it), the download check fails (the trace did not end). Real strace lines must pass the line check, and text joined
-to an strace line or a line cut short must fail it. One that asks for an io_uring must be refused it, and one that makes
+to an strace line or a line cut short must fail it. strace's own error message at the end of the trace (after a call it
+cut short, or alone) must fail the download check and allow the one rerun only when strace exited 1 with
+`--kill-on-exit` and no line, the cut call included, addressed another computer; the same text inside a quoted
+string, in front of another line, cut short, under another path, with a quote in it, or after a line that is not of
+strace's form must not allow it. A fixture test whose download check records that strace failed must run once more:
+a second run that passes prints `FLAKY`, counts on the `JUDGE` line, keeps the run's folder and the first run's as
+`<test>.try1` with its verdict in its log, and writes `--flaky-file` (which must not exist yet); one that fails fails
+the test; one whose first run failed another check too is not rerun and fails as it is, using none of the run's
+reruns; a third such test in one run is not rerun; with an strace that takes `--kill-on-exit`, a `JUDGE_STRACE` that
+writes strace's own `PTRACE_LISTEN` message after the trace of a test's first run and exits 1 must get that test rerun
+(`FLAKY`), and one that exits 0 or names another path must fail the download check with no rerun; under
+`--as-user` both runs' logs must be the runner's `records/<test>.try1.log` and `records/<test>.log`; an strace that
+does not take `--kill-on-exit` must trace with `--seccomp-bpf` (with and without `--require-trace`), and one that takes
+neither `--kill-on-exit` nor `--seccomp-bpf` must not be used with `--require-trace` and must trace without it; a link a test puts
+in place of its `test.log` must not be followed when the runner adds its verdict; and a rerun marker on any other record fails the run as a line
+that is not one of the test's records. One that asks for an io_uring must be refused it, and one that makes
 a UDP connect to 127.0.0.1 and Chromium's IPv6 probe must pass the check. With strace switched off (`JUDGE_STRACE=`) the
 check must be not observed, a failure with `--require-trace`; a fake `JUDGE_STRACE` (a script that runs its command
 without tracing it) must not be used, and with `--require-trace` it must fail the run, as must a `JUDGE_STRACE` that is
@@ -330,7 +400,8 @@ def run(t):
   `write()` is not a traced call and is not seen (see "What it does not defend against"). Every other UDP connect
   counts, because `write()` on a connected UDP socket sends without a traced call. The check sees an attempt also
   when the network is down. It fails too when a line in the trace is not of the form strace writes, or when the
-  trace ended (strace exited) before the editor was asked to stop. `t.driver(trace=True)` traces the file-system
+  trace ended (strace exited) before the editor was asked to stop, also when strace failed by itself (the runner then
+  runs the test once more: see "A test rerun after strace failed"). `t.driver(trace=True)` traces the file-system
   calls (`%file`) too; `t.trace` is then the lines kept (`t.trace_path` names the copy), and
   `observe.trace_hits(t.trace, names)` searches them (never in a process's argv or a send's data). Without strace, `t.trace` and `t.trace_path` are None and the test records
   its trace checks with `t.not_observed`.
@@ -487,7 +558,15 @@ What it defends against:
   user, and when no symbolic link met on the way to it sits in a folder that user can write, so a `JUDGE_STRACE` or
   `PATH` entry that a build step writes to `$GITHUB_ENV` or `$GITHUB_PATH` cannot name a fake one, and a link cannot be
   pointed elsewhere after the check. The runner makes the path real once and runs that real path. Every strace is also
-  tested before use: it must record a UDP connect to 192.0.2.1 port 53 made by a child, or it is not used.
+  tested before use: it must record a UDP connect to 192.0.2.1 port 53 made by a child, or it is not used. It runs
+  with `--kill-on-exit` when it takes it (strace 6.x): when strace exits for any reason, the kernel kills every process
+  it still traces. It runs with `--seccomp-bpf` when it takes it and the probe's child then runs under a seccomp filter
+  (its `/proc/self/status` counts more seccomp filters than the runner's): a process strace no longer traces gets `ENOSYS` for every traced call, so it
+  can make no network call untraced (strace 5.16, which has no `--kill-on-exit`, shows this: after strace is killed,
+  or detaches and exits on `SIGTERM`, every connect of a process it traced fails with `ENOSYS`). Under
+  `--require-trace` an strace that takes neither is not used. When
+  strace fails by itself while the editor runs, its message ends the trace and the check fails; the runner may run
+  that test once more, and only a complete second run can pass it (see "A test rerun after strace failed").
   `test_network_hosts` also fails when a file of 1 MiB or more appears in its folder during the agent tool calls. With
   `--as-user` (CI) strace runs as root and starts the adapter as the other user (`strace -u`; it is probed that way
   too), so no process of the traced tree can end, stop or attach to strace, read its memory or open its descriptors, and

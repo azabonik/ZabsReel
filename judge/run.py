@@ -4,6 +4,7 @@
     python3 -I judge/run.py [--adapter "<command>"] [--build <dir>] [--only <text>] [--timeout <s>] [--jobs <n>]
                             [--scratch <dir>] [--keep] [--list] [--strict] [--require-trace] [--allow-unprotected]
                             [--as-user <name>] [--graphics-addon <dir>] [--release zedmix|v0.2.0]
+                            [--flaky-file <file>]
     python3 -I judge/run.py --self-test [--require-trace] [--as-user <name>]
 
 --adapter   the adapter command (default: this judge's v0.2.0 adapter, run with this Python). A word that names an
@@ -38,6 +39,9 @@
             is (its names: tests/test_cli_migrate.py's GENERATIONS), and the tests that depend on it grade the build
             against the release given here, never against what the build or the adapter says it is. judge.yml passes
             --release zedmix (the lock covers that line); a run on the v0.2.0 release passes --release v0.2.0
+--flaky-file
+            a new file (it must not exist) that gets one FLAKY line per test that passed its rerun after strace
+            failed (see "Downloads"), and nothing when no test did; judge.yml puts its lines in the job summary
 --self-test the runner's own tests (judge/selftest.py): each way a test can fail must fail the run
 
 Statuses: a check passes or fails, or is recorded as NOT APPLICABLE (the hostile input it needs could not be made from
@@ -59,7 +63,26 @@ what it finds, and a trace that still does not end within 10 s is incomplete (a 
 strace is used only when it records a UDP connect that a
 child makes (strace_probe), and with --require-trace only when the runner's user cannot write it or any folder above
 it and no symbolic link on the way to it sits in a folder that user can write; its real path is what runs. Without a
-usable strace that check is not observed.
+usable strace that check is not observed. strace runs with --kill-on-exit when it takes it (strace 6.x): when
+strace exits, the kernel kills every process it still traces. It runs with --seccomp-bpf when it takes it and its
+probe child then runs under a seccomp filter: a process strace no longer traces gets ENOSYS for every traced call
+(strace 5.16 has no --kill-on-exit; after it is killed, or detaches and exits, every connect of a process it traced
+fails with ENOSYS). With --require-trace an strace that takes neither is not used.
+
+strace itself can fail while the editor runs: when a thread stops for a signal and is killed before strace looks at
+it (its process is exiting), strace 6.8 takes it for a stopped process, asks the kernel to keep it stopped
+(PTRACE_LISTEN), gets EIO (the thread now waits at its exit), and exits 1. It shows when Electron's GPU process ends:
+"ptrace(PTRACE_LISTEN,pid:N,sig:0): Input/output error". strace's message, "<strace's path>: <message>", ends the
+trace, and the download check fails ("strace failed while the editor ran"): a trace that ends early never
+shows that nothing was downloaded. When that is the only reason (strace_failed: the message is the last thing in the
+trace, outside every quoted string and decoration, every line before it has strace's form, strace exited 1, it ran
+with --kill-on-exit, and no line, the call it cut short included, addressed another computer) and no other check of
+that run failed, the runner runs the test once more (run_judged; at most 2 tests a run). The first run's checks are
+printed with "  try 1: " in front and not counted, its records are kept as <test>.try1, and the second run is the
+test's result: when it passes, a line "FLAKY <test> (first run: strace failed while the editor ran: <message>; rerun
+passed)" follows, the JUDGE line adds ", <n> flaky (strace)", and the run's folder is kept; when it fails in any way,
+strace failing again included, the test fails. A test whose first run failed another check as well is not run again:
+it fails as it is.
 
 Each test file judge/tests/test_*.py has a function run(t), sets CHECKS (the number of checks run(t) records) and may
 set PORT_BOUND (default True: it starts the editor), TIMEOUT and EXTRA_MEDIA (the optional fixtures it uses, from
@@ -76,9 +99,10 @@ that test fails without running. --allow-unprotected runs anyway and marks the J
 the pipe that is not one of the test's records (the declaration first, checks, the end last) fails the test. When the
 test ends,
 every process whose environment names the test's scratch folder is ended by exact process id. The runner prints one
-line per check and then "JUDGE: <passed>/<checks> passed", and exits 1 when any check failed, a test did not finish,
-did not report its end, wrote a malformed or unknown record, recorded a number of checks other than its CHECKS, left
-a process running, or there were no checks. SIGTERM or SIGINT ends the running tests and what they started, prints
+line per check (and appends the same lines to the test's log) and then "JUDGE: <passed>/<checks> passed", and exits 1
+when any check failed, a test did not finish, did not report its end, wrote a malformed or unknown record, recorded a
+number of checks other than its CHECKS, left a process running, or there were no checks (for a test that ran twice
+after strace failed, its second run's checks). SIGTERM or SIGINT ends the running tests and what they started, prints
 "JUDGE: interrupted ..." and exits 1. Python 3 standard library only; FFmpeg and ffprobe from PATH
 (JUDGE_FFMPEG / JUDGE_FFPROBE override).
 
@@ -616,6 +640,8 @@ def shared_folders(root, folder):
 # ---------------------------------------------------------------- strace (file-system trace and the download tripwire)
 NET_CALLS = "connect,sendto,sendmsg,sendmmsg,io_uring_setup"  # the calls observe.net_hits reads (see its docstring)
 NET_CHECK = "nothing was downloaded: no process of the adapter or the editor addressed another computer"
+RERUN_STRACE = "strace"  # a NET_CHECK record's "rerun": strace failed while the editor ran (strace_failed)
+MAX_RERUNS = 2  # tests a run reruns after strace failed in them (run_judged)
 LEFT_CHECK = "nothing the adapter started is left running after stop"
 _STRACE = {}
 REQUIRE_TRACE = False  # --require-trace (the runner's flag; the runner passes it on to each test process)
@@ -714,23 +740,50 @@ def _links_not_writable(path, user=None):
     return None
 
 
-def strace_probe(st, bpf):
-    """None when strace `st` traces a child here: run as the tests run it (TraceTail, TRACEE), it must record the
-    child's UDP connect to 192.0.2.1 port 53 (observe.net_hits finds exactly that line), and every line it writes must
-    have the form of an strace line. Else why not. A program that runs its command without tracing it, or traces
-    nothing, fails this."""
+# The number of seccomp filters of the process that runs it (/proc/self/status: Seccomp_filters, or 0 when the mode is
+# 0 on a kernel without that line), or None when it cannot be told; run here, and in strace_probe's child.
+_SECCOMP_FILTERS = ("def seccomp_filters():\n"
+                    "    try:\n"
+                    "        with open('/proc/self/status') as f:\n"
+                    "            d = dict(ln.split(':', 1) for ln in f if ':' in ln)\n"
+                    "    except OSError:\n"
+                    "        return None\n"
+                    "    if 'Seccomp_filters' in d:\n"
+                    "        return int(d['Seccomp_filters'])\n"
+                    "    return 0 if d.get('Seccomp', '').strip() == '0' else None\n")
+
+
+def _seccomp_filters():
+    """This process's number of seccomp filters (_SECCOMP_FILTERS), or None."""
+    scope = {}
+    exec(_SECCOMP_FILTERS, scope)  # the same text the probe's child runs
+    return scope["seccomp_filters"]()
+
+
+def strace_probe(st, bpf, kill):
+    """None when strace `st` traces a child here: run as the tests run it (TraceTail, TRACEE, strace_words with `bpf`
+    and `kill`), it must record the child's UDP connect to 192.0.2.1 port 53 (observe.net_hits finds exactly that
+    line), and every line it writes must have the form of an strace line. With `bpf` the child connects to port 53
+    only when /proc/self/status shows it runs under more seccomp filters than this process (_SECCOMP_FILTERS: the
+    filter strace put in place; this process can run under filters of its own, as in a sandbox), else to port 54, so
+    a probe that passes shows the filter in effect. Else why not. A program that runs its command without tracing it, or traces
+    nothing, fails this, and so does an strace that does not take an option it is given (strace 5.x has no
+    --kill-on-exit) or warns that it cannot use one (that line does not have strace's form)."""
     import observe
     tmp = tempfile.mkdtemp(prefix="judge-strace-probe-")
     child = [sys.executable, "-I", "-S", "-c",
-             "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ntry:\n"
-             "    s.connect(('192.0.2.1', 53))\nexcept OSError:\n    pass\n"]
+             "import socket\nport = 53\n"
+             + (_SECCOMP_FILTERS + f"mine, outer = seccomp_filters(), {_seccomp_filters()!r}\n"
+                "if mine is None or outer is None or mine <= outer:\n    port = 54\n" if bpf else "")
+             + "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ntry:\n"
+             "    s.connect(('192.0.2.1', port))\nexcept OSError:\n    pass\n"]
     tail = None
     try:
         tail = TraceTail(os.path.join(tmp, "probe.log"))
         if AS_USER is None:
-            words = strace_words(st, bpf, NET_CALLS) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child
+            words = strace_words(st, bpf, NET_CALLS, kill=kill) + TRACEE + [os.path.join(tmp, "probe.stderr")] + child
         else:  # as the tests run it: strace as root, the child as the other user (its stderr: nowhere it cannot reach)
-            words = AS_USER.tracer(AS_USER.env_words() + strace_words(st, bpf, NET_CALLS, AS_USER.name)
+            words = AS_USER.tracer(AS_USER.env_words() + strace_words(st, bpf, NET_CALLS, AS_USER.name, kill)
                                    + TRACEE_AS_USER + ["/dev/null"] + child)
         p = subprocess.Popen(words, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tail.writer,
                              close_fds=True, cwd="/" if AS_USER else None)
@@ -748,6 +801,8 @@ def strace_probe(st, bpf):
         if tail.tampered:
             return tail.tampered
         hits = observe.net_hits(tail)
+        if bpf and len(hits) == 1 and "htons(54)" in hits[0]:
+            return "with --seccomp-bpf its child does not run under a seccomp filter of strace's (/proc/self/status)"
         if len(hits) != 1 or "htons(53)" not in hits[0] or "192.0.2.1" not in hits[0]:
             return ("it did not record the probe's UDP connect to 192.0.2.1 port 53 ("
                     + (f"found {_short(hits, 200)}" if hits else "it wrote no such line") + ")")
@@ -769,7 +824,13 @@ def strace(require_trace=None):
     $GITHUB_ENV or $GITHUB_PATH, or point the link elsewhere after the check. Under --as-user (strace runs as root)
     the same holds for the other user: an strace whose real file, a folder above it, or a folder holding a link on
     the way belongs to that user or can be written by it is not used either. An strace that fails strace_probe is not
-    used."""
+    used. It runs with --seccomp-bpf when that probe passes (stops only at the traced calls: the network-only trace
+    costs almost nothing), and with --kill-on-exit (strace_words) when the strace takes it. With --require-trace an
+    strace that takes neither is not used: with --kill-on-exit the kernel kills every process strace still traces when
+    strace exits, and with the seccomp filter a process strace no longer traces gets ENOSYS for every traced call
+    (strace 5.16, which has no --kill-on-exit, shows this: after strace is killed, or detaches and exits on SIGTERM,
+    every connect of a process it traced fails with ENOSYS), so either way no process runs on making network calls
+    untraced."""
     if require_trace is None:
         require_trace = REQUIRE_TRACE
     key = (bool(require_trace), AS_USER.name if AS_USER else None)
@@ -777,7 +838,7 @@ def strace(require_trace=None):
         env = os.environ.get("JUDGE_STRACE")
         st = (env or None) if env is not None else shutil.which("strace", path=SYSTEM_PATH if AS_USER else None)
         real = os.path.realpath(st) if st else None
-        why, bpf = None, False
+        why, bpf, kill = None, False, False
         if not st:
             why = "strace is not installed" + (" (JUDGE_STRACE is empty)" if env == "" else "")
         elif not (os.path.isfile(real) and os.access(real, os.X_OK)):
@@ -786,16 +847,21 @@ def strace(require_trace=None):
             why = (f"strace {st} is not used with " + ("--require-trace" if require_trace else "--as-user (it runs as "
                    "root)") + f": {_links_not_writable(st, AS_USER) or _not_writable(real, AS_USER)}")
         else:
-            bad = strace_probe(real, True)
-            if bad is None:
-                bpf = True  # stops only at the traced calls: the network-only trace costs almost nothing
+            tries = [(True, True), (False, True), (True, False)] + ([] if require_trace else [(False, False)])
+            for bpf, kill in tries:
+                bad = strace_probe(real, bpf, kill)
+                if bad is None:
+                    break
             else:
-                plain = strace_probe(real, False)
-                if plain is not None:
-                    why = f"strace {st} does not trace a child here: {plain}"
-        _STRACE[key] = (None if why else real, bpf, why)
-    path, bpf, why = _STRACE[key]
-    _STRACE["path"], _STRACE["bpf"], _STRACE["why"] = path, bpf, why
+                bpf = kill = False
+                if require_trace and strace_probe(real, False, False) is None:
+                    why = (f"strace {st} takes neither --seccomp-bpf nor --kill-on-exit, one of which --require-trace "
+                           f"needs: {bad}")
+                else:
+                    why = f"strace {st} does not trace a child here: {bad}"
+        _STRACE[key] = (None if why else real, bpf, kill, why)
+    path, bpf, kill, why = _STRACE[key]
+    _STRACE["path"], _STRACE["bpf"], _STRACE["kill"], _STRACE["why"] = path, bpf, kill, why
     return path
 
 
@@ -804,13 +870,18 @@ def strace_why():
     return _STRACE.get("why")
 
 
-def strace_words(st, bpf, calls, user=None):
+def strace_words(st, bpf, calls, user=None, kill=False):
     """The strace words that run a command under strace `st` with `calls` traced to strace's stderr (the trace
     channel, TraceTail), following every process it starts: -yy names each socket (TCP, UDP, UNIX, ...) and the ends
     of a connected one, which observe.net_hits needs, and every io_uring_setup is refused with ENOSYS (io_uring
-    connect and send operations are not system calls strace sees; Node's libuv then uses epoll). With `user` (strace
-    then runs as root) the command runs as that user (-u). The command after them is TRACEE and then the adapter."""
-    return ([st, "-f"] + (["--seccomp-bpf"] if bpf else [])
+    connect and send operations are not system calls strace sees; Node's libuv then uses epoll). With `kill`,
+    --kill-on-exit: when strace exits, the kernel kills every process it still traces (PTRACE_O_EXITKILL), so none of
+    them runs on untraced after the trace ended (strace 6.x implies it with --seccomp-bpf, but not without it).
+    Without it, with `bpf`, a process strace no longer traces gets ENOSYS for every traced call (the seccomp filter
+    stays; strace 5.x). With
+    `user` (strace then runs as root) the command runs as that user (-u). The command after them is TRACEE and then
+    the adapter."""
+    return ([st, "-f"] + (["--seccomp-bpf"] if bpf else []) + (["--kill-on-exit"] if kill else [])
             + ["-qq", "-yy", "-s", "4096", "-e", f"trace={calls}", "-e", "inject=io_uring_setup:error=ENOSYS",
                "-e", "signal=none"] + (["-u", user] if user else []) + ["--"])
 
@@ -821,13 +892,30 @@ def strace_cmd(stderr_path, files, scratch=None):
     root through sudo with the adapter's environment (AsUser.env_words for the test's `scratch` folder), and starts
     the command as the other user."""
     calls = ("%file," if files else "") + NET_CALLS
+    st, bpf, kill = strace(), _STRACE.get("bpf"), _STRACE.get("kill")
     if AS_USER is None:
-        return strace_words(strace(), _STRACE.get("bpf"), calls) + TRACEE + [stderr_path]
-    return AS_USER.tracer(AS_USER.env_words(scratch) + strace_words(strace(), _STRACE.get("bpf"), calls, AS_USER.name)
+        return strace_words(st, bpf, calls, kill=kill) + TRACEE + [stderr_path]
+    return AS_USER.tracer(AS_USER.env_words(scratch) + strace_words(st, bpf, calls, AS_USER.name, kill)
                           + TRACEE_AS_USER + [stderr_path])
 
 
+def strace_failed(tail, returncode, hits):
+    """Whether a test's download check failed only because strace itself failed while the editor ran, so the runner
+    may run the test once more (run_judged): the trace ended on strace's own error message (TraceTail.tracer_failed:
+    the last thing in it, every line before it of strace's form), strace exited with 1 (its exit code when it fails;
+    `returncode` is the tracer command's: strace, or under --as-user the sudo that ran it), no line of the trace (the
+    call strace cut short included) addressed another computer (`hits`, observe.net_hits), and strace ran with
+    --kill-on-exit, so the kernel killed every process it traced when it exited and none of them ran on untraced. The
+    check itself is failed either way: a trace that ended early never shows that nothing was downloaded."""
+    return (tail.tracer_failed is not None and returncode == 1 and not hits and bool(_STRACE.get("kill"))
+            and _STRACE.get("path") == tail.tracer)
+
+
 _PID = re.compile(r"^\[pid +(\d+)\] (.*)$", re.S)
+# What strace writes after "<its path>: " when it fails (perror_msg: "ptrace(PTRACE_LISTEN,pid:52800,sig:0):
+# Input/output error"): printable ASCII without a quote, a backslash or an angle bracket, so it can neither close nor
+# open a quoted string or a decoration (observe.strace_skeleton).
+_TRACER_MESSAGE = re.compile(r"[ !#-;=?-\[\]-~]+")
 
 
 class TraceTail:
@@ -846,16 +934,28 @@ class TraceTail:
     (observe.strace_line_problem); the first one that does not, or an end of the trace before stopping() (strace ended
     while the editor ran), sets `tampered`, and every check on the trace then fails. The test process also writes each
     line it keeps to `copy_path`, outside the test's scratch folder, for people and for CI's log upload; the checks
-    never read that file."""
+    never read that file.
 
-    def __init__(self, copy_path):
+    strace's own error message (`tracer`, the path strace runs as, names it: strace writes "<that path>: <message>"
+    when it fails and then exits 1, as with "ptrace(PTRACE_LISTEN,pid:N,sig:0): Input/output error" when a thread
+    it took for stopped had gone on to exit) is recognised only at the end of a line, outside every quoted string and
+    decoration, where it can cut short the call strace was printing for another process (_tracer_line). That line
+    sets `tampered` too ("strace failed while the editor ran"): the trace ends there, so it never shows that nothing
+    was downloaded. The cut call is kept as strace's own "<pid> ... <unfinished ...>" line, so observe.net_hits reads
+    it. `tracer_failed` is strace's message only when that line is the last thing in the trace and every line before
+    it has strace's form (run.strace_failed then decides whether the test may run once more)."""
+
+    def __init__(self, copy_path, tracer=None):
         self._r, self.writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         self._r.setblocking(False)
         self.copy_path = copy_path
+        self.tracer = tracer
         self._copy = open(copy_path, "x", encoding="latin-1", newline="\n")
         self._lock = threading.Lock()
         self._lines, self._rest = [], b""
         self._tampered = None
+        self._failure = None        # strace's own error message, once a line ended in it
+        self._after_failure = False  # a line came after that message
         self._eof = self._stopping = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -873,15 +973,50 @@ class TraceTail:
         with self._lock:
             self._stopping = True
 
+    def _tracer_line(self, ln):
+        """(strace's own error message, the call it cut short as strace's own "<pid> ... <unfinished ...>" line or
+        None) when line `ln` ends in "<tracer>: <message>": outside every quoted string and decoration
+        (observe.strace_skeleton), to the end of the line, with what comes before it either nothing (its pid alone) or
+        the start of one call line that has strace's form. Else None: the line is checked as any other. A process of
+        the traced tree cannot put such text there: what strace prints of its data is quoted or decorated.
+        The skeleton condition is a second guard: today _TRACER_MESSAGE (no quote, backslash or angle bracket) and the
+        form check on the cut call already refuse every line it refuses; it keeps refusing a message that holds a
+        quoted string or a decoration if that class is ever made wider (the self-test widens it to show this)."""
+        import observe
+        if not self.tracer:
+            return None
+        prefix = f"{self.tracer}: "
+        i = ln.rfind(prefix)
+        if i < 0:
+            return None
+        msg, head = ln[i + len(prefix):], ln[:i]
+        skel = observe.strace_skeleton(ln)
+        if not _TRACER_MESSAGE.fullmatch(msg) or skel is None or not skel.endswith(prefix + msg):
+            return None
+        if re.fullmatch(r"\d+ ", head):
+            return msg, None
+        call = head.rstrip() + " <unfinished ...>"
+        return (msg, call) if observe.strace_line_problem(call) is None else None
+
     def _keep(self, raw):
         import observe
         m = _PID.match(raw)
         ln = f"{m.group(1)} {m.group(2)}" if m else f"0 {raw}"
+        self._copy.write(ln + "\n")
+        if self._failure is not None:
+            self._after_failure = True  # strace writes nothing after its own error message
+        failed = self._tracer_line(ln)
+        if failed is not None:
+            msg, call = failed
+            if self._failure is None:
+                self._failure = msg
+            if call is not None:
+                self._lines.append(call)
+            return
         why = observe.strace_line_problem(ln)
         if why and not self._tampered:
             self._tampered = f"the trace holds a line that strace does not write ({why}): {_short(ln, 200)}"
         self._lines.append(ln)
-        self._copy.write(ln + "\n")
 
     def _pull(self):
         """Reads what is new (under the lock)."""
@@ -898,7 +1033,9 @@ class TraceTail:
                 self._tampered = self._tampered or f"the trace cannot be read: {e}"
             if not chunk:
                 self._eof = True
-                if not self._stopping:
+                if self._rest:  # bytes after the last newline: more after strace's own error message, if any
+                    self._after_failure = self._after_failure or self._failure is not None
+                if not self._stopping and self._failure is None:
                     self._tampered = self._tampered or ("the trace ended before the editor was asked to stop "
                                                         "(strace exited or was ended while the editor ran)")
                 break
@@ -924,10 +1061,25 @@ class TraceTail:
 
     @property
     def tampered(self):
-        """None, or why the trace cannot be trusted (after reading what is new)."""
+        """None, or why the trace cannot be trusted (after reading what is new). strace's own error message is a
+        reason too: the trace ends there."""
         with self._lock:
             self._pull()
-            return self._tampered
+            if self._tampered or self._failure is None:
+                return self._tampered
+            if self._after_failure:
+                return f"the trace goes on after strace's own error message ({self._failure})"
+            return (f"strace failed while the editor ran ({self._failure}); the trace ends there, so what the "
+                    "editor did after it was not seen")
+
+    @property
+    def tracer_failed(self):
+        """strace's own error message when the trace ended on it: that line is the last thing strace wrote, and every
+        line before it has strace's form. Else None."""
+        with self._lock:
+            self._pull()
+            ok = self._eof and self._failure is not None and not self._after_failure and not self._tampered
+            return self._failure if ok else None
 
     def lines(self):
         """Every complete line read so far (after reading what is new)."""
@@ -960,6 +1112,8 @@ class TraceTail:
             if self._rest:
                 self._keep(self._rest.decode("latin-1"))
                 self._rest = b""
+                # strace ends its own error message with a newline: one without it is not the message as strace wrote it
+                self._after_failure = self._after_failure or self._failure is not None
             if self._r is not None:
                 self._r.close()
                 self._r = None
@@ -1035,7 +1189,7 @@ class T:
         mine["read"] = {p: None if v is None else base64.b64decode(v) for p, v in mine["read"].items()}
         return mine
 
-    def _record(self, name, ok, detail, harness, status):
+    def _record(self, name, ok, detail, harness, status, rerun=None):
         if not harness:
             self.n_checks += 1
         rec = {"check": str(name), "ok": bool(ok), "detail": str(detail)}
@@ -1043,6 +1197,8 @@ class T:
             rec["harness"] = True
         if status:
             rec["status"] = status
+        if rerun:
+            rec["rerun"] = rerun
         self._emit(rec)
         return bool(ok)
 
@@ -1105,7 +1261,8 @@ class T:
             stderr_path = os.path.join(self.scratch, "adapter.stderr")
             if strace():
                 if self.net_trace is None:
-                    self.net_trace = TraceTail(self.trace_copy)  # its reader runs before strace (and the adapter) starts
+                    # its reader runs before strace (and the adapter) starts; strace names itself by this path
+                    self.net_trace = TraceTail(self.trace_copy, tracer=strace())
                 if trace:
                     self.trace, self.trace_path = self.net_trace, self.net_trace.copy_path
                 cmd = strace_cmd(stderr_path, files=trace, scratch=self.scratch) + cmd
@@ -1176,7 +1333,8 @@ class T:
         hits = observe.net_hits(self.net_trace)
         bad = self.net_trace.tampered
         detail = "; ".join(([bad] if bad else []) + ([_short(hits[:3])] if hits else []))
-        self.check(NET_CHECK, not hits and not bad, detail or "no other computer addressed", harness=True)
+        rerun = RERUN_STRACE if strace_failed(self.net_trace, d.p.returncode, hits) else None
+        self._record(NET_CHECK, not hits and not bad, detail or "no other computer addressed", True, None, rerun)
 
 
 def _listening(port):
@@ -1298,8 +1456,9 @@ CHECK_KEYS = {"check", "ok", "detail"}
 
 def known_record(r, i, n):
     """Whether record `i` of `n` has one of the shapes T._emit writes, in its place: {"declare": int or None} first,
-    {"check": str, "ok": bool, "detail": str} (with "harness": true for a runner-added check, and "status":
-    "not_applicable" or "not_observed", with ok true, for a check that was not made), {"end": true} last."""
+    {"check": str, "ok": bool, "detail": str} (with "harness": true for a runner-added check, "status":
+    "not_applicable" or "not_observed", with ok true, for a check that was not made, and "rerun": "strace" only on a
+    failed download check, NET_CHECK, when strace itself failed: strace_failed), {"end": true} last."""
     if not isinstance(r, dict):
         return False
     keys = set(r)
@@ -1307,10 +1466,12 @@ def known_record(r, i, n):
         return i == 0 and (r["declare"] is None or (_is_int(r["declare"]) and r["declare"] >= 0))
     if keys == {"end"}:
         return i == n - 1 and r["end"] is True
-    if CHECK_KEYS <= keys <= CHECK_KEYS | {"harness", "status"}:
+    if CHECK_KEYS <= keys <= CHECK_KEYS | {"harness", "status", "rerun"}:
         return (isinstance(r["check"], str) and isinstance(r["ok"], bool) and isinstance(r["detail"], str)
                 and r.get("harness", True) is True and r.get("status", STATUSES[0]) in STATUSES
-                and ("status" not in r or r["ok"] is True))
+                and ("status" not in r or r["ok"] is True)
+                and ("rerun" not in r or (r["rerun"] == RERUN_STRACE and r["check"] == NET_CHECK
+                                          and r.get("harness") is True and r["ok"] is False and "status" not in r)))
     return False
 
 
@@ -1333,7 +1494,8 @@ def status_of(r, strict=False, require_trace=False):
 
 def verdict(recs, timed_out, returncode, timeout, left, channel_closed, strict=False, require_trace=False):
     """The checks for one test from its pipe records and what the runner saw: [{"check", "ok", "status", "detail"}],
-    status pass, fail, not applicable or not observed (ok is true only for pass). A record of another shape, or out of
+    status pass, fail, not applicable or not observed (ok is true only for pass), and "rerun" on the download check
+    when strace itself failed (strace_failed). A record of another shape, or out of
     its place, fails the test (a corrupted or tampered pipe), and is not counted as a check."""
     checks = []
 
@@ -1353,7 +1515,8 @@ def verdict(recs, timed_out, returncode, timeout, left, channel_closed, strict=F
             harness = r.get("harness") is True
             counted += not harness
             st, detail = status_of(r, strict, require_trace)
-            checks.append({"check": str(r.get("check")), "ok": st == "pass", "status": st, "detail": detail})
+            checks.append({"check": str(r.get("check")), "ok": st == "pass", "status": st, "detail": detail}
+                          | ({"rerun": r["rerun"]} if "rerun" in r else {}))
     if not isinstance(declared, int) or isinstance(declared, bool):
         add("the test declares its number of checks (CHECKS)", False, "no declaration as its first record")
     elif counted != declared:
@@ -1374,6 +1537,8 @@ def verdict(recs, timed_out, returncode, timeout, left, channel_closed, strict=F
 
 
 def run_test(meta, a, base, media, adapter):
+    """Runs one test once in a new scratch folder <run's folder>/<test>. Returns (checks, seconds, scratch folder,
+    the test's log, the copy of its trace); nothing is printed (report)."""
     name = meta["name"]
     scratch = os.path.realpath(os.path.join(base, name))
     if AS_USER is None:
@@ -1433,12 +1598,107 @@ def run_test(meta, a, base, media, adapter):
                      a.require_trace)
     for c in checks:
         c["test"] = name
+    return checks, time.time() - t0, scratch, log_path, trace_copy
+
+
+def report(name, checks, took, scratch, log_path, prefix="", note=()):
+    """Prints one line per check of one run of a test (with `prefix`), its time, and the `note` lines, and appends the
+    same lines to the test's log (records/<test>.log under --as-user, else test.log in its folder), which otherwise
+    holds only what the test process itself printed (nothing, as a rule: its results go over the result pipe)."""
+    lines = []
+    for c in checks:
+        detail = _short(c.get("detail") or "", 400)
+        lines.append(f"{prefix}{LABEL[c['status']]}  {name}: {c['check']}" + (f"  -- {detail}" if detail else ""))
+    lines.append(f"      {name}: {took:.1f} s, scratch {scratch}")
+    lines += list(note)
+    with PRINT_LOCK:
+        for ln in lines:
+            print(ln, flush=True)
+    try:  # the log the runner made ("xb"); never through a link put in its place (a same-user run's test folder)
+        with os.fdopen(os.open(log_path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW), "a", encoding="utf-8") as f:
+            f.write("".join(ln + "\n" for ln in lines))
+    except OSError as e:
+        with PRINT_LOCK:
+            print(f"judge: note: could not add the verdict to {log_path}: {e}", flush=True)
+
+
+RERUNS = []         # [test, the first run's download check detail, whether the rerun passed] for each rerun made
+RERUN_LOCK = threading.Lock()
+
+
+def _strace_message(detail):
+    """strace's own error message in a download check's detail (TraceTail.tampered's wording), else the detail."""
+    m = re.match(r"strace failed while the editor ran \((.*)\); the trace ends there", detail)
+    return m.group(1) if m else _short(detail, 300)
+
+
+def _first_try(path):
+    """The name a rerun test's first-run file or folder gets: <test>.try1, records/<test>.try1.log, ..."""
+    folder, name = os.path.split(path)
+    for ext in (".adapter-strace.log", ".log"):
+        if name.endswith(ext) and name != "test.log":
+            return os.path.join(folder, name[: -len(ext)] + ".try1" + ext)
+    return path + ".try1"
+
+
+def _passed(c):
+    """Whether check `c` (verdict) did not fail: it passed, or was not applicable or not observed (without --strict
+    or --require-trace)."""
+    return c["status"] in ("pass", "not applicable", "not observed")
+
+
+def run_judged(meta, a, base, media, adapter):
+    """Runs one test (run_test), reports it, and returns its checks. When strace itself failed while the editor ran
+    (the download check's record carries "rerun": strace_failed) the test runs once more, at most MAX_RERUNS tests a
+    run: the first run's checks are printed with "  try 1: " in front and not counted, its folder and records are kept
+    as <test>.try1, records/<test>.try1.log and <test>.try1.adapter-strace.log (in records/ under --as-user), and the
+    second run, in a new folder of the test's own name, is the test's result. A second run that passes prints a FLAKY
+    line; one that fails, in any way, strace failing again included, fails the test. A test whose first run failed
+    any other check (one of its own or one the runner adds) is not run again and fails as it is, without using one of
+    the MAX_RERUNS."""
+    name = meta["name"]
+    checks, took, scratch, log_path, trace_copy = run_test(meta, a, base, media, adapter)
+    first = next((c for c in checks if c.get("rerun") == RERUN_STRACE), None)
+    other = None if first is None else next((c for c in checks if c is not first and not _passed(c)), None)
+    allowed = False
+    if first is not None and other is None:
+        with RERUN_LOCK:
+            allowed = len(RERUNS) < MAX_RERUNS
+            if allowed:
+                RERUNS.append([name, first["detail"], False])
+                entry = RERUNS[-1]
+    if not allowed:
+        if first is None:
+            note = ()
+        elif other is not None:
+            note = [f"judge: {name} is not run again after strace failed: another check of it failed "
+                    f"({_short(other['check'], 200)})"]
+        else:
+            note = [f"judge: {name} is not run again: {MAX_RERUNS} tests of this run were rerun already after strace "
+                    "failed"]
+        report(name, checks, took, scratch, log_path, note=note)
+        with PRINT_LOCK:
+            RESULTS.extend(checks)
+        return checks
+    report(name, checks, took, scratch, log_path, prefix="  try 1: ")
+    kept = []
+    for path in (scratch, log_path, trace_copy):
+        if os.path.lexists(path) and not path.startswith(scratch + os.sep):
+            os.rename(path, _first_try(path))
+            kept.append(_first_try(path))
+    with PRINT_LOCK:
+        print(f"RERUN {name}: strace failed while the editor ran ({_strace_message(first['detail'])}). The first "
+              f"run's {len(checks)} checks are not counted (kept: {', '.join(kept)}); the test runs once more",
+              flush=True)
+    checks, took, scratch, log_path, trace_copy = run_test(meta, a, base, media, adapter)
+    passed = all(_passed(c) for c in checks)
+    entry[2] = passed
+    why = _strace_message(first["detail"])
+    note = ([f"FLAKY {name} (first run: strace failed while the editor ran: {why}; rerun passed)"] if passed else
+            [f"judge: {name} failed its rerun too (the first run: strace failed while the editor ran: {why})"])
+    report(name, checks, took, scratch, log_path, note=note)
     with PRINT_LOCK:
         RESULTS.extend(checks)
-        for c in checks:
-            detail = _short(c.get("detail") or "", 400)
-            print(f"{LABEL[c['status']]}  {name}: {c['check']}" + (f"  -- {detail}" if detail else ""), flush=True)
-        print(f"      {name}: {time.time() - t0:.1f} s, scratch {scratch}", flush=True)
     return checks
 
 
@@ -1521,6 +1781,9 @@ def main():
     ap.add_argument("--release", choices=RELEASES, default=RELEASES[0],
                     help="the release the build is graded as: zedmix (the default; judge.yml passes it) or v0.2.0 "
                          "(the v0.2.0 release)")
+    ap.add_argument("--flaky-file", metavar="FILE",
+                    help="write one FLAKY line per test that passed its rerun after strace failed (none: an empty "
+                         "file) to this new file; judge.yml puts them in the job summary")
     ap.add_argument("--tests", default=os.path.join(JUDGE, "tests"), help=argparse.SUPPRESS)
     # child mode (one test, started by the runner)
     ap.add_argument("--child", help=argparse.SUPPRESS)
@@ -1558,6 +1821,9 @@ def main():
         return 0
     if not metas:
         print("JUDGE: 0/0 passed (no tests selected)")
+        return 1
+    if a.flaky_file and os.path.lexists(a.flaky_file):
+        print(f"JUDGE: refused: --flaky-file {a.flaky_file} exists (the runner writes a new file)", flush=True)
         return 1
     if unprotected and not a.allow_unprotected:
         print(f"JUDGE: refused: the runner is not protected ({unprotected}): a process of the same user could reopen "
@@ -1655,10 +1921,10 @@ def main():
     free = [m for m in metas if not m["port_bound"]]
     bound = [m for m in metas if m["port_bound"]]
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
-        for checks in pool.map(lambda m: run_test(m, a, base, media, adapter), free):
+        for checks in pool.map(lambda m: run_judged(m, a, base, media, adapter), free):
             results += checks
     for m in bound:
-        results += run_test(m, a, base, media, adapter)
+        results += run_judged(m, a, base, media, adapter)
 
     passed = sum(1 for c in results if c["status"] == "pass")
     judged = sum(1 for c in results if c["status"] in ("pass", "fail"))
@@ -1678,11 +1944,22 @@ def main():
                   + ("--strict" if st == "not applicable" else "--require-trace") + " fails them):")
             for c in named:
                 print(f"judge:   {c['test']}: {c['check']}")
+    flaky = [r for r in RERUNS if r[2]]
+    if flaky:
+        counts += f", {len(flaky)} flaky (strace)"
     print(f"JUDGE: {passed}/{judged} passed{counts}{mark}", flush=True)
-    if ok and not a.keep:
+    if a.flaky_file:
+        # One FLAKY line per test that passed its rerun (judge.yml puts them in the job summary). A new file only.
+        with open(a.flaky_file, "x", encoding="utf-8") as f:
+            f.write("".join(f"FLAKY {r[0]} (first run: strace failed while the editor ran: {_strace_message(r[1])}; "
+                            "rerun passed)\n" for r in flaky))
+    if ok and not a.keep and not RERUNS:
         if AS_USER is not None:
             AS_USER.remove(base)  # it holds files and folders of the editor's user
         shutil.rmtree(base, ignore_errors=True)
+    elif RERUNS:
+        print(f"judge: scratch kept for inspection: {base} (a test was rerun after strace failed; its first run's "
+              "records are <test>.try1)")
     elif not ok:
         print(f"judge: scratch kept for inspection: {base}")
     return 0 if ok else 1
