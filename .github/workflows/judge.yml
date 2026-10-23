@@ -349,6 +349,25 @@ jobs:
             echo "flaky=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # On main (a push or a manual run), the FLAKY lines of this run for the
+      # flaky-report job below: an empty file when nothing flaked, written
+      # even when the job failed.
+      - name: FLAKY lines for the tracking issue
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/flaky"
+          { grep '^FLAKY ' "$RUNNER_TEMP/judge-flaky.txt" 2>/dev/null || true; } > "$RUNNER_TEMP/flaky/flaky-judge.txt"
+          cat "$RUNNER_TEMP/flaky/flaky-judge.txt"
+
+      - name: Upload the FLAKY lines
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-flaky
+          path: ${{ runner.temp }}/flaky/flaky-judge.txt
+          if-no-files-found: warn
+          retention-days: 7
+
       # A failed run (and one with a FLAKY test) keeps its scratch folder,
       # which holds files and folders of zjudge's, links among them (the
       # editor's sandbox is zjudge's own folder, so the kernel's link
@@ -380,3 +399,58 @@ jobs:
           path: ${{ runner.temp }}/judge-logs
           if-no-files-found: ignore
           retention-days: 14
+
+  # Runs on main only (never for a pull request, whose token stays read-only),
+  # also when the judge job failed: every FLAKY test of this run goes as one
+  # comment on the tracking issue "Flaky judge tests (strace)"
+  # (scripts/ci/flaky-report.sh with the judge's texts; it opens the issue
+  # when none is open). Only this job may write issues; it runs nothing of
+  # the build and reads only the FLAKY lines the judge job uploaded.
+  flaky-report:
+    needs: [judge]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+
+      - name: FLAKY lines of the judge
+        uses: actions/download-artifact@v4
+        with:
+          pattern: judge-flaky
+          path: ${{ runner.temp }}/flaky
+          merge-multiple: true
+
+      - name: Record them on the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          FLAKY_TITLE: Flaky judge tests (strace)
+          FLAKY_PREFIX: ''
+          FLAKY_WHAT: test
+          FLAKY_RUN: Judge run
+          FLAKY_NONE: 'flaky-report: no flaky judge tests in this run'
+          FLAKY_LOGS: >-
+            Each test's first run ended when strace failed while the editor
+            ran, and its rerun passed. Logs: the run's `judge-logs` artifact
+            (both runs' records: `records/<test>.try1.log` and
+            `records/<test>.log`).
+          FLAKY_INTRO: >-
+            The judge (`.github/workflows/judge.yml`) runs a test once more
+            when strace itself failed while the editor ran (judge/README.md,
+            "A test rerun after strace failed"). A test that passes its rerun
+            is FLAKY: the job stays green, and each run on main (a push or a
+            manual run) adds a comment here naming every such test, with the
+            run. Every flaky test is investigated; close this issue when none
+            is left open.
+        run: bash scripts/ci/flaky-report.sh "$RUNNER_TEMP/flaky"

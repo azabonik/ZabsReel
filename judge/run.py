@@ -63,8 +63,11 @@ what it finds, and a trace that still does not end within 10 s is incomplete (a 
 strace is used only when it records a UDP connect that a
 child makes (strace_probe), and with --require-trace only when the runner's user cannot write it or any folder above
 it and no symbolic link on the way to it sits in a folder that user can write; its real path is what runs. Without a
-usable strace that check is not observed. strace runs with --kill-on-exit (with --require-trace an strace that does
-not take it is not used): when strace exits, the kernel kills every process it still traces.
+usable strace that check is not observed. strace runs with --kill-on-exit when it takes it (strace 6.x): when
+strace exits, the kernel kills every process it still traces. It runs with --seccomp-bpf when it takes it and its
+probe child then runs under a seccomp filter: a process strace no longer traces gets ENOSYS for every traced call
+(strace 5.16 has no --kill-on-exit; after it is killed, or detaches and exits, every connect of a process it traced
+fails with ENOSYS). With --require-trace an strace that takes neither is not used.
 
 strace itself can fail while the editor runs: when a thread stops for a signal and is killed before strace looks at
 it (its process is exiting), strace 6.8 takes it for a stopped process, asks the kernel to keep it stopped
@@ -73,12 +76,13 @@ it (its process is exiting), strace 6.8 takes it for a stopped process, asks the
 trace, and the download check fails ("strace failed while the editor ran"): a trace that ends early never
 shows that nothing was downloaded. When that is the only reason (strace_failed: the message is the last thing in the
 trace, outside every quoted string and decoration, every line before it has strace's form, strace exited 1, it ran
-with --kill-on-exit, and no line, the call it cut short included, addressed another computer), the runner runs the
-test once more (run_judged; at most 2 tests a run). The first run's checks are printed with "  try 1: " in front and
-not counted, its records are kept as <test>.try1, and the second run is the test's result: when it passes, a line
-"FLAKY <test> (first run: strace failed while the editor ran: <message>; rerun passed)" follows, the JUDGE line adds
-", <n> flaky (strace)", and the run's folder is kept; when it fails in any way, strace failing again included, the
-test fails.
+with --kill-on-exit, and no line, the call it cut short included, addressed another computer) and no other check of
+that run failed, the runner runs the test once more (run_judged; at most 2 tests a run). The first run's checks are
+printed with "  try 1: " in front and not counted, its records are kept as <test>.try1, and the second run is the
+test's result: when it passes, a line "FLAKY <test> (first run: strace failed while the editor ran: <message>; rerun
+passed)" follows, the JUDGE line adds ", <n> flaky (strace)", and the run's folder is kept; when it fails in any way,
+strace failing again included, the test fails. A test whose first run failed another check as well is not run again:
+it fails as it is.
 
 Each test file judge/tests/test_*.py has a function run(t), sets CHECKS (the number of checks run(t) records) and may
 set PORT_BOUND (default True: it starts the editor) and TIMEOUT. Each test runs in its own session under its
@@ -729,17 +733,43 @@ def _links_not_writable(path, user=None):
     return None
 
 
+# The number of seccomp filters of the process that runs it (/proc/self/status: Seccomp_filters, or 0 when the mode is
+# 0 on a kernel without that line), or None when it cannot be told; run here, and in strace_probe's child.
+_SECCOMP_FILTERS = ("def seccomp_filters():\n"
+                    "    try:\n"
+                    "        with open('/proc/self/status') as f:\n"
+                    "            d = dict(ln.split(':', 1) for ln in f if ':' in ln)\n"
+                    "    except OSError:\n"
+                    "        return None\n"
+                    "    if 'Seccomp_filters' in d:\n"
+                    "        return int(d['Seccomp_filters'])\n"
+                    "    return 0 if d.get('Seccomp', '').strip() == '0' else None\n")
+
+
+def _seccomp_filters():
+    """This process's number of seccomp filters (_SECCOMP_FILTERS), or None."""
+    scope = {}
+    exec(_SECCOMP_FILTERS, scope)  # the same text the probe's child runs
+    return scope["seccomp_filters"]()
+
+
 def strace_probe(st, bpf, kill):
     """None when strace `st` traces a child here: run as the tests run it (TraceTail, TRACEE, strace_words with `bpf`
     and `kill`), it must record the child's UDP connect to 192.0.2.1 port 53 (observe.net_hits finds exactly that
-    line), and every line it writes must have the form of an strace line. Else why not. A program that runs its
-    command without tracing it, or traces nothing, fails this, and so does an strace that does not take an option it
-    is given (strace 5.x has no --kill-on-exit)."""
+    line), and every line it writes must have the form of an strace line. With `bpf` the child connects to port 53
+    only when /proc/self/status shows it runs under more seccomp filters than this process (_SECCOMP_FILTERS: the
+    filter strace put in place; this process can run under filters of its own, as in a sandbox), else to port 54, so
+    a probe that passes shows the filter in effect. Else why not. A program that runs its command without tracing it, or traces
+    nothing, fails this, and so does an strace that does not take an option it is given (strace 5.x has no
+    --kill-on-exit) or warns that it cannot use one (that line does not have strace's form)."""
     import observe
     tmp = tempfile.mkdtemp(prefix="judge-strace-probe-")
     child = [sys.executable, "-I", "-S", "-c",
-             "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ntry:\n"
-             "    s.connect(('192.0.2.1', 53))\nexcept OSError:\n    pass\n"]
+             "import socket\nport = 53\n"
+             + (_SECCOMP_FILTERS + f"mine, outer = seccomp_filters(), {_seccomp_filters()!r}\n"
+                "if mine is None or outer is None or mine <= outer:\n    port = 54\n" if bpf else "")
+             + "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ntry:\n"
+             "    s.connect(('192.0.2.1', port))\nexcept OSError:\n    pass\n"]
     tail = None
     try:
         tail = TraceTail(os.path.join(tmp, "probe.log"))
@@ -764,6 +794,8 @@ def strace_probe(st, bpf, kill):
         if tail.tampered:
             return tail.tampered
         hits = observe.net_hits(tail)
+        if bpf and len(hits) == 1 and "htons(54)" in hits[0]:
+            return "with --seccomp-bpf its child does not run under a seccomp filter of strace's (/proc/self/status)"
         if len(hits) != 1 or "htons(53)" not in hits[0] or "192.0.2.1" not in hits[0]:
             return ("it did not record the probe's UDP connect to 192.0.2.1 port 53 ("
                     + (f"found {_short(hits, 200)}" if hits else "it wrote no such line") + ")")
@@ -786,8 +818,12 @@ def strace(require_trace=None):
     the same holds for the other user: an strace whose real file, a folder above it, or a folder holding a link on
     the way belongs to that user or can be written by it is not used either. An strace that fails strace_probe is not
     used. It runs with --seccomp-bpf when that probe passes (stops only at the traced calls: the network-only trace
-    costs almost nothing), and with --kill-on-exit (strace_words) when the strace takes it; with --require-trace an
-    strace that does not take it is not used (strace 5.x)."""
+    costs almost nothing), and with --kill-on-exit (strace_words) when the strace takes it. With --require-trace an
+    strace that takes neither is not used: with --kill-on-exit the kernel kills every process strace still traces when
+    strace exits, and with the seccomp filter a process strace no longer traces gets ENOSYS for every traced call
+    (strace 5.16, which has no --kill-on-exit, shows this: after strace is killed, or detaches and exits on SIGTERM,
+    every connect of a process it traced fails with ENOSYS), so either way no process runs on making network calls
+    untraced."""
     if require_trace is None:
         require_trace = REQUIRE_TRACE
     key = (bool(require_trace), AS_USER.name if AS_USER else None)
@@ -804,7 +840,7 @@ def strace(require_trace=None):
             why = (f"strace {st} is not used with " + ("--require-trace" if require_trace else "--as-user (it runs as "
                    "root)") + f": {_links_not_writable(st, AS_USER) or _not_writable(real, AS_USER)}")
         else:
-            tries = [(True, True), (False, True)] + ([] if require_trace else [(True, False), (False, False)])
+            tries = [(True, True), (False, True), (True, False)] + ([] if require_trace else [(False, False)])
             for bpf, kill in tries:
                 bad = strace_probe(real, bpf, kill)
                 if bad is None:
@@ -812,7 +848,8 @@ def strace(require_trace=None):
             else:
                 bpf = kill = False
                 if require_trace and strace_probe(real, False, False) is None:
-                    why = f"strace {st} does not take --kill-on-exit, which --require-trace needs (strace 6.x does): {bad}"
+                    why = (f"strace {st} takes neither --seccomp-bpf nor --kill-on-exit, one of which --require-trace "
+                           f"needs: {bad}")
                 else:
                     why = f"strace {st} does not trace a child here: {bad}"
         _STRACE[key] = (None if why else real, bpf, kill, why)
@@ -832,7 +869,9 @@ def strace_words(st, bpf, calls, user=None, kill=False):
     of a connected one, which observe.net_hits needs, and every io_uring_setup is refused with ENOSYS (io_uring
     connect and send operations are not system calls strace sees; Node's libuv then uses epoll). With `kill`,
     --kill-on-exit: when strace exits, the kernel kills every process it still traces (PTRACE_O_EXITKILL), so none of
-    them runs on untraced after the trace ended (strace 6.x implies it with --seccomp-bpf, but not without it). With
+    them runs on untraced after the trace ended (strace 6.x implies it with --seccomp-bpf, but not without it).
+    Without it, with `bpf`, a process strace no longer traces gets ENOSYS for every traced call (the seccomp filter
+    stays; strace 5.x). With
     `user` (strace then runs as root) the command runs as that user (-u). The command after them is TRACEE and then
     the adapter."""
     return ([st, "-f"] + (["--seccomp-bpf"] if bpf else []) + (["--kill-on-exit"] if kill else [])
@@ -932,7 +971,10 @@ class TraceTail:
         None) when line `ln` ends in "<tracer>: <message>": outside every quoted string and decoration
         (observe.strace_skeleton), to the end of the line, with what comes before it either nothing (its pid alone) or
         the start of one call line that has strace's form. Else None: the line is checked as any other. A process of
-        the traced tree cannot put such text there: what strace prints of its data is quoted or decorated."""
+        the traced tree cannot put such text there: what strace prints of its data is quoted or decorated.
+        The skeleton condition is a second guard: today _TRACER_MESSAGE (no quote, backslash or angle bracket) and the
+        form check on the cut call already refuse every line it refuses; it keeps refusing a message that holds a
+        quoted string or a decoration if that class is ever made wider (the self-test widens it to show this)."""
         import observe
         if not self.tracer:
             return None
@@ -1575,25 +1617,41 @@ def _first_try(path):
     return path + ".try1"
 
 
+def _passed(c):
+    """Whether check `c` (verdict) did not fail: it passed, or was not applicable or not observed (without --strict
+    or --require-trace)."""
+    return c["status"] in ("pass", "not applicable", "not observed")
+
+
 def run_judged(meta, a, base, media, adapter):
     """Runs one test (run_test), reports it, and returns its checks. When strace itself failed while the editor ran
     (the download check's record carries "rerun": strace_failed) the test runs once more, at most MAX_RERUNS tests a
     run: the first run's checks are printed with "  try 1: " in front and not counted, its folder and records are kept
     as <test>.try1, records/<test>.try1.log and <test>.try1.adapter-strace.log (in records/ under --as-user), and the
     second run, in a new folder of the test's own name, is the test's result. A second run that passes prints a FLAKY
-    line; one that fails, in any way, strace failing again included, fails the test."""
+    line; one that fails, in any way, strace failing again included, fails the test. A test whose first run failed
+    any other check (one of its own or one the runner adds) is not run again and fails as it is, without using one of
+    the MAX_RERUNS."""
     name = meta["name"]
     checks, took, scratch, log_path, trace_copy = run_test(meta, a, base, media, adapter)
     first = next((c for c in checks if c.get("rerun") == RERUN_STRACE), None)
-    if first is not None:
+    other = None if first is None else next((c for c in checks if c is not first and not _passed(c)), None)
+    allowed = False
+    if first is not None and other is None:
         with RERUN_LOCK:
             allowed = len(RERUNS) < MAX_RERUNS
             if allowed:
                 RERUNS.append([name, first["detail"], False])
                 entry = RERUNS[-1]
-    if first is None or not allowed:
-        note = () if first is None else [f"judge: {name} is not run again: {MAX_RERUNS} tests of this run were rerun "
-                                         "already after strace failed"]
+    if not allowed:
+        if first is None:
+            note = ()
+        elif other is not None:
+            note = [f"judge: {name} is not run again after strace failed: another check of it failed "
+                    f"({_short(other['check'], 200)})"]
+        else:
+            note = [f"judge: {name} is not run again: {MAX_RERUNS} tests of this run were rerun already after strace "
+                    "failed"]
         report(name, checks, took, scratch, log_path, note=note)
         with PRINT_LOCK:
             RESULTS.extend(checks)
@@ -1609,7 +1667,7 @@ def run_judged(meta, a, base, media, adapter):
               f"run's {len(checks)} checks are not counted (kept: {', '.join(kept)}); the test runs once more",
               flush=True)
     checks, took, scratch, log_path, trace_copy = run_test(meta, a, base, media, adapter)
-    passed = all(c["status"] in ("pass", "not applicable", "not observed") for c in checks)
+    passed = all(_passed(c) for c in checks)
     entry[2] = passed
     why = _strace_message(first["detail"])
     note = ([f"FLAKY {name} (first run: strace failed while the editor ran: {why}; rerun passed)"] if passed else

@@ -37,8 +37,15 @@ addressed another computer; the same text inside a quoted string, in front of an
 path, with a quote in it, or after a line that is not of strace's form does not. A test whose download check records
 that strace failed runs once more: a second run that passes prints FLAKY, counts on the JUDGE line ("1 flaky
 (strace)"), keeps the run's folder and the first run's as <test>.try1 with its verdict in its log, and writes
---flaky-file (which must be new); a second run that fails fails the test; at most two tests a run are rerun; a rerun
-marker on any other record is a line that is not one of the test's records. An
+--flaky-file (which must be new); a second run that fails fails the test; a test whose first run failed another check
+too is not rerun and fails as it is, using none of the reruns; at most two tests a run are rerun; a rerun marker on
+any other record is a line that is not one of the test's records. With an strace that takes --kill-on-exit, a
+JUDGE_STRACE that writes strace's own PTRACE_LISTEN message after a first run's trace and exits 1 gets the test rerun
+(FLAKY); one that exits 0 or names another path fails the download check with no rerun. Under --as-user both runs'
+logs are the runner's records/<test>.try1.log and records/<test>.log. An strace that does not take --kill-on-exit
+traces with --seccomp-bpf, with and without --require-trace; one that takes neither --kill-on-exit nor --seccomp-bpf
+is not used with --require-trace and traces without it. A link a test puts in place of its test.log is not followed when
+the runner adds its verdict. An
 adapter that asks for an io_uring is refused one (strace injects ENOSYS). One that makes a UDP connect to 127.0.0.1 and
 Chromium's IPv6 probe ([2001:4860:4860::8888]:443, no packet) passes the check. With strace switched off (JUDGE_STRACE
 empty) the check is not observed, a failure with --require-trace; a JUDGE_STRACE that runs its command without tracing
@@ -167,6 +174,9 @@ TESTS = {
     # "rerunfail" and "budget1".."budget3" record it on every run.
     "rerunpass": RERUN_FIXTURE.format(first="not os.path.isdir(t.scratch + '.try1')"),
     "rerunfail": RERUN_FIXTURE.format(first="True"),
+    # "budget0" fails an ordinary check in the same run: it is not rerun and does not use one of the run's reruns.
+    "budget0": RERUN_FIXTURE.format(first="True").replace("t.check('a passing check', True)",
+                                                          "t.check('a failing check', False)"),
     "budget1": RERUN_FIXTURE.format(first="True"),
     "budget2": RERUN_FIXTURE.format(first="True"),
     "budget3": RERUN_FIXTURE.format(first="True"),
@@ -180,6 +190,12 @@ TESTS = {
                 "              {'check': net, 'ok': False, 'harness': True, 'rerun': 'other'}):\n"
                 "        r = {'detail': 'forged', 'rerun': 'strace', **r}\n"
                 "        os.write(t._out.fileno(), (json.dumps(r) + '\\n').encode())\n",
+    # Puts a symbolic link to <self-test folder>/loglink-target.txt in place of its test.log (the runner must not
+    # append its verdict through it).
+    "loglink": "PORT_BOUND = False\nCHECKS = 1\ndef run(t):\n    t.check('a passing check', True)\n"
+               "    log = os.path.join(t.scratch, 'test.log')\n"
+               "    os.symlink(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(t.scratch))), "
+               "'loglink-target.txt'), log + '.new')\n    os.replace(log + '.new', log)\n",
     "interrupt": "PORT_BOUND = False\nCHECKS = 1\nTIMEOUT = 600\ndef run(t):\n"
                  "    p = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
                  "    open(t.path('pids.tmp'), 'w').write(f'{os.getpid()} {p.pid}')\n"
@@ -561,6 +577,18 @@ FAKE_STRACE = "fake_strace.sh"
 FAKE_STRACE_SH = '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n'
 
 
+def nokill_script(real, bpf=True):
+    """A JUDGE_STRACE that exits 1 when it is given --kill-on-exit (as strace 5.x does), and with bpf=False also when
+    it is given --seccomp-bpf (as strace before 5.3 does), and else runs strace `real`."""
+    refuse = "".join(f'  [ "$w" = {o} ] && exit 1\n' for o in ["--kill-on-exit"] + ([] if bpf else ["--seccomp-bpf"]))
+    return (f'#!/bin/sh\nfor w in "$@"; do\n{refuse}  [ "$w" = -- ] && break\n'
+            f'done\nexec {shlex.quote(real)} "$@"\n')
+
+
+# strace's own message when PTRACE_LISTEN fails (TraceTail._tracer_line), as the fault wrappers write it.
+LISTEN_EIO = "ptrace(PTRACE_LISTEN,pid:1,sig:0): Input/output error"
+
+
 def _alive(pid):
     try:
         with open(f"/proc/{pid}/stat", "rb") as f:
@@ -581,6 +609,14 @@ def run_left():
     sys.path.insert(0, JUDGE)
     import run
     return run.LEFT_CHECK
+
+
+def strace_kills():
+    """Whether the strace the runner uses without --require-trace takes --kill-on-exit (run._STRACE["kill"]; strace
+    6.x does, 5.x does not)."""
+    sys.path.insert(0, JUDGE)
+    import run
+    return run.strace(False) is not None and bool(run._STRACE.get("kill"))
 
 
 def strace_here(require_trace=False):
@@ -609,6 +645,21 @@ class SelfTest:
             f.write(FAKE_STRACE_SH)
         os.chmod(self.fake_strace, 0o755)
         self.failures = 0
+
+    def fault_strace(self, name, real, rc=1, said=None):
+        """A JUDGE_STRACE (its real path) that runs strace `real`. In the first test run it serves (its words name
+        the test's adapter.stderr; the probe's do not), it lets strace run to its end, then writes strace's own
+        PTRACE_LISTEN message, "<said, default: its own real path>: <message>", where strace writes its trace, and
+        exits `rc`, as strace 6.8 does when it fails by itself. Every later run is strace's own."""
+        path = os.path.realpath(os.path.join(self.tmp, name))
+        once = shlex.quote(path + ".fired")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\ncase " $* " in\n  *"/adapter.stderr "*)\n    if [ ! -e {once} ]; then\n'
+                    f'      : > {once}\n      {shlex.quote(real)} "$@"\n'
+                    f'      printf "%s: %s\\n" {shlex.quote(said or path)} {shlex.quote(LISTEN_EIO)} >&2\n'
+                    f'      exit {int(rc)}\n    fi ;;\nesac\nexec {shlex.quote(real)} "$@"\n')
+        os.chmod(path, 0o755)
+        return path
 
     def addon_fixture(self, name, version=None, shell=True):
         """A folder in the graphics add-on's layout (run.graphics_addon): @remotion/renderer's package.json with
@@ -913,6 +964,29 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
           label="--as-user: a child left with an empty environment is found by the user sweep and the run fails")
     s.asuser(JUDGE)
     s.still_running("--as-user: the child the adapter left", s.pids_in("driver", "asuser.pid"))
+    # A rerun under --as-user: both runs' logs are the runner's own records, records/<test>.try1.log and
+    # records/<test>.log, with the verdict lines the runner printed for each run.
+    out = s.run("rerunpass", 0, [r"^RERUN test_rerunpass: ", r"^FLAKY test_rerunpass ",
+                                 r"^judge: scratch kept for inspection: \S+ \(a test was rerun"],
+                extra=extra, label="--as-user: strace failed in the first run, the rerun passes")
+    kept = re.search(r"^judge: scratch kept for inspection: (\S+) ", out, re.M)
+    recs = [os.path.join(kept.group(1), "records", f"test_rerunpass{x}.log") for x in (".try1", "")] if kept else []
+    got = []
+    for path in recs:
+        try:
+            st = os.lstat(path)
+            with open(path, encoding="utf-8") as f:
+                got.append((stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid(), f.read()))
+        except OSError as e:
+            got.append((False, str(e)))
+    s.unit("--as-user: records/test_rerunpass.try1.log and records/test_rerunpass.log are the runner's files, the "
+           "first with the first run's 'try 1:' lines, the second with the FLAKY line",
+           len(got) == 2 and got[0][0] and got[1][0] and "  try 1: FAIL  test_rerunpass: " + NET in got[0][1]
+           and "FLAKY test_rerunpass (first run: " in got[1][1] and "try 1:" not in got[1][1],
+           f"{recs}: {[(o, t[-300:]) for o, t in got]}")
+    if kept:
+        subprocess.run(au.root([au.tools["rm"], "-rf", "--one-file-system", "--", kept.group(1)]),
+                       capture_output=True, timeout=60, cwd="/")
 
     def user_sleeps():
         p = subprocess.Popen(au.as_user([au.tools["env"], "-i", "PATH=/usr/bin:/bin", "sleep", "120"]),
@@ -992,6 +1066,34 @@ def user_cases(s, user, traced, py, drv, fail, net, left):
                                 + r"\)", r"^JUDGE: 3/3 passed, 1 not observed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra, env={"JUDGE_STRACE": scopy},
                   label="--as-user: a JUDGE_STRACE in a folder of the other user's is not used (strace runs as root)")
+            # An strace that does not take --kill-on-exit (strace 5.x), in a folder of root's: it traces with
+            # --seccomp-bpf, with --require-trace too. One that takes neither --kill-on-exit nor --seccomp-bpf: with
+            # --require-trace it is not used, without it it traces.
+            for name, bpf in (("strace-nokill", True), ("strace-neither", False)):
+                src = os.path.join(s.tmp, name + "-src.sh")
+                with open(src, "w", encoding="utf-8") as f:
+                    f.write(nokill_script(run_strace_path(), bpf))
+                as_root(tool["install"], "-o", "0", "-g", "0", "-m", "0755", src, os.path.join(top, name))
+            nokill, neither = os.path.join(top, "strace-nokill"), os.path.join(top, "strace-neither")
+            s.run("driver", 0, [r"^judge: trace with " + re.escape(nokill) + r" \(--seccomp-bpf\)",
+                                r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra + ("--require-trace",),
+                  env={"JUDGE_STRACE": nokill},
+                  label="--as-user --require-trace: an strace that does not take --kill-on-exit traces with "
+                        "--seccomp-bpf")
+            s.run("driver", 1, [r"^judge: trace with nothing \(strace " + re.escape(neither) + r" takes neither "
+                                r"--seccomp-bpf nor --kill-on-exit, one of which --require-trace needs",
+                                fail.format("driver", net + ".*a failure with --require-trace"),
+                                r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra + ("--require-trace",),
+                  env={"JUDGE_STRACE": neither},
+                  label="--as-user --require-trace: an strace that takes neither --kill-on-exit nor --seccomp-bpf is "
+                        "not used")
+            s.run("driver", 0, [r"^judge: trace with " + re.escape(neither) + r"( |$)",
+                                r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
+                  adapter=f"{py} {FAKE_ADAPTER} 1 plain", extra=extra, env={"JUDGE_STRACE": neither},
+                  label="--as-user without --require-trace: an strace that takes neither --kill-on-exit nor "
+                        "--seccomp-bpf traces")
         finally:
             subprocess.run(au.root(rm + [top]), capture_output=True, timeout=60, cwd="/")
 
@@ -1273,6 +1375,101 @@ def tracetail_units(s):
         run._STRACE.update(saved)
 
 
+def nokill_units(s):
+    """run.strace on a JUDGE_STRACE that refuses --kill-on-exit and otherwise runs the real strace (as strace 5.x
+    does): with --require-trace it is used with --seccomp-bpf and without --kill-on-exit (with the seccomp filter a
+    process strace no longer traces gets ENOSYS for every traced call), and so without it. One that also refuses
+    --seccomp-bpf: with --require-trace it is not used ("takes neither --seccomp-bpf nor --kill-on-exit, one of which
+    --require-trace needs"), without it it traces (with neither). One that drops --seccomp-bpf and runs the real strace
+    without it (its child then runs under no seccomp filter) is never used with --seccomp-bpf (strace_probe reads the
+    child's seccomp mode). The folder checks of --require-trace are switched
+    off in this process for the --require-trace calls (run._not_writable and run._links_not_writable return None): the
+    wrappers sit in this user's folder."""
+    import run
+    real = run_strace_path()
+    if real is None:
+        print("skip an strace without --kill-on-exit: strace is not installed", flush=True)
+        return
+    wrappers = {}
+    for name, bpf in (("strace-nokill.sh", True), ("strace-neither.sh", False)):
+        wrappers[bpf] = os.path.realpath(os.path.join(s.tmp, name))
+        with open(wrappers[bpf], "w", encoding="utf-8") as f:
+            f.write(nokill_script(real, bpf))
+        os.chmod(wrappers[bpf], 0o755)
+    saved, env = dict(run._STRACE), os.environ.get("JUDGE_STRACE")
+    funcs = (run._not_writable, run._links_not_writable)
+
+    def probe(wrapper, require_trace):
+        os.environ["JUDGE_STRACE"] = wrapper
+        run._STRACE.clear()
+        if require_trace:
+            run._not_writable = run._links_not_writable = lambda *a, **k: None
+        try:
+            got = run.strace(require_trace)
+        finally:
+            run._not_writable, run._links_not_writable = funcs
+        return got, run._STRACE.get("bpf"), run._STRACE.get("kill"), run.strace_why() or ""
+
+    try:
+        wrapper = wrappers[True]
+        got, bpf, kill, why = probe(wrapper, True)
+        s.unit("an strace that does not take --kill-on-exit, with --require-trace: used with --seccomp-bpf",
+               got == wrapper and bpf is True and kill is False, f"strace {got}, bpf {bpf}, kill {kill}, why {why!r}")
+        got, bpf, kill, why = probe(wrapper, False)
+        s.unit("...and without --require-trace too",
+               got == wrapper and bpf is True and kill is False, f"strace {got}, bpf {bpf}, kill {kill}, why {why!r}")
+        wrapper = wrappers[False]
+        got, bpf, kill, why = probe(wrapper, True)
+        s.unit("an strace that takes neither --kill-on-exit nor --seccomp-bpf, with --require-trace: not used",
+               got is None and why.startswith(f"strace {wrapper} takes neither --seccomp-bpf nor --kill-on-exit, one "
+                                              "of which --require-trace needs"), f"strace {got}, why {why!r}")
+        got, bpf, kill, why = probe(wrapper, False)
+        s.unit("...and without --require-trace it traces, with neither",
+               got == wrapper and bpf is False and kill is False, f"strace {got}, bpf {bpf}, kill {kill}, why {why!r}")
+        wrapper = os.path.realpath(os.path.join(s.tmp, "strace-dropbpf.sh"))
+        with open(wrapper, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\nfor w in "$@"; do\n  shift\n  [ "$w" = --seccomp-bpf ] || set -- "$@" "$w"\ndone\n'
+                    f'exec {shlex.quote(real)} "$@"\n')
+        os.chmod(wrapper, 0o755)
+        got, bpf, kill, why = probe(wrapper, False)
+        s.unit("an strace that takes --seccomp-bpf but runs its child under no seccomp filter: not used with it",
+               got == wrapper and bpf is False, f"strace {got}, bpf {bpf}, kill {kill}, why {why!r}")
+        got, bpf, kill, why = probe(wrapper, True)
+        s.unit("...and with --require-trace it is used only with --kill-on-exit",
+               (got == wrapper and bpf is False and kill is True) if strace_kills() else
+               (got is None and "takes neither --seccomp-bpf nor --kill-on-exit" in why),
+               f"strace {got}, bpf {bpf}, kill {kill}, why {why!r}")
+    finally:
+        run._not_writable, run._links_not_writable = funcs
+        if env is None:
+            os.environ.pop("JUDGE_STRACE", None)
+        else:
+            os.environ["JUDGE_STRACE"] = env
+        run._STRACE.clear()
+        run._STRACE.update(saved)
+
+
+def tracer_skeleton_unit(s):
+    """TraceTail._tracer_line's second guard (observe.strace_skeleton): with run._TRACER_MESSAGE loosened in this
+    process to any text, a line that starts with strace's path and holds a quoted string after it is still not taken
+    for strace's own message (the quoted string is a process's data), and the line check fails it."""
+    import run
+    tracer = "/usr/bin/strace"
+    saved = run._TRACER_MESSAGE
+    run._TRACER_MESSAGE = re.compile(r".+")
+    try:
+        t = run.TraceTail(os.path.join(s.tmp, "tracetail-skeleton.log"), tracer=tracer)
+        t.writer.sendall(f'{tracer}: can\'t "x"\n'.encode("latin-1"))
+        t.started()
+        t.close(wait=5)
+        s.unit("strace's path followed by a quoted string, with any message text allowed: not strace's message (the "
+               "skeleton guard), and the line check fails it",
+               t.tracer_failed is None and bool(t.tampered) and "a line that strace does not write" in t.tampered,
+               f"tampered {t.tampered!r}, failed {t.tracer_failed!r}")
+    finally:
+        run._TRACER_MESSAGE = saved
+
+
 def look_units(s):
     """run.look's stat and read (T.look; tests/test_cli_migrate.py reads the installer's world with them): a regular
     file's kind, mode and bytes, a link's target, a folder; no link is followed at the path, a file over the cap is not
@@ -1551,20 +1748,37 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
                     label="strace failed in both runs: the test fails")
         s.unit("...and no FLAKY line", "FLAKY" not in out)
         argv = s.runner("budget", extra=("--jobs", "1"))
-        argv[argv.index("--only") + 1] = "test_budget"  # test_budget1, 2 and 3, one at a time
+        argv[argv.index("--only") + 1] = "test_budget"  # test_budget0, 1, 2 and 3, one at a time
         p = subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd=s.tmp, stdin=subprocess.DEVNULL)
-        out = s.judge("three tests in which strace failed: two are rerun, the third fails as it is", p.returncode,
-                      p.stdout + p.stderr, 1,
-                      [r"^RERUN test_budget1: ", r"^RERUN test_budget2: ",
+        out = s.judge("four tests in which strace failed: one that failed another check too fails as it is, two are "
+                      "rerun, the fourth fails as it is", p.returncode, p.stdout + p.stderr, 1,
+                      [fail.format("budget0", "a failing check$"),
+                       fail.format("budget0", net + r".*strace failed while the editor ran"),
+                       r"^judge: test_budget0 is not run again after strace failed: another check of it failed \(a "
+                       r"failing check\)$",
+                       r"^RERUN test_budget1: ", r"^RERUN test_budget2: ",
                        r"^judge: test_budget3 is not run again: 2 tests of this run were rerun already",
                        fail.format("budget3", net + r".*strace failed while the editor ran"),
-                       r"^JUDGE: 6/9 passed( UNPROTECTED|$)"])
-        s.unit("...and the third is not rerun", "RERUN test_budget3" not in out and "try 1: FAIL  test_budget3" not in out)
+                       r"^JUDGE: 7/12 passed( UNPROTECTED|$)"])
+        s.unit("...and the one that failed another check is not rerun (and uses none of the run's reruns), nor is the "
+               "fourth", not re.search(r"^(RERUN|FLAKY) test_budget[03]|^  try 1: \S+ +test_budget[03]", out, re.M),
+               out[-600:])
         bad = fail.format("rerunbad", "the result pipe carries only the test's records  -- line {}: ")
         out = s.run("rerunbad", 1, [bad.format(3), bad.format(4), bad.format(5), bad.format(6),
                                     r"^JUDGE: 2/6 passed( UNPROTECTED|$)"],
                     label="a rerun marker anywhere but on a failed download check of the runner's: not a record")
         s.unit("...and no rerun", "RERUN" not in out)
+        # The runner appends its verdict to the test's log only through the file it made: a link the test put in its
+        # place is not followed.
+        target = os.path.join(s.tmp, "loglink-target.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("unchanged\n")
+        s.run("loglink", 0, [r"^PASS  test_loglink: a passing check",
+                             r"^judge: note: could not add the verdict to \S+/test_loglink/test\.log: "],
+              label="a test that puts a link in place of its test.log: the runner's verdict does not go through it")
+        with open(target, encoding="utf-8") as f:
+            got = f.read()
+        s.unit("...and the link's target is unchanged", got == "unchanged\n", repr(got[:300]))
         s.run("leak", 1, [fail.format("leak", "nothing left running after the test  -- \\d+ sleep 300")])
         s.still_running("leak", s.pids_in("leak", "leak.pid"))
         if sys.platform.startswith("linux"):
@@ -1698,6 +1912,36 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
                                 r"^JUDGE: 4/4 passed( UNPROTECTED|$)"],
                   adapter=f"{py} {FAKE_ADAPTER} 1 plain", env={"JUDGE_STRACE": link},
                   label="a JUDGE_STRACE symbolic link without --require-trace: its real path runs")
+            # strace failing by itself as strace 6.8 does (T.finish -> run.strace_failed on the tracer's real exit
+            # code and path): a JUDGE_STRACE that writes strace's own PTRACE_LISTEN message after the trace and exits
+            # 1 in the first run gets the test rerun, and the rerun passes; one that exits 0, or whose message names
+            # another path, fails the download check with no rerun. Only an strace that takes --kill-on-exit allows
+            # a rerun.
+            if strace_kills():
+                eio = re.escape(LISTEN_EIO)
+                out = s.run("driver", 0, [r"^  try 1: FAIL  test_driver: " + net + r".*strace failed while the editor "
+                                          r"ran \(" + eio, r"^RERUN test_driver: strace failed while the editor ran \("
+                                          + eio + r"\)", r"^FLAKY test_driver \(first run: strace failed while the "
+                                          r"editor ran: " + eio + r"; rerun passed\)$",
+                                          r"^JUDGE: 4/4 passed, 1 flaky \(strace\)( UNPROTECTED|$)"],
+                            adapter=f"{py} {FAKE_ADAPTER} 1 plain",
+                            env={"JUDGE_STRACE": s.fault_strace("strace-eio1", run_strace_path())},
+                            label="strace fails by itself in the first run (its message, exit 1): the test runs once "
+                                  "more and the rerun passes (FLAKY)")
+                for label, wrapper, why in (
+                        ("exits 0", s.fault_strace("strace-eio0", run_strace_path(), rc=0),
+                         r"strace failed while the editor ran \(" + eio),
+                        ("names another path", s.fault_strace("strace-eiox", run_strace_path(), said="/tmp/strace"),
+                         r"the trace holds a line that strace does not write")):
+                    out = s.run("driver", 1, [fail.format("driver", net + ".*" + why),
+                                              r"^JUDGE: 3/4 passed( UNPROTECTED|$)"],
+                                adapter=f"{py} {FAKE_ADAPTER} 1 plain", env={"JUDGE_STRACE": wrapper},
+                                label=f"strace's message after the trace from a JUDGE_STRACE that {label}: the download "
+                                      "check fails")
+                    s.unit("...and the test is not run again", not re.search(r"^(RERUN|FLAKY) ", out, re.M), out[-600:])
+            else:
+                print("skip strace failing by itself in a test run: the strace here does not take --kill-on-exit "
+                      "(strace 5.x), and only one that does allows a rerun", flush=True)
         else:
             print(f"{'FAIL' if require_trace else 'skip'} the download tripwire cases: strace is not installed"
                   + (" (--require-trace)" if require_trace else ""), flush=True)
@@ -1728,6 +1972,8 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
         read_cap_units(s, observe)
         look_units(s)
         tracetail_units(s)
+        tracer_skeleton_unit(s)
+        nokill_units(s)
         real = ('1234 connect(3<UDP:[5]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("192.0.2.1")}, '
                 '16) = 0')
         good = [real, '7 openat(AT_FDCWD</a>, "/dev/null", O_RDONLY) = 3</dev/null<char 1:3>>',
