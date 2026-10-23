@@ -154,16 +154,27 @@ def wait_job(d, job, timeout=600):
 
 
 # ---------------------------------------------------------------- a bake that was stopped must stay stopped
-def bake_time(fn):
-    """(seconds, None) that fn() takes: a clean bake, made with wait true, of another span of the same media and the
-    same length as a bake the test then cancels or refuses: how long a full bake of it takes. (None, why) when fn()
-    failed. The span differs so that an editor that keeps its copies cannot hand the later bake a copy of this one."""
+def bake_time(d, ref, fn):
+    """(seconds, None) that fn() takes: a clean bake, made with wait true, of the clip `ref`, another span of the same
+    media and the same length as a bake the test then cancels or refuses: how long a full bake of it takes. The span
+    differs so that an editor that keeps its copies cannot hand the later bake a copy of this one. The time counts
+    only when the bake did its work: when fn() answered, `ref` plays an asset that was not in the State before and
+    keeps its place and timeline length (an answer that came before the copy was made would set the hold, hold(), to
+    nearly nothing). (None, why) when fn() failed or placed no new copy."""
+    st0 = d.get_state()
     t0 = time.monotonic()
     try:
         fn()
     except drv.JudgeError as e:
         return None, f"the clean bake failed: {type(e).__name__}: {e}"
-    return time.monotonic() - t0, None
+    took = time.monotonic() - t0
+    st1 = d.get_state()
+    c0, c1 = clip(st0, ref), clip(st1, ref)
+    if c0 is None or c1 is None or c1.get("asset") not in new_assets(st0, st1) \
+            or (c1.get("start_frame"), c1.get("length_frames")) != (c0.get("start_frame"), c0.get("length_frames")):
+        return None, (f"the clean bake placed no new copy when it answered (after {took:.1f} s): the clip before "
+                      f"{c0}, after {c1}")
+    return took, None
 
 
 def hold(full):

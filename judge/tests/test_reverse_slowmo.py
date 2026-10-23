@@ -16,17 +16,19 @@ fx-base.mp4 (0xE020E0, under the cutout), move.mp4 (moving 320x180 30 fps, 3 s, 
 and long.mp4 (1920x1080, 20 s), whose bakes are canceled while they run: the second 10 s of long.mp4 reversed (about
 4 s on v0.2.0) and the first 3 s of a.mp4 in optical flow at 0.5x (about 25 s). The canvas is 180x90 at 30 fps.
 
-A cancel is judged on what follows it, not on its answer (which may come before the work has stopped): the job must
-end canceled with the State as before and no new media file, and stay so: the clip is left in place for one and a
-half times a full bake of the same media, and 2 s more, after the cancel answered, and then the job must not have
-turned done, the State must still be as before and no media file may have appeared (a bake that went on and placed or
-kept its copy fails). How long a full bake takes is measured just before, on a clean bake of the other half of the
-same file (the first 10 s of long.mp4; the second 3 s of a.mp4 at 0.5x, which take longer in optical flow than the
-first, about 38 s on v0.2.0): the same length, another span, so a copy of it cannot be handed to the canceled bake. A bake that had already ended done when the judge was about to cancel it could not be judged,
-and its checks are recorded as not applicable (run.py --strict fails them).
+A cancel is judged on what follows it, not on its answer (which may come before the work has stopped): the job must end
+canceled with the State as before and no new media file, and stay so: the clip is left in place for one and a half times
+a full bake of the same media, and 2 s more, after the cancel answered, and then the job must not have turned done, the
+State must still be as before and no media file may have appeared (a bake that went on and placed or kept its copy
+fails). How long a full bake takes is measured just before, on a clean bake of the other half of the same file (the
+first 10 s of long.mp4; the second 3 s of a.mp4 at 0.5x, which take longer in optical flow than the first, about 38 s on
+v0.2.0): the same length, another span, so a copy of it cannot be handed to the canceled bake; the time counts only when
+that bake placed a new copy of the same length (edits.bake_time), else the check fails. A bake that had already ended
+done when the judge was about to cancel it could not be judged, and its checks are recorded as not applicable (run.py
+--strict fails them).
 
 A new bake is seen in get_state (the clip plays an asset that was not there before); what it holds is read from an
-export, never from the editor's own files; a bake that leaves something behind is seen as a new media file in the
+export, never from the editor's own files; a bake that leaves media behind is seen as a new media file in the
 test's folder (edits.left_media). A repeated frame is one whose mean grey difference from the one before is under
 0.05 (on 160x90 grey pictures of the export); the plain 0.5x control repeats every other frame.
 
@@ -85,11 +87,11 @@ def export_path(t, d, name):
 
 
 def measured(d, place, bake):
-    """(seconds, why) that a clean bake takes (edits.bake_time): bake(clip) (wait true) of the clip place() puts on the
-    timeline, which is then removed."""
+    """(seconds, why) that a clean bake takes (edits.bake_time: only when it placed a new copy of the same length):
+    bake(clip) (wait true) of the clip place() puts on the timeline, which is then removed."""
     ref = place()
     try:
-        return E.bake_time(lambda: bake(ref))
+        return E.bake_time(d, ref, lambda: bake(ref))
     finally:
         if E.clip(d.get_state(), ref) is not None:
             d.remove_clip(ref)
@@ -229,8 +231,8 @@ def skew_and_alpha(t, d, m, v1):
             n = observe.decode(out)["video_frames"] if out else 0
         except observe.Unmeasurable as e:
             top, n = str(e), 0
-        t.check(f"smooth slow motion ({mode}) of a cutout keeps its transparency: the track below shows in its top half "
-                f"over all its 120 frames",
+        t.check(f"smooth slow motion ({mode}) of a cutout keeps its transparency: the track below shows "
+                f"in its top half over all its 120 frames",
                 isinstance(top, list) and all(observe.colour_is(c, BASE) for c in top) and n == 120, (top, n))
         d.undo()
     E.clear(d)

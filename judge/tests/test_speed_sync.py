@@ -144,6 +144,8 @@ SAME_AS_1X = -0.007
 
 
 TAIL = 0.025   # the original's bound for an L-cut tail (after a constant speed or a ramp) and for the next sound
+# A picture and sound both one source frame ahead reach this bound exactly; the checks at a constant speed catch that
+# shift (judge/PORTING.md, section 5, an L-cut tail by ear).
 
 
 def head_extra(speed):
@@ -210,6 +212,8 @@ def lcut(t, d, idx, label, op, s_start, s_end):
         probs += E.speed_rule_problems(frames, a)   # a whole clip: exactly the frame playing at each frame's middle
     # The first frame's middle plays at most s_start / 2 source frames into the range (flash_in slows from 8x, so
     # less there: 33 on v0.2.0), so below 2x it shows the in point itself, and at 2x either frame of the tie.
+    # A picture and sound one source frame ahead stay inside flash_in's allowance (34); the checks at a constant speed
+    # catch that shift (judge/PORTING.md, section 5, an L-cut tail by ear).
     first = 30 + math.floor(s_start / 2)
     t.check(names[0], len(pic) == end_a and not probs and pic[0] <= first and pic[-1] >= 117,
             f"{len(pic)} frames, first {pic[:3]} (at most {first}), last {pic[-3:]}; {E.short(probs)}")

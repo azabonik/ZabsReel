@@ -15,7 +15,8 @@ judged on what follows its error, not on the error alone (which may come before 
 timeline would take the copy again (the track unlocked, the spot free), the clips are left in place for one and a half
 times a full bake of the same media, and 2 s more, and then the State must still be as before and no media file may
 have appeared. How long a full bake takes is measured first, on a clean reverse of another 10 s of long.mp4 (from 5 s:
-another span, so a copy of it cannot be handed to the later bakes).
+another span, so a copy of it cannot be handed to the later bakes); the time counts only when that reverse placed a new
+copy of the same length (edits.bake_time), else the checks that wait on it fail.
 
 The layout (canvas 180x90 at 30 fps): v0 "V1" A [0,60) | B [60,120); a0 "A1" A's sound Aa [0,60), linked to A;
 v1 "Titles" (locked) T [90,120) and the card K [120,150), butted to it; a1 "Music" (locked) M [0,150). v0 is muted
@@ -263,12 +264,13 @@ def expected(st, asset, n):
 
 def measured(d, hd, a0):
     """(seconds, why) that a clean reverse of 10 s of long.mp4 (from 5 s) with its linked sound takes
-    (edits.bake_time): how long a full bake of the later bakes' media takes. Its clips are removed after it."""
+    (edits.bake_time: only when the picture then plays a new copy of the same length): how long a full bake of the
+    later bakes' media takes. Its clips are removed after it."""
     X = d.place_clip(hd, "v0", 2000, 150, 450)
     Xa = d.place_clip(hd, a0, 2000, 150, 450)
     d.link_clips([X, Xa])
     try:
-        return E.bake_time(lambda: d.reverse_clip(X))
+        return E.bake_time(d, X, lambda: d.reverse_clip(X))
     finally:
         for c in (X, Xa):
             if E.clip(d.get_state(), c) is not None:
