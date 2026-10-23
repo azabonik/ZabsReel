@@ -58,7 +58,11 @@
  *                            rotate the key or drop an entry; the stale and
  *                            unread states; no laundering; Keep and Remove;
  *                            HostTrust publishes approved servers only, and
- *                            picks up changes (lazy reload, watch, 1 s retry).
+ *                            picks up changes (lazy reload, watch, 1 s retry);
+ *                            a revoke counts on the next check of that server
+ *                            (the gate's own included), with no watch and no
+ *                            re-check; a store that can't be read then fails
+ *                            closed as on a miss.
  *  13. the trust folder    — isTrustPath's quick form (Windows streams,
  *                            trailing dots, 8.3 names, case); gatedfs content
  *                            calls and G7 refuse it in every mode, metadata
@@ -92,7 +96,9 @@
  *                            enforced, the asset is offline and pending; the
  *                            autosave of a project on such a server goes to
  *                            the recovery folder; timeline_summary says why a
- *                            clip is offline (not found; the unread state).
+ *                            clip is offline (not found; the unread state);
+ *                            right after a revoke, with no re-read yet, G4, G5
+ *                            and G6 refuse the server's online media.
  *  15. the args builders   — every ffmpeg input gets FFmpeg's own format
  *                            allowlist (MEDIA_DEMUXERS; concat plus the list
  *                            for ZedMix's -f concat lists; none for its
@@ -1602,8 +1608,8 @@ async function main() {
     check(landed && ht.isApproved(E3) && !ht.isOutside(E3),
       `a Keep written while a re-read reads the store counts on the next check (lazy reload; no watch, no re-check) (${landed}; ${JSON.stringify(ht.list().outside)})`);
     // The mirror: a revoke (nas taken off the list) that lands during a re-read counts on the next miss
-    // of another server, before the watch sees it. This checks the miss path only: a hit on nas itself
-    // returns before the store is compared (isApproved), so the revoked host is checked after the miss.
+    // of another server, before the watch sees it. This checks the miss path (the next block checks a
+    // hit on the revoked server itself), so the revoked host is checked after the miss.
     writeFixture(next, JSON.stringify({ version: 2, servers: readList(d).servers.filter((s) => s.host !== "nas") }));
     let revoked = false;
     fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
@@ -1626,6 +1632,91 @@ async function main() {
     check(revoked && nasAfterReload && !missUnlisted && !ht.isApproved("nas") && ht.isApproved(E3),
       `a revoke written while a re-read reads the store counts on the next miss of another server (miss path; no watch, no re-check) (${revoked}; ${nasAfterReload}; ${names(ht.list().approved)})`);
     ht.close();
+    gfs.setAllowedNetworkHosts([]);
+  }
+  {
+    // A revoke counts on the very next check of the revoked server itself, already allowed and checked
+    // (a hit), in a core with no watch (a simulated platform has none, as a watch on WSL/9p or a share
+    // may never fire) that nobody asks to re-check: made through the app's route, by another process,
+    // by a hand edit in place, or by a new key. Also when the next check is a second core's, or the
+    // gate's own (a path on nas opened before any trust check, as a background job's FFmpeg call is).
+    // MUTATION: return on a hit in HostTrust.isApproved before the store is compared → every row here
+    // finds nas still allowed. Drop the store check on a hit in gatedfs → the gate row opens the path.
+    const fresh = async () => {
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      await approveHost(d, "other", "prompt");
+      const ht = new HostTrust(d, { platform: process.platform }).start();
+      const cached = ht.isApproved("nas") && ht.isApproved("nas") && gfs.allowedNetworkHosts().has("nas");
+      return { d, ht, cached };
+    };
+    const revokes: [string, (d: string) => Promise<unknown>][] = [
+      ["through the app's route (revokeHost)", (d) => revokeHost(d, "nas")],
+      ["by another process (revokeHost in trust-child.ts)", (d) => child(["revoke", d, "nas"])],
+      ["by a hand edit of hosts.json in place", async (d) => writeList(d, readList(d).servers.filter((s) => s.host !== "nas"))],
+      ["by a new hosts.key (no stamp is valid any more)", async (d) => writeFixture(keyFile(d), `${randomBytes(32).toString("base64url")}\n`)],
+    ];
+    for (const [how, revoke] of revokes) {
+      const { d, ht, cached } = await fresh();
+      await revoke(d);
+      const refused = !ht.isApproved("nas");
+      check(cached && refused && !gfs.allowedNetworkHosts().has("nas"),
+        `a revoke ${how} counts on the next check of nas itself (no watch, no re-check) (cached ${cached}; approved ${names(ht.list().approved)}; published ${allowed()})`);
+      ht.close();
+    }
+    {
+      // Two cores on one data folder: the UI host that revoked re-checks its own core only.
+      const { d, ht, cached } = await fresh();
+      const second = new HostTrust(d, { platform: process.platform }).start();
+      const cached2 = second.isApproved("nas");
+      await revokeHost(d, "nas");
+      ht.reload();
+      check(cached && cached2 && !second.isApproved("nas") && second.isApproved("other"),
+        `a second core on the same data folder refuses nas on its next check too (approved ${names(second.list().approved)})`);
+      second.close();
+      ht.close();
+    }
+    {
+      const { d, ht, cached } = await fresh();
+      await revokeHost(d, "nas");
+      const e = await thrown(() => gfs.assertReachable("//nas/s/a.mp4", "smoke"));
+      check(cached && e instanceof gfs.BlockedPathError && e.host === "nas" && !ht.list().approved.some((a) => a.host === "nas") && !gfs.allowedNetworkHosts().has("nas"),
+        `the gate's own check of a path on nas (no trust check first) re-reads the store and refuses it (${e?.message.slice(0, 110)}; published ${allowed()})`);
+      ht.close();
+    }
+    // Fail closed: the store changed and can't be read as it was. A missing list, a corrupt list or a
+    // missing key leaves no server approved, as on a miss: nas is refused on its next check.
+    const spoils: [string, (d: string) => void][] = [
+      ["hosts.json deleted", (d) => unlinkSync(listFile(d))],
+      ["hosts.json corrupt", (d) => writeFixture(listFile(d), "{ not a store file")],
+      ["hosts.key deleted", (d) => unlinkSync(keyFile(d))],
+    ];
+    for (const [how, spoil] of spoils) {
+      const { d, ht, cached } = await fresh();
+      spoil(d);
+      const logs = await logsOf(() => void ht.isApproved("nas"));
+      check(cached && !ht.isApproved("nas") && !ht.isApproved("other") && !gfs.allowedNetworkHosts().has("nas"),
+        `${how}: nas (and every other server) is refused on its next check (approved ${names(ht.list().approved)}; ${JSON.stringify(logs)})`);
+      ht.close();
+    }
+    {
+      // A revoke, then hosts.json can't be read (EBUSY: an antivirus scanner holds the new file): the last
+      // good copy is used (stale) and nas stays allowed, as on a miss, until the first check a second later.
+      const d = freshData();
+      await approveHost(d, "nas", "prompt");
+      const inject: ReadErrorInjection = {};
+      const ht = new HostTrust(d, { platform: process.platform, readError: inject }).start();
+      const cached = ht.isApproved("nas");
+      await revokeHost(d, "nas");
+      inject["hosts.json"] = "EBUSY";
+      const during = ht.isApproved("nas");
+      const stale = ht.list().stale;
+      delete inject["hosts.json"];
+      await sleep(1_050);
+      check(cached && during && stale && !ht.isApproved("nas") && !ht.list().stale,
+        `a revoke, then hosts.json unreadable at the next check: nas stays allowed from the last good copy (stale ${stale}), as on a miss, and is refused on the first check a second later`);
+      ht.close();
+    }
     gfs.setAllowedNetworkHosts([]);
   }
 
@@ -2265,6 +2356,65 @@ async function main() {
       check(engine.getProject().assets[0].awaitingServer === undefined && after.unread.length === 0 && after.pending.some((x) => x.host === "zr-evil-3.invalid" && x.origins.includes("outside")),
         `the read works again: the retry timer alone brings the asset online, and only now is zr-evil-3.invalid pending as outside (${Date.now() - t0} ms; ${JSON.stringify(after)})`);
     } finally {
+      ht.close();
+      (engine as unknown as { trust: HostTrust }).trust = realTrust;
+      realTrust.start();
+    }
+  }
+  if (enforced) {
+    // A revoke with no re-read yet (no watch, no re-check): the next check of the revoked server refuses
+    // media of it that was online. G4 (generate_thumbnail), G5 (render_preview) and G6 (/file) each check
+    // the server of the media they would open: media_offline naming it (or 403) before any job starts,
+    // the asset waits for it, and no FFmpeg call names it. Each starts online again (approve, re-check, load).
+    // MUTATION: check only the server an asset waits for in requireMedia → the G4 row gets the gate's
+    // ERR_PATH_BLOCKED instead of media_offline. The same in assertTimelineOnline → the G5 row starts a
+    // preview job (the gate refuses its FFmpeg call). Both, and drop the gate's store check → both run FFmpeg.
+    const OK6 = "zr-ok-6.invalid";
+    const d = freshData();
+    const realTrust = engine.trust;
+    const ht = new HostTrust(d, { platform: process.platform, onChange: () => engine.onTrustChanged() });
+    (engine as unknown as { trust: HostTrust }).trust = ht;
+    const eng = engine as unknown as Record<string, unknown>;
+    eng.proxyInBackground = () => {};
+    eng.probeUnrecordedColors = async () => {};
+    try {
+      ht.start();
+      const f = join(root, "revoke6.aive");
+      writeFixture(f, JSON.stringify(project(`//${OK6}/s/a.mp4`)));
+      const named = () => spawned.filter((a) => JSON.stringify(a).includes(OK6)).length;
+      const jobIds = () => new Set(engine.jobs.list().map((j) => j.id));
+      /** media_offline naming OK6, or what the call did instead. */
+      const offline = async (fn: () => unknown) => {
+        const e = await thrown(fn);
+        const ok = e instanceof RpcError && e.code === "media_offline" && e.message.includes(`\\\\${OK6}`);
+        return { ok, got: e ? `${(e as RpcError).code ?? e.name}: ${e.message.slice(0, 120)}` : "(no error)" };
+      };
+      const calls: [string, () => Promise<{ ok: boolean; got: string }>][] = [
+        ["generate_thumbnail (G4)", () => offline(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }))],
+        ["render_preview (G5)", () => offline(() => dispatch(engine, "render_preview", {}))],
+        ["/file of its path (G6)", async () => {
+          const r = engine.servablePath(`//${OK6}/s/a.mp4`);
+          return { ok: "status" in r && r.status === 403, got: JSON.stringify(r) };
+        }],
+      ];
+      for (const [what, call] of calls) {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        await engine.load(f);
+        const online = engine.getProject().assets[0].awaitingServer === undefined;
+        await revokeHost(d, OK6);
+        const notReread = engine.mediaServers().approved.some((x) => x.host === OK6);
+        const before = named();
+        const jobsBefore = jobIds();
+        const r = await call();
+        const waits = engine.getProject().assets[0].awaitingServer;
+        const started = [...jobIds()].filter((id) => !jobsBefore.has(id)).length;
+        check(online && notReread && r.ok && waits === OK6 && named() === before && started === 0,
+          `${what} right after a revoke (no re-read yet): refused (media_offline naming ${OK6}, or 403) before any job starts; the asset waits for it; no FFmpeg call names it (online ${online}, not re-read ${notReread}; ${r.got}; waits ${waits}; jobs started ${started}; FFmpeg calls ${before} → ${named()})`);
+      }
+    } finally {
+      delete eng.proxyInBackground;
+      delete eng.probeUnrecordedColors;
       ht.close();
       (engine as unknown as { trust: HostTrust }).trust = realTrust;
       realTrust.start();

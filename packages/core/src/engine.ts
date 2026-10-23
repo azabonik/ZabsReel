@@ -867,7 +867,8 @@ export class EditorEngine extends EventEmitter {
   /**
    * True when `p` is on a network computer the user has not allowed (G6:
    * /file, /frames and /peaks answer "waiting for approval in the app"; P13;
-   * P14). Log mode only logs. No I/O.
+   * P14). Log mode only logs. Nothing opens `p`; for a network `p` the check
+   * stats the approval store (HostTrust.isApproved).
    */
   awaitsApproval(p: string): boolean {
     const c = classifyPath(p);
@@ -1122,13 +1123,22 @@ export class EditorEngine extends EventEmitter {
     return `waiting for the user to allow ${at}`;
   }
 
+  /** The network computers an asset's own files are on (its path and cutout colour path: what G3 marks it for). */
+  private assetServers(asset: MediaAsset): string[] {
+    return [asset.path, asset.cutout?.colorPath].flatMap((p) => {
+      const c = p ? classifyPath(p) : undefined;
+      return c?.kind === "network" ? [c.host] : [];
+    });
+  }
+
   /**
-   * Check the server an asset waits for: when the store changed since the
-   * asset was marked (an approval with no re-check yet), the check re-reads
-   * it (lazy reload), which marks the media again (onTrustChanged).
+   * Check the servers of an asset's files, online or waiting: when the store
+   * changed since the asset was marked (an approval, or a revoke, with no
+   * re-check yet), the check re-reads it (lazy reload), which marks the media
+   * again (onTrustChanged).
    */
   private recheckWaiting(asset: MediaAsset): void {
-    if (asset.awaitingServer) this.trust.isAllowed(asset.awaitingServer);
+    for (const h of new Set([asset.awaitingServer, ...this.assetServers(asset)])) if (h) this.trust.isAllowed(h);
   }
 
   /** G4: `asset`, or a MediaOfflineError when its file may not or can't be opened (`isOffline`). */
@@ -1167,8 +1177,8 @@ export class EditorEngine extends EventEmitter {
    * never changes. A `missing` asset keeps today's behaviour (FFmpeg fails on it).
    */
   private assertTimelineOnline(): void {
-    // As requireMedia (recheckWaiting), once per server: one allowed since the media was marked is picked up first.
-    for (const h of new Set(this.project.assets.map((a) => a.awaitingServer))) if (h) this.trust.isAllowed(h);
+    // As requireMedia (recheckWaiting), once per server: one allowed or revoked since the media was marked is picked up first.
+    for (const h of new Set(this.project.assets.flatMap((a) => [a.awaitingServer, ...this.assetServers(a)]))) if (h) this.trust.isAllowed(h);
     const waiting = new Map<string, string[]>();
     const unchecked = new Map<string, { code: string; host?: string }>();
     const refused: string[] = [];

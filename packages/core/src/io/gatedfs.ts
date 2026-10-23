@@ -15,7 +15,9 @@
  *    refuses them) are always refused.
  *  - A network path whose server is not in {@link setAllowedNetworkHosts}:
  *    while {@link NETWORK_GATE} is "log", one line per server says what would
- *    be blocked and the call goes on; when enforced, the call is refused.
+ *    be blocked and the call goes on; when enforced, the call is refused. A
+ *    server in it is checked against the approval store first, so one
+ *    revoked on disk is refused on its next open.
  *  - A call that reads or changes content (not stat, lstat, readdir, access,
  *    existsSync, realpath, watch) refuses a path in the private trust folder
  *    ({@link setTrustDir}, {@link isTrustPath}) in every mode: only
@@ -47,13 +49,23 @@ export function networkGateEnforced(): boolean {
 let allowed: ReadonlySet<string> = new Set();
 /** False until the first {@link setAllowedNetworkHosts}: {@link bootstrap} allows a path on any server until then. */
 let hostsSet = false;
+/** Asked before a path on an allowed server is opened (see {@link setAllowedNetworkHosts}). */
+let recheck: ((host: string) => void) | null = null;
+/** A recheck is running: a path it opens is gated by the set as it is. */
+let rechecking = false;
 /** Servers already named in a log line. */
 const logged = new Set<string>();
 
-/** Replace the set of servers (host keys from unc.ts) whose paths may be opened. */
-export function setAllowedNetworkHosts(keys: Iterable<string>): void {
+/**
+ * Replace the set of servers (host keys from unc.ts) whose paths may be
+ * opened. `check` (hosttrust.ts passes one) runs before a path on one of
+ * them is opened and may replace the set first, so a server revoked on disk
+ * is refused on its next open (G8 is the check too, not only HostTrust's).
+ */
+export function setAllowedNetworkHosts(keys: Iterable<string>, check: ((host: string) => void) | null = null): void {
   allowed = new Set(keys);
   hostsSet = true;
+  recheck = check;
 }
 
 /** The servers {@link setAllowedNetworkHosts} last allowed. */
@@ -238,6 +250,14 @@ function blocked(p: unknown, what: string, bootstrapping = false, ctx: PathConte
   if (a.c.kind === "refused") return new BlockedPathError(`Refusing to open ${show(a.text)}: ${a.c.reason}`, a.text);
   if (bootstrapping && !hostsSet) return null;
   const { host, display } = a.c;
+  if (allowed.has(host) && recheck && !rechecking) {
+    rechecking = true;
+    try {
+      recheck(host);
+    } finally {
+      rechecking = false;
+    }
+  }
   if (allowed.has(host)) return null;
   if (!logged.has(host)) {
     logged.add(host);
