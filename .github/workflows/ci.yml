@@ -8,7 +8,9 @@ on:
 
 jobs:
   build-and-smoke:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to a new Ubuntu release on its own schedule, and this
+    # job is a required check on main. Moving to a new release is a deliberate PR (the FFmpeg matrix pins too).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
