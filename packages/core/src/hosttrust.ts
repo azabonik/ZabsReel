@@ -198,7 +198,7 @@ export class HostTrust {
   private unread: TrustFile[] = [];
   private stale = false;
   private lastRead = 0;
-  /** Size, mtime and file id of the two store files at the last read. */
+  /** Size, mtime and file id of the two store files, taken just before the last read. */
   private sig = "";
   private retry: NodeJS.Timeout | null = null;
   private watcher: ReturnType<typeof watch> | null = null;
@@ -245,16 +245,23 @@ export class HostTrust {
     this.retry = this.debounce = this.watcher = null;
   }
 
-  /** Re-read the store (stamps checked) and publish the approved servers. */
+  /**
+   * Re-read the store (stamps checked) and publish the approved servers. The
+   * signature is taken before the read: a write that lands during the read
+   * then differs from it, so the next miss reads again. Taken after, it would
+   * match the new file while the read holds the old one, and no miss would
+   * read again until the watch did.
+   */
   reload(): void {
     const before = this.state();
+    const sig = this.signature();
     const r = readTrustedHosts(this.dataDir, { readError: this.opts.readError });
     this.approved = new Map(r.approved.map((a) => [a.host, a]));
     this.outside = r.outside.map((o) => o.host);
     this.unread = r.unread;
     this.stale = r.stale;
     this.lastRead = Date.now();
-    this.sig = this.signature();
+    this.sig = sig;
     setAllowedNetworkHosts(this.dataFolderHost ? [...this.approved.keys(), this.dataFolderHost] : this.approved.keys());
     if (this.unread.length > 0 && !this.retry) {
       this.retry = setInterval(() => this.reload(), 1_000);

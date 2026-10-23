@@ -133,7 +133,7 @@
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -1334,7 +1334,9 @@ async function main() {
   // 1 s retry timer → the unread rows arm no timer and are still unread after
   // 10 s; arm it at another delay → the "every 1 s" rows fail. Ignore
   // onlyIfOutside → the remove-after-keep row removes the host. Drop the lazy
-  // reload or the watch → their HostTrust rows fail. Keep a missing or corrupt
+  // reload or the watch → their HostTrust rows fail. Take the store's
+  // signature after the read in HostTrust.reload → the Keep-during-a-re-read
+  // row finds zr-evil-3.invalid still outside. Keep a missing or corrupt
   // key (or list) as the last good copy → the missing/corrupt-then-EBUSY rows
   // call nas outside (or give "allow") instead of unread.
   console.log("12. stamps: outside entries, the key, read errors, the unread state, HostTrust...");
@@ -1571,6 +1573,58 @@ async function main() {
     const t0 = Date.now();
     while (Date.now() - t0 < 2_000 && !gfs.allowedNetworkHosts().has("zr-evil-4.invalid")) await sleep(50);
     check(gfs.allowedNetworkHosts().has("zr-evil-4.invalid"), `fs.watch on the trust folder picks up a write with no check (${Date.now() - t0} ms)`);
+    // A write that lands while a re-read is reading the store (a UI host's Keep during the watch's re-read
+    // of an earlier write) counts on the next check, before the watch sees it: the next version of the
+    // list is renamed into place right after the re-read's read of hosts.json.
+    const next = join(d, "next.json");
+    const key = Buffer.from(readFileSync(keyFile(d), "utf8").trim(), "base64url");
+    const kept3 = readList(d).servers.filter((s) => s.host !== E3);
+    const added3 = new Date().toISOString();
+    writeFixture(next, JSON.stringify({ version: 2, servers: [...kept3, { host: E3, via: "prompt", added: added3, stamp: stampWith(key, E3, "prompt", added3) }] }));
+    const fsMod = require("node:fs") as Record<string, unknown>;
+    const realRead = fsMod.readFileSync as (...a: unknown[]) => unknown;
+    let landed = false;
+    fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
+      const bytes = realRead.apply(this, a);
+      if (!landed && a[0] === listFile(d)) {
+        landed = true;
+        renameSync(next, listFile(d));
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      ht.reload();
+    } finally {
+      fsMod.readFileSync = realRead;
+      syncBuiltinESMExports();
+    }
+    check(landed && ht.isApproved(E3) && !ht.isOutside(E3),
+      `a Keep written while a re-read reads the store counts on the next check (lazy reload; no watch, no re-check) (${landed}; ${JSON.stringify(ht.list().outside)})`);
+    // The mirror: a revoke (nas taken off the list) that lands during a re-read counts on the next miss
+    // of another server, before the watch sees it. This checks the miss path only: a hit on nas itself
+    // returns before the store is compared (isApproved), so the revoked host is checked after the miss.
+    writeFixture(next, JSON.stringify({ version: 2, servers: readList(d).servers.filter((s) => s.host !== "nas") }));
+    let revoked = false;
+    fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
+      const bytes = realRead.apply(this, a);
+      if (!revoked && a[0] === listFile(d)) {
+        revoked = true;
+        renameSync(next, listFile(d));
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      ht.reload();
+    } finally {
+      fsMod.readFileSync = realRead;
+      syncBuiltinESMExports();
+    }
+    const nasAfterReload = ht.list().approved.some((a) => a.host === "nas");
+    const missUnlisted = ht.isApproved("zr-unlisted.invalid");
+    check(revoked && nasAfterReload && !missUnlisted && !ht.isApproved("nas") && ht.isApproved(E3),
+      `a revoke written while a re-read reads the store counts on the next miss of another server (miss path; no watch, no re-check) (${revoked}; ${nasAfterReload}; ${names(ht.list().approved)})`);
     ht.close();
     gfs.setAllowedNetworkHosts([]);
   }
