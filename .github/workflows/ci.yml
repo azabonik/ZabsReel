@@ -63,8 +63,34 @@ jobs:
 
       # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
       # strace: smoke-unc row 16 traces FFmpeg on files that name a test server.
+      # The .deb files apt downloads are kept between runs (scripts/ci/apt-install.sh, APT_DEB_DIR): on a runner whose
+      # mirror was throttled the install took 16-34 min. The key names the package list, the runner's OS and its image
+      # version; a new image (weekly) restores the previous image's files and saves its own set. apt does not check the
+      # hash of a cached file, so only jobs that already run this PR's code with sudo use the cache (not judge.yml).
+      - name: apt download cache key
+        id: aptkey
+        run: |
+          pk=$(printf '%s' 'ffmpeg strace --no-install-recommends' | sha256sum | cut -c1-12)
+          echo "prefix=apt-debs-$pk-$ImageOS-" >> "$GITHUB_OUTPUT"
+          echo "key=apt-debs-$pk-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: apt downloads from the cache
+        id: aptcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ steps.aptkey.outputs.key }}
+          restore-keys: ${{ steps.aptkey.outputs.prefix }}
       - name: Install FFmpeg
+        env:
+          APT_DEB_DIR: ${{ runner.temp }}/apt-debs
         run: bash scripts/ci/apt-install.sh --no-install-recommends ffmpeg strace
+      # Saved right after the install, not at the end of the job: a failing suite must not leave the cache empty.
+      - name: Save the apt downloads to the cache
+        if: steps.aptcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: ${{ steps.aptkey.outputs.key }}
 
       - name: Install dependencies
         run: npm ci

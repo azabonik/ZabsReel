@@ -1,7 +1,7 @@
 # sha256 of every file under judge/ except this one, of scripts/check-judge-lock.mjs and of
 # .github/workflows/judge.yml, sorted by path from the repository root (scripts/check-judge-lock.mjs).
 # The agents that rewrite the editor must not change the judge. The gauntlet reviews a change to this file on its PR.
-76cc68a6c27f454d9a9ad030a3506095bd59026c870c87fabbfd3c645e0e92bc  .github/workflows/judge.yml
+c343997db993e1392fe83bdb67c6695fd483c7b9735cbad0d80b052b19d07fa1  .github/workflows/judge.yml
 d35269f9749e536799cc75afcb3969cd60ec38e53a3d166c6a1ab9c795d7250b  judge/PORTING.md
 64213c5225877ca6fc82e52c9b68ef52fd649e91bbc17cc9a23d84029aa890cf  judge/PROTOCOL.md
 251cf9f8c4a943560b6d5cb65c9f38cd503a92d5ba42befb7e9b9ee4def283d2  judge/README.md
