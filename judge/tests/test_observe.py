@@ -6,17 +6,20 @@ Known properties (judge/fixtures/make.sh): a.mp4 and b.mp4 are 6 s, 1280x720, 30
 digital silence from 2.0 to 3.5 s, 5.5 s in all.
 
 The side-effect observations (the loopback listener, the strace form of a name and the trace search, the text
-substitution, the marker search and the secret search) are checked on inputs made here.
+substitution, the marker search and the secret search) are checked on inputs made here, and the edit tests' refusal
+check (edits.refused_unchanged) on a model of an editor's undo history.
 """
 import json
 import os
 import socket
 
+import driver as drv
+import edits
 import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 39
+CHECKS = 40
 
 
 def run(t):
@@ -79,6 +82,59 @@ def run(t):
     t.check("OTIO: a file that is not a timeline is flagged", bool(observe.parse_otio(otio)["problems"]))
 
     side_effects(t)
+    refusal_model(t)
+
+
+class UndoModel:
+    """An editor's undo history in miniature, for edits.refused_unchanged: the State is its markers, set_markers is one
+    undo step (a new step drops the redo steps), and its one edit is refused the way `refusal` says: "clean" (nothing
+    changes), "empty step" (a step that changes nothing is added to the undo history, the redo steps are kept), "redo
+    lost" (the redo steps are dropped), "state" (a marker is added) or "accepted" (no refusal)."""
+
+    def __init__(self, refusal):
+        self.refusal, self.markers, self.undos, self.redos = refusal, [(30, "early"), (7, None)], [], []
+
+    def get_state(self):
+        return {"markers": [{"frame": f, "name": n} for f, n in sorted(self.markers, key=lambda m: m[0])]}
+
+    def set_markers(self, markers):
+        self.undos.append(self.markers)
+        self.redos = []
+        self.markers = [tuple(m) for m in markers]
+
+    def undo(self):
+        if self.undos:
+            self.redos.append(self.markers)
+            self.markers = self.undos.pop()
+
+    def redo(self):
+        if self.redos:
+            self.undos.append(self.markers)
+            self.markers = self.redos.pop()
+
+    def edit(self):
+        if self.refusal == "accepted":
+            return {}
+        if self.refusal == "empty step":
+            self.undos.append(self.markers)
+        elif self.refusal == "redo lost":
+            self.redos = []
+        elif self.refusal == "state":
+            self.markers = self.markers + [(99, "x")]
+        raise drv.ProductError("refused", op="edit")
+
+
+def refusal_model(t):
+    got = {}
+    for kind in ("clean", "empty step", "redo lost", "state", "accepted"):
+        m = UndoModel(kind)
+        before = m.get_state()
+        ok, why = edits.refused_unchanged(m, m.edit)
+        got[kind] = (ok, why, m.get_state() == before)
+    t.check("the refusal check passes a clean refusal (and leaves the State as before), and fails a refusal that "
+            "leaves an empty step in the undo history, one that drops the redo step, one that changes the State and "
+            "an edit that is not refused",
+            got["clean"][0] and got["clean"][2] and not any(got[k][0] for k in got if k != "clean"), got)
 
 
 def side_effects(t):

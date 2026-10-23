@@ -1,6 +1,7 @@
 """freeze_frame holds the exact frame shown at a moment of a clip as a still clip, and the timeline ripples as the
-user chose: the timeline grows by exactly the still, the still keeps the clip's look and has no sound, the clip's
-linked sound is split and silent under the still and in sync after it, a freeze at the first or past the last frame
+user chose: the timeline grows by exactly the still, the still keeps the clip's look (its effects, its colour grade,
+colour adjustments and look-up table: it shows the colours the clip shows) and has no sound, the clip's linked sound
+is split and silent under the still and in sync after it, a freeze at the first or past the last frame
 leaves no empty half, a slowed clip holds the frame shown there and never one past its out point, a freeze inside a
 transition's overlap is refused, freezing the linked sound freezes its picture, one undo restores everything; ripple
 all moves the other tracks and the markers (a straddling clip stays) and refuses to break a transition, ripple none
@@ -8,12 +9,14 @@ overwrites the clip in place. Port of the freeze_frame sections of packages/core
 fourth; judge/PORTING.md has the map of its sections; its others are tests/test_reverse_slowmo.py).
 
 Media: idx.mp4 (180x90 30 fps, 16 s): each frame shows its own index (observe.frame_indexes) and its sound is a chirp
-whose pitch says its source moment (observe.chirp_time). The canvas is 180x90 at 30 fps. v0 is muted: the pictures'
-own sound is not heard, their linked clips on a0 carry it.
+whose pitch says its source moment (observe.chirp_time). fx-redblue.mp4 (red | blue, still) and look.cube (red and
+blue swapped) for the looks. The canvas is 180x90 at 30 fps. v0 is muted: the pictures' own sound is not heard, their
+linked clips on a0 carry it.
 
 The still is found in get_state (the clip on v0 that plays an asset that was not there before), never taken from the
-operation's answer; the frame it holds is read from an export or from render_frame at its middle. The sound is held
-to the source moment the picture plays, within (0.5 + 0.5) / 30 s + 12 ms (edits.sound_offset).
+operation's answer; the frame it holds is read from an export or from render_frame at its middle, and its look from
+the colours render_frame shows there (observe.block_rgb), against the clip's own frame. The sound is held to the source
+moment the picture plays, within (0.5 + 0.5) / 30 s + 12 ms (edits.sound_offset).
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -24,7 +27,14 @@ PORT_BOUND = True
 TIMEOUT = 900
 FPS = 30
 TOL = 1.0 / FPS + 0.012
-CHECKS = 12 + 2 + 2 + 1 + 5 + 3 * 2 + 2 + 3 + 9
+CHECKS = 12 + 2 + 2 + 1 + 5 + 3 * 2 + 2 + 3 + 3 + 9
+# The looks a still must keep, each set on its own (see looks()), and the blocks (x, y) where its colours are read: one
+# in the red half and one in the blue half of fx-redblue.mp4 on the 180x90 canvas.
+LOOKS = [("colour grade (brightness, contrast, saturation)",
+          lambda t, d, c: d.apply_colour(c, saturation=0.2, brightness=0.1)),
+         ("colour adjustments (temperature, tint, hue)", lambda t, d, c: d.apply_colour(c, temperature=-0.8, tint=0.6)),
+         ("look-up table", lambda t, d, c: d.apply_lut(c, t.media("look.cube")))]
+BLOCKS = [(20, 40), (150, 40)]
 
 
 def run(t):
@@ -38,6 +48,7 @@ def run(t):
     slowed(t, d, idx)
     transition(t, d, idx)
     sound_side(t, d, idx, a0)
+    looks(t, d, d.import_media(t.media("fx-redblue.mp4")))
     ripple_modes(t, d, idx, a0, v1)
 
 
@@ -239,6 +250,41 @@ def sound_side(t, d, idx, a0):
     ok, why = E.refused_unchanged(d, lambda: d.freeze_frame(lone, 0, 30))
     t.check("freeze_frame of a sound clip with no linked picture: refused, nothing changes", ok, why)
     E.clear(d)
+
+
+# ---------------------------------------------------------------- the still's look, by its colours
+def colours(t, d, time, name):
+    """[(r, g, b)] of BLOCKS in render_frame at `time` s, or why they could not be read."""
+    p = t.path("frames", f"{name}.png")
+    try:
+        d.render_frame(time, p)
+        return [observe.block_rgb(p, 0, x, y) for x, y in BLOCKS]
+    except observe.Unmeasurable as e:
+        return f"unmeasurable ({e})"
+
+
+def looks(t, d, rb):
+    """fx-redblue.mp4 on v0 [0,60) with one look; a freeze at 30 for 30 frames. The still (render_frame at its middle)
+    must show the colours the clip shows (render_frame at the clip's frame 15; the footage does not change), within 12
+    per channel at each block, and the look must show (those colours are not the plain footage's, rendered before the
+    look was set)."""
+    for k, (name, apply) in enumerate(LOOKS):
+        c = d.place_clip(rb, "v0", 0, 0, 60)
+        plain = colours(t, d, 15 / FPS, f"look-{k}-plain")
+        apply(t, d, c)
+        clip_c = colours(t, d, 15 / FPS, f"look-{k}-clip")
+        st0 = d.get_state()
+        d.freeze_frame(c, 30, 30)
+        st = d.get_state()
+        still = still_of(st0, st)
+        ok_still = len(still) == 1 and (still[0]["start_frame"], still[0]["length_frames"]) == (30, 30)
+        still_c = colours(t, d, (30 + 15) / FPS, f"look-{k}-still") if ok_still else "no 30-frame still at 30"
+        read = all(isinstance(v, list) for v in (plain, clip_c, still_c))
+        shows = read and any(not observe.colour_is(a, b, 40) for a, b in zip(clip_c, plain))
+        kept = read and all(observe.colour_is(a, b, 12) for a, b in zip(still_c, clip_c))
+        t.check(f"the still keeps the clip's {name}: it shows the colours the clip shows there",
+                ok_still and shows and kept, f"plain {plain}; the clip {clip_c}; the still {still_c}")
+        E.clear(d)
 
 
 # ---------------------------------------------------------------- ripple modes

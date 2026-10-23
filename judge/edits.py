@@ -84,16 +84,19 @@ def clear(d):
 
 
 def refused_unchanged(d, fn):
-    """(ok, detail): fn() (an edit) is refused and changes nothing, its undo history included. Before it, a marker is
-    set and undone, so the editor has a step to redo. After the refusal the State must be the one before; redo must
-    bring that marker back (a refused edit that had made an undo step would have dropped the redo step), and undo then
-    gives the State before again."""
+    """(ok, detail): fn() (an edit) is refused and changes nothing, its undo history included. Before it, the user's
+    last edit is a marker K that stays, and a second marker P is set and undone, so the editor has a step to redo.
+    After the refusal the State must be the one before; redo must bring P back (a refused edit that had made an undo
+    step would have dropped the redo step), undo must take P away again, and the next undo must take back K, the last
+    edit before the refusal (a refusal that had left a step in the undo history, even one that changes nothing, would
+    make that undo do nothing visible). That undo gives the State from before the call."""
     st = d.get_state()
     mine = [(m["frame"], m.get("name")) for m in st.get("markers", [])]
-    probe = (7, "judge redo probe")
-    if probe in mine:
-        probe = (8, "judge redo probe 2")
-    d.set_markers(mine + [probe])
+    used = {f for f, _ in mine}
+    free = [f for f in range(7, 9 + len(used)) if f not in used]
+    kept, probe = (free[0], "judge kept edit"), (free[1], "judge redo probe")
+    d.set_markers(mine + [kept])
+    d.set_markers(mine + [kept, probe])
     d.undo()
     s0 = d.get_state()
     refused, what = drv.refused(fn)
@@ -104,7 +107,9 @@ def refused_unchanged(d, fn):
     if redone:
         d.undo()
     s3 = d.get_state()
-    ok = refused and s1 == s0 and redone and s3 == s0
+    d.undo()
+    s4 = d.get_state()
+    ok = refused and s1 == s0 and redone and s3 == s0 and s4 == st
     why = [what]
     if s1 != s0:
         why.append("the State changed")
@@ -112,6 +117,9 @@ def refused_unchanged(d, fn):
         why.append("redo did not bring back the step undone before (the redo history was lost)")
     elif s3 != s0:
         why.append("undo after that redo did not give the State before")
+    if s4 != st:
+        why.append("the next undo did not take back the last edit before the refusal (a marker): the refusal left a "
+                   "step in the undo history" if s4 == s3 else "the next undo did not give the State from before")
     return ok, "; ".join(why)
 
 

@@ -3,8 +3,9 @@ move the clips after the changed clip by exactly its change in length, its linke
 or curve, and the ripple modes (track, all, none), the linked partners, the J-cut heads and L-cut tails, and the
 clips that hold their place (a clip straddling the old end, one entering it through a transition, one butted to it)
 behave as the user is told; a ripple that would break the edit is refused and changes nothing. Judged on get_state
-(and by ear for a ramp's muted sound). Port of sections 1 to 4 and 6 of packages/core/scripts/smoke-ripple.ts
-(judge/PORTING.md has the map of its sections; its sections 5 and 7, judged on exports, are tests/test_speed_sync.py).
+(and by ear for a ramp's muted sound; the linked sound's curve itself is heard in tests/test_speed_sync.py). Port of
+sections 1 to 4 and 6 of packages/core/scripts/smoke-ripple.ts (judge/PORTING.md has the map of its sections; its
+sections 5 and 7, judged on exports, are tests/test_speed_sync.py).
 
 Media: idx.mp4 (180x90 30 fps, 16 s, frames that show their index, and a chirp), tone300.m4a (another recording, the
 "mic"), m.mp3 (a music bed), fx-white.mp4 (a title). The canvas is 180x90 at 30 fps.

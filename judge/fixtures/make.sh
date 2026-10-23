@@ -34,6 +34,8 @@
 #   cutout.mkv   stripes 180x90 30 fps 2 s, the top half transparent     FFV1 yuva420p, no audio
 #   move.mp4     testsrc2 320x180 30 fps 3 s + sine 440 Hz               H.264 crf 12 + AAC-LC mono 48 kHz
 #   tone300.m4a  sine 300 Hz 10 s                                        AAC-LC mono 48 kHz
+#   chirp.m4a    the chirp alone, 16 s: another recording of idx.mp4's   AAC-LC mono 48 kHz 192 kb/s
+#                moments (a microphone's, say)
 # The tones are at amplitude 1/8 (peak about -18 dBFS). The frame rate is the source's (rate=30), never -r.
 # Usage: make.sh <outdir>   env: FFMPEG / FFPROBE (default: the ffmpeg / ffprobe on PATH)
 # Then checks each file with ffprobe (codecs, size, rate, frame count, channels) and prints what it made.
@@ -109,6 +111,8 @@ X264="-c:v libx264 -preset medium -crf 12 -pix_fmt yuv420p -g 15"
   -c:a aac -b:a 128k -ac 1 -ar 48000 "$OUT/move.mp4"
 "$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=300:sample_rate=48000:duration=10" \
   -c:a aac -b:a 128k -ac 1 -ar 48000 "$OUT/tone300.m4a"
+"$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "$CHIRP:duration=16" -c:a aac -b:a 192k -ac 1 -ar 48000 \
+  "$OUT/chirp.m4a"
 
 # probe <file> <stream> <entries>: the stream's values, comma-separated, in ffprobe's order.
 probe() { "$FP" -v error -select_streams "$2" -show_entries "stream=$3" -of csv=p=0 "$OUT/$1"; }
@@ -152,6 +156,8 @@ expect cutout.mkv v:0 codec_name,width,height,pix_fmt,r_frame_rate ffv1,180,90,y
 expect move.mp4 v:0 codec_name,width,height,pix_fmt,r_frame_rate,nb_frames h264,320,180,yuv420p,30/1,90
 expect move.mp4 a:0 codec_name,sample_rate,channels aac,48000,1
 expect tone300.m4a a:0 codec_name,sample_rate,channels aac,48000,1
+expect chirp.m4a a:0 codec_name,profile,sample_rate,channels aac,LC,48000,1
+[ -z "$(probe chirp.m4a v "codec_type")" ] || { echo "make.sh: chirp.m4a has a video stream" >&2; exit 1; }
 for f in a.mp4 b.mp4 c640.mp4 m.mp3 gap.m4a tiny.mp4; do
   printf '%-9s %s s, %s bytes\n' "$f" "$("$FP" -v error -show_entries format=duration -of csv=p=0 "$OUT/$f")" "$(stat -c %s "$OUT/$f")"
 done
