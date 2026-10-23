@@ -49,7 +49,9 @@ permissions:
 
 jobs:
   judge:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to a new Ubuntu release on its own schedule, and this
+    # job is a required check on main. Moving to a new release is a deliberate PR (the FFmpeg matrix pins too).
+    runs-on: ubuntu-24.04
     steps:
       # No token is kept in the checkout (persist-credentials: false): nothing
       # after this step needs it (the base gate's fetch reads the public
@@ -127,7 +129,24 @@ jobs:
       # trace). strace starts the adapter as its own child, which
       # kernel.yama.ptrace_scope 1 allows.
       - name: Install FFmpeg and strace
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
+        # Bounded waits and retries, as scripts/ci/apt-install.sh does for the other workflows (throttled mirror
+        # throughput, 43 kB/s, held two matrix jobs for 32-34 min, so install has no time cap; the script's header
+        # says why); inline because this job runs only lock-covered code as the runner user.
+        run: |
+          opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120)
+          for attempt in 1 2 3; do
+            if [ "$attempt" -gt 1 ]; then
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 10 300 dpkg --configure -a || true
+            fi
+            if sudo timeout -k 10 600 apt-get "${opts[@]}" update -q &&
+               sudo DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" install -y -q --no-install-recommends ffmpeg strace; then
+              exit 0
+            fi
+            echo "::warning::apt-get attempt $attempt of 3 failed; retrying in 10 s"
+            sleep 10
+          done
+          echo "::error::apt-get failed 3 times: could not install ffmpeg strace"
+          exit 1
 
       # The graphics add-on the judge gives the editor (judge/README.md, "The
       # graphics add-on"), before any code from the change runs and before the

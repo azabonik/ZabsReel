@@ -8,7 +8,9 @@ on:
 
 jobs:
   build-and-smoke:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to a new Ubuntu release on its own schedule, and this
+    # job is a required check on main. Moving to a new release is a deliberate PR (the FFmpeg matrix pins too).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +64,7 @@ jobs:
       # smoke-opaque-base, smoke-security, smoke-jobs and smoke-safepath synthesize their own media with ffmpeg.
       # strace: smoke-unc row 16 traces FFmpeg on files that name a test server.
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg strace
+        run: bash scripts/ci/apt-install.sh --no-install-recommends ffmpeg strace
 
       - name: Install dependencies
         run: npm ci
@@ -175,7 +177,7 @@ jobs:
       - name: Smoke — media formats under the demuxer allowlist (FFmpeg, no network)
         run: npx tsx packages/core/scripts/smoke-demuxers.ts
 
-      # The apt FFmpeg on ubuntu-latest is Ubuntu 24.04's 6.1, a tested version:
+      # The apt FFmpeg on the pinned ubuntu-24.04 runner is 6.1, a tested version (moving the pin to a new release changes it):
       # its version-specific checks (6.1's acrossfade dropped the end of a speed
       # ramp's audio) and the speed-ramp suite. The step prints the version first,
       # so a runner image with another FFmpeg shows in the log.
@@ -279,7 +281,7 @@ jobs:
         if: ${{ !cancelled() && steps.pack_linux.outcome == 'success' }}
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          command -v strace >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends strace)
+          command -v strace >/dev/null || bash scripts/ci/apt-install.sh --no-install-recommends strace
           npx tsx packages/motion/scripts/smoke-motion-media.ts
 
       # The motion renderer captures a frame of library media only once the
