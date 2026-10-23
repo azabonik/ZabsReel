@@ -1,10 +1,10 @@
 # sha256 of every file under judge/ except this one, of scripts/check-judge-lock.mjs and of
 # .github/workflows/judge.yml, sorted by path from the repository root (scripts/check-judge-lock.mjs).
 # The agents that rewrite the editor must not change the judge. The gauntlet reviews a change to this file on its PR.
-c343997db993e1392fe83bdb67c6695fd483c7b9735cbad0d80b052b19d07fa1  .github/workflows/judge.yml
+0d61dec333b4228a0cd712f91d893db7775c220997673a9c8182165b3e90a536  .github/workflows/judge.yml
 d35269f9749e536799cc75afcb3969cd60ec38e53a3d166c6a1ab9c795d7250b  judge/PORTING.md
 64213c5225877ca6fc82e52c9b68ef52fd649e91bbc17cc9a23d84029aa890cf  judge/PROTOCOL.md
-251cf9f8c4a943560b6d5cb65c9f38cd503a92d5ba42befb7e9b9ee4def283d2  judge/README.md
+4458fba0c645c033cec91fa550ae9c82e4f164191bd2f4f488235f1ab11ceaf2  judge/README.md
 c12b03f0cc825f24bbf6c6ebe94782f8e939b6fcc34780e4f6c038aa5e2fa04f  judge/adapters/v020/adapter.py
 60d050f139e5972a2c91a5133b7fcb3a3f3d85e83fa91d2db23f68d812f80beb  judge/check_observe.py
 6c27d8baf904312890c92162eee77d69246c2073fd3b0c4ee9428d6ca5af2310  judge/ci/collect_logs.sh
@@ -25,8 +25,8 @@ cda4d66767df634c36f35476438b0b2fe54575d01ff8e285e6695401c0b839d2  judge/fixtures
 c623a4a816d704ae2318996eb9aedf67c07c8306d3d47eb073ea5ae15279b7cd  judge/fixtures/v020-otio/speed.otio
 2abbe732444163fe4ffa85a88d48820763f392eb1e10ce9a2959ded48c005e24  judge/lockout.py
 01eb1545078ef6b9ee7372a188fc718ed82537a2fdeb7e103131ae3e1cc9d7ff  judge/observe.py
-49594c9f0ed268b6f64a3b8501621f6fe237eb1a9e06275ff18cbce8d9aa8968  judge/run.py
-0c84014b723bd9afc7803855e2c7bc2273328d2b2dd2d6422d105beaf31379ce  judge/selftest.py
+85d67684f8407da5f70eec842e6da8db283e8800e882d5ee7323769edafdbb05  judge/run.py
+589f76834915b1d0760845f1cc952ff2c1d731d80d1c57b179fa39f1d8351c43  judge/selftest.py
 93e86a8a5ca44ecbbfaeccb797801b591e2df33d3ebb92bb9b9d8bafda8c7241  judge/tests/test_cli_migrate.py
 88f47b27f7fbce832a1829632ccc7a77c5d082433dbd9a9190af29fe23a6d5e3  judge/tests/test_effect_looks.py
 faf0f4927d3c5d1f99926eadeadb3117517eabd2807033f532c243d4ad47b52b  judge/tests/test_effects.py

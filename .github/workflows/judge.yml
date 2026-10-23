@@ -323,16 +323,36 @@ jobs:
       # workflow commands are off while it runs (ci/quiet.sh --live: the runner
       # prints as it goes; no zjudge process holds the step's output, and the
       # token is made before any zjudge process starts and is never passed on).
+      # A test in which strace itself failed while the editor ran (strace 6.8
+      # exits 1 on a thread that a signal stopped and its process's exit then
+      # killed) fails its download check and runs once more; one that passes
+      # that rerun is FLAKY, and --flaky-file (a new file of the runner's)
+      # gets its line (judge/README.md, "A test rerun after strace failed").
       - name: Judge (v0.2.0 adapter, as zjudge)
         run: |
           bash "$RUNNER_TEMP/judge-src/judge/ci/quiet.sh" --live timeout -k 30 2400 \
             python3 -I "$RUNNER_TEMP/judge-src/judge/run.py" --build /home/zjudge/build \
             --scratch /srv/judge/scratch --strict --require-trace --as-user zjudge \
-            --graphics-addon /srv/judge/addon --release zedmix
+            --graphics-addon /srv/judge/addon --release zedmix --flaky-file "$RUNNER_TEMP/judge-flaky.txt"
 
-      # A failed run keeps its scratch folder, which holds files and folders of
-      # zjudge's, links among them (the editor's sandbox is zjudge's own folder,
-      # so the kernel's link protection does not apply there). First every
+      # FLAKY: the job stays green, the FLAKY lines go to the job summary with
+      # a warning, and the logs (both runs' records) are collected and
+      # uploaded as for a failed run. Each one is investigated.
+      - name: FLAKY lines of the judge
+        id: flaky
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/judge-flaky.txt"
+          if [ -s "$f" ]; then
+            { echo "### Judge: tests that passed their rerun after strace failed"; echo; echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Judge FLAKY::$(wc -l < "$f") test(s) passed their rerun after strace failed while the editor ran (the job summary names them)"
+            echo "flaky=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A failed run (and one with a FLAKY test) keeps its scratch folder,
+      # which holds files and folders of zjudge's, links among them (the
+      # editor's sandbox is zjudge's own folder, so the kernel's link
+      # protection does not apply there). First every
       # zjudge process and its crontab are ended (lockout.py --kill: by real and
       # by effective user id, and none may be left), so nothing changes them
       # after that. Then root runs the judge copy's ci/collect_logs.sh: it
@@ -343,7 +363,7 @@ jobs:
       # /proc/self/environ) or to a folder never reaches it. The self-test runs
       # it on a tree with such a link and a FIFO.
       - name: Collect the judge's logs
-        if: failure()
+        if: failure() || steps.flaky.outputs.flaky == 'true'
         run: |
           python3 -I -B "$RUNNER_TEMP/judge-src/judge/lockout.py" --user zjudge --kill
           sudo -n bash "$RUNNER_TEMP/judge-src/judge/ci/collect_logs.sh" "$(id -u):$(id -g)" \
@@ -353,7 +373,7 @@ jobs:
       # adapter.stderr, mcp-server.stderr, the editor's own logs), not the
       # media or the exports: only the copies made above.
       - name: Upload the judge's logs
-        if: failure()
+        if: failure() || steps.flaky.outputs.flaky == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: judge-logs
