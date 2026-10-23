@@ -12,8 +12,10 @@ freeze_frame sections are tests/test_freeze.py).
 
 Media: idx.mp4 (180x90 30 fps, 16 s: frames that show their index, a chirp whose pitch says its source moment),
 skew.mp4 (3.0 s of those frames, 3.5 s of the chirp), cutout.mkv (2 s of those frames, the top half transparent),
-fx-base.mp4 (0xE020E0, under the cutout), move.mp4 (moving 320x180 30 fps, 3 s, a 440 Hz tone) and a.mp4 (1280x720,
-6 s: its bakes take long enough to be canceled while they run). The canvas is 180x90 at 30 fps.
+fx-base.mp4 (0xE020E0, under the cutout), move.mp4 (moving 320x180 30 fps, 3 s, a 440 Hz tone), a.mp4 (1280x720, 6 s:
+optical flow on it takes about a minute) and long.mp4 (1920x1080, 20 s: reversing it takes about 8 s), whose bakes
+are canceled while they run; a bake that had already ended done when the judge was about to cancel it could not be
+judged, and its checks are recorded as not applicable (run.py --strict fails them). The canvas is 180x90 at 30 fps.
 
 A new bake is seen in get_state (the clip plays an asset that was not there before); what it holds is read from an
 export, never from the editor's own files; a bake that leaves something behind is seen as a new media file in the
@@ -41,8 +43,8 @@ def run(t):
     d = t.driver()
     d.set_project(width=180, height=90, fps=FPS)
     m = {k: d.import_media(t.media(f)) for k, f in (("idx", "idx.mp4"), ("move", "move.mp4"), ("hd", "a.mp4"),
-                                                    ("skew", "skew.mp4"), ("cut", "cutout.mkv"),
-                                                    ("base", "fx-base.mp4"))}
+                                                    ("long", "long.mp4"), ("skew", "skew.mp4"),
+                                                    ("cut", "cutout.mkv"), ("base", "fx-base.mp4"))}
     a0 = d.add_track("audio")
     v1 = d.add_track("video")
     mine = [os.path.dirname(t.path("out", "x")), os.path.dirname(t.path("frames", "x"))]
@@ -71,6 +73,28 @@ def export_path(t, d, name):
     out = t.path("out", f"{name}.mp4")
     job = d.export(out)
     return out if job.get("status") == "done" else None
+
+
+def canceled_bake(t, d, start, pause, mine, names):
+    """A bake started with start() (-> its job), canceled `pause` s later: it must end canceled, with the State as
+    before and no new media file. When the bake had already ended done just before the cancel, the cancel could not
+    land during it, and the two checks are not applicable (edits.too_fast)."""
+    sb = d.get_state()
+    files = E.files(t, mine)
+    job = start()
+    time.sleep(pause)
+    was = E.job_now(d, job)
+    if was and was.get("status") == "done":
+        E.too_fast(t, names, was, "canceled it")
+        return
+    canceled = d.cancel(job) if job else False
+    end = E.wait_job(d, job) if job else None
+    st = d.get_state()
+    left = E.left_media(t, files, mine)
+    t.check(names[0], canceled and bool(end) and end.get("status") == "canceled" and st == sb,
+            f"running just before the cancel: {was}; cancel answered {canceled}; the job {end}; State unchanged: "
+            f"{st == sb}")
+    t.check(names[1], not left, left)
 
 
 # ---------------------------------------------------------------- reverse_clip
@@ -117,18 +141,11 @@ def reverse(t, d, m, mine):
     d.reverse_clip(clip)
     d.undo()
     t.check("one undo restores the clip as it was before the reverse", d.get_state() == before_st, "")
-    # A cancel while the bake runs (6 s of 720p: about a second to bake).
-    hdc = d.place_clip(m["hd"], "v0", 200, 0, 180)
-    sb = d.get_state()
-    files = E.files(t, mine)
-    job = d.reverse_clip(hdc, wait=False)
-    canceled = d.cancel(job) if job else False
-    end = E.wait_job(d, job) if job else None
-    st = d.get_state()
-    t.check("a reverse canceled while it bakes ends canceled, and the project is as it was",
-            canceled and bool(end) and end.get("status") == "canceled" and st == sb,
-            f"cancel answered {canceled}; the job {end}; State unchanged: {st == sb}")
-    t.check("...and no media file is left", not E.left_media(t, files, mine), E.left_media(t, files, mine))
+    # A cancel while the bake runs (20 s of 1080p: about 8 s to bake).
+    hdc = d.place_clip(m["long"], "v0", 200, 0, 600)
+    canceled_bake(t, d, lambda: d.reverse_clip(hdc, wait=False), 0, mine,
+                  ["a reverse canceled while it bakes ends canceled, and the project is as it was",
+                   "...and no media file is left"])
     E.clear(d)
     # Un-reverse after an fps change.
     rc = d.place_clip(idx, "v0", 0, 10, 110)
@@ -236,17 +253,9 @@ def slow_motion(t, d, m, mine):
     # A cancel while optical flow runs (6 s of 720p takes about a minute).
     hdc = d.place_clip(m["hd"], "v0", 400, 0, 180)
     d.set_speed(hdc, 0.5)
-    sb = d.get_state()
-    files = E.files(t, mine)
-    job = d.smooth_slow_motion(hdc, "flow", wait=False)
-    time.sleep(0.3)
-    canceled = d.cancel(job) if job else False
-    end = E.wait_job(d, job) if job else None
-    st = d.get_state()
-    t.check("a smooth slow motion (flow) canceled while it bakes ends canceled and leaves the clip alone (0.5x)",
-            canceled and bool(end) and end.get("status") == "canceled" and st == sb,
-            f"cancel answered {canceled}; the job {end}; State unchanged: {st == sb}")
-    t.check("...and no media file is left", not E.left_media(t, files, mine), E.left_media(t, files, mine))
+    canceled_bake(t, d, lambda: d.smooth_slow_motion(hdc, "flow", wait=False), 0.3, mine,
+                  ["a smooth slow motion (flow) canceled while it bakes ends canceled and leaves the clip alone (0.5x)",
+                   "...and no media file is left"])
     E.clear(d)
 
 

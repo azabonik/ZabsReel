@@ -6,17 +6,20 @@ packages/core/scripts/smoke-cuts.ts (judge/PORTING.md has the map of its section
 Media: idx.mp4 and idx2997.mp4 (fixtures/make.sh): 180x90, 16 s, every frame shows its own index in nine stripes, so
 observe.frame_indexes reads back which source frame an exported or rendered frame shows. The canvas is 180x90.
 
-The speed rule the exports are held to (no model of the editor): a clip at constant speed s with source range
-[in, out) shows, at its timeline frame n, a source frame inside [in, out), never an earlier one than at frame n - 1,
-exactly in + n at 1x, and else within max(1, s / 2) source frames of in + n * s: the source frame that plays within
-half a frame period of the frame's start (which of two frames at an exact half-period tie depends on the source's
-timebase: at 4x on idx2997.mp4's 1/30000 timebase v0.2.0 shows in + 4n + 2). Splits, cuts and ripple deletes are held to what a user
-sees: the pieces butt, the right half ends where the clip did, the next clip closes up, no empty piece, a one-frame
-head or tail stays, and at 1x, 2x, 3x and 4x a split lands exactly where asked. A split that would leave a half with
-no source frame may be declined, changing nothing (the original counts only the splits that happen); nine in ten must
-happen. A freeze holds exactly the frame the
-export shows at that moment, and render_frame shows exactly the exported frame at the start, the middle and the end
-of each frame period, before and after a preview render, and the last frame past the end.
+The speed rule the exports are held to (no model of the editor; edits.speed_rule_problems): a clip at constant speed s
+with source range [in, out) shows, at its timeline frame n, a source frame inside [in, out), never an earlier one than
+at frame n - 1, and the source frame that plays at the middle of that frame: exactly in + floor((n + 1/2) * s) on a
+whole clip (one placed and set to its speed as a whole: the freeze references and the render_frame layout). Where
+(n + 1/2) * s is a whole number (at 2x and 4x) two source frames meet at the middle and either may show (v0.2.0 shows
+the earlier one on idx.mp4 and the later one on idx2997.mp4's 1/30000 timebase: in + 4n + 2 at 4x). A piece of a split
+clip may start part of a source frame into its in point, which get_state does not show, so the pieces are held to
+in + n at 1x and within max(1, s / 2) source frames of in + n * s at another speed. Splits, cuts and ripple deletes
+are held to what a user sees: the pieces butt, the right half ends where the clip did, the next clip closes up, no
+empty piece, a one-frame head or tail stays, and at 1x, 2x, 3x and 4x a split lands exactly where asked. A split that
+would leave a half with no source frame may be declined, changing nothing (the original counts only the splits that
+happen); nine in ten must happen. A freeze (0.25x to 4x) holds exactly the frame the export shows at that moment, and
+render_frame shows exactly the exported frame at the start, the middle and the end of each frame period, before and
+after a preview render, and the last frame past the end.
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -32,7 +35,7 @@ W, H, FPS = 180, 90, 30
 SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4]
 RD_SPEEDS = [0.25, 0.75, 1.5]
 PIECE_SPEEDS = [0.25, 0.5, 0.75, 1.5, 2, 4]
-FREEZE_SPEEDS = [0.5, 0.75, 1.5, 2, 3, 4]
+FREEZE_SPEEDS = [0.25, 0.5, 0.75, 1.5, 2, 3, 4]
 FREEZE_AT = [1, 2, 3, 5, 6, 7, 10, 21]
 FREEZE_LEN = 6      # frames (0.2 s at 30 fps)
 PERIOD = (0, 0.5, 0.95)  # where in a frame period render_frame is asked
@@ -45,21 +48,10 @@ def is_int(s):
     return float(s) == int(s)
 
 
-def rule_problems(idx, c):
-    """Where the export `idx` breaks the speed rule (module docstring) for the clip `c` (a State clip): [text]."""
-    out, prev = [], None
-    s = float(c.get("speed") or 1)
-    for n in range(c["length_frames"]):
-        f = c["start_frame"] + n
-        if f >= len(idx):
-            out.append(f"frame {f} is missing")
-            break
-        got, ideal = idx[f], c["in_frame"] + n * s
-        if not c["in_frame"] <= got < c["out_frame"] or abs(got - ideal) > max(1, s / 2) + 1e-9 \
-                or (prev is not None and got < prev) or (s == 1 and got != ideal):
-            out.append(f"{f}: {got} (in + n*s = {ideal:g})")
-        prev = got
-    return out
+def rule_problems(idx, c, whole=True):
+    """Where the export `idx` breaks the speed rule (module docstring) for the clip `c` (a State clip; whole False: a
+    piece of a split clip): [text]."""
+    return E.speed_rule_problems(idx, c, whole=whole)
 
 
 def run(t):
@@ -242,7 +234,7 @@ def pieces(t, d, coded):
                     f"lengths and the speed rule's frames" + (" (no source frame lost)" if speed < 1 else ""), False,
                     f"no export: {job}")
             continue
-        bad = [x for p in placed for x in rule_problems(idx, p)]
+        bad = [x for p in placed for x in rule_problems(idx, p, whole=False)]
         gaps = [E.end(p) for p in placed[:-1] if E.end(p) >= len(idx) or idx[E.end(p)] != 0]
         shown = sorted({idx[f] for p in placed for f in range(p["start_frame"], min(E.end(p), len(idx)))})
         lost = [f for f in range(31, 91) if f not in shown] if speed < 1 else []

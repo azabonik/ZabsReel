@@ -52,13 +52,17 @@ class BadRequest(JudgeError):
     code = "bad_request"
 
 
-def refused(fn, n=200):
+def refused(fn, n=200, codes=None):
     """(refused?, what happened) of calling fn(): refused = the editor answered with an error (ProductError or
-    BadRequest); what happened is its message or the answer, cut to `n` characters."""
+    BadRequest); what happened is its message or the answer, cut to `n` characters. With `codes` (a tuple of error
+    classes, such as (ProductError,)) only those count: another error answer is not a refusal (what happened names
+    its code)."""
     try:
         r = fn()
         return False, f"accepted: {str(r)[:n]}"
     except (ProductError, BadRequest) as e:
+        if codes is not None and not isinstance(e, tuple(codes)):
+            return False, f"answered {e.code}, not {' or '.join(c.code for c in codes)}: {e.message[:n]}"
         return True, f"refused: {e.message[:n]}"
 
 
@@ -233,7 +237,7 @@ class Driver:
 
     def set_speed(self, clip, speed, ripple=None):
         """Sets a constant playback speed (1 = normal). ripple: "track" (the editor's default when not sent), "all" or
-        "none" (PROTOCOL.md, "Speed and ripple")."""
+        "none" (PROTOCOL.md, "Speed and time")."""
         args = {"clip": clip, "speed": float(speed)}
         if ripple is not None:
             args["ripple"] = ripple

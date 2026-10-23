@@ -1051,7 +1051,8 @@ class T:
         return self._record(name, ok, detail, harness, None)
 
     def not_applicable(self, name, why, harness=False):
-        """Records a check that cannot be made on this editor (its input cannot be crafted): neither passed nor
+        """Records a check that cannot be made on this editor (README.md, "Statuses": its input cannot be crafted, the
+        add-on it needs is missing, or the bake it needs had ended before the judge could act): neither passed nor
         failed, listed by name and counted on the JUDGE line; a failure with run.py --strict."""
         return self._record(name, True, why, harness, "not_applicable")
 

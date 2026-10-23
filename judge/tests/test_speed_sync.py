@@ -17,14 +17,21 @@ offset is the median of seven such measurements 20 ms apart (a ramp's stretched 
 pieces joined by crossfades, where two pitches overlap). At a constant speed s the picture's source moment at t is the
 rule a user can state, in + (t - start) * s (get_state's in_frame and start_frame), and the sound is held to it with
 the original's bounds: under the picture max(0.5, s / 2) / 30 s + 10 ms (half a source frame, or half a frame's worth
-of source), the L-cut tail 25 ms. Under a ramp the picture's source moment is read from the frames shown around t
-(each of the seven frames nearest t, carried to t at the local speed the frames show; the median), and the offset must
-be within (max(0.5, s / 2) + 0.5) / 30 s + 12 ms, s the local speed in source frames per frame: the original's half a
-source frame or half a frame's worth of source, half a frame more for the picture's rounding (the frame shown is the
-one playing within half a frame period), and 12 ms for the pitch measurement. A J-cut head (a sound clip that starts
-before its picture) starts on a whole frame, so its sync may be off by half a frame's worth of source more (the
-original allows a whole frame there). An L-cut tail is held to the picture's source out point (get_state) carried on
-at the speed the change ends with, and the next sound (at 1x) to its own moment within the original's 25 ms.
+of source), the L-cut tail 25 ms. Under a ramp the picture's source moment is read from the frames shown around t: each
+frame shows the source frame that plays at its middle (test_cuts holds whole clips to that exactly), so the middle of
+frame j plays within half a source frame of the middle of the source frame it shows, and a least-squares line through
+those seven points (the frames nearest t) gives the moment at t and the local speed s (its slope, in source frames per
+frame). At a steady speed that line is within half a source frame of the true moment (17 ms), the most at and near a
+whole-number speed, where the frames shown cannot place it closer (at 0.25x to 0.75x and 1.5x: within 0.29 source
+frames, 10 ms). Where the picture plays at real time or slower (s at most 1) the offset must be within the original's
+bound at real time, 0.5 / 30 s + 10 ms (27 ms): the picture's worst placement there and 10 ms for the sound and its
+measurement. Faster, it must be within (max(0.5, s / 2) + 0.5) / 30 s + 12 ms: the original's half a source frame or
+half a frame's worth of source, half a frame more for the picture's rounding (frames are skipped, and where the speed
+climbs quickly, to the flash presets' 8x, a line through seven frames bends away from the curve) and 12 ms for the
+pitch measurement. A J-cut head (a sound clip that starts before its picture) starts on a whole frame, so its sync may
+be off by half a frame's worth of source more (the original allows a whole frame there). An L-cut tail is held to the
+picture's source out point (get_state) carried on at the speed the change ends with, and the next sound (at 1x) to its
+own moment, both within the original's 25 ms: neither depends on the frames shown.
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
@@ -74,16 +81,20 @@ def reset(d):
 
 
 def picture_time(idx, t, lo, hi):
-    """The picture's source moment (s) at timeline moment t (s), from the frames shown in [lo, hi) (timeline frames)
-    around t: each of the seven frames nearest t, carried to t at the local speed (the frames 4 before and 4 after
-    t's frame); the median. None outside [lo, hi)."""
+    """(the picture's source moment in s, the local speed) at timeline moment t (s), from the frames shown in [lo, hi)
+    (timeline frames): the least-squares line through the points (j + 1/2, idx[j] + 1/2) of the seven frames j nearest
+    t (the middle of frame j plays within half a source frame of the middle of the source frame it shows), at t; the
+    local speed is its slope (source frames per frame). None outside [lo, hi)."""
     f = int(t * FPS)
     if not lo <= f < hi:
         return None
-    a, b = max(lo, f - 4), min(hi - 1, f + 4)
-    s = (idx[b] - idx[a]) / max(1, b - a)
-    preds = [(idx[j] + (t * FPS - j) * s) / FPS for j in range(max(lo, f - 3), min(hi, f + 4))]
-    return statistics.median(preds), s
+    js = range(max(lo, f - 3), min(hi, f + 4))
+    xs = [j + 0.5 for j in js]
+    ys = [idx[j] + 0.5 for j in js]
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    s = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 1.0
+    return (my + s * (t * FPS - mx)) / FPS, s
 
 
 def off_at(snd, idx, t, lo, hi, want=None, shift=0.0):
@@ -104,23 +115,27 @@ def off_at(snd, idx, t, lo, hi, want=None, shift=0.0):
     return (statistics.median(diffs) if diffs else None), speed
 
 
-def tolerance(speed):
-    """The bound under a ramp at the local speed `speed` (the picture's moment read from the frames shown)."""
-    return (max(0.5, abs(speed) / 2) + 0.5) / FPS + 0.012
-
-
 def constant_tolerance(speed):
     """The original's bound under a picture at the constant speed `speed`, whose moment is in + (t - start) * speed."""
     return max(0.5, abs(speed) / 2) / FPS + 0.010
 
 
-TAIL_CONSTANT = 0.025   # the original's bound for an L-cut tail after a constant speed, and for the next sound
+def tolerance(speed):
+    """The bound under a ramp at the local speed `speed` (the picture's moment read from the frames shown): at real
+    time or slower the original's bound at real time (27 ms); faster, half a frame more for the picture's rounding and
+    12 ms for the measurement (module docstring)."""
+    if abs(speed) <= 1:
+        return constant_tolerance(1)
+    return (max(0.5, abs(speed) / 2) + 0.5) / FPS + 0.012
 
 
-def head_tolerance(speed):
-    """tolerance(speed) and half a frame more for a J-cut head: it starts on a whole frame, so its sync can be off by
-    up to half a frame's worth of source (the original allows a whole frame)."""
-    return tolerance(speed) + 0.5 * abs(speed) / FPS
+TAIL = 0.025   # the original's bound for an L-cut tail (after a constant speed or a ramp) and for the next sound
+
+
+def head_extra(speed):
+    """What a J-cut head may be off by beyond tolerance(speed): half a frame's worth of source, since it starts on a
+    whole frame (the original allows a whole frame)."""
+    return 0.5 * abs(speed) / FPS
 
 
 def run(t):
@@ -178,9 +193,7 @@ def lcut(t, d, idx, label, op, s_start, s_end):
     pic = frames[:end_a]
     probs = [f"{f}: {g}" for f, g in enumerate(pic) if not 30 <= g < 120 or (f and g < pic[f - 1])]
     if "speed" in op:
-        s = op["speed"]
-        probs += [f"{n}: {pic[n]} (30 + n*s = {30 + n * s:g})" for n in range(len(pic))
-                  if abs(pic[n] - (30 + n * s)) > max(1, s / 2) + 1e-9]
+        probs += E.speed_rule_problems(frames, a)   # a whole clip: exactly the frame playing at each frame's middle
     t.check(names[0], len(pic) == end_a and not probs and pic[0] <= 30 + max(1, s_start / 2) and pic[-1] >= 117,
             f"{len(pic)} frames, first {pic[:3]}, last {pic[-3:]}; {E.short(probs)}")
     if "speed" in op:
@@ -197,13 +210,12 @@ def lcut(t, d, idx, label, op, s_start, s_end):
     src0 = a["out_frame"] / FPS
     tt = (end_a + min(8, (E.end(aa) - end_a) / 2)) / FPS
     o, _ = off_at(snd, frames, tt, 0, 0, want=lambda x: src0 + (x - t0) * s_end)
-    bound = TAIL_CONSTANT if "speed" in op else tolerance(s_end)
-    t.check(names[2], o is not None and abs(o) <= bound,
+    t.check(names[2], o is not None and abs(o) <= TAIL,
             f"at {tt:.3f} s: {'silent' if o is None else f'{o * 1000:+.0f} ms'} (end speed {s_end:.2f}; allowed "
-            f"{bound * 1000:.0f} ms)")
+            f"{TAIL * 1000:.0f} ms)")
     tb = (ba["start_frame"] + 10) / FPS
     ob, _ = off_at(snd, frames, tb, 0, 0, want=lambda x: ba["in_frame"] / FPS + (x - ba["start_frame"] / FPS))
-    t.check(names[3], E.end(aa) <= ba["start_frame"] and ob is not None and abs(ob) <= TAIL_CONSTANT,
+    t.check(names[3], E.end(aa) <= ba["start_frame"] and ob is not None and abs(ob) <= TAIL,
             f"A's sound ends at {E.end(aa)}, B's starts at {ba['start_frame']}; B's sound at {tb:.3f} s: "
             f"{'silent' if ob is None else f'{ob * 1000:+.0f} ms'}")
 
@@ -217,25 +229,30 @@ def fractions(parts):
     return [a + (b - a) * k / (n - 1) for a, b in parts for k in range(n)]
 
 
-def under(snd, frames, lo, hi, want=None, bound=None, shift=0.0, parts=None):
+def under(snd, frames, lo, hi, want=None, bound=None, shift=0.0, parts=None, extra=None):
     """The moments under the picture [lo, hi) (timeline frames) where the sound is off, and a summary: at MOMENTS
     moments (fractions(parts) of the picture), the offset from want(t) (a rule) within `bound`, or else from the
-    picture's moment read from the frames (plus `shift`) within tolerance(the local speed). The summary names the worst
-    offset and the moment closest to its bound."""
-    off, worst, close = [], 0.0, None
+    picture's moment read from the frames (plus `shift`) within tolerance(the local speed), plus extra(the local speed)
+    when given. The summary names the worst offset, the worst where the local speed is 1 or less, and the moment
+    closest to its bound."""
+    off, worst, slow, close = [], 0.0, None, None
     for x in fractions(parts):
         tm = (lo + (hi - lo) * x) / FPS
         o, s = off_at(snd, frames, tm, lo, hi, want=want, shift=shift)
-        b = bound if want is not None else tolerance(s)
+        b = bound if want is not None else tolerance(s) + (extra(s) if extra else 0)
         what = f"{tm:.3f} s: {E.ms(o)} (" + (f"allowed {b * 1000:.0f} ms)" if want is not None
                                              else f"speed {s:.2f}, allowed {b * 1000:.0f} ms)")
         if o is None or abs(o) > b:
             off.append(what)
         if o is not None:
             worst = max(worst, abs(o))
+            if want is None and abs(s) <= 1:
+                slow = max(slow or 0.0, abs(o))
             if close is None or abs(o) / b > close[0]:
                 close = (abs(o) / b, what)
-    return off, f"worst {worst * 1000:.0f} ms; closest to its bound {close[1] if close else None}"
+    at1 = "" if want is not None else ("; at 1x or slower: none" if slow is None else
+                                       f"; at 1x or slower: worst {slow * 1000:.0f} ms")
+    return off, f"worst {worst * 1000:.0f} ms{at1}; closest to its bound {close[1] if close else None}"
 
 
 def export_sound(t, d, name):
@@ -365,21 +382,14 @@ def jcut_hero(t, d, idx):
     a = E.clip(st, A)
     out = t.path("out", "jcut-hero.mp4")
     job = d.export(out)
-    off, worst = [], 0.0
+    off, summary = [], ""
     try:
         frames = observe.frame_indexes(out) if job.get("status") == "done" else None
         snd = observe.samples(out) if frames is not None else None
     except observe.Unmeasurable as e:
         frames, snd, off = None, None, [str(e)]
     if frames is not None and snd is not None:
-        lo, hi = a["start_frame"], E.end(a)
-        for k in range(1, MOMENTS + 1):
-            tm = (lo + (hi - lo) * k / (MOMENTS + 1)) / FPS
-            o, s = off_at(snd, frames, tm, lo, hi)
-            if o is None or abs(o) > head_tolerance(s):
-                off.append(f"{tm:.3f} s: {'silent' if o is None else f'{o * 1000:+.0f} ms'} (speed {s:.2f})")
-            if o is not None:
-                worst = max(worst, abs(o))
+        off, summary = under(snd, frames, a["start_frame"], E.end(a), extra=head_extra)
     t.check("a J-cut with the hero ramp: under the picture, its sound head plays the moment the picture shows",
-            frames is not None and snd is not None and not off, f"worst {worst * 1000:.0f} ms; {E.short(off)}; "
+            frames is not None and snd is not None and not off, f"{summary}; {E.short(off)}; "
                                                                  f"{job if frames is None else ''}")

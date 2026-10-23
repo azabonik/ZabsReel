@@ -5,6 +5,9 @@
 #   b.mp4     testsrc  1280x720 30 fps 6 s + sine 660 Hz   same codecs
 #   c640.mp4  testsrc2  640x480 30 fps 5 s + sine 440 Hz   same codecs
 #   m.mp3     sine 330 Hz 20 s                              MP3 mono 44.1 kHz 64 kb/s
+# a long one, for the edit tests' bakes that must still run while the test changes the timeline or cancels them
+# (test_locks, test_reverse_slowmo: reversing it takes about 8 s on v0.2.0):
+#   long.mp4  testsrc2 1920x1080 30 fps 20 s + sine 440 Hz same codecs
 # one for the measurement self-check:
 #   gap.m4a   440 Hz tone, digital silence from 2.0 to 3.5 s, 5.5 s in all   AAC-LC mono 44.1 kHz
 # and a very small video that a test puts in a data: URI (a few kB):
@@ -55,6 +58,7 @@ clip() {
 clip a.mp4 testsrc2 1280x720 6 440
 clip b.mp4 testsrc 1280x720 6 660
 clip c640.mp4 testsrc2 640x480 5 440
+clip long.mp4 testsrc2 1920x1080 20 440
 "$FF" -nostdin -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=330:sample_rate=44100:duration=20" \
   -c:a libmp3lame -b:a 64k -ac 1 -ar 44100 "$OUT/m.mp3"
 "$FF" -nostdin -hide_banner -loglevel error -y \
@@ -122,7 +126,7 @@ expect() {
   got="$(probe "$1" "$2" "$3")"
   [ "$got" = "$4" ] || { echo "make.sh: $1 $2 is '$got', expected '$4' ($3)" >&2; exit 1; }
 }
-for f in a.mp4:1280:720:180 b.mp4:1280:720:180 c640.mp4:640:480:150; do
+for f in a.mp4:1280:720:180 b.mp4:1280:720:180 c640.mp4:640:480:150 long.mp4:1920:1080:600; do
   IFS=: read -r n w h frames <<< "$f"
   expect "$n" v:0 codec_name,profile,width,height,pix_fmt,r_frame_rate,nb_frames "h264,High,$w,$h,yuv420p,30/1,$frames"
   expect "$n" a:0 codec_name,profile,sample_rate,channels aac,LC,44100,1
@@ -158,6 +162,6 @@ expect move.mp4 a:0 codec_name,sample_rate,channels aac,48000,1
 expect tone300.m4a a:0 codec_name,sample_rate,channels aac,48000,1
 expect chirp.m4a a:0 codec_name,profile,sample_rate,channels aac,LC,48000,1
 [ -z "$(probe chirp.m4a v "codec_type")" ] || { echo "make.sh: chirp.m4a has a video stream" >&2; exit 1; }
-for f in a.mp4 b.mp4 c640.mp4 m.mp3 gap.m4a tiny.mp4; do
+for f in a.mp4 b.mp4 c640.mp4 long.mp4 m.mp3 gap.m4a tiny.mp4; do
   printf '%-9s %s s, %s bytes\n' "$f" "$("$FP" -v error -show_entries format=duration -of csv=p=0 "$OUT/$f")" "$(stat -c %s "$OUT/$f")"
 done

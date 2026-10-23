@@ -699,7 +699,7 @@ def media_magic(head):
 
 
 # ---------------------------------------------------------------- sidecar files
-SRT_TIME =r"(\d{1,2}):([0-5]\d):([0-5]\d),(\d{3})"
+SRT_TIME = r"(\d{1,2}):([0-5]\d):([0-5]\d),(\d{3})"
 SRT_TIMING = re.compile(rf"^{SRT_TIME}\s+-->\s+{SRT_TIME}(\s+.*)?$")
 
 

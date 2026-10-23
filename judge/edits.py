@@ -4,6 +4,8 @@ and changed nothing, waiting for a job, and the search for media files an editor
 
 Python 3 standard library only. Every position comes from get_state, never from an operation's answer.
 """
+import fractions
+import math
 import os
 import time
 
@@ -83,13 +85,15 @@ def clear(d):
         d.remove_clip(left[0]["id"])
 
 
-def refused_unchanged(d, fn):
-    """(ok, detail): fn() (an edit) is refused and changes nothing, its undo history included. Before it, the user's
-    last edit is a marker K that stays, and a second marker P is set and undone, so the editor has a step to redo.
-    After the refusal the State must be the one before; redo must bring P back (a refused edit that had made an undo
-    step would have dropped the redo step), undo must take P away again, and the next undo must take back K, the last
-    edit before the refusal (a refusal that had left a step in the undo history, even one that changes nothing, would
-    make that undo do nothing visible). That undo gives the State from before the call."""
+def refused_unchanged(d, fn, codes=(drv.ProductError,)):
+    """(ok, detail): fn() (an edit) is refused and changes nothing, its undo history included. Refused: the editor
+    answers product_error (PROTOCOL.md: the editor refused the edit); bad_request says the adapter found the arguments
+    malformed, which is not the editor's refusal (`codes` widens what counts). Before the call, the user's last edit is
+    a marker K that stays, and a second marker P is set and undone, so the editor has a step to redo. After the
+    refusal the State must be the one before; redo must bring P back (a refused edit that had made an undo step would
+    have dropped the redo step), undo must take P away again, and the next undo must take back K, the last edit before
+    the refusal (a refusal that had left a step in the undo history, even one that changes nothing, would make that
+    undo do nothing visible). That undo gives the State from before the call."""
     st = d.get_state()
     mine = [(m["frame"], m.get("name")) for m in st.get("markers", [])]
     used = {f for f, _ in mine}
@@ -99,7 +103,7 @@ def refused_unchanged(d, fn):
     d.set_markers(mine + [kept, probe])
     d.undo()
     s0 = d.get_state()
-    refused, what = drv.refused(fn)
+    refused, what = drv.refused(fn, codes=codes)
     s1 = d.get_state()
     d.redo()
     s2 = d.get_state()
@@ -123,6 +127,19 @@ def refused_unchanged(d, fn):
     return ok, "; ".join(why)
 
 
+def job_now(d, job):
+    """The job `job` as d.jobs() lists it now (None when it is not listed)."""
+    return next((j for j in d.jobs() if j.get("job") == job), None) if job else None
+
+
+def too_fast(t, names, was, change):
+    """Records the checks `names` as not applicable: the bake (`was`, as jobs() listed it) had ended done before the
+    judge could make `change` during it (it bakes long media so that this does not happen; run.py --strict fails it)."""
+    for n in names:
+        t.not_applicable(n, f"the bake had ended done before the judge {change} ({was}): it was not seen running, so "
+                            f"the change could not land during it")
+
+
 def wait_job(d, job, timeout=600):
     """The job `job` (from d.jobs()) once it is no longer running, or the last one seen when `timeout` s pass (None
     when the editor never listed it)."""
@@ -136,12 +153,55 @@ def wait_job(d, job, timeout=600):
 
 
 # ---------------------------------------------------------------- what an export must show
+def middle_frame(c, n):
+    """(frame, tie) for the State clip `c` at its constant speed s: the source frame that plays at the middle of the
+    clip's timeline frame n, in_frame + floor((n + 1/2) * s), and whether (n + 1/2) * s is a whole number: a tie,
+    where that frame starts playing at the very middle and the frame before it may show as well (of the speeds the
+    tests use, at 2x and 4x)."""
+    s = fractions.Fraction(float(c.get("speed") or 1)).limit_denominator(10000)
+    x = (n + fractions.Fraction(1, 2)) * s
+    return c["in_frame"] + math.floor(x), x.denominator == 1
+
+
+def speed_rule_problems(frames, c, whole=True):
+    """Where `frames` (observe.frame_indexes of an export, one per timeline frame) breaks the speed rule for the State
+    clip `c` (a constant speed s, source range [in, out), at start_frame) -> [text]. At its timeline frame n the clip
+    shows a source frame inside [in, out), never an earlier one than at frame n - 1, and:
+    - a whole clip (placed and set to its speed as a whole, so its first frame starts on its in point) shows exactly
+      the source frame playing at the middle of that frame, in + floor((n + 1/2) * s) (middle_frame; at a tie, that
+      frame or the one before it: v0.2.0 shows the one before on idx.mp4 and the later one on idx2997.mp4's 1/30000
+      timebase);
+    - a piece of a split clip (whole False) may start part of a source frame into its in point, which get_state does
+      not show (its in_frame is a whole frame), so it is held to in + n at 1x and within max(1, s / 2) source frames
+      of in + n * s at another speed."""
+    out, prev = [], None
+    s = float(c.get("speed") or 1)
+    for n in range(c["length_frames"]):
+        f = c["start_frame"] + n
+        if f >= len(frames):
+            out.append(f"frame {f} is missing")
+            break
+        got = frames[f]
+        if whole:
+            want, tie = middle_frame(c, n)
+            wrong = got not in ((want - 1, want) if tie else (want,))
+            what = f"the middle of the frame plays {want}" + (" (a tie: or the one before)" if tie else "")
+        else:
+            ideal = c["in_frame"] + n * s
+            wrong = got != ideal if s == 1 else abs(got - ideal) > max(1, s / 2) + 1e-9
+            what = f"in + n*s = {ideal:g}"
+        if not c["in_frame"] <= got < c["out_frame"] or (prev is not None and got < prev) or wrong:
+            out.append(f"{f}: {got} (clip {c['id']} at {s:g}x: {what})")
+        prev = got
+    return out
+
+
 def render_problems(st, frames, stripes):
     """Where `frames` (observe.frame_indexes of an export of the timeline) differs from what State `st` says: at each
-    timeline frame the highest shown video track's clip there shows its source (a clip of the asset `stripes` at a
-    constant speed s: a source frame inside its range, never earlier than at the frame before, exactly in + n at 1x,
-    else within max(1, s / 2) of in + n * s; a clip of another asset or with a ramp is not read), and a frame with no
-    clip is black (0). The export must hold State's length_frames frames. -> [text]"""
+    timeline frame the highest shown video track's clip there shows its source, and a frame with no clip is black (0).
+    A clip of the asset `stripes` at a constant speed is held, where it is on top, to the whole clip's speed rule
+    (speed_rule_problems: the clips of the layouts this checks are whole, none is a piece of a split clip); a clip of
+    another asset or with a ramp is not read. The export must hold State's length_frames frames. -> [text]"""
     n = st.get("length_frames") or 0
     out = [] if len(frames) == n else [f"{len(frames)} frames, get_state says {n}"]
     top = [None] * n
@@ -160,13 +220,12 @@ def render_problems(st, frames, stripes):
             continue
         if c["asset"] != stripes or c.get("ramp"):
             continue
-        s = float(c.get("speed") or 1)
-        k = f - c["start_frame"]
-        ideal = c["in_frame"] + k * s
+        want, tie = middle_frame(c, f - c["start_frame"])
         p = prev.get(c["id"])
         if not c["in_frame"] <= got < c["out_frame"] or (p is not None and got < p) \
-                or (got != ideal if s == 1 else abs(got - ideal) > max(1, s / 2) + 1e-9):
-            out.append(f"{f}: {got} (clip {c['id']} at {s:g}x: in + n*s = {ideal:g})")
+                or got not in ((want - 1, want) if tie else (want,)):
+            out.append(f"{f}: {got} (clip {c['id']} at {float(c.get('speed') or 1):g}x: the middle of the frame "
+                       f"plays {want}" + (" (a tie: or the one before)" if tie else "") + ")")
         prev[c["id"]] = got
     return out
 

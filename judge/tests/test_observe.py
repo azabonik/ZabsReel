@@ -19,7 +19,7 @@ import observe
 
 PORT_BOUND = False
 TIMEOUT = 300
-CHECKS = 40
+CHECKS = 41
 
 
 def run(t):
@@ -89,7 +89,8 @@ class UndoModel:
     """An editor's undo history in miniature, for edits.refused_unchanged: the State is its markers, set_markers is one
     undo step (a new step drops the redo steps), and its one edit is refused the way `refusal` says: "clean" (nothing
     changes), "empty step" (a step that changes nothing is added to the undo history, the redo steps are kept), "redo
-    lost" (the redo steps are dropped), "state" (a marker is added) or "accepted" (no refusal)."""
+    lost" (the redo steps are dropped), "state" (a marker is added), "bad request" (nothing changes, but the answer is
+    bad_request: the adapter's word, not the editor's refusal) or "accepted" (no refusal)."""
 
     def __init__(self, refusal):
         self.refusal, self.markers, self.undos, self.redos = refusal, [(30, "early"), (7, None)], [], []
@@ -121,6 +122,8 @@ class UndoModel:
             self.redos = []
         elif self.refusal == "state":
             self.markers = self.markers + [(99, "x")]
+        elif self.refusal == "bad request":
+            raise drv.BadRequest("malformed", op="edit")
         raise drv.ProductError("refused", op="edit")
 
 
@@ -135,6 +138,12 @@ def refusal_model(t):
             "leaves an empty step in the undo history, one that drops the redo step, one that changes the State and "
             "an edit that is not refused",
             got["clean"][0] and got["clean"][2] and not any(got[k][0] for k in got if k != "clean"), got)
+    m = UndoModel("bad request")
+    strict = edits.refused_unchanged(m, m.edit)
+    m = UndoModel("bad request")
+    wide = edits.refused_unchanged(m, m.edit, codes=(drv.ProductError, drv.BadRequest))
+    t.check("the refusal check takes only product_error as the editor's refusal: a bad_request answer that changes "
+            "nothing fails it, and passes when bad_request is allowed too", not strict[0] and wide[0], (strict, wide))
 
 
 def side_effects(t):

@@ -90,7 +90,7 @@ folder then needs `sudo`.
 A check passes or fails, or it is not made, for one of two reasons, each printed with its name and counted on the
 `JUDGE` line (`JUDGE: 150/150 passed, 6 not applicable`), neither passed nor failed:
 
-- **Not applicable** (`N/A`), for one of three reasons. First, the graphics tests' checks on the graphics add-on, when
+- **Not applicable** (`N/A`), for one of four reasons. First, the graphics tests' checks on the graphics add-on, when
   no add-on was given to the judge (`--graphics-addon`, or `JUDGE_GRAPHICS_ADDON`): a run without it cannot judge them,
   and must not pass them. Second, the hostile input the check is about could not be made. The judge makes a hostile
   project or OTIO file by text substitution in a file the editor itself saved (`observe.craft`). That needs the file
@@ -101,6 +101,10 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   format every crafted input comes from. A rewrite's run without `--strict` lists its not-applicable checks: each one
   is a security check the judge could not apply to that build, not a pass. Third, a check that needs Python's
   `tomllib` (Python 3.11 or newer: `test_cli_migrate` parses the TOML the installer rewrote) on an older Python.
+  Fourth, a check on what happens when the timeline changes, or a cancel comes, while a bake runs (`test_locks`,
+  `test_reverse_slowmo`), when the bake had already ended done just before the judge acted: the change could not land
+  during it. The bakes are long (20 s of 1080p takes v0.2.0 about 8 s to reverse), so a correct editor does not get
+  here; `--strict` makes each one a failure.
 - **Not observed** (`N/O`): the observation needs `strace`, which is not installed, not usable (it failed the
   runner's test of it, or under `--require-trace` it can be written by the runner's user or is named through a
   symbolic link in a folder that user can write), or `JUDGE_STRACE` is set empty:
