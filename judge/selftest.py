@@ -144,6 +144,13 @@ TESTS = {
              "    name = \"the adapter got the judge's graphics add-on in start\"\n"
              "    if t.graphics_addon is None and got is None:\n        t.not_applicable(name, t.graphics_addon_why)\n"
              "    else:\n        t.check(name, got is not None and got == t.graphics_addon, got)\n",
+    # An optional fixture (run.OPTIONAL_MEDIA) named in EXTRA_MEDIA is made for the run; one that is not an optional
+    # fixture refuses the run before anything is made.
+    "media": "PORT_BOUND = False\nEXTRA_MEDIA = ('long.mp4',)\nCHECKS = 1\ndef run(t):\n"
+             "    n = os.path.getsize(t.media('long.mp4'))\n"
+             "    t.check('the optional fixture it names is made', n > 1 << 20, n)\n",
+    "badmedia": "PORT_BOUND = False\nEXTRA_MEDIA = ('nope.mp4',)\nCHECKS = 1\ndef run(t):\n"
+                "    t.check('one', True)\n",
     "nobs": "PORT_BOUND = False\nCHECKS = 2\ndef run(t):\n    t.check('a passing check', True)\n"
             "    t.not_observed('a trace check', 'strace is not installed')\n",
     "interrupt": "PORT_BOUND = False\nCHECKS = 1\nTIMEOUT = 600\ndef run(t):\n"
@@ -724,6 +731,25 @@ class SelfTest:
 
     def unit(self, name, ok, detail=""):
         print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f"; {detail}" if not ok and detail else ""), flush=True)
+        if not ok:
+            self.failures += 1
+
+    def made_media(self, case):
+        """The fixtures in the media folder of the kept run that ran test_<case> (sorted names), or None."""
+        for d, dirs, _ in os.walk(os.path.join(self.tmp, "scratch")):
+            if f"test_{case}" in dirs and "media" in dirs:
+                return sorted(os.listdir(os.path.join(d, "media")))
+        return None
+
+    def no_optional_media(self, case):
+        """A run whose tests name no optional fixture (the kept run of test_<case>) made the base set only."""
+        sys.path.insert(0, JUDGE)
+        import run
+        got = self.made_media(case)
+        extra = [n for n in (got or []) if n in run.OPTIONAL_MEDIA]
+        ok = got is not None and "a.mp4" in got and not extra
+        print(f"{'ok  ' if ok else 'FAIL'} a run whose tests name no optional fixture makes only the base set"
+              + (f"; media: {got}" if not ok else ""), flush=True)
         if not ok:
             self.failures += 1
 
@@ -1404,6 +1430,13 @@ def main(run_py, parent=None, allow_unprotected=False, require_trace=False, as_u
         s.run("ok", 0, [r"^PASS  test_ok: a passing check", r"^JUDGE: 2/2 passed"])
         s.run("crash", 1, [fail.format("crash", "the test process exited cleanly"),
                            fail.format("crash", "the test reported its end")])
+        s.no_optional_media("crash")  # its run failed, so its folder (and the media made for it) is kept
+        s.run("media", 0, [r"^judge: fixtures: the base set; long\.mp4 \(for test_media\)$",
+                           r"^PASS  test_media: the optional fixture it names is made", r"^JUDGE: 2/2 passed"],
+              label="a test that names an optional fixture in EXTRA_MEDIA gets it")
+        s.run("badmedia", 1, [r"^JUDGE: refused: test_badmedia: EXTRA_MEDIA names 'nope\.mp4', which "
+                              r"judge/fixtures/make\.sh does not make on request"],
+              label="EXTRA_MEDIA naming a file that is not an optional fixture: refused before anything is made")
         s.run("hang", 1, [fail.format("hang", r"finished within 3 s")])
         s.run("sysexit", 1, [fail.format("sysexit", "the test ran to its end"),
                              fail.format("sysexit", "the test recorded the 2 checks it declares")])

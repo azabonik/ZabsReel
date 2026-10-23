@@ -62,8 +62,11 @@ it and no symbolic link on the way to it sits in a folder that user can write; i
 usable strace that check is not observed.
 
 Each test file judge/tests/test_*.py has a function run(t), sets CHECKS (the number of checks run(t) records) and may
-set PORT_BOUND (default True: it starts the editor) and TIMEOUT. Each test runs in its own session under its
-timeout, with JUDGE_TEST_SCRATCH=<its scratch folder> in its environment (the driver passes it on to the adapter).
+set PORT_BOUND (default True: it starts the editor), TIMEOUT and EXTRA_MEDIA (the optional fixtures it uses, from
+OPTIONAL_MEDIA: judge/fixtures/make.sh makes those only when a test of the run names them, so a run that needs none,
+such as the self-test's, does not spend the time; a name that is not one refuses the run). Each test runs in its own
+session under its timeout, with JUDGE_TEST_SCRATCH=<its scratch folder> in its environment (the driver passes it on to
+the adapter).
 The test sends its results to the runner over a pipe that only the test process holds; nothing the runner reads for
 the verdict is a file. On Linux the runner and the test process make themselves non-dumpable first (prctl), so another
 process of the same user cannot reopen the pipe through /proc/<pid>/fd or attach with ptrace. A Python fork child
@@ -121,6 +124,10 @@ sys.path.insert(0, JUDGE)
 
 DEFAULT_TIMEOUT = 600
 PRINT_LOCK = threading.Lock()
+# The fixtures judge/fixtures/make.sh makes only when a test of the run names them in EXTRA_MEDIA (the same list as
+# make.sh's OPTIONAL): the edit tests' media.
+OPTIONAL_MEDIA = ("idx.mp4", "idx2997.mp4", "skew.mp4", "cutout.mkv", "move.mp4", "tone300.m4a", "chirp.m4a",
+                  "long.mp4")
 
 
 # ---------------------------------------------------------------- no access through /proc or ptrace
@@ -989,10 +996,13 @@ class T:
         self._out.flush()
 
     def media(self, name):
-        """Path of a fixture made by judge/fixtures/make.sh."""
+        """Path of a fixture made by judge/fixtures/make.sh (an optional one only when a test of the run names it in
+        EXTRA_MEDIA)."""
         p = os.path.join(self.media_dir, name)
         if not os.path.isfile(p):
-            raise FileNotFoundError(f"fixture {name} missing in {self.media_dir}")
+            raise FileNotFoundError(f"fixture {name} missing in {self.media_dir}"
+                                    + (": it is an optional fixture, made only for a test that names it in EXTRA_MEDIA"
+                                       if name in OPTIONAL_MEDIA else ""))
         return p
 
     def path(self, *parts):
@@ -1238,7 +1248,20 @@ def load_meta(path):
     if not callable(getattr(mod, "run", None)):
         raise SystemExit(f"{path} has no run(t)")
     return {"path": path, "name": os.path.basename(path)[:-3], "port_bound": bool(getattr(mod, "PORT_BOUND", True)),
-            "timeout": int(getattr(mod, "TIMEOUT", DEFAULT_TIMEOUT))}
+            "timeout": int(getattr(mod, "TIMEOUT", DEFAULT_TIMEOUT)), "media": getattr(mod, "EXTRA_MEDIA", ())}
+
+
+def media_problem(m):
+    """Why test meta `m`'s EXTRA_MEDIA cannot be made (it must be a list or tuple of names from OPTIONAL_MEDIA), or
+    None."""
+    names = m["media"]
+    if not isinstance(names, (list, tuple)) or not all(isinstance(n, str) for n in names):
+        return f"EXTRA_MEDIA must be a list of fixture names, not {names!r}"
+    bad = [n for n in names if n not in OPTIONAL_MEDIA]
+    if bad:
+        return (f"EXTRA_MEDIA names {', '.join(repr(n) for n in bad)}, which judge/fixtures/make.sh does not make "
+                f"on request (it makes {', '.join(OPTIONAL_MEDIA)})")
+    return None
 
 
 def _end_group(p, grace=10):
@@ -1523,9 +1546,15 @@ def main():
     if a.only:
         tests = [t for t in tests if a.only in os.path.basename(t)]
     metas = [load_meta(t) for t in tests]
+    for m in metas:
+        why = media_problem(m)
+        if why:
+            print(f"JUDGE: refused: {m['name']}: {why}", flush=True)
+            return 1
     if a.list:
         for m in metas:
-            print(f"{m['name']}  port_bound={m['port_bound']}  timeout={m['timeout']}")
+            print(f"{m['name']}  port_bound={m['port_bound']}  timeout={m['timeout']}"
+                  + (f"  media={','.join(m['media'])}" if m["media"] else ""))
         return 0
     if not metas:
         print("JUDGE: 0/0 passed (no tests selected)")
@@ -1602,7 +1631,10 @@ def main():
     print(f"judge: scratch {base}", flush=True)
 
     media = os.path.join(base, "media")
-    mk = subprocess.Popen(["bash", os.path.join(JUDGE, "fixtures", "make.sh"), media], stdout=subprocess.PIPE,
+    extra = [n for n in OPTIONAL_MEDIA if any(n in m["media"] for m in metas)]
+    print("judge: fixtures: the base set" + "".join(
+        f"; {n} (for {', '.join(m['name'] for m in metas if n in m['media'])})" for n in extra), flush=True)
+    mk = subprocess.Popen(["bash", os.path.join(JUDGE, "fixtures", "make.sh"), media, *extra], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
     with LIVE_LOCK:
         LIVE["fixtures"] = (mk, None)

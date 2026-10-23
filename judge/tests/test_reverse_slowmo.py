@@ -12,10 +12,18 @@ freeze_frame sections are tests/test_freeze.py).
 
 Media: idx.mp4 (180x90 30 fps, 16 s: frames that show their index, a chirp whose pitch says its source moment),
 skew.mp4 (3.0 s of those frames, 3.5 s of the chirp), cutout.mkv (2 s of those frames, the top half transparent),
-fx-base.mp4 (0xE020E0, under the cutout), move.mp4 (moving 320x180 30 fps, 3 s, a 440 Hz tone), a.mp4 (1280x720, 6 s:
-optical flow on it takes about a minute) and long.mp4 (1920x1080, 20 s: reversing it takes about 8 s), whose bakes
-are canceled while they run; a bake that had already ended done when the judge was about to cancel it could not be
-judged, and its checks are recorded as not applicable (run.py --strict fails them). The canvas is 180x90 at 30 fps.
+fx-base.mp4 (0xE020E0, under the cutout), move.mp4 (moving 320x180 30 fps, 3 s, a 440 Hz tone), a.mp4 (1280x720, 6 s)
+and long.mp4 (1920x1080, 20 s), whose bakes are canceled while they run: the second 10 s of long.mp4 reversed (about
+4 s on v0.2.0) and the first 3 s of a.mp4 in optical flow at 0.5x (about 25 s). The canvas is 180x90 at 30 fps.
+
+A cancel is judged on what follows it, not on its answer (which may come before the work has stopped): the job must
+end canceled with the State as before and no new media file, and stay so: the clip is left in place for one and a
+half times a full bake of the same media, and 2 s more, after the cancel answered, and then the job must not have
+turned done, the State must still be as before and no media file may have appeared (a bake that went on and placed or
+kept its copy fails). How long a full bake takes is measured just before, on a clean bake of the other half of the
+same file (the first 10 s of long.mp4; the second 3 s of a.mp4 at 0.5x, which take longer in optical flow than the
+first, about 38 s on v0.2.0): the same length, another span, so a copy of it cannot be handed to the canceled bake. A bake that had already ended done when the judge was about to cancel it could not be judged,
+and its checks are recorded as not applicable (run.py --strict fails them).
 
 A new bake is seen in get_state (the clip plays an asset that was not there before); what it holds is read from an
 export, never from the editor's own files; a bake that leaves something behind is seen as a new media file in the
@@ -31,12 +39,13 @@ import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4", "move.mp4", "long.mp4", "skew.mp4", "cutout.mkv")   # the optional fixtures it uses (run.py)
 TIMEOUT = 1200
 FPS = 30
 TOL = 1.0 / FPS + 0.012
 BASE = (0xE0, 0x20, 0xE0)
 ORDINAL = {2: "second", 4: "fourth"}
-CHECKS = 11 + 6 + (3 + 2 * 4 + 2) + 4 * 2 + 15   # reverse, skew and cutout, slow motion, inside, linked
+CHECKS = 12 + 6 + (3 + 2 * 4 + 3) + 4 * 2 + 15   # reverse, skew and cutout, slow motion, inside, linked
 
 
 def run(t):
@@ -75,10 +84,24 @@ def export_path(t, d, name):
     return out if job.get("status") == "done" else None
 
 
-def canceled_bake(t, d, start, pause, mine, names):
+def measured(d, place, bake):
+    """(seconds, why) that a clean bake takes (edits.bake_time): bake(clip) (wait true) of the clip place() puts on the
+    timeline, which is then removed."""
+    ref = place()
+    try:
+        return E.bake_time(lambda: bake(ref))
+    finally:
+        if E.clip(d.get_state(), ref) is not None:
+            d.remove_clip(ref)
+
+
+def canceled_bake(t, d, full, why, start, pause, mine, names):
     """A bake started with start() (-> its job), canceled `pause` s later: it must end canceled, with the State as
-    before and no new media file. When the bake had already ended done just before the cancel, the cancel could not
-    land during it, and the two checks are not applicable (edits.too_fast)."""
+    before and no new media file (names[0], names[1]), and stay so (names[2], edits.stays_stopped: the clip stays in
+    place for edits.hold(full) s after the cancel answered, `full` being how long a full bake of the same media takes,
+    measured() or None with `why`; then the job is not done, the State is as before and no media file appeared). When
+    the bake had already ended done just before the cancel, the cancel could not land during it, and the three checks
+    are not applicable (edits.too_fast)."""
     sb = d.get_state()
     files = E.files(t, mine)
     job = start()
@@ -88,6 +111,7 @@ def canceled_bake(t, d, start, pause, mine, names):
         E.too_fast(t, names, was, "canceled it")
         return
     canceled = d.cancel(job) if job else False
+    since = time.monotonic()
     end = E.wait_job(d, job) if job else None
     st = d.get_state()
     left = E.left_media(t, files, mine)
@@ -95,6 +119,8 @@ def canceled_bake(t, d, start, pause, mine, names):
             f"running just before the cancel: {was}; cancel answered {canceled}; the job {end}; State unchanged: "
             f"{st == sb}")
     t.check(names[1], not left, left)
+    ok, detail = E.stays_stopped(t, d, job, sb, files, mine, full, since, why)
+    t.check(names[2], ok and bool(end) and end.get("status") == "canceled", detail)
 
 
 # ---------------------------------------------------------------- reverse_clip
@@ -141,11 +167,14 @@ def reverse(t, d, m, mine):
     d.reverse_clip(clip)
     d.undo()
     t.check("one undo restores the clip as it was before the reverse", d.get_state() == before_st, "")
-    # A cancel while the bake runs (20 s of 1080p: about 8 s to bake).
-    hdc = d.place_clip(m["long"], "v0", 200, 0, 600)
-    canceled_bake(t, d, lambda: d.reverse_clip(hdc, wait=False), 0, mine,
+    # A cancel while the bake runs (10 s of 1080p: about 4 s to bake), after a clean bake of the other 10 s.
+    full, why = measured(d, lambda: d.place_clip(m["long"], "v0", 200, 0, 300), d.reverse_clip)
+    hdc = d.place_clip(m["long"], "v0", 200, 300, 600)
+    canceled_bake(t, d, full, why, lambda: d.reverse_clip(hdc, wait=False), 0, mine,
                   ["a reverse canceled while it bakes ends canceled, and the project is as it was",
-                   "...and no media file is left"])
+                   "...and no media file is left",
+                   "...and it stays canceled: left in place for longer than a full bake of the same media takes, the "
+                   "clip still plays its own media and no media file appears"])
     E.clear(d)
     # Un-reverse after an fps change.
     rc = d.place_clip(idx, "v0", 0, 10, 110)
@@ -250,12 +279,19 @@ def slow_motion(t, d, m, mine):
                 f is not None and abs(f - 440) < 15 and end_rms > 0.02, (f, end_rms))
         d.undo()
         t.check(f"{mode}: one undo restores the original clip at 0.5x", d.get_state() == st0, "")
-    # A cancel while optical flow runs (6 s of 720p takes about a minute).
-    hdc = d.place_clip(m["hd"], "v0", 400, 0, 180)
-    d.set_speed(hdc, 0.5)
-    canceled_bake(t, d, lambda: d.smooth_slow_motion(hdc, "flow", wait=False), 0.3, mine,
+    # A cancel while optical flow runs (3 s of 720p at 0.5x: about 25 s), after a clean bake of the other 3 s (the
+    # second, which takes longer: about 38 s).
+    def slowed(a, b):
+        c = d.place_clip(m["hd"], "v0", 400, a, b)
+        d.set_speed(c, 0.5)
+        return c
+    full, why = measured(d, lambda: slowed(90, 180), lambda c: d.smooth_slow_motion(c, "flow"))
+    hdc = slowed(0, 90)
+    canceled_bake(t, d, full, why, lambda: d.smooth_slow_motion(hdc, "flow", wait=False), 0.3, mine,
                   ["a smooth slow motion (flow) canceled while it bakes ends canceled and leaves the clip alone (0.5x)",
-                   "...and no media file is left"])
+                   "...and no media file is left",
+                   "...and it stays canceled: left in place for longer than a full bake of the same media takes, the "
+                   "clip still plays its own media at 0.5x and no media file appears"])
     E.clear(d)
 
 

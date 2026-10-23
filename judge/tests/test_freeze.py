@@ -24,6 +24,7 @@ import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4",)   # the optional fixtures it uses (run.py)
 TIMEOUT = 900
 FPS = 30
 TOL = 1.0 / FPS + 0.012

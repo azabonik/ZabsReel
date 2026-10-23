@@ -22,6 +22,7 @@ import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4", "tone300.m4a")   # the optional fixtures it uses (run.py)
 TIMEOUT = 900
 FPS = 30
 PRESETS = ["montage", "hero", "bullet", "jump_cut", "flash_in", "flash_out"]

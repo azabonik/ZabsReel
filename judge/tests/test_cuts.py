@@ -29,6 +29,7 @@ import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4", "idx2997.mp4")   # the optional fixtures it uses (run.py)
 TIMEOUT = 1500
 
 W, H, FPS = 180, 90, 30
@@ -36,7 +37,7 @@ SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4]
 RD_SPEEDS = [0.25, 0.75, 1.5]
 PIECE_SPEEDS = [0.25, 0.5, 0.75, 1.5, 2, 4]
 FREEZE_SPEEDS = [0.25, 0.5, 0.75, 1.5, 2, 3, 4]
-FREEZE_AT = [1, 2, 3, 5, 6, 7, 10, 21]
+FREEZE_AT = [1, 2, 3, 4, 5, 6, 7, 8, 10, 21]   # 4 and 8: at 0.25x a picture one frame late shows there
 FREEZE_LEN = 6      # frames (0.2 s at 30 fps)
 PERIOD = (0, 0.5, 0.95)  # where in a frame period render_frame is asked
 

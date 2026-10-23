@@ -1,6 +1,7 @@
 """What the edit tests share (tests/test_cuts.py, test_speed_ripple.py, test_speed_sync.py, test_locks.py,
 test_freeze.py, test_reverse_slowmo.py): reading clips from a State (PROTOCOL.md), the check that an edit was refused
-and changed nothing, waiting for a job, and the search for media files an editor left in the test's folder.
+and changed nothing, waiting for a job, the check that a canceled or refused bake stays without effect for longer than
+a full bake takes, and the search for media files an editor left in the test's folder.
 
 Python 3 standard library only. Every position comes from get_state, never from an operation's answer.
 """
@@ -150,6 +151,46 @@ def wait_job(d, job, timeout=600):
             return seen
         time.sleep(0.1)
     return seen
+
+
+# ---------------------------------------------------------------- a bake that was stopped must stay stopped
+def bake_time(fn):
+    """(seconds, None) that fn() takes: a clean bake, made with wait true, of another span of the same media and the
+    same length as a bake the test then cancels or refuses: how long a full bake of it takes. (None, why) when fn()
+    failed. The span differs so that an editor that keeps its copies cannot hand the later bake a copy of this one."""
+    t0 = time.monotonic()
+    try:
+        fn()
+    except drv.JudgeError as e:
+        return None, f"the clean bake failed: {type(e).__name__}: {e}"
+    return time.monotonic() - t0, None
+
+
+def hold(full):
+    """How long (s) the judge leaves a canceled or refused bake's clip in place before it looks again: one and a half
+    times a full bake of the same media (`full`, bake_time) and 2 s more."""
+    return 1.5 * full + 2
+
+
+def stays_stopped(t, d, job, state, before, mine, full, since, why=None):
+    """(ok, detail) for a bake (`job`) that was canceled or refused at `since` (time.monotonic()): the answer may come
+    before its work has stopped, so the judge leaves everything in place until hold(full) s after `since` (well past
+    the time a full bake of the same media takes from its start) and looks again: the job has not turned done, the
+    State is still `state`, and no media file appeared since `before` (files()). A bake that went on after the answer
+    and placed its copy, or kept it, fails here. With `full` None (the clean bake failed: `why`) the check fails, since
+    how long to wait is not known."""
+    if full is None:
+        return False, (f"how long a full bake of the same media takes is not known ({why}), so the judge cannot "
+                       f"wait it out")
+    left_s = since + hold(full) - time.monotonic()
+    if left_s > 0:
+        time.sleep(left_s)
+    j = job_now(d, job)
+    st = d.get_state()
+    left = left_media(t, before, mine)
+    ok = (j is None or j.get("status") != "done") and st == state and not left
+    return ok, (f"looked again {time.monotonic() - since:.1f} s after (a full bake of the same media takes {full:.1f} "
+                f"s): the job {j}; State unchanged: {st == state}; media files left: {left}")
 
 
 # ---------------------------------------------------------------- what an export must show

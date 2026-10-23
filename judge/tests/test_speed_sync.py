@@ -31,21 +31,28 @@ climbs quickly, to the flash presets' 8x, a line through seven frames bends away
 pitch measurement. A J-cut head (a sound clip that starts before its picture) starts on a whole frame, so its sync may
 be off by half a frame's worth of source more (the original allows a whole frame there). An L-cut tail is held to the
 picture's source out point (get_state) carried on at the speed the change ends with, and the next sound (at 1x) to its
-own moment, both within the original's 25 ms: neither depends on the frames shown.
+own moment, both within the original's 25 ms: neither depends on the frames shown. The linked recording is also held
+to its own offset at real time (measured on an export before the ramp and taken out): under the ramp each moment may
+differ from it by the bound less 7 ms (20 ms at real time or slower), so a file whose sound the editor's FFmpeg
+places a little early or late (chirp.m4a with the FFmpeg 9.0 build: 12 ms early) cannot hide a fault of the ramp.
 
 Every check is recorded on every path (a check whose input is missing fails with the reason), so CHECKS is exact.
 """
+import math
 import statistics
 
 import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4", "chirp.m4a")   # the optional fixtures it uses (run.py)
 TIMEOUT = 900
 FPS = 30
 # The speeds each change starts and ends with (the presets' own definitions: bullet and montage start and end at real
-# time, flash_in starts at 8x and is at real time from 30 %): the picture's first frame may be up to half a frame's
-# worth of source into its range, and past the picture's end the L-cut tail goes on at the end speed.
+# time, flash_in starts at 8x and is at real time from 30 %): the picture's first frame shows the source frame playing
+# at its middle, less than half a frame's worth of source at the start speed into the range (so the in point itself
+# where that is under one source frame: at 0.5x, bullet and montage), and past the picture's end the L-cut tail goes
+# on at the end speed.
 LCUT_OPS = [("0.5x", {"speed": 0.5}, 0.5, 0.5), ("2x", {"speed": 2}, 2, 2), ("bullet", {"preset": "bullet"}, 1, 1),
             ("montage", {"preset": "montage"}, 1, 1), ("flash_in", {"preset": "flash_in"}, 8, 1)]
 # The linked sound's curve, heard on a plain linked pair (A and its sound Aa): each change is made as said, and the
@@ -66,7 +73,7 @@ PAIR_OPS = [
      lambda d, A, Aa: (d.set_speed_ramp(A, preset="montage"), d.set_speed_ramp(A, audio="mute"),
                        d.set_speed_ramp(A, audio="stretch")), None),
 ]
-CHECKS = 5 * len(LCUT_OPS) + 6 + 1 + len(PAIR_OPS) + 1
+CHECKS = 5 * len(LCUT_OPS) + 6 + 2 + len(PAIR_OPS) + 1
 MOMENTS = 12            # moments under the picture
 OFFSETS = [-0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06]
 
@@ -127,6 +134,13 @@ def tolerance(speed):
     if abs(speed) <= 1:
         return constant_tolerance(1)
     return (max(0.5, abs(speed) / 2) + 0.5) / FPS + 0.012
+
+
+# What the recording's offset under a ramp may differ from its own offset at real time (recording()): tolerance() less
+# 7 ms, since the sound's own offset (of its file, with the FFmpeg the editor runs) is measured and taken out, leaving
+# 3 ms (5 ms faster than real time) for the measurement: at real time or slower 20 ms, half a source frame for the
+# picture's placement and those 3 ms.
+SAME_AS_1X = -0.007
 
 
 TAIL = 0.025   # the original's bound for an L-cut tail (after a constant speed or a ramp) and for the next sound
@@ -194,8 +208,11 @@ def lcut(t, d, idx, label, op, s_start, s_end):
     probs = [f"{f}: {g}" for f, g in enumerate(pic) if not 30 <= g < 120 or (f and g < pic[f - 1])]
     if "speed" in op:
         probs += E.speed_rule_problems(frames, a)   # a whole clip: exactly the frame playing at each frame's middle
-    t.check(names[0], len(pic) == end_a and not probs and pic[0] <= 30 + max(1, s_start / 2) and pic[-1] >= 117,
-            f"{len(pic)} frames, first {pic[:3]}, last {pic[-3:]}; {E.short(probs)}")
+    # The first frame's middle plays at most s_start / 2 source frames into the range (flash_in slows from 8x, so
+    # less there: 33 on v0.2.0), so below 2x it shows the in point itself, and at 2x either frame of the tie.
+    first = 30 + math.floor(s_start / 2)
+    t.check(names[0], len(pic) == end_a and not probs and pic[0] <= first and pic[-1] >= 117,
+            f"{len(pic)} frames, first {pic[:3]} (at most {first}), last {pic[-3:]}; {E.short(probs)}")
     if "speed" in op:
         # At a constant speed the picture's moment is the rule's: in + (t - start) * s, held with the original's bound.
         k_s = op["speed"]
@@ -294,24 +311,50 @@ def pair(t, d, idx, i, label, change, parts):
 def recording(t, d, idx, rec):
     """A recording of another file (chirp.m4a), linked to the picture A (source 1..91) 1 s later into its file
     (source 31..121), at the same place: after a montage ramp on A, under the picture it plays the picture's moment
-    plus its 1 s offset."""
+    plus its 1 s offset. And the ramp moves it by no more than that: the recording's offset at real time (an export
+    before the ramp, against the rule's moment, in + (t - start), plus 1 s: within the original's 27 ms) is taken out,
+    and under the ramp each moment's offset must stay within tolerance() less 7 ms of it (SAME_AS_1X). With the FFmpeg
+    9.0 build the editor's export of this recording is 12 ms early at real time already (0 with 4.4): within the
+    bound, but a sound one source frame late under the ramp would then measure only 21 ms where the ramp plays at real
+    time; taken against its own real-time offset it measures 33 ms more than that."""
     reset(d)
     a0 = d.add_track("audio")
     A = d.place_clip(idx, "v0", 0, 1, 91)
     R = d.place_clip(rec, a0, 0, 31, 121)
     d.set_track("v0", muted=True)
     d.link_clips([A, R])
+    a1x = E.clip(d.get_state(), A)
+    frames1, snd1, why1 = export_sound(t, d, "recording-1x")
     d.set_speed_ramp(A, preset="montage")
     st = d.get_state()
     a, r = E.clip(st, A), E.clip(st, R)
     frames, snd, why = export_sound(t, d, "recording-montage")
-    name = ("a linked recording of another file, with montage on the picture: under the picture it plays the picture's "
-            "moment moved by its 1 s sync offset")
+    names = ["a linked recording of another file, with montage on the picture: under the picture it plays the "
+             "picture's moment moved by its 1 s sync offset",
+             "...and the ramp moves its sync no further than the measurement allows: each moment's offset is within "
+             "20 ms (at real time or slower) of the recording's own offset at real time, measured before the ramp"]
     if frames is None or snd is None:
-        t.check(name, False, f"no export: {why}")
+        for n in names:
+            t.check(n, False, f"no export: {why}")
         return
     off, summary = under(snd, frames, a["start_frame"], E.end(a), shift=1.0)
-    t.check(name, r["ramp"] and not off, f"recording ramped: {r['ramp']}; {summary}; {E.short(off)}")
+    t.check(names[0], r["ramp"] and not off, f"recording ramped: {r['ramp']}; {summary}; {E.short(off)}")
+    if frames1 is None or snd1 is None:
+        t.check(names[1], False, f"no export at real time: {why1}")
+        return
+    rule = (lambda x: a1x["in_frame"] / FPS + (x - a1x["start_frame"] / FPS) + 1.0)
+    lo, hi = a1x["start_frame"], E.end(a1x)
+    own = [off_at(snd1, frames1, (lo + (hi - lo) * x) / FPS, 0, 0, want=rule)[0] for x in fractions(None)]
+    heard = [o for o in own if o is not None]
+    base = statistics.median(heard) if heard else None
+    at1x = [o for o in own if o is None or abs(o) > constant_tolerance(1)]
+    if base is None:
+        t.check(names[1], False, f"at real time: silent; {[E.ms(o) for o in own]}")
+        return
+    off2, summary2 = under(snd, frames, a["start_frame"], E.end(a), shift=1.0 + base, extra=lambda s: SAME_AS_1X)
+    t.check(names[1], not at1x and not off2,
+            f"at real time {E.ms(base)} (from {E.ms(min(heard))} to {E.ms(max(heard))}; out of 27 ms: "
+            f"{[E.ms(o) for o in at1x]}); under the ramp, less that: {summary2}; {E.short(off2)}")
 
 
 # ---------------------------------------------------------------- 7. the export stays seamless

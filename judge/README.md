@@ -72,9 +72,11 @@ The runner prints one line per check (`PASS`, `FAIL`, `N/A` or `N/O`, see "Statu
 exits 1 when any check fails, when a test does not finish within its timeout, when there are no checks, or when the
 runner or a test process cannot be made non-dumpable (see "Threat model") and `--allow-unprotected` is not given.
 Each run makes its media with `judge/fixtures/make.sh` (FFmpeg's lavfi sources, nothing downloaded) in a new scratch
-folder. A run that passes deletes that folder unless you give `--keep`. A run that fails keeps it, and the runner
-prints its path. Each test's folder holds `test.log`, `adapter.stderr` and the editor's own logs; next to it, with
-strace, `<test>.adapter-strace.log` is the test process's copy of the trace lines it read (no check reads it). With
+folder: the base set always, and the optional fixtures (the edit tests' media) only when a test of the run names them
+(`EXTRA_MEDIA`, see "Write a test"). A run that passes deletes that folder unless you give `--keep`. A run that fails
+keeps it, and the runner prints its path. Each test's folder holds `test.log`, `adapter.stderr` and the editor's own
+logs; next to it, with strace, `<test>.adapter-strace.log` is the test process's copy of the trace lines it read (no
+check reads it). With
 `--as-user` the runner keeps its own records in `records/` in the run's folder (mode 0700, the runner's):
 `records/<test>.log` (the test process's output) and `records/<test>.adapter-strace.log`. Each test's folder then
 belongs to the runner with mode 1777 (sticky), as does every folder `t.path` makes in it: the editor's user can add
@@ -103,8 +105,9 @@ A check passes or fails, or it is not made, for one of two reasons, each printed
   `tomllib` (Python 3.11 or newer: `test_cli_migrate` parses the TOML the installer rewrote) on an older Python.
   Fourth, a check on what happens when the timeline changes, or a cancel comes, while a bake runs (`test_locks`,
   `test_reverse_slowmo`), when the bake had already ended done just before the judge acted: the change could not land
-  during it. The bakes are long (20 s of 1080p takes v0.2.0 about 8 s to reverse), so a correct editor does not get
-  here; `--strict` makes each one a failure.
+  during it. The bakes are long (10 s of 1080p takes v0.2.0 about 4 s to reverse, 3 s of 720p at 0.5x about 25 s in
+  optical flow, and the judge acts within milliseconds, or 0.3 s), so a correct editor does not get here; `--strict`
+  makes each one a failure.
 - **Not observed** (`N/O`): the observation needs `strace`, which is not installed, not usable (it failed the
   runner's test of it, or under `--require-trace` it can be written by the runner's user or is named through a
   symbolic link in a folder that user can write), or `JUDGE_STRACE` is set empty:
@@ -184,7 +187,9 @@ passing results into its scratch folder, lines on the result pipe that are not t
 that leaves the session and closes its descriptors, and SIGTERM to the runner must each fail the run, and a clean test
 must pass. A not-applicable check (also one made through `needs=` on an input that could not be crafted) and a
 not-observed one must pass the run and be counted, and fail it with `--strict` and `--require-trace`. A fixture test
-that asks for the graphics add-on must get it in the adapter's `start` with `--graphics-addon`, and record its check as
+that names an optional fixture in `EXTRA_MEDIA` must get it, a run whose tests name none must make only the base set,
+and a name that is not an optional fixture must refuse the run before anything is made. A fixture test that asks for
+the graphics add-on must get it in the adapter's `start` with `--graphics-addon`, and record its check as
 not applicable without it (a failure with `--strict`); a `--graphics-addon` folder with another Remotion version, or
 with no headless shell, must be refused. A fixture adapter that starts a DNS lookup (a UDP connect to 192.0.2.1 port
 53), makes a UDP connect to 192.0.2.1 port 9 and sends with
@@ -250,9 +255,9 @@ runner's, and a link it planted to a file of the runner's must be followed by ne
 | `driver.py` | The judge's side of the protocol. Tests call its methods (`import_media`, `place_clip`, `export`, ...). |
 | `adapters/v020/adapter.py` | The adapter for v0.2.0's interfaces: its MCP tools over stdio, and the core's HTTP routes. |
 | `observe.py` | The measurements: ffprobe facts, full decode, SSIM (whole frame or region), signalstats, volume, tone bands, loudness, silences, SRT and OTIO parsing: the first-try baseline checker's measurements, with the same FFmpeg filter chains. For the edit tests, the source frame index that each frame of their media shows (`frame_indexes`), the source moment their chirp is heard from (`chirp_time`), and frames compared with the one before them. Also the judge's own observations of side effects: a loopback listener that must receive nothing (or that answers a token a graphic's page must not be able to read), the search of the file-system trace, the search of the network calls for a download (`net_hits`), files that must not appear, secrets that must not appear in an answer, and the text substitution that makes a hostile input from a file the editor wrote (`craft`, which also says when it cannot). |
-| `edits.py` | What the edit tests share: clips and tracks read from a State, the check that an edit was refused and changed nothing (its undo history included: redo must still bring back a step undone before it, and the next undo must take back the edit made before it), waiting for a job, the sound's offset from the moment expected, and the search for media files an editor left in the test's folder. |
+| `edits.py` | What the edit tests share: clips and tracks read from a State, the check that an edit was refused and changed nothing (its undo history included: redo must still bring back a step undone before it, and the next undo must take back the edit made before it), waiting for a job, the check that a canceled or refused bake has no effect later either (its clip left in place for one and a half times a measured full bake, and 2 s more), the sound's offset from the moment expected, and the search for media files an editor left in the test's folder. |
 | `check_observe.py` | Compares `observe.py` with the values that the baseline checker recorded for its oracle exports (a local tool: the oracles are not in the repository). |
-| `fixtures/make.sh` | Makes the test media. |
+| `fixtures/make.sh` | Makes the test media: the base set, and the optional fixtures that the run's tests name (`EXTRA_MEDIA`). |
 | `fixtures/v020-otio/` | OpenTimelineIO files that the v0.2.0 release exported (`generate.py` made them with the v0.2.0 adapter, and replaced only their media folder with a token) and `manifest.json`, what each must open as, for `tests/test_v020_otio_compat.py`. `generate.py` is a tool a person runs once against the v0.2.0 release, as their own user and with no trace; CI never runs it. |
 | `fixtures/graphics-addon/` | The graphics add-on the judge gives the editor: `package.json` and `package-lock.json` (Remotion 4.0.481's packages, with their integrity hashes), `headless-shell.json` (the Chrome headless shell's URL, size and sha256) and `install.sh`, which installs both into a folder (see "The graphics add-on"). |
 | `run.py` | The runner. |
@@ -290,7 +295,11 @@ def run(t):
 - Record the same checks on every path: where an input is missing (no export file, for example), record the checks
   that need it as failed with the reason instead of returning early. The runner fails a test whose number of checks
   differs from `CHECKS`, so a test cut short cannot pass with the checks it did record.
-- `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder.
+- `t.media(name)` is a fixture, and `t.path(...)` is a path in the test's scratch folder. `fixtures/make.sh` makes its
+  base set for every run, and an optional fixture (`run.OPTIONAL_MEDIA`: the edit tests' media, among them the 20 s of
+  1080p in `long.mp4`) only when a test of the run names it: `EXTRA_MEDIA = ("idx.mp4", "long.mp4")` at the top of the
+  test. `t.media` of an optional fixture that no test of the run named fails, and a name that is not an optional
+  fixture refuses the run.
 - `t.release` is the release the build is graded as (`run.py --release`: `zedmix` or `v0.2.0`). A test whose
   expectations depend on the release takes them from it, never from what the build or the adapter reports.
 - `t.driver(graphics_addon=True)` gives the editor the judge's graphics add-on in `start` (see "The graphics add-on").

@@ -1,16 +1,21 @@
 """Locked tracks: every edit that would change a locked track's clip, directly or by a ripple, is refused and changes
 nothing (the State, the undo history: what redo brings back, and the clip's look: its colours in render_frame), a bake
 on a locked clip leaves no file, and a bake whose result can no longer be placed (its linked clip's track was locked,
-or its new spot was taken, while it ran) is refused and leaves no file; track-level changes (rename, an fps change,
-removing the track) stay allowed, and after an unlock the same edits go through. Port of
+or its new spot was taken, while it ran) is refused, leaves no file and places nothing later; track-level changes
+(rename, an fps change, removing the track) stay allowed, and after an unlock the same edits go through. Port of
 packages/core/scripts/smoke-locks.ts (judge/PORTING.md has the map of its sections).
 
 Media: idx.mp4 (180x90, 16 s, each frame shows its index: observe.frame_indexes; a chirp) for the layout,
 fx-redblue.mp4 (red | blue) for a card on the locked track whose look the test tries to change, and long.mp4
-(1920x1080, 20 s) for the two bakes that must still run when the test changes the timeline under them: reversing it
-takes about 8 s (v0.2.0), and the change is sent at once, in milliseconds. The test checks that the bake was still
-running just before the change (jobs); a bake that had already ended there could not be judged, and its checks are
-recorded as not applicable with the reason (run.py --strict fails them).
+(1920x1080, 20 s) for the two bakes that must still run when the test changes the timeline under them: each reverses
+10 s of it with its linked sound (about 4 s on v0.2.0), and the change is sent at once, in milliseconds. The test
+checks that the bake was still running just before the change (jobs); a bake that had already ended there could not
+be judged, and its checks are recorded as not applicable with the reason (run.py --strict fails them). Such a bake is
+judged on what follows its error, not on the error alone (which may come before the work has stopped): once the
+timeline would take the copy again (the track unlocked, the spot free), the clips are left in place for one and a half
+times a full bake of the same media, and 2 s more, and then the State must still be as before and no media file may
+have appeared. How long a full bake takes is measured first, on a clean reverse of another 10 s of long.mp4 (from 5 s:
+another span, so a copy of it cannot be handed to the later bakes).
 
 The layout (canvas 180x90 at 30 fps): v0 "V1" A [0,60) | B [60,120); a0 "A1" A's sound Aa [0,60), linked to A;
 v1 "Titles" (locked) T [90,120) and the card K [120,150), butted to it; a1 "Music" (locked) M [0,150). v0 is muted
@@ -22,6 +27,9 @@ before must come back with redo (an edit that made an undo step would have dropp
 State again (edits.refused_unchanged). The State does not hold a clip's colours, so a change of the card's look
 (apply_colour, apply_lut) is also held to its colours: render_frame at the card's middle shows the same colours after
 the refusal as before (and after the unlock the same change shows); these renders come after the checks on files left.
+The colour comparison guards one case only: a change that is refused but still shows. A change that is accepted is
+caught by the refusal part (no product_error, and the undo history no longer as before), and refused_unchanged's own
+undo steps have taken it back before the colours are read.
 A bake that leaves something behind is seen as a new media file anywhere in the test's folder (edits.left_media): the
 editor keeps its files there (PROTOCOL.md rule 1); no render runs between the two looks. Positions come from
 get_state, and the last check holds an export to it.
@@ -35,6 +43,7 @@ import edits as E
 import observe
 
 PORT_BOUND = True
+EXTRA_MEDIA = ("idx.mp4", "long.mp4")   # the optional fixtures it uses (run.py)
 TIMEOUT = 900
 W, H, FPS = 180, 90, 30
 # The changes of a clip's look (none is in the State) tried on the card on the locked track, and after the unlock.
@@ -45,7 +54,7 @@ LOOKS = [("apply_colour with a grade (brightness, contrast, saturation, gamma)",
          ("apply_lut (a look-up table that swaps red and blue)", lambda d, t, c: d.apply_lut(c, t.media("look.cube")))]
 BLOCKS = [(20, 40), (150, 40)]   # (x, y) of a block in the card's red half and one in its blue half
 CARD_AT = 135 / FPS              # the card's middle
-CHECKS = 8 + 1 + len(LOOKS) + 7 + 3 + 3 + 5 + 2 + 1 + 1 + 1
+CHECKS = 8 + 1 + len(LOOKS) + 7 + 3 + 3 + 7 + 2 + 1 + 1 + 1
 
 
 def run(t):
@@ -165,8 +174,9 @@ def run(t):
     # ---- 5. a bake whose result can no longer be placed
     refused_clean("freeze_frame with ripple all into the locked title's track: refused, nothing changes, no media "
                   "file left", lambda: d.freeze_frame(A, 30, 30, ripple="all"))
-    late_lock(t, d, hd, a0, mine)
-    spot_taken(t, d, hd, idx, a0, mine)
+    full, why = measured(d, hd, a0)
+    late_lock(t, d, hd, a0, mine, full, why)
+    spot_taken(t, d, hd, idx, a0, mine, full, why)
 
     # ---- 1 (the look). The State does not hold a clip's colours: the card's are read with render_frame, after the
     # checks on files left (a render writes the editor's caches).
@@ -251,12 +261,27 @@ def expected(st, asset, n):
     return out
 
 
-def late_lock(t, d, hd, a0, mine):
-    """A reverse of a picture (20 s of long.mp4) with its linked sound on a0; a0 is locked while the bake runs: the
+def measured(d, hd, a0):
+    """(seconds, why) that a clean reverse of 10 s of long.mp4 (from 5 s) with its linked sound takes
+    (edits.bake_time): how long a full bake of the later bakes' media takes. Its clips are removed after it."""
+    X = d.place_clip(hd, "v0", 2000, 150, 450)
+    Xa = d.place_clip(hd, a0, 2000, 150, 450)
+    d.link_clips([X, Xa])
+    try:
+        return E.bake_time(lambda: d.reverse_clip(X))
+    finally:
+        for c in (X, Xa):
+            if E.clip(d.get_state(), c) is not None:
+                d.remove_clip(c)
+
+
+def late_lock(t, d, hd, a0, mine, full, why):
+    """A reverse of a picture (10 s of long.mp4) with its linked sound on a0; a0 is locked while the bake runs: the
     bake's result cannot be placed (it would change the locked sound), so the reverse ends in an error (at once or
-    when the copy is made) and leaves nothing."""
-    R = d.place_clip(hd, "v0", 300, 0, 600)
-    Ra = d.place_clip(hd, a0, 300, 0, 600)
+    when the copy is made) and leaves nothing; once a0 is unlocked again, it stays so for longer than a full bake
+    takes (`full` s, measured(); edits.stays_stopped)."""
+    R = d.place_clip(hd, "v0", 300, 0, 300)
+    Ra = d.place_clip(hd, a0, 300, 0, 300)
     d.link_clips([R, Ra])
     st0 = d.get_state()
     before = E.files(t, mine)
@@ -264,12 +289,15 @@ def late_lock(t, d, hd, a0, mine):
     was = E.job_now(d, job)
     ran, done = bool(was) and was.get("status") == "running", bool(was) and was.get("status") == "done"
     names = ["a reverse whose linked sound's track is locked while it bakes ends in an error and leaves the project "
-             "as it was", "...and leaves no media file behind"]
+             "as it was", "...and leaves no media file behind",
+             "...and with the track unlocked, left in place for longer than a full bake of the same media takes, the "
+             "clip and its sound still play their own media and no media file appears"]
     if done:
         E.too_fast(t, names, was, "locked the track")
     else:
         d.set_track(a0, locked=True)
         end = E.wait_job(d, job) if job else None
+        since = time.monotonic()
         d.set_track(a0, locked=False)
         st = d.get_state()
         left = E.left_media(t, before, mine)
@@ -277,37 +305,45 @@ def late_lock(t, d, hd, a0, mine):
                 f"running just before the lock: {ran} ({was}); the job at its end: {end}; State unchanged: "
                 f"{st == st0}")
         t.check(names[1], ran and not left, f"left: {left}")
+        ok, detail = E.stays_stopped(t, d, job, st0, before, mine, full, since, why)
+        t.check(names[2], ran and ok, detail)
     d.remove_clip(R)
 
 
-def spot_taken(t, d, hd, idx, a0, mine):
-    """A J-cut (the sound starts 10 frames before the picture) of 20 s of long.mp4 is reversed: its sound becomes an
-    L-cut tail, [1010, 1610) on a0. While the bake runs, Q is moved into that spot (1595, beside the sound where it is
-    now, [990, 1590)): the result cannot be placed without an overlap, so the reverse ends in an error and leaves
-    nothing, and no two clips overlap on a0."""
-    P = d.place_clip(hd, "v0", 1000, 0, 600)
-    Pa = d.place_clip(hd, a0, 990, 0, 600)
+def spot_taken(t, d, hd, idx, a0, mine, full, why):
+    """A J-cut (the sound starts 10 frames before the picture) of 10 s of long.mp4 is reversed: its sound becomes an
+    L-cut tail, [1010, 1310) on a0. While the bake runs, Q is moved into that spot (1295, beside the sound where it is
+    now, [990, 1290)): the result cannot be placed without an overlap, so the reverse ends in an error and leaves
+    nothing, and no two clips overlap on a0; once Q is back (the spot free again), it stays so for longer than a full
+    bake takes (`full` s, measured(); edits.stays_stopped)."""
+    P = d.place_clip(hd, "v0", 1000, 300, 600)
+    Pa = d.place_clip(hd, a0, 990, 300, 600)
     d.link_clips([P, Pa])
-    Q = d.place_clip(idx, a0, 1620, 0, 20)
+    Q = d.place_clip(idx, a0, 1320, 0, 20)
     st0 = d.get_state()
     before = E.files(t, mine)
     job = d.reverse_clip(P, wait=False)
     was = E.job_now(d, job)
     ran, done = bool(was) and was.get("status") == "running", bool(was) and was.get("status") == "done"
     names = ["a reverse whose J-cut sound's new spot is taken while it bakes ends in an error, leaves no media file "
-             "and the project as it was", "...and no two clips overlap on a0 meanwhile"]
+             "and the project as it was", "...and no two clips overlap on a0 meanwhile",
+             "...and with the spot free again, left in place for longer than a full bake of the same media takes, the "
+             "J-cut still plays its own media and no media file appears"]
     if done:
         E.too_fast(t, names, was, "moved the clip")
     else:
-        d.move_clip(Q, 1595)
+        d.move_clip(Q, 1295)
         end = E.wait_job(d, job) if job else None
+        since = time.monotonic()
         st1 = d.get_state()
-        d.move_clip(Q, 1620)
+        d.move_clip(Q, 1320)
         st = d.get_state()
         left = E.left_media(t, before, mine)
         t.check(names[0], ran and bool(end) and end.get("status") == "error" and st == st0 and not left,
                 f"running just before the move: {ran} ({was}); the job at its end: {end}; State unchanged: "
                 f"{st == st0}; left: {left}")
         t.check(names[1], not E.overlaps(E.clips(st1, a0)), E.spans(st1, a0))
+        ok, detail = E.stays_stopped(t, d, job, st0, before, mine, full, since, why)
+        t.check(names[2], ran and ok, detail)
     d.remove_clip(P)
     d.remove_clip(Q)
