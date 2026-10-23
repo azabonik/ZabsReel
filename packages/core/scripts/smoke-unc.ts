@@ -98,7 +98,10 @@
  *                            the recovery folder; timeline_summary says why a
  *                            clip is offline (not found; the unread state);
  *                            right after a revoke, with no re-read yet, G4, G5
- *                            and G6 refuse the server's online media.
+ *                            and G6 refuse the server's online media (a
+ *                            cutout colour source on it included), and a job
+ *                            already running gets no further FFmpeg call on it
+ *                            (G7's per-spawn guard).
  *  15. the args builders   — every ffmpeg input gets FFmpeg's own format
  *                            allowlist (MEDIA_DEMUXERS; concat plus the list
  *                            for ZedMix's -f concat lists; none for its
@@ -1654,7 +1657,14 @@ async function main() {
       ["through the app's route (revokeHost)", (d) => revokeHost(d, "nas")],
       ["by another process (revokeHost in trust-child.ts)", (d) => child(["revoke", d, "nas"])],
       ["by a hand edit of hosts.json in place", async (d) => writeList(d, readList(d).servers.filter((s) => s.host !== "nas"))],
-      ["by a new hosts.key (no stamp is valid any more)", async (d) => writeFixture(keyFile(d), `${randomBytes(32).toString("base64url")}\n`)],
+      // The store signature is size:mtime:inode, so a same-size edit in place within one mtime tick is not
+      // seen until the next change. The new key goes in as the product writes one (a temp file in the trust
+      // folder, renamed over hosts.key): a new inode, whatever the clock.
+      ["by a new hosts.key (no stamp is valid any more)", async (d) => {
+        const tmp = join(dirname(keyFile(d)), "hosts.key.smoke-tmp");
+        writeFixture(tmp, `${randomBytes(32).toString("base64url")}\n`);
+        renameSync(tmp, keyFile(d));
+      }],
     ];
     for (const [how, revoke] of revokes) {
       const { d, ht, cached } = await fresh();
@@ -2366,9 +2376,11 @@ async function main() {
     // media of it that was online. G4 (generate_thumbnail), G5 (render_preview) and G6 (/file) each check
     // the server of the media they would open: media_offline naming it (or 403) before any job starts,
     // the asset waits for it, and no FFmpeg call names it. Each starts online again (approve, re-check, load).
+    // An asset whose own file is local and whose cutout colour source is on the server counts as on it too.
     // MUTATION: check only the server an asset waits for in requireMedia → the G4 row gets the gate's
     // ERR_PATH_BLOCKED instead of media_offline. The same in assertTimelineOnline → the G5 row starts a
     // preview job (the gate refuses its FFmpeg call). Both, and drop the gate's store check → both run FFmpeg.
+    // Drop the cutout colour path from assetServers → the colour-source G5 row starts a preview job.
     const OK6 = "zr-ok-6.invalid";
     const d = freshData();
     const realTrust = engine.trust;
@@ -2381,6 +2393,11 @@ async function main() {
       ht.start();
       const f = join(root, "revoke6.aive");
       writeFixture(f, JSON.stringify(project(`//${OK6}/s/a.mp4`)));
+      // A local matte whose colour source is on OK6 (the asset's own path is local).
+      const fc = join(root, "revoke6-color.aive");
+      const matte = join(root, "revoke6-matte.mp4");
+      writeFixture(matte, "");
+      writeFixture(fc, JSON.stringify(project(matte, { cutout: { colorPath: `//${OK6}/s/color.mp4`, colorStart: 0 } })));
       const named = () => spawned.filter((a) => JSON.stringify(a).includes(OK6)).length;
       const jobIds = () => new Set(engine.jobs.list().map((j) => j.id));
       /** media_offline naming OK6, or what the call did instead. */
@@ -2389,18 +2406,19 @@ async function main() {
         const ok = e instanceof RpcError && e.code === "media_offline" && e.message.includes(`\\\\${OK6}`);
         return { ok, got: e ? `${(e as RpcError).code ?? e.name}: ${e.message.slice(0, 120)}` : "(no error)" };
       };
-      const calls: [string, () => Promise<{ ok: boolean; got: string }>][] = [
-        ["generate_thumbnail (G4)", () => offline(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }))],
-        ["render_preview (G5)", () => offline(() => dispatch(engine, "render_preview", {}))],
-        ["/file of its path (G6)", async () => {
+      const calls: [string, string, () => Promise<{ ok: boolean; got: string }>][] = [
+        ["generate_thumbnail (G4)", f, () => offline(() => dispatch(engine, "generate_thumbnail", { assetId: "asset_a1" }))],
+        ["render_preview (G5)", f, () => offline(() => dispatch(engine, "render_preview", {}))],
+        ["/file of its path (G6)", f, async () => {
           const r = engine.servablePath(`//${OK6}/s/a.mp4`);
           return { ok: "status" in r && r.status === 403, got: JSON.stringify(r) };
         }],
+        ["render_preview (G5) of a local matte whose cutout colour source is on it", fc, () => offline(() => dispatch(engine, "render_preview", {}))],
       ];
-      for (const [what, call] of calls) {
+      for (const [what, file, call] of calls) {
         await approveHost(d, OK6, "prompt");
         engine.recheckOfflineMedia();
-        await engine.load(f);
+        await engine.load(file);
         const online = engine.getProject().assets[0].awaitingServer === undefined;
         await revokeHost(d, OK6);
         const notReread = engine.mediaServers().approved.some((x) => x.host === OK6);
@@ -2411,6 +2429,61 @@ async function main() {
         const started = [...jobIds()].filter((id) => !jobsBefore.has(id)).length;
         check(online && notReread && r.ok && waits === OK6 && named() === before && started === 0,
           `${what} right after a revoke (no re-read yet): refused (media_offline naming ${OK6}, or 403) before any job starts; the asset waits for it; no FFmpeg call names it (online ${online}, not re-read ${notReread}; ${r.got}; waits ${waits}; jobs started ${started}; FFmpeg calls ${before} → ${named()})`);
+      }
+      // A revoke that lands while a job runs: generate_proxy probes the file (an ffprobe on OK6), then
+      // reads its colour and encodes (more FFmpeg calls on OK6). The revoke is made between the first call
+      // and the next ones, with no re-read yet: the per-spawn guard (G7, the gate's own store check) refuses
+      // every later call, the job ends in error naming OK6, and the asset then waits for it.
+      // MUTATION: drop the gate's store check on a hit (gatedfs) → the later FFmpeg calls name OK6, the job
+      // fails in FFmpeg instead, and the asset stays online.
+      {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        await engine.load(f);
+        const online = engine.getProject().assets[0].awaitingServer === undefined;
+        const realSourceColor = (eng.sourceColor as (a: unknown) => Promise<unknown>).bind(engine);
+        const start = named();
+        let heldAt = -1;
+        let notReread = false;
+        eng.sourceColor = async (a: unknown) => {
+          await revokeHost(d, OK6);
+          notReread = engine.mediaServers().approved.some((x) => x.host === OK6);
+          heldAt = named();
+          return realSourceColor(a);
+        };
+        const jobsBefore = jobIds();
+        let e: Error | null;
+        try {
+          e = await thrown(() => engine.generateProxy("asset_a1"));
+        } finally {
+          delete eng.sourceColor;
+        }
+        const job = engine.jobs.list().find((j) => !jobsBefore.has(j.id));
+        const waits = engine.getProject().assets[0].awaitingServer;
+        check(online && notReread && heldAt > start && named() === heldAt && e instanceof gfs.BlockedPathError && e.host === OK6
+          && job?.type === "proxy" && job.status === "error" && !!job.error?.includes(OK6) && waits === OK6,
+          `a revoke while generate_proxy runs (no re-read yet): every FFmpeg call after it is refused by the per-spawn guard (ERR_PATH_BLOCKED naming ${OK6}), the job ends in error and the asset waits for it (online ${online}, not re-read ${notReread}; FFmpeg calls naming it ${start} → ${heldAt} before the revoke → ${named()}; ${e?.name}: ${e?.message.slice(0, 110)}; job ${job?.type} ${job?.status}; waits ${waits})`);
+      }
+      // The per-spawn guard itself, right after a revoke (no re-read yet): an argument on OK6, and a concat
+      // list entry on OK6, are refused before any spawn. Each starts with OK6 allowed and published.
+      // MUTATION: drop the gate's store check on a hit (gatedfs) → both spawn FFmpeg.
+      const list = join(root, "revoke6-concat.txt");
+      writeFixture(list, `file '//${OK6}/s/a.mp4'\n`);
+      const guarded: [string, string[]][] = [
+        ["an FFmpeg argument on it", ["-hide_banner", "-i", `//${OK6}/s/a.mp4`, "-f", "null", "-"]],
+        ["a concat list entry on it", ["-hide_banner", "-f", "concat", "-safe", "0", "-i", list, "-f", "null", "-"]],
+      ];
+      for (const [what, args] of guarded) {
+        await approveHost(d, OK6, "prompt");
+        engine.recheckOfflineMedia();
+        const published = gfs.allowedNetworkHosts().has(OK6);
+        await revokeHost(d, OK6);
+        const stillPublished = gfs.allowedNetworkHosts().has(OK6);
+        const before = spawned.length;
+        const e = await thrown(() => runFfmpeg(args));
+        const spawns = spawned.slice(before).filter((a) => a.some((x) => Array.isArray(x) && x.some((y) => y === list || String(y).includes(OK6)))).length;
+        check(published && stillPublished && e instanceof gfs.BlockedPathError && e.code === "ERR_PATH_BLOCKED" && e.host === OK6 && spawns === 0 && !gfs.allowedNetworkHosts().has(OK6),
+          `the per-spawn guard right after a revoke (no re-read yet) refuses ${what}: ERR_PATH_BLOCKED naming ${OK6}, no spawn (published ${published} → ${stillPublished}; ${e?.name}: ${e?.message.slice(0, 110)}; spawns ${spawns})`);
       }
     } finally {
       delete eng.proxyInBackground;
