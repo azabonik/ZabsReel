@@ -1601,6 +1601,30 @@ async function main() {
     }
     check(landed && ht.isApproved(E3) && !ht.isOutside(E3),
       `a Keep written while a re-read reads the store counts on the next check (lazy reload; no watch, no re-check) (${landed}; ${JSON.stringify(ht.list().outside)})`);
+    // The mirror: a revoke (nas taken off the list) that lands during a re-read counts on the next miss
+    // of another server, before the watch sees it. This checks the miss path only: a hit on nas itself
+    // returns before the store is compared (isApproved), so the revoked host is checked after the miss.
+    writeFixture(next, JSON.stringify({ version: 2, servers: readList(d).servers.filter((s) => s.host !== "nas") }));
+    let revoked = false;
+    fsMod.readFileSync = function (this: unknown, ...a: unknown[]) {
+      const bytes = realRead.apply(this, a);
+      if (!revoked && a[0] === listFile(d)) {
+        revoked = true;
+        renameSync(next, listFile(d));
+      }
+      return bytes;
+    };
+    syncBuiltinESMExports();
+    try {
+      ht.reload();
+    } finally {
+      fsMod.readFileSync = realRead;
+      syncBuiltinESMExports();
+    }
+    const nasAfterReload = ht.list().approved.some((a) => a.host === "nas");
+    const missUnlisted = ht.isApproved("zr-unlisted.invalid");
+    check(revoked && nasAfterReload && !missUnlisted && !ht.isApproved("nas") && ht.isApproved(E3),
+      `a revoke written while a re-read reads the store counts on the next miss of another server (miss path; no watch, no re-check) (${revoked}; ${nasAfterReload}; ${names(ht.list().approved)})`);
     ht.close();
     gfs.setAllowedNetworkHosts([]);
   }
